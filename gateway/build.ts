@@ -171,7 +171,7 @@ const server = Bun.serve({
     message(ws, data) {
       try {
         const msg = JSON.parse(data as string) as TunnelMessage;
-        if ("id" in msg && ("response" in msg || "error" in msg)) {
+        if ("id" in msg && ("response" in msg || "result" in msg || "error" in msg)) {
           respond(msg.id, msg as TunnelResponse | TunnelError);
         } else if ("type" in msg && (msg as any).type === "register") {
           const newDeviceId = (msg as any).deviceId as string;
