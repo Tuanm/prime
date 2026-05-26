@@ -137,6 +137,15 @@ const server = Bun.serve({
       });
     }
 
+    if (url.pathname.startsWith("/ws/") && req.headers.get("upgrade") === "websocket") {
+      const deviceId = url.pathname.slice(4); // Remove "/ws/" prefix
+      if (!deviceId) {
+        return Response.json({ error: "missing deviceId" }, { status: 400 });
+      }
+      server.upgrade(req, { data: deviceId });
+      return;
+    }
+    // Backward compat: also accept ?deviceId= query param
     if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
       const deviceId = url.searchParams.get("deviceId") || crypto.randomUUID();
       server.upgrade(req, { data: deviceId });
