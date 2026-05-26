@@ -1,0 +1,6 @@
+{
+  "name": "code-mcp-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gateway for exposing local code-mcp servers via Cloudflare Workers"
+}

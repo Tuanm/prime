@@ -1,0 +1,20 @@
+name = "code-gateway"
+main = "server.ts"
+compatibility_date = "2024-11-01"
+
+[observability]
+enabled = true
+
+[build]
+command = ""
+
+[durable_objects]
+class_name = "DeviceRegistry"
+
+[[durable_objects.bindings]]
+name = "DEVICE_REGISTRY"
+class_name = "DeviceRegistry"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DeviceRegistry"]
