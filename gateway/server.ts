@@ -71,13 +71,17 @@ function respond(id: string, res: TunnelResponse | TunnelError | null): void {
   if (!p) return;
   clearTimeout(p.timer);
   pendingMap.delete(id);
-  if (res) p.resolve(res);
+  if (res) {
+    // TunnelResponse is {id, response: JsonRpcResponse} - wrap in Response
+    const jsonRpcResponse = "response" in res ? res.response : res;
+    p.resolve(Response.json(jsonRpcResponse));
+  }
 }
 
 // Server
 const server = Bun.serve({
   port: PORT,
-  fetch(req) {
+  async fetch(req) {
     const url = new URL(req.url);
 
     // Auth check
@@ -91,6 +95,7 @@ const server = Bun.serve({
 
     // POST /mcp/{device-id}?token=xxx (path-based, recommended)
     if (req.method === "POST" && url.pathname.startsWith("/mcp/")) {
+
       const ip = req.headers.get("x-forwarded-for") || "unknown";
       if (!rateLimit(ip)) {
         return Response.json({ error: "rate limited" }, { status: 429 });
@@ -108,8 +113,10 @@ const server = Bun.serve({
 
       let body: unknown;
       try {
-        body = req.json();
-      } catch {
+        body = await req.json();
+
+      } catch (e) {
+
         return Response.json({ error: "invalid json" }, { status: 400 });
       }
 
@@ -120,6 +127,7 @@ const server = Bun.serve({
       const id = crypto.randomUUID();
       const token = url.searchParams.get("token") || undefined;
       const tunnelReq: TunnelRequest = { id, request: body as TunnelRequest["request"], ...(token && { token }) };
+
       ws.send(JSON.stringify(tunnelReq));
 
       return new Promise<Response>((resolve) => {

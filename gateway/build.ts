@@ -81,7 +81,10 @@ function respond(id: string, res: TunnelResponse | TunnelError | null): void {
   if (!p) return;
   clearTimeout(p.timer);
   pendingMap.delete(id);
-  if (res) p.resolve(res);
+  if (res) {
+    const jsonRpcResponse = "response" in res ? res.response : res;
+    p.resolve(Response.json(jsonRpcResponse));
+  }
 }
 
 const server = Bun.serve({
