@@ -158,6 +158,18 @@ const server = Bun.serve({
         const msg = JSON.parse(data as string) as TunnelMessage;
         if ("id" in msg && ("response" in msg || "error" in msg)) {
           respond(msg.id, msg as TunnelResponse | TunnelError);
+        } else if ("type" in msg && (msg as any).type === "register") {
+          // Client requested to change deviceId - update registry
+          const newDeviceId = (msg as any).deviceId as string;
+          const oldDeviceId = ws.data as string;
+          if (newDeviceId && newDeviceId !== oldDeviceId) {
+            wsMap.delete(oldDeviceId);
+            wsMap.set(newDeviceId, ws);
+            deviceRegistry.close(oldDeviceId);
+            deviceRegistry.register(newDeviceId);
+            ws.data = newDeviceId;
+          }
+          ws.send(JSON.stringify({ type: "registered", deviceId: newDeviceId || ws.data }));
         }
       } catch {
         // Ignore invalid messages
