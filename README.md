@@ -59,3 +59,15 @@ Tools are exposed with `<namespace>__` prefix. HTTP transport servers use `{"typ
 bun build ./code-mcp.ts --outfile=./code-mcp --target=bun --compile --minify
 chmod +x code-mcp
 ```
+
+### Java (optional)
+
+Java 11+ can run directly without compilation:
+```bash
+```
+
+Or compile first for faster startup:
+```bash
+```
+
+Requires JDK 21+. No external dependencies — standard Java APIs only.
