@@ -194,7 +194,7 @@ async function installService() {
 
   // Ensure service directory exists
   await Bun.write(`${serviceDir}/${name}-start.sh`, `#!/bin/bash\nexec ${execPath} "${scriptPath}" --port 8080\n`);
-  Bun.chmod(`${serviceDir}/${name}-start.sh`, 0o755);
+  await Bun.spawn(["chmod", "+x", `${serviceDir}/${name}-start.sh`]).exited;
 
   if (isMac) {
     const serviceFile = `${serviceDir}/${name}.plist`;
