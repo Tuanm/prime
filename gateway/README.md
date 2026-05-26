@@ -1,53 +1,57 @@
-# Code Gateway Server (Cloudflare Workers)
+# Prime
 
-## Deploy
+A Bun-based gateway server for exposing local code-mcp servers via WebSocket tunneling.
+
+## Usage
 
 ```bash
-cp .env.example .env
-# Fill in CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, GATEWAY_DOMAIN, GATEWAY_TOKEN
-wrangler deploy
+bun run server.ts [options]
 ```
 
-## Cloudflare API Token Permissions
+### Options
 
-Create a custom token at **Cloudflare Dashboard → My Profile → API Tokens → Create Custom Token** with:
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--port <n>` | Listen port | `8080` |
+| `--token <s>` | Bearer token auth | none |
+| `--rate-window <ms>` | Rate limit window | `60000` |
+| `--rate-max <n>` | Max requests per window | `100` |
+| `--timeout <ms>` | Request timeout | `30000` |
+| `--max-pending <n>` | Max pending requests | `100` |
 
-| Resource | Permission |
-|----------|------------|
-| `Account` | `Edit` |
+## Examples
 
-This is the minimum required for `wrangler deploy`.
+```bash
+# Basic
+bun run start --port 8080
 
-## Endpoints
+# With auth
+bun run start --port 8080 --token mysecret
+
+# High performance
+bun run start --port 8080 --rate-max 1000 --timeout 60000
+```
+
+## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/ws` | WebSocket upgrade — device connects here |
-| POST | `/mcp` | HTTP MCP relay — requires `x-device-id` header, optional `x-token` header |
-| GET | `/devices` | List online device IDs |
+| `GET` | `/devices` | List registered devices |
+| `POST` | `/mcp` | Relay JSON-RPC to device |
+| `WS` | `/ws?deviceId=<id>` | Device WebSocket |
 
-### POST /mcp Headers
+### Headers
 
 | Header | Required | Description |
 |--------|----------|-------------|
-| `x-device-id` | Yes | Target device UUID |
-| `x-token` | No | Auth token forwarded to local code-mcp as `?token=` |
+| `x-device-id` | Yes* | Target device UUID |
+| `x-token` | No | Device auth token |
+| `Authorization` | No* | Bearer token for gateway auth |
 
-## Security
+*Required unless using WebSocket with deviceId in query
 
-| Feature | Description |
-|---------|-------------|
-| **Gateway auth** | Optional `GATEWAY_TOKEN` env var — if set, all requests require `Authorization: Bearer <token>` |
-| **Rate limiting** | 100 requests/minute per IP (via `CF-Connecting-IP`) |
-| **Pending cap** | Max 100 in-flight requests per device — rejects with 503 if exceeded |
-| **Body validation** | Invalid JSON returns 400 |
-| **Request timeout** | 30s per request — returns 504 on timeout |
+## Architecture
 
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `CLOUDFLARE_ACCOUNT_ID` | Found in Cloudflare Dashboard URL or overview page |
-| `CLOUDFLARE_API_TOKEN` | Token with `Account: Edit` permission |
-| `GATEWAY_DOMAIN` | Public domain after deploy |
-| `GATEWAY_TOKEN` | Optional bearer token for gateway-level auth |
+```
+Client → Gateway (HTTP) → WebSocket → code-mcp (device) → localhost
+```

@@ -1,21 +1,50 @@
 import { DeviceRegistry } from './device-registry';
-import { TunnelRequest, TunnelMessage, TunnelResponse, TunnelError } from './protocol';
+import type { TunnelRequest, TunnelMessage, TunnelResponse, TunnelError } from './protocol';
 
-interface Env {
-  DEVICE_REGISTRY: DurableObjectNamespace<DeviceRegistry>;
-  GATEWAY_TOKEN?: string;
+// Configuration from flags
+let PORT = 8080;
+let GATEWAY_TOKEN: string | undefined;
+let RATE_LIMIT_WINDOW_MS = 60_000;
+let RATE_LIMIT_MAX = 100;
+let TIMEOUT_MS = 30_000;
+let MAX_PENDING = 100;
+
+// Parse args
+for (let i = 0; i < Bun.argv.length; i++) {
+  const arg = Bun.argv[i];
+  if (arg === "--port" && i + 1 < Bun.argv.length) {
+    PORT = parseInt(Bun.argv[++i]);
+  } else if (arg === "--token" && i + 1 < Bun.argv.length) {
+    GATEWAY_TOKEN = Bun.argv[++i];
+  } else if (arg === "--rate-window" && i + 1 < Bun.argv.length) {
+    RATE_LIMIT_WINDOW_MS = parseInt(Bun.argv[++i]);
+  } else if (arg === "--rate-max" && i + 1 < Bun.argv.length) {
+    RATE_LIMIT_MAX = parseInt(Bun.argv[++i]);
+  } else if (arg === "--timeout" && i + 1 < Bun.argv.length) {
+    TIMEOUT_MS = parseInt(Bun.argv[++i]);
+  } else if (arg === "--max-pending" && i + 1 < Bun.argv.length) {
+    MAX_PENDING = parseInt(Bun.argv[++i]);
+  } else if (arg === "-h" || arg === "--help") {
+    console.log(`Usage: bun server.ts [options]
+Options:
+  --port <n>          Listen port (default: 8080)
+  --token <s>         Bearer token auth (optional)
+  --rate-window <ms>   Rate limit window (default: 60000)
+  --rate-max <n>       Max requests per window (default: 100)
+  --timeout <ms>        Request timeout (default: 30000)
+  --max-pending <n>    Max pending requests (default: 100)`);
+    process.exit(0);
+  }
 }
 
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 100;
-const TIMEOUT_MS = 30_000;
-const MAX_PENDING = 100;
-
+// State
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+type PendingResolve = (v: TunnelResponse | TunnelError | null) => void;
+const pendingMap = new Map<string, { resolve: PendingResolve; timer: ReturnType<typeof setTimeout> }>();
+const wsMap = new Map<string, Bun.WebSocket>();
+const deviceRegistry = new DeviceRegistry();
 
-const wsMap = new Map<string, WebSocket>();
-const pendingMap = new Map<string, { resolve: (v: TunnelResponse | TunnelError) => void; timer: ReturnType<typeof setTimeout> }>();
-
+// Helper functions
 function rateLimit(ip: string): boolean {
   const now = Date.now();
   const entry = rateLimitMap.get(ip);
@@ -28,152 +57,114 @@ function rateLimit(ip: string): boolean {
   return true;
 }
 
-function authenticate(request: Request, token: string | undefined): Response | null {
-  if (!token) return null;
-  const auth = request.headers.get('Authorization');
-  if (auth !== `Bearer ${token}`) {
-    return Response.json({ error: 'unauthorized' }, { status: 401 });
+function authenticate(request: Request): Response | null {
+  if (!GATEWAY_TOKEN) return null;
+  const auth = request.headers.get("authorization");
+  if (auth !== `Bearer ${GATEWAY_TOKEN}`) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   return null;
 }
 
-function getStub(env: Env): DurableObjectStub<DeviceRegistry> {
-  return env.DEVICE_REGISTRY.get(env.DEVICE_REGISTRY.idFromName('global'));
-}
-
-function respond(id: string, res: TunnelResponse | TunnelError): void {
+function respond(id: string, res: TunnelResponse | TunnelError | null): void {
   const p = pendingMap.get(id);
   if (!p) return;
   clearTimeout(p.timer);
   pendingMap.delete(id);
-  p.resolve(res);
+  if (res) p.resolve(res);
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+// Server
+const server = Bun.serve({
+  port: PORT,
+  fetch(req) {
+    const url = new URL(req.url);
 
-    if (url.pathname === '/ws') {
-      const pair = new WebSocketPair();
-      const clientWs = pair[0];
-      const serverWs = pair[1];
-
-      const upgrade = request.headers.get('Upgrade');
-      if (upgrade !== 'websocket') {
-        return new Response('Expected Upgrade: websocket', { status: 426 });
-      }
-
-      let deviceId: string | null = null;
-
-      const deviceClose = () => {
-        if (deviceId) {
-          wsMap.delete(deviceId);
-          getStub(env).close(deviceId);
-        }
-      };
-
-      serverWs.addEventListener('close', deviceClose);
-      serverWs.addEventListener('message', async (e) => {
-        try {
-          const data = e.data as string;
-          const msg = JSON.parse(data) as TunnelMessage;
-
-          if (msg.type === 'register') {
-            deviceId = (msg as any).deviceId;
-            wsMap.set(deviceId, serverWs);
-            await getStub(env).register(deviceId);
-            serverWs.send(JSON.stringify({ type: 'registered', deviceId }));
-          } else if (deviceId && ('response' in msg || 'error' in msg)) {
-            respond(msg.id, msg);
-          }
-        } catch (err) {
-          console.error('Message error:', err);
-        }
-      });
-
-      serverWs.accept();
-      return new Response(null, { status: 101, webSocket: clientWs });
-    }
-
-    const authError = authenticate(request, env.GATEWAY_TOKEN);
+    // Auth check
+    const authError = authenticate(req);
     if (authError) return authError;
 
-    if (request.method === 'POST' && url.pathname === '/mcp') {
-      const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+    // GET /devices
+    if (req.method === "GET" && url.pathname === "/devices") {
+      return Response.json({ devices: deviceRegistry.listDevices() });
+    }
+
+    // POST /mcp
+    if (req.method === "POST" && url.pathname === "/mcp") {
+      const ip = req.headers.get("x-forwarded-for") || "unknown";
       if (!rateLimit(ip)) {
-        return Response.json({ error: 'rate limited' }, { status: 429 });
+        return Response.json({ error: "rate limited" }, { status: 429 });
       }
 
-      const deviceId = request.headers.get('x-device-id');
+      const deviceId = req.headers.get("x-device-id");
       if (!deviceId) {
-        return Response.json({ error: 'missing x-device-id' }, { status: 400 });
+        return Response.json({ error: "missing x-device-id" }, { status: 400 });
       }
 
       const ws = wsMap.get(deviceId);
-      if (!ws) {
-        return Response.json({ error: 'device offline' }, { status: 503 });
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return Response.json({ error: "device offline" }, { status: 503 });
       }
 
       let body: unknown;
       try {
-        body = await request.json();
+        body = req.json();
       } catch {
-        return Response.json({ error: 'invalid json' }, { status: 400 });
+        return Response.json({ error: "invalid json" }, { status: 400 });
       }
 
       if (pendingMap.size >= MAX_PENDING) {
-        return Response.json({ error: 'device busy' }, { status: 503 });
+        return Response.json({ error: "device busy" }, { status: 503 });
       }
 
       const id = crypto.randomUUID();
-      const token = request.headers.get('x-token') ?? undefined;
-
-      const tunnelReq: TunnelRequest = { id, request: body as TunnelRequest['request'], ...(token && { token }) };
+      const token = req.headers.get("x-token") || undefined;
+      const tunnelReq: TunnelRequest = { id, request: body as TunnelRequest["request"], ...(token && { token }) };
       ws.send(JSON.stringify(tunnelReq));
 
-      const result = await new Promise<TunnelResponse | TunnelError>((resolve) => {
+      return new Promise<Response>((resolve) => {
         const timer = setTimeout(() => {
           pendingMap.delete(id);
-          resolve({ id, error: 'timeout' });
+          resolve(Response.json({ error: "timeout" }, { status: 504 }));
         }, TIMEOUT_MS);
         pendingMap.set(id, { resolve, timer });
       });
-
-      if ('error' in result) {
-        if (result.error === 'timeout') {
-          return Response.json({ error: 'timeout' }, { status: 504 });
-        }
-      }
-
-      return Response.json(result);
     }
 
-    if (request.method === 'GET' && url.pathname === '/devices') {
-      const stub = getStub(env);
-      const devices = await stub.listDevices();
-      return Response.json({ devices: [...devices] });
+    // WebSocket upgrade
+    if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
+      const deviceId = url.searchParams.get("deviceId") || crypto.randomUUID();
+      server.upgrade(req, { data: deviceId });
+      return;
     }
 
-    return Response.json({ error: 'not found' }, { status: 404 });
+    return Response.json({ error: "not found" }, { status: 404 });
   },
-};
 
-import { DurableObject } from 'cloudflare:workers';
+  websocket: {
+    open(ws) {
+      const deviceId = ws.data as string;
+      wsMap.set(deviceId, ws);
+      deviceRegistry.register(deviceId);
+      ws.send(JSON.stringify({ type: "registered", deviceId }));
+    },
+    close(ws) {
+      const deviceId = ws.data as string;
+      wsMap.delete(deviceId);
+      deviceRegistry.close(deviceId);
+    },
+    message(ws, data) {
+      try {
+        const msg = JSON.parse(data as string) as TunnelMessage;
+        if ("id" in msg && ("response" in msg || "error" in msg)) {
+          respond(msg.id, msg as TunnelResponse | TunnelError);
+        }
+      } catch {
+        // Ignore invalid messages
+      }
+    },
+  },
+});
 
-export class DeviceRegistry extends DurableObject {
-  private devices: string[] = [];
-
-  async register(deviceId: string): Promise<void> {
-    if (!this.devices.includes(deviceId)) {
-      this.devices.push(deviceId);
-    }
-  }
-
-  async close(deviceId: string): Promise<void> {
-    this.devices = this.devices.filter(d => d !== deviceId);
-  }
-
-  listDevices(): string[] {
-    return this.devices;
-  }
-}
+console.log(`Gateway listening on http://localhost:${PORT}`);
+console.log(`Token auth: ${GATEWAY_TOKEN ? "enabled" : "disabled"}`);

@@ -1,19 +1,15 @@
-import { DurableObject } from 'cloudflare:workers';
+export class DeviceRegistry {
+  private devices = new Set<string>();
 
-export class DeviceRegistry extends DurableObject {
-  private devices: string[] = [];
-
-  async register(deviceId: string): Promise<void> {
-    if (!this.devices.includes(deviceId)) {
-      this.devices.push(deviceId);
-    }
+  register(deviceId: string): void {
+    this.devices.add(deviceId);
   }
 
-  async close(deviceId: string): Promise<void> {
-    this.devices = this.devices.filter(d => d !== deviceId);
+  close(deviceId: string): void {
+    this.devices.delete(deviceId);
   }
 
   listDevices(): string[] {
-    return this.devices;
+    return [...this.devices];
   }
 }
