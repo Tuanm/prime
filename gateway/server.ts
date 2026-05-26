@@ -89,16 +89,16 @@ const server = Bun.serve({
       return Response.json({ devices: deviceRegistry.listDevices() });
     }
 
-    // POST /mcp
-    if (req.method === "POST" && url.pathname === "/mcp") {
+    // POST /mcp/{device-id}?token=xxx (path-based, recommended)
+    if (req.method === "POST" && url.pathname.startsWith("/mcp/")) {
       const ip = req.headers.get("x-forwarded-for") || "unknown";
       if (!rateLimit(ip)) {
         return Response.json({ error: "rate limited" }, { status: 429 });
       }
 
-      const deviceId = req.headers.get("x-device-id");
+      const deviceId = url.pathname.slice(5); // Remove "/mcp/" prefix
       if (!deviceId) {
-        return Response.json({ error: "missing x-device-id" }, { status: 400 });
+        return Response.json({ error: "missing deviceId" }, { status: 400 });
       }
 
       const ws = wsMap.get(deviceId);
@@ -118,7 +118,7 @@ const server = Bun.serve({
       }
 
       const id = crypto.randomUUID();
-      const token = req.headers.get("x-token") || undefined;
+      const token = url.searchParams.get("token") || undefined;
       const tunnelReq: TunnelRequest = { id, request: body as TunnelRequest["request"], ...(token && { token }) };
       ws.send(JSON.stringify(tunnelReq));
 
@@ -131,7 +131,16 @@ const server = Bun.serve({
       });
     }
 
-    // WebSocket upgrade
+    // WebSocket upgrade: /ws/{device-id} (path-based)
+    if (url.pathname.startsWith("/ws/") && req.headers.get("upgrade") === "websocket") {
+      const deviceId = url.pathname.slice(4); // Remove "/ws/" prefix
+      if (!deviceId) {
+        return Response.json({ error: "missing deviceId" }, { status: 400 });
+      }
+      server.upgrade(req, { data: deviceId });
+      return;
+    }
+    // Backward compat: /ws?deviceId=xxx
     if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
       const deviceId = url.searchParams.get("deviceId") || crypto.randomUUID();
       server.upgrade(req, { data: deviceId });

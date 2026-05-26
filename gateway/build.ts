@@ -96,15 +96,16 @@ const server = Bun.serve({
       return Response.json({ devices: deviceRegistry.listDevices() });
     }
 
-    if (req.method === "POST" && url.pathname === "/mcp") {
+    // POST /mcp/{device-id}?token=xxx (path-based, recommended)
+    if (req.method === "POST" && url.pathname.startsWith("/mcp/")) {
       const ip = req.headers.get("x-forwarded-for") || "unknown";
       if (!rateLimit(ip)) {
         return Response.json({ error: "rate limited" }, { status: 429 });
       }
 
-      const deviceId = req.headers.get("x-device-id");
+      const deviceId = url.pathname.slice(5); // Remove "/mcp/" prefix
       if (!deviceId) {
-        return Response.json({ error: "missing x-device-id" }, { status: 400 });
+        return Response.json({ error: "missing deviceId" }, { status: 400 });
       }
 
       const ws = wsMap.get(deviceId);
@@ -124,7 +125,7 @@ const server = Bun.serve({
       }
 
       const id = crypto.randomUUID();
-      const token = req.headers.get("x-token") || undefined;
+      const token = url.searchParams.get("token") || undefined;
       const tunnelReq: TunnelRequest = { id, request: body as TunnelRequest["request"], ...(token && { token }) };
       ws.send(JSON.stringify(tunnelReq));
 
