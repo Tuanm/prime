@@ -16,6 +16,14 @@ A minimal MCP (Model Context Protocol) server over HTTP with Streamable HTTP tra
 bun code-mcp.ts [--port <n>] [--token <s>] [--enable-memory] [--public | --domain <host>] [--mcp <path>]
 ```
 
+### Gateway Mode
+
+Connect to a [code-mcp-gateway](https://github.com/Tuanm/code-mcp-gateway) to expose this server to the internet without `cloudflared`:
+```bash
+# Bun
+bun code-mcp.ts --gateway wss://gateway.example.workers.dev --port 7777
+```
+
 ## Flags
 
 | Flag | Description | Default |
@@ -27,6 +35,7 @@ bun code-mcp.ts [--port <n>] [--token <s>] [--enable-memory] [--public | --domai
 | `--public` | Expose via Cloudflare quick tunnel (requires `cloudflared`) | disabled |
 | `--domain <host>` | Use existing public hostname (mutually exclusive with `--public`) | none |
 | `--mcp <path>` | Aggregate tools from external MCP servers (Claude Desktop JSON config) | none |
+| `--gateway <url>` | Connect to a gateway server and tunnel requests via WebSocket | none |
 
 ### MCP Config Format
 ```json
