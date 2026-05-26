@@ -1,2 +1,4 @@
 .env
 .memo.jsonl
+dist/
+gateway/dist/
