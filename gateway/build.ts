@@ -89,7 +89,7 @@ function respond(id: string, res: TunnelResponse | TunnelError | null): void {
 
 const server = Bun.serve({
   port: PORT,
-  fetch(req) {
+  async fetch(req) {
     const url = new URL(req.url);
 
     const authError = authenticate(req);
@@ -118,7 +118,7 @@ const server = Bun.serve({
 
       let body: unknown;
       try {
-        body = req.json();
+        body = await req.json();
       } catch {
         return Response.json({ error: "invalid json" }, { status: 400 });
       }
