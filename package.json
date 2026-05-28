@@ -6,7 +6,7 @@
   "scripts": {
     "start": "bun run gateway/server.ts",
     "dev": "bun --watch gateway/server.ts",
-    "build": "rm -rf dist && bun build --compile --outfile=dist/code-mcp-gateway gateway/build.ts && chmod +x dist/code-mcp-gateway",
+    "build": "rm -rf dist && bun build --compile --outfile=dist/code-mcp-gateway gateway/server.ts && chmod +x dist/code-mcp-gateway",
     "install-service": "./dist/code-mcp-gateway install",
     "uninstall-service": "./dist/code-mcp-gateway uninstall"
   }

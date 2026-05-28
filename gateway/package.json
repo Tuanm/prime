@@ -4,10 +4,7 @@
   "private": true,
   "scripts": {
     "start": "bun run server.ts",
-    "dev": "bun --watch server.ts",
-    "build": "bun build --target=bun ./build.ts --output code-mcp-gateway",
-    "install-service": "bun run build.ts install",
-    "uninstall-service": "bun run build.ts uninstall"
+    "dev": "bun --watch server.ts"
   },
   "dependencies": {}
 }
