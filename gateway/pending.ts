@@ -58,10 +58,28 @@ export class PendingRegistry {
 
   // Fail every pending request for a device (e.g. ws closed or reregistered).
   failDevice(deviceId: string, status: number, reason: string): void {
+    // Snapshot ids first so resolve callbacks (which may re-enter or throw)
+    // cannot disturb the iteration.
+    const victims: Array<[string, PendingEntry]> = [];
     for (const [id, entry] of this.byId) {
-      if (entry.deviceId !== deviceId) continue;
+      if (entry.deviceId === deviceId) victims.push([id, entry]);
+    }
+    for (const [id, entry] of victims) {
       this.detach(id, entry);
-      entry.resolve(Response.json({ error: reason }, { status }));
+      try {
+        entry.resolve(Response.json({ error: reason }, { status }));
+      } catch {}
+    }
+  }
+
+  // Fail every pending request across all devices (shutdown path).
+  failAll(status: number, reason: string): void {
+    const victims: Array<[string, PendingEntry]> = [...this.byId.entries()];
+    for (const [id, entry] of victims) {
+      this.detach(id, entry);
+      try {
+        entry.resolve(Response.json({ error: reason }, { status }));
+      } catch {}
     }
   }
 

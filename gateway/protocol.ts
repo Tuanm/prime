@@ -10,6 +10,17 @@ export interface RegisteredMessage {
   deviceId: string;
 }
 
+// App-layer heartbeat. Data frames survive HTTP/2 tunnels (e.g. Cloudflare
+// Zero Trust) that may swallow WS control ping/pong. Clients send keepalive
+// every ~25s; server replies with keepalive-ack.
+export interface KeepaliveMessage {
+  type: 'keepalive';
+}
+
+export interface KeepaliveAckMessage {
+  type: 'keepalive-ack';
+}
+
 export interface TunnelRequest {
   id: string;
   request: JsonRpcRequest;
@@ -40,5 +51,9 @@ export interface JsonRpcResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 
-export type DeviceMessage = RegisterMessage | RegisteredMessage;
+export type DeviceMessage =
+  | RegisterMessage
+  | RegisteredMessage
+  | KeepaliveMessage
+  | KeepaliveAckMessage;
 export type TunnelMessage = TunnelRequest | TunnelResponse | TunnelError;

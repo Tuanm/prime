@@ -17,6 +17,17 @@ type WS = {
   readyState: number;
 };
 
+// Bun exposes WebSocket as a global; pin the OPEN constant to a literal so the
+// readyState check is resilient to runtime variations.
+const WS_OPEN = 1;
+
+// deviceId character allowlist + length cap. Prevents path-traversal-flavored
+// confusion in /mcp/{id} routing and bounds memory for spurious registrations.
+const DEVICE_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+function validDeviceId(s: string): boolean {
+  return DEVICE_ID_RE.test(s);
+}
+
 const { config, action } = parseArgs(Bun.argv.slice(2));
 
 if (action === 'install' || action === 'uninstall') {
@@ -89,9 +100,20 @@ const server = Bun.serve({
     const url = new URL(req.url);
     const peerIp = srv.requestIP(req)?.address ?? 'unknown';
 
-    // /devices: loopback only, no other authentication needed.
+    // /devices: loopback only AND no proxy headers. If a reverse proxy
+    // (cloudflared, nginx, Caddy) runs on the same host it connects via
+    // 127.0.0.1, so peerIp alone cannot prove the request originated locally.
+    // Any forwarding header indicates a hop and disqualifies the request.
     if (req.method === 'GET' && url.pathname === '/devices') {
-      if (!isLoopback(peerIp)) {
+      const proxied =
+        req.headers.get('x-forwarded-for') ||
+        req.headers.get('x-real-ip') ||
+        req.headers.get('forwarded') ||
+        req.headers.get('cf-connecting-ip') ||
+        req.headers.get('cf-ray') ||
+        req.headers.get('x-forwarded-proto') ||
+        req.headers.get('x-forwarded-host');
+      if (!isLoopback(peerIp) || proxied) {
         return Response.json({ error: 'not found' }, { status: 404 });
       }
       return Response.json({ devices: [...wsMap.keys()] });
@@ -107,10 +129,12 @@ const server = Bun.serve({
       }
 
       const deviceId = url.pathname.slice(5);
-      if (!deviceId) return Response.json({ error: 'missing deviceId' }, { status: 400 });
+      if (!validDeviceId(deviceId)) {
+        return Response.json({ error: 'invalid deviceId' }, { status: 400 });
+      }
 
       const ws = wsMap.get(deviceId);
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (!ws || ws.readyState !== WS_OPEN) {
         return Response.json({ error: 'device offline' }, { status: 503 });
       }
       if (pending.pendingCount(deviceId) >= config.maxPendingPerDevice) {
@@ -125,7 +149,8 @@ const server = Bun.serve({
       }
 
       // Device-side token (relayed via tunnel) - separate from gateway token.
-      const relayToken = req.headers.get('x-device-token') || url.searchParams.get('token') || undefined;
+      const relayToken =
+        req.headers.get('x-device-token') || url.searchParams.get('token') || undefined;
       const id = crypto.randomUUID();
       const tunnelReq: TunnelRequest = {
         id,
@@ -140,10 +165,18 @@ const server = Bun.serve({
           resolve(Response.json({ error: 'device busy' }, { status: 503 }));
           return;
         }
+        // Bun's ws.send returns the number of bytes queued, or 0/-1 on
+        // back-pressure / closed peer. A failed send must abort the pending
+        // immediately; otherwise the request hangs until --timeout fires.
+        let sent = 0;
         try {
-          ws.send(JSON.stringify(tunnelReq));
+          sent = ws.send(JSON.stringify(tunnelReq));
         } catch {
           pending.abortId(id, 502, 'device send failed');
+          return;
+        }
+        if (sent <= 0) {
+          pending.abortId(id, 503, 'device backpressure');
         }
       });
     }
@@ -153,7 +186,9 @@ const server = Bun.serve({
       if (!originAllowed(req)) return Response.json({ error: 'forbidden origin' }, { status: 403 });
       if (!authDevice(req, url)) return unauthorized();
       const deviceId = url.pathname.slice(4);
-      if (!deviceId) return Response.json({ error: 'missing deviceId' }, { status: 400 });
+      if (!validDeviceId(deviceId)) {
+        return Response.json({ error: 'invalid deviceId' }, { status: 400 });
+      }
       if (wsMap.has(deviceId)) {
         return Response.json({ error: 'deviceId already in use' }, { status: 409 });
       }
@@ -166,7 +201,10 @@ const server = Bun.serve({
       if (!originAllowed(req)) return Response.json({ error: 'forbidden origin' }, { status: 403 });
       if (!authDevice(req, url)) return unauthorized();
       const requested = url.searchParams.get('deviceId');
-      let deviceId = requested || crypto.randomUUID();
+      const deviceId = requested || crypto.randomUUID();
+      if (requested && !validDeviceId(requested)) {
+        return Response.json({ error: 'invalid deviceId' }, { status: 400 });
+      }
       if (requested && wsMap.has(requested)) {
         return Response.json({ error: 'deviceId already in use' }, { status: 409 });
       }
@@ -193,7 +231,9 @@ const server = Bun.serve({
         return;
       }
       wsMap.set(deviceId, ws);
-      ws.send(JSON.stringify({ type: 'registered', deviceId }));
+      try {
+        ws.send(JSON.stringify({ type: 'registered', deviceId }));
+      } catch {}
     },
     close(ws: WS) {
       const { deviceId } = ws.data;
@@ -212,6 +252,12 @@ const server = Bun.serve({
       }
       if (!msg || typeof msg !== 'object') return;
 
+      // Successful parse of a well-formed app-layer message proves liveness.
+      // Reset only AFTER parse so garbage frames cannot keep a zombie ws alive.
+      // Survives HTTP/2 tunnels (Cloudflare Zero Trust, etc.) that may swallow
+      // WS control ping/pong frames.
+      ws.data.missedPings = 0;
+
       if (
         'id' in msg &&
         typeof msg.id === 'string' &&
@@ -222,25 +268,42 @@ const server = Bun.serve({
         return;
       }
 
+      if ('type' in msg && (msg as any).type === 'keepalive') {
+        try {
+          ws.send(JSON.stringify({ type: 'keepalive-ack' }));
+        } catch {}
+        return;
+      }
+
       if ('type' in msg && (msg as any).type === 'register') {
         const requested = String((msg as any).deviceId || '').trim();
-        if (!requested) return;
+        if (!validDeviceId(requested)) return;
         const current = ws.data.deviceId;
         if (requested === current) {
-          ws.send(JSON.stringify({ type: 'registered', deviceId: current }));
+          try {
+            ws.send(JSON.stringify({ type: 'registered', deviceId: current }));
+          } catch {}
           return;
         }
         const existing = wsMap.get(requested);
         if (existing && existing !== ws) {
-          ws.send(JSON.stringify({ type: 'error', error: 'deviceId already in use' }));
+          try {
+            ws.send(JSON.stringify({ type: 'error', error: 'deviceId already in use' }));
+          } catch {}
           return;
         }
-        // Reassign safely: drop old slot, fail its pendings, claim new.
-        if (wsMap.get(current) === ws) wsMap.delete(current);
-        pending.failDevice(current, 503, 'device reregistered');
+        // Only release `current` if THIS ws owns it. Otherwise another ws is the
+        // legitimate owner of `current` and we must not wipe its pendings.
+        const weOwnedCurrent = wsMap.get(current) === ws;
+        if (weOwnedCurrent) {
+          wsMap.delete(current);
+          pending.failDevice(current, 503, 'device reregistered');
+        }
         wsMap.set(requested, ws);
         ws.data.deviceId = requested;
-        ws.send(JSON.stringify({ type: 'registered', deviceId: requested }));
+        try {
+          ws.send(JSON.stringify({ type: 'registered', deviceId: requested }));
+        } catch {}
         return;
       }
       // Unknown messages: ignore.
@@ -251,7 +314,7 @@ const server = Bun.serve({
 // Active liveness probe: ping each ws; drop after N missed pongs.
 const pingTimer = setInterval(() => {
   for (const ws of wsMap.values()) {
-    if (ws.readyState !== WebSocket.OPEN) continue;
+    if (ws.readyState !== WS_OPEN) continue;
     if (ws.data.missedPings >= config.pingMaxMisses) {
       try {
         ws.close(1011, 'ping timeout');
@@ -268,6 +331,8 @@ const pingTimer = setInterval(() => {
 function shutdown(): void {
   clearInterval(pingTimer);
   rateLimiter.stop();
+  // Fail any in-flight pendings so HTTP callers see a 503 instead of TCP reset.
+  pending.failAll(503, 'gateway shutting down');
   try {
     server.stop(true);
   } catch {}
@@ -282,4 +347,11 @@ console.log(
   `Device auth:  ${config.deviceToken ? 'enabled' : 'DISABLED (any client may register as device)'}`,
 );
 if (!config.gatewayToken) console.warn('WARNING: --token not set. /mcp/* is publicly accessible.');
-if (!config.deviceToken) console.warn('WARNING: --device-token not set. Device hijacking is possible.');
+if (!config.deviceToken)
+  console.warn('WARNING: --device-token not set. Device hijacking is possible.');
+if (!config.trustProxy) {
+  console.warn(
+    'NOTE: --trust-proxy not set; rate limit and /devices loopback check use the TCP peer IP. ' +
+      'If this gateway sits behind a reverse proxy (nginx/Caddy/Cloudflare), set --trust-proxy.',
+  );
+}

@@ -29,7 +29,12 @@ async function startGateway(
       const r = await fetch(`http://127.0.0.1:${port}/devices`);
       // 200 (loopback unauth) or 401 are both proof of life
       if (r.status === 200 || r.status === 401 || r.status === 404) {
-        return { proc, port, baseHttp: `http://127.0.0.1:${port}`, baseWs: `ws://127.0.0.1:${port}` };
+        return {
+          proc,
+          port,
+          baseHttp: `http://127.0.0.1:${port}`,
+          baseWs: `ws://127.0.0.1:${port}`,
+        };
       }
     } catch {}
     await Bun.sleep(50);
@@ -70,7 +75,11 @@ async function connectWs(url: string, headers: Record<string, string> = {}): Pro
   return ws;
 }
 
-function recvJson<T = any>(ws: WebSocket, predicate: (m: any) => boolean, timeoutMs = 1500): Promise<T> {
+function recvJson<T = any>(
+  ws: WebSocket,
+  predicate: (m: any) => boolean,
+  timeoutMs = 1500,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
       ws.removeEventListener('message', listener);
@@ -243,7 +252,11 @@ async function s6_e2e_rpc(): Promise<void> {
         dev.send(
           JSON.stringify({
             id: env.id,
-            response: { jsonrpc: '2.0', id: env.request.id, result: { echoed: env.request.params } },
+            response: {
+              jsonrpc: '2.0',
+              id: env.request.id,
+              result: { echoed: env.request.params },
+            },
           }),
         );
       }
@@ -389,7 +402,8 @@ async function s10_pending_budget(): Promise<void> {
     });
     if (c.status !== 503) return bad('s10_pending_budget', `3rd status=${c.status}`);
     const cb = (await c.json()) as any;
-    if (cb.error !== 'device busy') return bad('s10_pending_budget', `3rd body=${JSON.stringify(cb)}`);
+    if (cb.error !== 'device busy')
+      return bad('s10_pending_budget', `3rd body=${JSON.stringify(cb)}`);
     // Cleanup: kill server to release a,b promises
     dev.close();
     ok('s10_pending_budget');
@@ -438,13 +452,107 @@ async function s12_invalid_args(): Promise<void> {
   ok('s12_invalid_args');
 }
 
-async function s13_devices_loopback_only(): Promise<void> {
-  // Bind to all interfaces but probe via 127.0.0.1 only; verify behavior with a spoofed X-Forwarded-For — that must NOT bypass the loopback check (we check peer IP, not headers).
+async function s14_keepalive_ack(): Promise<void> {
   const g = await startGateway([]);
   try {
-    const r = await fetch(`${g.baseHttp}/devices`, { headers: { 'x-forwarded-for': '1.2.3.4' } });
-    if (r.status !== 200)
-      return bad('s13_devices_loopback_only', `loopback fetch should pass: status=${r.status}`);
+    const ws = await connectWs(`${g.baseWs}/ws/ka-dev`);
+    await recvJson(ws, (m) => m.type === 'registered');
+    ws.send(JSON.stringify({ type: 'keepalive' }));
+    const ack = await recvJson<any>(ws, (m) => m.type === 'keepalive-ack');
+    if (ack.type !== 'keepalive-ack') return bad('s14_keepalive_ack', `ack=${JSON.stringify(ack)}`);
+    ws.close();
+    ok('s14_keepalive_ack');
+  } finally {
+    await stopGateway(g.proc);
+  }
+}
+
+async function s15_inbound_resets_missed_pings(): Promise<void> {
+  // With ping-interval=200ms and max-misses=2, an idle ws is dropped within ~600ms.
+  // A keepalive every 100ms must keep it alive past 1.5s.
+  const g = await startGateway(['--ping-interval', '200', '--ping-max-misses', '2']);
+  try {
+    const ws = await connectWs(`${g.baseWs}/ws/ka-live`);
+    await recvJson(ws, (m) => m.type === 'registered');
+    let closed = false;
+    ws.addEventListener('close', () => {
+      closed = true;
+    });
+    const send = setInterval(() => {
+      try {
+        ws.send(JSON.stringify({ type: 'keepalive' }));
+      } catch {}
+    }, 100);
+    await Bun.sleep(1500);
+    clearInterval(send);
+    if (closed)
+      return bad('s15_inbound_resets_missed_pings', 'ws closed despite keepalive traffic');
+    ws.close();
+    ok('s15_inbound_resets_missed_pings');
+  } finally {
+    await stopGateway(g.proc);
+  }
+}
+
+async function s16_invalid_device_id_rejected(): Promise<void> {
+  const g = await startGateway([]);
+  try {
+    // POST /mcp/<bad>: out-of-allowlist ids rejected up front. `..` is
+    // normalized by URL parser before reaching the gateway, so skip it.
+    const bad = ['foo/bar', 'a b', 'a$b', 'a'.repeat(129), ''];
+    for (const id of bad) {
+      const r = await fetch(`${g.baseHttp}/mcp/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        body: '{}',
+      });
+      if (r.status !== 400) {
+        return bad_(`s16_post_mcp_bad_id[${JSON.stringify(id)}]`, `status=${r.status}`);
+      }
+    }
+    // WS upgrade with bad id rejected before upgrade.
+    let failed = false;
+    try {
+      await connectWs(`${g.baseWs}/ws/${encodeURIComponent('a b')}`);
+    } catch {
+      failed = true;
+    }
+    if (!failed) return bad_('s16_ws_bad_id_rejected', 'connect succeeded');
+    ok('s16_invalid_device_id_rejected');
+  } finally {
+    await stopGateway(g.proc);
+  }
+}
+function bad_(name: string, why: string): void {
+  bad(name, why);
+}
+
+async function s13_devices_loopback_only(): Promise<void> {
+  // /devices is gated on loopback peer IP AND absence of any proxy header.
+  // The proxy-header check matters when a reverse proxy (cloudflared, nginx)
+  // runs on the same host: it connects via 127.0.0.1 so peerIp alone cannot
+  // prove the request originated locally.
+  const g = await startGateway([]);
+  try {
+    // Clean loopback request must pass.
+    let r = await fetch(`${g.baseHttp}/devices`);
+    if (r.status !== 200) return bad('s13_clean_loopback_ok', `status=${r.status}`);
+
+    // Each proxy header alone must trip the 404 path.
+    const proxyHeaders = [
+      'x-forwarded-for',
+      'x-real-ip',
+      'forwarded',
+      'cf-connecting-ip',
+      'cf-ray',
+      'x-forwarded-proto',
+      'x-forwarded-host',
+    ];
+    for (const h of proxyHeaders) {
+      r = await fetch(`${g.baseHttp}/devices`, { headers: { [h]: 'x' } });
+      if (r.status !== 404) {
+        return bad(`s13_proxy_header_${h}`, `expected 404 got ${r.status}`);
+      }
+    }
     ok('s13_devices_loopback_only');
   } finally {
     await stopGateway(g.proc);
@@ -468,6 +576,9 @@ async function main(): Promise<void> {
     ['s11', s11_origin_whitelist],
     ['s12', s12_invalid_args],
     ['s13', s13_devices_loopback_only],
+    ['s14', s14_keepalive_ack],
+    ['s15', s15_inbound_resets_missed_pings],
+    ['s16', s16_invalid_device_id_rejected],
   ];
   for (const [, fn] of scenarios) {
     try {
