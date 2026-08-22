@@ -593,9 +593,9 @@ export const ADMIN_HTML = `<!doctype html>
                 var meta = document.createElement("div");
                 meta.className = "t-desc";
                 meta.textContent =
-                  (c.name ? c.ip + " &middot; " : "") +
+                  (c.name ? c.ip + " · " : "") +
                   c.count + " request" + (c.count === 1 ? "" : "s") +
-                  " &middot; " + ago(c.lastSeen);
+                  " · " + ago(c.lastSeen);
                 el.appendChild(name);
                 el.appendChild(meta);
                 d.bodyEl.appendChild(el);
