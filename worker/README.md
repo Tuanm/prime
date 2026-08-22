@@ -1,152 +1,139 @@
-# Prime (Cloudflare Worker)
+# Prime — Cloudflare Worker
 
-A high-throughput, globally-distributed reimplementation of the code-mcp gateway
-built on **Cloudflare Workers + Durable Objects**. It is wire-compatible with the
-Bun gateway (`../gateway`): devices and MCP clients do not need to change.
+**Production gateway for exposing code-mcp devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
 
-## Why Durable Objects?
+## Overview
 
-A Cloudflare Worker runs many **isolates** with no shared memory. A device's
-WebSocket is pinned to the isolate that accepted it, so a plain-Worker design
-could not find the tunnel when an HTTP `/mcp/{deviceId}` request landed on a
-different isolate.
-
-**Durable Objects** give every deviceId a deterministic single instance
-(`idFromName(deviceId)`) that owns BOTH the WebSocket AND the pending-request
-registry. Every `/mcp` and `/ws` request routes to the same colocated object,
-so routing is always correct, low-latency, and scales horizontally per device
-(a busy device only affects its own object, not the whole gateway).
+| Topic | Answer |
+| --- | --- |
+| **What** | WebSocket tunnel gateway: a device connects once; MCP clients relay JSON-RPC calls to it over HTTP |
+| **Where** | Cloudflare Worker + Durable Objects (needs a **Paid** plan) |
+| **Why DOs** | A Worker's memory is per-isolate; only a Durable Object per `deviceId` guarantees every `/mcp` request finds the device's WebSocket |
+| **Protocol** | Wire-compatible with the code-mcp device protocol: register / keepalive / JSON-RPC envelope |
+| **Cost model** | Idle tunnels hibernate (WebSocket Hibernation API); no servers to run |
 
 ## Architecture
 
-```
-MCP client --HTTP--> Worker --DO stub--> DeviceDO(deviceId) --WS--> code-mcp device
-                                   \-> RegistryDO (global /devices listing)
+```mermaid
+flowchart LR
+    C[MCP client] -->|POST /mcp/{deviceId}| W
+    D[Device<br/>code-mcp] -->|"wss /ws/{deviceId}?token=…"| W
+    subgraph CF [Cloudflare Worker]
+        W[entry — src/index.ts<br/>routing, auth, rate limit]
+        DO[DeviceDO — src/device-do.ts<br/>per deviceId<br/>WebSocket + pending registry]
+        R[RegistryDO — src/registry-do.ts<br/>online deviceIds]
+    end
+    W -->|stub.fetch| DO
+    W -->|idFromName| R
+    DO <-->|"register / keepalive / JSON-RPC"| D
+    R -.->|GET /devices — admin token| C
 ```
 
-- **`src/index.ts`** — entry point: routing, gateway/device auth, per-isolate
-  rate limiting, origin whitelist. Stateless, scales across all isolates.
-- **`src/device-do.ts`** — one object per device: WebSocket + pending requests,
-  request timeout, keepalive watchdog (via alarms so it fires while hibernated),
-  per-device pending budget, cross-device response guard (trivially safe: the DO
-  owns exactly one device).
-- **`src/registry-do.ts`** — single shared object that tracks online deviceIds
-  for `GET /devices` (persisted to durable storage, TTL-swept).
-- **`src/config.ts` / `src/rate-limit.ts`** — env-based config + helpers.
+| Component | Responsibility |
+| --- | --- |
+| `src/index.ts` | Route `/devices`, `/mcp/{id}`, `/ws`; gateway + device auth **before** any DO; per-isolate rate limiting; origin whitelist |
+| `src/device-do.ts` | One object per device: owns the WebSocket, pending-request registry, request timeout, keepalive watchdog (alarm-driven), per-device pending budget |
+| `src/registry-do.ts` | Single shared object: online deviceIds for `GET /devices`, persisted, TTL-swept |
+| `src/config.ts`, `src/rate-limit.ts`, `src/protocol.ts` | Env config + helpers, limiter, tunnel envelope types |
 
-The DeviceDO uses the **WebSocket Hibernation API** (`state.acceptWebSocket()`),
-so idle device tunnels cost nothing (the object sleeps between messages) and
-wake instantly on traffic — ideal for a fleet of long-lived device connections.
+### Request flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as Device
+    participant W as Worker entry
+    participant DO as DeviceDO
+    participant C as MCP client
+
+    D->>W: wss /ws/{deviceId}?token=T
+    W->>W: deviceKnown(T) — 401 if unknown/bad
+    W->>DO: forward upgrade + x-auth-token
+    DO->>D: 101 — token re-checked (defense in depth)
+    D->>DO: { type: "register", deviceId }
+    DO-->>D: { type: "registered" }
+
+    C->>W: POST /mcp/{deviceId} + token
+    W->>W: gateway token, rate limit, body cap, budget
+    W->>DO: stub.fetch (idempotent routing)
+    DO-->>D: { id, request, token? }
+    D-->>DO: { id, response }
+    DO-->>C: 200 — JSON-RPC response
+```
 
 ## Deploy
 
 ```bash
 cd worker
 npm install
-
-# Configure secrets (tokens are NEVER committed; use wrangler secrets)
-# RECOMMENDED: per-device tokens so no one can claim/intercept another device.
-npx wrangler secret put DEVICE_TOKENS    # JSON map: {"deviceId": "token", ...}
-npx wrangler secret put GATEWAY_TOKEN    # optional bearer token for /mcp/*
-npx wrangler secret put ADMIN_TOKEN      # optional /devices auth (defaults to GATEWAY_TOKEN)
-
+npx wrangler secret put DEVICE_TOKENS   # REQUIRED for secure deployments
+npx wrangler secret put ADMIN_TOKEN     # optional — gates GET /devices
 npx wrangler deploy
 ```
 
-Tunables live in `wrangler.toml` under `[vars]` (mirror the Bun gateway flags):
-`RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`, `TIMEOUT_MS`,
-`MAX_PENDING_PER_DEVICE`, `MAX_BODY_BYTES`, `KEEPALIVE_TIMEOUT_MS`,
-`PING_INTERVAL_MS`, `PING_MAX_MISSES`, `IDLE_TIMEOUT_MS`,
-`ALLOWED_ORIGINS` (comma-separated origin whitelist).
+### Secrets
 
-> **Long tool calls**: `TIMEOUT_MS` defaults to 300s (5 minutes). Cloudflare
-> gives Durable Objects and incoming HTTP requests **unlimited wall time** while
-> the caller stays connected, so long operations (recording, `wait_for`,
-> downloads) are relayed correctly as long as the client keeps the connection
-> open - the per-device keepalive (25s) does exactly that.
+| Secret | Required | Effect |
+| --- | --- | --- |
+| `DEVICE_TOKENS` | recommended | JSON map `{"deviceId":"token",…}`; authenticates devices at `/ws` and relay requests at `/mcp` |
+| `DEVICE_TOKEN` | optional | Shared fallback token for all devices when no per-device map is set |
+| `GATEWAY_TOKEN` | optional | Client → gateway bearer auth for `/mcp/*` |
+| `ADMIN_TOKEN` | optional | `GET /devices` auth (defaults to `GATEWAY_TOKEN`); endpoint hidden (404) when neither is set |
 
-> Durable Objects require a Cloudflare **Paid** plan (or higher).
+Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>`, `?token=<token>`, or `X-Device-Token` (device credentials).
+
+### Tunables (`[vars]` in `wrangler.toml`)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TIMEOUT_MS` | `300000` | Per-request relay timeout — 5 min for long tool calls |
+| `MAX_PENDING_PER_DEVICE` | `100` | Concurrent in-flight requests per device (503 when full) |
+| `MAX_BODY_BYTES` | `1048576` | Request body cap (413) |
+| `KEEPALIVE_TIMEOUT_MS` | `90000` | Drop tunnel after this long with no frame (alarm-driven) |
+| `PING_INTERVAL_MS` / `PING_MAX_MISSES` | `30000` / `2` | Server-side ping cadence / misses before reap |
+| `IDLE_TIMEOUT_MS` | `120000` | Hibernation idle threshold |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `60000` / `100` | Per-isolate in-memory limiter |
+| `ALLOWED_ORIGINS` | unset | Comma-separated WS origin whitelist (403 otherwise) |
+
+> **Long tool calls** — Durable Objects and incoming HTTP requests have
+> **unlimited wall time** while the caller stays connected; only CPU time is
+> billed. With `TIMEOUT_MS` at 300 s and the device's 25 s keepalive, long
+> operations (recording, `wait_for`, downloads) relay correctly.
+
+## Security model
+
+| Goal | Control |
+| --- | --- |
+| No one can hijack a deviceId | Per-device token required at `/ws` connect, re-checked inside the DO; duplicate registration → 409 |
+| No one can intercept relay traffic | Same token required on `/mcp` before the DO is touched |
+| No existence oracle | Unknown deviceId → identical 401; no DO created for unauthenticated probes |
+| No roster leak | `/devices` hidden (404) without admin token; admin-gated (401) otherwise |
+| No register takeover | Register message with a different deviceId is rejected |
+| No slow-device DoS | Per-device pending budget; body cap (413) |
+| No stale tunnels | Keepalive alarm drops dead tunnels |
+| No brute force | Per-isolate rate limit + optional Cloudflare edge rule on `CF-Connecting-IP` (client-spoof-proof) |
+| No cross-device leakage | One DO = one device; a WS can only resolve its own pendings |
+
+## API
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/devices` | admin | List online devices (token-gated) |
+| `POST` | `/mcp/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
+| `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
+| `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 
 ## Local development
 
 ```bash
 cd worker
 npm run dev          # wrangler dev --local (miniflare/workerd on :8787)
+npm test             # 16 smoke scenarios on local wrangler instances
+npm run typecheck    # tsc --noEmit
 ```
 
-## Test
+Smoke coverage: gateway/device auth, duplicate-registration rejection, register-message takeover blocking, end-to-end JSON-RPC relay, cross-device response blocking, request timeout, body cap, pending budget, origin whitelist, keepalive ack, invalid deviceId, `/devices` listing + hidden-without-admin, per-device unknown-id 401, relay-token forwarding, long-call relay.
 
-```bash
-cd worker
-npm test             # starts two local wrangler instances, runs 16 scenarios
-```
-
-For a manual run against already-started instances:
-
-```bash
-# terminal 1
-wrangler dev --local --port 8801 --var TIMEOUT_MS:3000 --var ALLOWED_ORIGINS:https://good.example --var MAX_PENDING_PER_DEVICE:2 --var MAX_BODY_BYTES:256
-# terminal 2
-wrangler dev --local --port 8802 --var GATEWAY_TOKEN:gw-secret-abc --var DEVICE_TOKEN:dev-secret-xyz --var ADMIN_TOKEN:admin-secret-xyz
-# terminal 3
-GW_PLAIN_PORT=8801 GW_AUTH_PORT=8802 bun test/smoke.ts
-```
-
-> Note: miniflare persists Durable Object state under `.wrangler/state`. After
-> a hard kill, stale sockets may linger until the keepalive alarm fires
-> (default 90s). For a clean local run: `rm -rf .wrangler/state` before starting.
-
-Covers: gateway/device auth, duplicate registration rejection, register-message
-takeover blocking, end-to-end JSON-RPC relay, cross-device response blocking,
-request timeout, body cap, per-device pending budget, origin whitelist,
-keepalive ack, invalid deviceId rejection, /devices listing, relay-token
-forwarding.
-
-## Security model
-
-Hardened beyond the Bun gateway - designed so no attacker can steal or
-intercept a connection, and no one can learn who is connected:
-
-- **Per-device authentication** (`DEVICE_TOKENS`, a JSON map
-  `{deviceId: token}`). At `/ws` connect AND at `/mcp` relay, the device's
-  secret is required and compared in constant time. An attacker who does not
-  know a device's token cannot:
-  - claim that deviceId over WebSocket (hijack), or
-  - relay requests to it over `/mcp` (intercept), or
-  - learn whether the deviceId exists (unknown ids return the same 401 -
-    no existence oracle), or
-  - force Durable Object creation for made-up ids (no DO churn / cost).
-  A shared `DEVICE_TOKEN` fallback is supported for deployments that do not
-  need per-device secrets.
-- **/devices is NEVER public**: it requires the admin token; if no admin token
-  is configured the endpoint is hidden entirely (404), so a misconfigured
-  gateway does not leak the device roster.
-- **`GATEWAY_TOKEN`** (optional): additional client -> gateway auth for /mcp.
-- **DeviceId collision rejection** (409) — a second client cannot hijack an
-  in-use deviceId (enforced atomically inside the DO).
-- **Register-message mismatch rejected** — a device bound to one DO cannot rebind
-  to another deviceId.
-- **Per-device pending budget** — one slow device cannot exhaust the gateway.
-- **Cross-device response guard** — a WS may only resolve pendings of its own
-  device (inherent: one DO = one device).
-- **Body cap** (`MAX_BODY_BYTES`) against JSON bombs.
-- **Keepalive watchdog** — stale tunnels dropped after `KEEPALIVE_TIMEOUT_MS`
-  with no frame (alarm-driven, survives hibernation).
-- **Origin whitelist** for browser-style WS clients.
-- **Rate limiting**: per-isolate in-memory limiter (cheap first line). For
-  global per-IP limits, add a Cloudflare **Rate Limiting rule** in the dashboard
-  targeting `CF-Connecting-IP` (the edge header is set by Cloudflare and cannot
-  be spoofed by clients).
-
-## API (unchanged from the Bun gateway)
-
-| Method | Path                | Auth      | Description                          |
-| ------ | ------------------- | --------- | ------------------------------------ |
-| GET    | /devices            | admin     | List registered devices (token-gated)|
-| POST   | /mcp/{deviceId}     | gateway   | Relay JSON-RPC body to device        |
-| WS     | /ws/{deviceId}      | device    | Device WebSocket (preferred)         |
-| WS     | /ws?deviceId=<id>   | device    | Legacy device WebSocket              |
-
-`POST /mcp/{deviceId}` also accepts a device-relay token forwarded to the
-device via the tunnel envelope (`X-Device-Token` header or `?token=` query) —
-opaque to the gateway, validated device-side.
+> **Miniflare note** — local DO state persists under `.wrangler/state`. After a
+> hard kill, stale sockets linger until the keepalive alarm fires; for a clean
+> run: `rm -rf worker/.wrangler/state` before starting.
