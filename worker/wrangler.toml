@@ -11,7 +11,8 @@
 # per-IP limits add a Cloudflare Rate Limiting rule in the dashboard targeting
 # CF-Connecting-IP.
 
-name = "code-mcp-gateway"
+name = "code-mcp"
+account_id = "b04dd6c1528d6cf40ffd645269716025" # tuanm
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
