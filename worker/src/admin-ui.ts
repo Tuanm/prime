@@ -1,0 +1,423 @@
+// Admin UI for the code-mcp gateway device registry. Served at GET /admin.
+// Styled after the browser-mcp extension popup (minimal black/white,
+// JetBrains Mono). The page is gated by Cloudflare Access at the edge; the
+// API calls below additionally require the admin token (stored locally in
+// the operator's browser).
+
+export const ADMIN_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        width: 540px;
+        margin: 48px auto;
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        color: #111;
+        background: #fff;
+        line-height: 1.4;
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        margin-bottom: 2px;
+      }
+      .sub {
+        font-size: 11px;
+        color: #999;
+        margin-bottom: 22px;
+      }
+      .token-bar {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 20px;
+      }
+      .token-bar input {
+        flex: 1;
+        padding: 7px 10px;
+        border: 1px solid #111;
+        font-family: inherit;
+        font-size: 12px;
+      }
+      .token-bar input:focus {
+        outline: none;
+        box-shadow: 0 0 0 1px #111;
+      }
+      .token-bar button {
+        padding: 7px 14px;
+        border: 1px solid #111;
+        background: #111;
+        color: #fff;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .token-bar button:hover {
+        background: #000;
+      }
+      .row-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 10px;
+      }
+      .row-head h2 {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.7px;
+      }
+      .plus {
+        width: 28px;
+        height: 28px;
+        border: 1px solid #111;
+        background: #fff;
+        color: #111;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .plus:hover {
+        background: #f5f5f5;
+      }
+      ul {
+        list-style: none;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid #111;
+        margin-bottom: 8px;
+        background: #fff;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .dot.on {
+        background: #16a34a;
+      }
+      .dot.off {
+        background: #fff;
+        border: 1.5px solid #b91c1c;
+      }
+      .cell-id {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .cell-id input {
+        width: 100%;
+        border: none;
+        border-bottom: 1px dotted #999;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 2px 0;
+        background: transparent;
+        color: #111;
+      }
+      .cell-id input:focus {
+        outline: none;
+        border-bottom-color: #111;
+      }
+      .cell-tok {
+        width: 140px;
+        font-size: 12px;
+        color: #666;
+      }
+      .cell-tok input {
+        width: 100%;
+        border: none;
+        border-bottom: 1px dotted #999;
+        font-family: inherit;
+        font-size: 12px;
+        padding: 2px 0;
+        background: transparent;
+        color: #111;
+      }
+      .cell-tok input:focus {
+        outline: none;
+        border-bottom-color: #111;
+      }
+      .menu-wrap {
+        position: relative;
+        flex: none;
+      }
+      .menu-btn {
+        width: 28px;
+        height: 28px;
+        border: 1px solid #111;
+        background: #fff;
+        color: #111;
+        font-size: 15px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .menu-btn:hover {
+        background: #f5f5f5;
+      }
+      .menu {
+        position: absolute;
+        right: 0;
+        top: 32px;
+        min-width: 130px;
+        border: 1px solid #111;
+        background: #fff;
+        z-index: 10;
+        display: none;
+      }
+      .menu.open {
+        display: block;
+      }
+      .menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: #fff;
+        font-family: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .menu button:hover {
+        background: #f5f5f5;
+      }
+      .menu button.danger {
+        color: #b91c1c;
+      }
+      .status {
+        margin-top: 14px;
+        font-size: 11px;
+        color: #666;
+        min-height: 16px;
+      }
+      .empty {
+        font-size: 12px;
+        color: #999;
+        padding: 14px;
+        border: 1px dashed #999;
+        text-align: center;
+      }
+      @media (max-width: 600px) {
+        body {
+          width: auto;
+          margin: 24px 14px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Admin</h1>
+    <div class="sub">device registry &middot; admin</div>
+
+    <div class="token-bar">
+      <input id="adminToken" type="password" placeholder="Admin token" autocomplete="off" spellcheck="false" />
+      <button id="tokenBtn" type="button">Save</button>
+    </div>
+
+    <div class="row-head">
+      <h2>Devices</h2>
+      <button class="plus" id="addBtn" type="button" title="Add device">+</button>
+    </div>
+    <ul id="list"></ul>
+    <div class="status" id="status"></div>
+
+    <script>
+      (function () {
+        var listEl = document.getElementById("list");
+        var statusEl = document.getElementById("status");
+        var tokenInput = document.getElementById("adminToken");
+        var tokenBtn = document.getElementById("tokenBtn");
+        var addBtn = document.getElementById("addBtn");
+        var token = "";
+        try { token = localStorage.getItem("cmg_admin_token") || ""; } catch (e) {}
+        tokenInput.value = token;
+
+        function maskToken(t) {
+          if (!t) return "";
+          if (t.length <= 5) return "***";
+          if (t.length <= 8) return t.charAt(0) + "***" + t.charAt(t.length - 1);
+          if (t.length <= 12) return t.slice(0, 2) + "***" + t.slice(-2);
+          return t.slice(0, 3) + "***" + t.slice(-3);
+        }
+
+        function setStatus(msg, isErr) {
+          statusEl.textContent = msg || "";
+          statusEl.style.color = isErr ? "#b91c1c" : "#666";
+        }
+
+        function api(path, opts) {
+          opts = opts || {};
+          var headers = {};
+          var h = opts.headers || {};
+          for (var k in h) headers[k] = h[k];
+          if (token) headers["authorization"] = "Bearer " + token;
+          if (opts.body) headers["content-type"] = "application/json";
+          return fetch(path, { method: opts.method || "GET", headers: headers, body: opts.body }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) {
+              if (!r.ok) throw new Error((j && j.error) || ("HTTP " + r.status));
+              return j;
+            });
+          });
+        }
+
+        function renderRow(dev, isNew) {
+          var li = document.createElement("li");
+          li.className = "row";
+          li.dataset.deviceId = dev.deviceId || "";
+
+          var dot = document.createElement("span");
+          dot.className = "dot " + (dev.online ? "on" : "off");
+
+          var idCell = document.createElement("span");
+          idCell.className = "cell-id";
+          if (isNew) {
+            var idInput = document.createElement("input");
+            idInput.placeholder = "device id";
+            idInput.value = dev.deviceId || "";
+            idCell.appendChild(idInput);
+          } else {
+            idCell.textContent = dev.deviceId;
+          }
+
+          var tokCell = document.createElement("span");
+          tokCell.className = "cell-tok";
+          var tokInput = document.createElement("input");
+          tokInput.type = "text";
+          tokInput.value = isNew ? (dev.token || "") : maskToken(dev.token || "");
+          tokInput.placeholder = "token";
+          tokCell.appendChild(tokInput);
+
+          var menuWrap = document.createElement("span");
+          menuWrap.className = "menu-wrap";
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "menu-btn";
+          btn.textContent = "⋮";
+          var menu = document.createElement("span");
+          menu.className = "menu";
+          var saveItem = document.createElement("button");
+          saveItem.type = "button";
+          saveItem.textContent = "Save";
+          var delItem = document.createElement("button");
+          delItem.type = "button";
+          delItem.className = "danger";
+          delItem.textContent = "Delete";
+          menu.appendChild(saveItem);
+          menu.appendChild(delItem);
+          menuWrap.appendChild(btn);
+          menuWrap.appendChild(menu);
+
+          li.appendChild(dot);
+          li.appendChild(idCell);
+          li.appendChild(tokCell);
+          li.appendChild(menuWrap);
+          listEl.appendChild(li);
+
+          function closeMenus() {
+            var open = document.querySelectorAll(".menu.open");
+            for (var i = 0; i < open.length; i++) open[i].classList.remove("open");
+          }
+
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var wasOpen = menu.classList.contains("open");
+            closeMenus();
+            if (!wasOpen) menu.classList.add("open");
+          });
+
+          saveItem.addEventListener("click", function () {
+            closeMenus();
+            var id = isNew ? (idInput.value || "").trim() : (dev.deviceId || "");
+            var tokVal = tokInput.value.trim();
+            if (!id) return setStatus("enter a device ID", true);
+            if (!tokVal) return setStatus("enter a token", true);
+            setStatus("saving " + id + " ...");
+            api("/admin/api/devices", { method: "POST", body: JSON.stringify({ deviceId: id, token: tokVal }) })
+              .then(function () {
+                setStatus("saved " + id);
+                load();
+              })
+              .catch(function (e) { setStatus("save failed: " + e.message, true); });
+          });
+
+          delItem.addEventListener("click", function () {
+            closeMenus();
+            var id = isNew ? (idInput.value || "").trim() : (dev.deviceId || "");
+            if (!id) return setStatus("no device to delete", true);
+            setStatus("deleting " + id + " ...");
+            api("/admin/api/devices/" + encodeURIComponent(id), { method: "DELETE" })
+              .then(function () {
+                setStatus("deleted " + id);
+                load();
+              })
+              .catch(function (e) { setStatus("delete failed: " + e.message, true); });
+          });
+
+          document.addEventListener("click", function handler(ev) {
+            if (!menuWrap.contains(ev.target)) closeMenus();
+            document.removeEventListener("click", handler);
+          });
+        }
+
+        function load() {
+          return api("/admin/api/devices")
+            .then(function (j) {
+              var devices = (j && j.devices) || [];
+              listEl.innerHTML = "";
+              if (!devices.length) {
+                var empty = document.createElement("li");
+                empty.className = "empty";
+                empty.textContent = "No devices registered. Click + to add one.";
+                listEl.appendChild(empty);
+                return;
+              }
+              devices.forEach(function (d) { renderRow(d, false); });
+            })
+            .catch(function (e) { setStatus("load failed: " + e.message, true); });
+        }
+
+        tokenBtn.addEventListener("click", function () {
+          token = tokenInput.value.trim();
+          try { if (token) localStorage.setItem("cmg_admin_token", token); else localStorage.removeItem("cmg_admin_token"); } catch (e) {}
+          setStatus(token ? "token saved - reloading devices" : "token cleared");
+          load();
+        });
+
+        addBtn.addEventListener("click", function () {
+          renderRow({ deviceId: "", token: "", online: false }, true);
+        });
+
+        load();
+        setInterval(load, 5000);
+      })();
+    </script>
+  </body>
+</html>
+`;

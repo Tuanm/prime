@@ -1,28 +1,25 @@
 // Cloudflare Worker entry for the code-mcp gateway.
 //
 // Routing model:
-//   GET  /devices               -> RegistryDO (auth: admin/gateway token)
-//   POST /mcp/{deviceId}        -> gateway auth + rate limit -> DeviceDO
-//   WS   /ws/{deviceId}         -> device auth + origin check -> DeviceDO upgrade
-//   WS   /ws?deviceId=          -> legacy path -> DeviceDO upgrade
+//   GET  /admin                   -> admin UI (Cloudflare Access protected)
+//   GET  /admin/api/devices       -> device registry (admin token)
+//   POST /admin/api/devices       -> register/update a device (admin token)
+//   DELETE /admin/api/devices/{id}-> remove a device (admin token)
+//   GET  /devices                 -> online deviceIds (admin token)
+//   POST /mcp/{deviceId}          -> gateway auth + rate limit -> DeviceDO
+//   WS   /ws/{deviceId}           -> device auth + origin check -> DeviceDO upgrade
+//   WS   /ws?deviceId=            -> legacy path -> DeviceDO upgrade
 //
 // All device state (WebSocket + pending requests) lives in a DeviceDO keyed by
 // deviceId, so every HTTP request finds the right tunnel regardless of which
-// isolate handled it. This is the key difference from the single-process Bun
-// gateway: on Workers, plain in-memory state would be per-isolate and would
-// break cross-isolate routing.
+// isolate handled it. The device->token registry is writable and lives in the
+// RegistryDO (durable storage), seeded once from the DEVICE_TOKENS secret, so
+// the admin UI can register devices at runtime without a redeploy.
 
-import {
-  loadConfig,
-  timingSafeEq,
-  extractToken,
-  extractDeviceToken,
-  deviceTokenFor,
-  deviceKnown,
-  validDeviceId,
-} from "./config";
+import { loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId } from "./config";
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
+import { ADMIN_HTML } from "./admin-ui";
 
 export { DeviceDO } from "./device-do";
 export { RegistryDO } from "./registry-do";
@@ -35,6 +32,29 @@ let rateLimiter: RateLimiter | null = null;
 let limiterWindowMs = 0;
 let limiterMax = 0;
 
+// Effective device->token map, backed by the RegistryDO (durable storage).
+// Cached briefly per isolate; admin mutations invalidate the local cache and
+// other isolates pick the change up within the TTL.
+let mapCache: { at: number; map: Map<string, string> } | null = null;
+const MAP_CACHE_TTL_MS = 2_000;
+
+async function effectiveDeviceMap(env: Env): Promise<Map<string, string>> {
+  if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.map;
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const map = new Map<string, string>();
+  try {
+    const r = await reg.fetch("https://registry/map");
+    if (r.ok) {
+      const j = (await r.json()) as { map?: Record<string, string> };
+      for (const [id, tok] of Object.entries(j.map || {})) {
+        if (typeof tok === "string" && tok.length > 0) map.set(id, tok);
+      }
+    }
+  } catch {}
+  mapCache = { at: Date.now(), map };
+  return map;
+}
+
 function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
   if (!rateLimiter || limiterWindowMs !== cfg.rateWindowMs || limiterMax !== cfg.rateMax) {
     if (rateLimiter) rateLimiter.stop();
@@ -45,10 +65,59 @@ function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
   return rateLimiter;
 }
 
+function adminOk(request: Request, url: URL, cfg: GatewayConfig): boolean {
+  if (!cfg.adminToken) return false;
+  const t = extractToken(request, url, "auth");
+  return !!t && timingSafeEq(t, cfg.adminToken);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
     const url = new URL(request.url);
+
+    // ---- Admin UI ----
+    // The page itself is gated by Cloudflare Access at the edge (policies:
+    // allow the admin email + @tuanm.dev); the API below additionally requires
+    // the admin token (defense in depth, also works for local dev).
+    if (request.method === "GET" && url.pathname === "/admin") {
+      return new Response(ADMIN_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    }
+
+    // ---- Admin API (device registry) ----
+    if (url.pathname.startsWith("/admin/api/")) {
+      if (!adminOk(request, url, cfg)) return unauthorized();
+      const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+
+      if (request.method === "GET" && url.pathname === "/admin/api/devices") {
+        return reg.fetch("https://registry/full");
+      }
+      if (request.method === "POST" && url.pathname === "/admin/api/devices") {
+        mapCache = null;
+        const upstream = new Request("https://registry/upsert", {
+          method: "POST",
+          headers: { "content-type": request.headers.get("content-type") || "application/json" },
+          body: request.body,
+        });
+        return reg.fetch(upstream);
+      }
+      if (request.method === "DELETE" && url.pathname.startsWith("/admin/api/devices/")) {
+        const deviceId = url.pathname.slice("/admin/api/devices/".length);
+        if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+        mapCache = null;
+        return reg.fetch(
+          new Request("https://registry/remove", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ deviceId }),
+          }),
+        );
+      }
+      return Response.json({ error: "not found" }, { status: 404 });
+    }
+
     // /devices - admin listing. NEVER public: it reveals which devices are
     // online. Requires the admin (or gateway) token; if no admin token is
     // configured the endpoint is hidden entirely (404), so a misconfigured
@@ -78,12 +147,15 @@ export default {
         return Response.json({ error: "invalid deviceId" }, { status: 400 });
       }
 
-      // Device credential check BEFORE touching the DO. In per-device mode an
-      // unknown deviceId is rejected outright (no existence oracle) and
-      // unauthenticated probes get 401 - never instantiating a Durable Object
-      // for them (no DO churn / cost).
-      if (!deviceKnown(cfg, deviceId)) return unauthorized();
-      const expected = deviceTokenFor(cfg, deviceId);
+      // Device credential check BEFORE touching the DeviceDO. The registry is
+      // the source of truth (admin UI + DEVICE_TOKENS seed). In per-device
+      // mode an unknown deviceId is rejected outright (no existence oracle)
+      // and unauthenticated probes get 401 - never instantiating a Durable
+      // Object for them (no DO churn / cost).
+      const map = await effectiveDeviceMap(env);
+      const perDeviceMode = map.size > 0;
+      if (perDeviceMode && !map.has(deviceId)) return unauthorized();
+      const expected = map.get(deviceId) ?? cfg.deviceToken;
       if (expected !== undefined) {
         const given = extractDeviceToken(request, url);
         if (!given || !timingSafeEq(given, expected)) return unauthorized();
@@ -137,8 +209,10 @@ export default {
       // hijacking / intercepting an in-use deviceId is impossible. Unknown
       // deviceIds get the same 401 (no existence oracle). The DO re-checks
       // the credential for defense in depth.
-      if (!deviceKnown(cfg, deviceId)) return unauthorized();
-      const expected = deviceTokenFor(cfg, deviceId);
+      const map = await effectiveDeviceMap(env);
+      const perDeviceMode = map.size > 0;
+      if (perDeviceMode && !map.has(deviceId)) return unauthorized();
+      const expected = map.get(deviceId) ?? cfg.deviceToken;
       if (expected !== undefined) {
         const given = extractDeviceToken(request, url);
         if (!given || !timingSafeEq(given, expected)) return unauthorized();
@@ -146,11 +220,12 @@ export default {
 
       const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
       // Keep the upgrade headers; add x-device-id for the DO, and forward the
-      // validated device token as x-auth-token so the DO's defense-in-depth
-      // check passes (the DO reads x-auth-token first, then ?auth= - it does
-      // NOT read ?token=, which is the extension's credential form).
+      // validated device token as x-auth-token + the effective expected token
+      // as x-expected-token so the DO's defense-in-depth check matches the
+      // registry (the DO reads x-expected-token first, then its env copy).
       const headers = new Headers(request.headers);
       headers.set("x-device-id", deviceId);
+      if (expected !== undefined) headers.set("x-expected-token", expected);
       const givenToken = extractDeviceToken(request, url);
       if (givenToken) headers.set("x-auth-token", givenToken);
       const upstream = new Request(url, { headers, method: request.method });

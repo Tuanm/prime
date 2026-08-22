@@ -5,12 +5,13 @@ import { spawn } from "node:child_process";
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
 const { rmSync } = await import("node:fs");
-try { rmSync(ROOT + "/.wrangler/state", { recursive: true, force: true }); } catch {} // fresh DO state
+try { rmSync(ROOT + "/.wrangler", { recursive: true, force: true }); } catch {} // fresh DO state (all instances)
 const BUN = process.env.BUN_PATH || (await import("node:os")).homedir() + "/.bun/bin/bun";
 
 async function start(port: number, vars: string[]): Promise<any> {
   const args = [
     WRANGLER, "dev", "--local", "--port", String(port), "--ip", "127.0.0.1",
+    "--persist-to", ROOT + "/.wrangler/state-" + port,
     ...vars.flatMap((v) => ["--var", v]),
   ];
   const proc = spawn("node", args, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });

@@ -252,6 +252,59 @@ async function s11_origin_whitelist(): Promise<void> {
   ok("s11_origin_whitelist");
 }
 
+
+async function s22_admin_registry(): Promise<void> {
+  // Admin UI + device registry CRUD (register -> connect -> delete -> blocked).
+  // Dedicated instance so flipping the registry into per-device mode cannot
+  // affect the shared-token scenarios on the auth instance.
+  const g = await startWrangler(8807, [
+    "DEVICE_TOKENS=" + JSON.stringify({ "seed-dev": "seed-tok" }),
+    "GATEWAY_TOKEN=" + GW,
+    "ADMIN_TOKEN=" + ADM,
+    "KEEPALIVE_TIMEOUT_MS=5000",
+  ]);
+  try {
+    // 1. /admin serves the UI
+    let r = await fetch(g.base + "/admin");
+    const html = await r.text();
+    if (r.status !== 200 || !html.includes("<h1>Admin</h1>")) {
+      return bad("s22_admin_ui", "status=" + r.status);
+    }
+    // 2. API is admin-gated; seeded device is listed
+    r = await fetch(g.base + "/admin/api/devices");
+    if (r.status !== 401) return bad("s22_admin_api_auth", "status=" + r.status);
+    r = await fetch(g.base + "/admin/api/devices", { headers: { authorization: "Bearer " + ADM } });
+    const list = (await r.json()) as any;
+    if (r.status !== 200 || !(list.devices || []).some((d: any) => d.deviceId === "seed-dev")) {
+      return bad("s22_admin_list", "status=" + r.status + " body=" + JSON.stringify(list));
+    }
+    // 3. register a device -> it can now connect over WS
+    r = await fetch(g.base + "/admin/api/devices", {
+      method: "POST",
+      headers: { authorization: "Bearer " + ADM, "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "admin-dev", token: "admin-tok" }),
+    });
+    if (r.status !== 200) return bad("s22_admin_register", "status=" + r.status + " body=" + (await r.text()));
+    const ws = await connectWs(g.base + "/ws/admin-dev?token=admin-tok");
+    await recvJson(ws, (m) => m.type === "registered");
+    ws.close();
+    await Bun.sleep(200);
+    // 4. delete -> the device is rejected again
+    r = await fetch(g.base + "/admin/api/devices/admin-dev", { method: "DELETE", headers: { authorization: "Bearer " + ADM } });
+    if (r.status !== 200) return bad("s22_admin_delete", "status=" + r.status + " body=" + (await r.text()));
+    let stillOpen = false;
+    try {
+      const w2 = await connectWs(g.base + "/ws/admin-dev?token=admin-tok", {}, 1);
+      stillOpen = true;
+      w2.close();
+    } catch {}
+    if (stillOpen) return bad("s22_admin_delete_blocks", "ws still opened after delete");
+    ok("s22_admin_registry");
+  } finally {
+    await stopWrangler(g.proc);
+  }
+}
+
 async function s14_keepalive_ack(): Promise<void> {
   const ws = await connectWs(plainBase + "/ws/s14-dev");
   await recvJson(ws, (m) => m.type === "registered");
@@ -440,6 +493,9 @@ async function startWrangler(port: number, vars: string[]): Promise<any> {
   const { spawn } = await import("node:child_process");
   const args = [
     WRANGLER, "dev", "--local", "--port", String(port), "--ip", "127.0.0.1",
+    // Isolate durable state per instance - all instances share one workerd
+    // otherwise and their Durable Objects collide (registry + stale sockets).
+    "--persist-to", ROOT + "/.wrangler/state-" + port,
     ...vars.flatMap((v) => ["--var", v.replace("=", ":")]),
   ];
   const proc = spawn("node", args, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
@@ -483,6 +539,8 @@ async function main(): Promise<void> {
     ["s17", s17_devices_lists_online],
     ["s18", s18_relay_token_forwarded],
     ["s20", s20_per_device_unknown_id_401],
+    ["s21", s21_long_call],
+    ["s22", s22_admin_registry],
   ];
   const authScenarios: Array<[string, () => Promise<void>]> = [
     ["a1", a1_devices_token_gated],

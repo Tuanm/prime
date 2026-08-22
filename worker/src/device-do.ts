@@ -101,9 +101,12 @@ export class DeviceDO extends DurableObject<Env> {
 
   private async handleUpgrade(request: Request, url: URL, authToken: string | null): Promise<Response> {
     // Device auth at connect time (defense in depth; the worker entry already
-    // checked). Prefer the per-device token, fall back to the shared token.
+    // checked). The worker forwards the effective expected token (registry-
+    // backed) as x-expected-token; fall back to the env-based per-device /
+    // shared token when absent (legacy paths).
+    const expectedHeader = request.headers.get("x-expected-token");
     if (this.deviceId) this.perDeviceToken = perDeviceToken(this.env, this.deviceId) ?? null;
-    const expected = this.perDeviceToken ?? this.deviceToken;
+    const expected = expectedHeader ?? this.perDeviceToken ?? this.deviceToken;
     if (expected && (!authToken || !timingSafeEq(authToken, expected))) {
       return Response.json({ error: "unauthorized" }, { status: 401 });
     }
