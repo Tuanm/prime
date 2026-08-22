@@ -28,6 +28,6 @@ jobs:
         run: bun run typecheck
 
       - name: Smoke tests
+        # run-smoke.ts resolves bun via $BUN_PATH or ~/.bun/bin/bun
+        # (setup-bun's install location on Linux runners).
         run: bun test/run-smoke.ts
-        env:
-          BUN_PATH: ${HOME}/.bun/bin/bun
