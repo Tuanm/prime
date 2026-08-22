@@ -225,10 +225,26 @@ async function s10_pending_budget(): Promise<void> {
 }
 
 async function s11_origin_whitelist(): Promise<void> {
-  const r = await fetch(plainBase + "/ws/x", {
-    headers: { upgrade: "websocket", connection: "upgrade", origin: "https://evil.example", "sec-websocket-key": "AAAAAAAAAAAAAAAAAAAAAA==", "sec-websocket-version": "13" },
-  });
-  if (r.status !== 403) return bad("s11_origin_blocked", "status=" + r.status);
+  // Disallowed origin: a real WS upgrade must be REJECTED (error/close), never
+  // open. fetch() with upgrade headers is unreliable under miniflare (it can
+  // throw or hang instead of returning the 403), so drive a real WebSocket.
+  let rejected = false;
+  for (let attempt = 0; attempt < 2 && !rejected; attempt++) {
+    try {
+      const ws = new WebSocket(plainBase + "/ws/x", { headers: { origin: "https://evil.example" } });
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("origin ws neither opened nor failed (timeout)")), 15000);
+        ws.addEventListener("open", () => { clearTimeout(t); reject(new Error("origin ws OPENED - whitelist bypassed!")); }, { once: true });
+        ws.addEventListener("error", () => { clearTimeout(t); resolve(); }, { once: true });
+        ws.addEventListener("close", () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      rejected = true;
+    } catch (e) {
+      if (attempt === 0) { await Bun.sleep(500); continue; } // retry once (miniflare cold-start)
+      return bad("s11_origin_blocked", "ws error=" + ((e as any).message || e));
+    }
+  }
+  // Allowed origin: must connect and register.
   const ws = await connectWs(plainBase + "/ws/s11-dev");
   await recvJson(ws, (m) => m.type === "registered");
   ws.close();
