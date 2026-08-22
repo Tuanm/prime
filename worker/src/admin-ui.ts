@@ -169,6 +169,84 @@ export const ADMIN_HTML = `<!doctype html>
       .menu button.danger {
         color: #b91c1c;
       }
+      .menu button:disabled {
+        color: #ccc;
+        cursor: default;
+      }
+      .menu button:disabled:hover {
+        background: #fff;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(17, 17, 17, 0.4);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+      }
+      .dlg {
+        width: 480px;
+        max-width: 92vw;
+        max-height: 70vh;
+        background: #fff;
+        border: 1px solid #111;
+        display: flex;
+        flex-direction: column;
+      }
+      .dlg-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid #111;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .dlg-id {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #666;
+        font-weight: 400;
+      }
+      .dlg-close {
+        border: 1px solid #111;
+        background: #fff;
+        cursor: pointer;
+        font-size: 14px;
+        line-height: 1;
+        padding: 2px 7px;
+      }
+      .dlg-close:hover {
+        background: #f5f5f5;
+      }
+      .dlg-body {
+        overflow-y: auto;
+        padding: 6px 0;
+        font-size: 12px;
+      }
+      .dlg-tool {
+        padding: 8px 12px;
+        border-bottom: 1px solid #eee;
+      }
+      .dlg-tool .t-name {
+        font-weight: 600;
+      }
+      .dlg-tool .t-desc {
+        color: #666;
+        font-size: 11px;
+        margin-top: 2px;
+      }
+      .dlg-msg {
+        padding: 14px 12px;
+        color: #666;
+      }
+      .dlg-msg.err {
+        color: #b91c1c;
+      }
       .status {
         margin-top: 14px;
         font-size: 11px;
@@ -296,6 +374,9 @@ export const ADMIN_HTML = `<!doctype html>
           btn.textContent = "⋮";
           var menu = document.createElement("span");
           menu.className = "menu";
+          var toolsItem = document.createElement("button");
+          toolsItem.type = "button";
+          toolsItem.textContent = "Tools";
           var saveItem = document.createElement("button");
           saveItem.type = "button";
           saveItem.textContent = "Save";
@@ -303,6 +384,7 @@ export const ADMIN_HTML = `<!doctype html>
           delItem.type = "button";
           delItem.className = "danger";
           delItem.textContent = "Delete";
+          menu.appendChild(toolsItem);
           menu.appendChild(saveItem);
           menu.appendChild(delItem);
           menuWrap.appendChild(btn);
@@ -320,10 +402,35 @@ export const ADMIN_HTML = `<!doctype html>
             for (var i = 0; i < open.length; i++) open[i].classList.remove("open");
           }
 
+          // Per-row state: online marker + dirty detection for the menu items.
+          li.dataset.online = dev.online ? "1" : "0";
+          var origId = dev.deviceId || "";
+          var origToken = realToken;
+          var maskedTok = masked;
+
+          function isDirty() {
+            var idChanged = idInput.value.trim() !== origId;
+            var tok = tokInput.value.trim();
+            var tokChanged = !(tok === maskedTok || tok === origToken);
+            return idChanged || tokChanged;
+          }
+
+          function updateMenuState() {
+            toolsItem.disabled = li.dataset.online !== "1"; // Tools needs a live tunnel
+            saveItem.disabled = !isDirty(); // Save only after the user edits
+          }
+
+          toolsItem.addEventListener("click", function () {
+            closeMenus();
+            if (li.dataset.online !== "1") return;
+            showToolsDialog(idInput.value.trim() || dev.deviceId, realToken);
+          });
+
           btn.addEventListener("click", function (e) {
             e.stopPropagation();
             var wasOpen = menu.classList.contains("open");
             closeMenus();
+            updateMenuState();
             if (!wasOpen) menu.classList.add("open");
           });
 
@@ -387,6 +494,58 @@ export const ADMIN_HTML = `<!doctype html>
           });
         }
 
+        // Fetch the device's tools through the gateway relay and show them in a dialog.
+        function showToolsDialog(deviceId, token) {
+          var overlay = document.createElement("div");
+          overlay.className = "overlay";
+          overlay.innerHTML =
+            '<div class="dlg">' +
+            '<div class="dlg-head"><span>Tools</span><span class="dlg-id">' + deviceId + '</span>' +
+            '<button type="button" class="dlg-close" title="Close">&times;</button></div>' +
+            '<div class="dlg-body"><div class="dlg-msg">Loading tools&hellip;</div></div>' +
+            "</div>";
+          document.body.appendChild(overlay);
+          var bodyEl = overlay.querySelector(".dlg-body");
+          var closeBtn = overlay.querySelector(".dlg-close");
+
+          function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+          closeBtn.addEventListener("click", close);
+          overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+
+          fetch("/mcp/" + encodeURIComponent(deviceId), {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-device-token": token },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+            signal: AbortSignal.timeout(20000),
+          })
+            .then(function (r) { return r.json().catch(function () { return {}; }); })
+            .then(function (j) {
+              var tools = j && j.result && j.result.tools;
+              if (!tools) throw new Error((j && j.error && j.error.message) || "device did not respond");
+              bodyEl.innerHTML = "";
+              if (!tools.length) {
+                bodyEl.innerHTML = '<div class="dlg-msg">No tools reported.</div>';
+                return;
+              }
+              tools.forEach(function (t) {
+                var el = document.createElement("div");
+                el.className = "dlg-tool";
+                var name = document.createElement("div");
+                name.className = "t-name";
+                name.textContent = t.name || "?";
+                var desc = document.createElement("div");
+                desc.className = "t-desc";
+                desc.textContent = t.description || "";
+                el.appendChild(name);
+                el.appendChild(desc);
+                bodyEl.appendChild(el);
+              });
+            })
+            .catch(function (e) {
+              bodyEl.innerHTML = '<div class="dlg-msg err">' + ((e && e.message) || "failed to load tools") + "</div>";
+            });
+        }
+
         function load() {
           return api("/admin/api/devices")
             .then(function (j) {
@@ -407,7 +566,9 @@ export const ADMIN_HTML = `<!doctype html>
               for (var i = 0; i < rows.length; i++) {
                 var id = rows[i].dataset.deviceId;
                 var dot = rows[i].querySelector(".dot");
-                if (dot) dot.className = "dot " + (map[id] ? "on" : "off");
+                var on = !!map[id];
+                if (dot) dot.className = "dot " + (on ? "on" : "off");
+                rows[i].dataset.online = on ? "1" : "0";
               }
             })
             .catch(function () {});
