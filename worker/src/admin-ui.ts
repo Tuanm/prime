@@ -42,35 +42,6 @@ export const ADMIN_HTML = `<!doctype html>
         color: #999;
         margin-bottom: 22px;
       }
-      .token-bar {
-        display: flex;
-        gap: 8px;
-        margin-bottom: 20px;
-      }
-      .token-bar input {
-        flex: 1;
-        padding: 7px 10px;
-        border: 1px solid #111;
-        font-family: inherit;
-        font-size: 12px;
-      }
-      .token-bar input:focus {
-        outline: none;
-        box-shadow: 0 0 0 1px #111;
-      }
-      .token-bar button {
-        padding: 7px 14px;
-        border: 1px solid #111;
-        background: #111;
-        color: #fff;
-        font-family: inherit;
-        font-size: 12px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-      .token-bar button:hover {
-        background: #000;
-      }
       .row-head {
         display: flex;
         align-items: center;
@@ -236,11 +207,6 @@ export const ADMIN_HTML = `<!doctype html>
     <h1>Admin</h1>
     <div class="sub">device registry &middot; admin</div>
 
-    <div class="token-bar">
-      <input id="adminToken" type="password" placeholder="Admin token" autocomplete="off" spellcheck="false" />
-      <button id="tokenBtn" type="button">Save</button>
-    </div>
-
     <div class="row-head">
       <h2>Devices</h2>
       <button class="plus" id="addBtn" type="button" title="Add device">+</button>
@@ -252,13 +218,7 @@ export const ADMIN_HTML = `<!doctype html>
       (function () {
         var listEl = document.getElementById("list");
         var statusEl = document.getElementById("status");
-        var tokenInput = document.getElementById("adminToken");
-        var tokenBtn = document.getElementById("tokenBtn");
         var addBtn = document.getElementById("addBtn");
-        var token = "";
-        try { token = localStorage.getItem("cmg_admin_token") || ""; } catch (e) {}
-        tokenInput.value = token;
-
         function maskToken(t) {
           if (!t) return "";
           if (t.length <= 5) return "***";
@@ -277,7 +237,6 @@ export const ADMIN_HTML = `<!doctype html>
           var headers = {};
           var h = opts.headers || {};
           for (var k in h) headers[k] = h[k];
-          if (token) headers["authorization"] = "Bearer " + token;
           if (opts.body) headers["content-type"] = "application/json";
           return fetch(path, { method: opts.method || "GET", headers: headers, body: opts.body }).then(function (r) {
             return r.json().catch(function () { return {}; }).then(function (j) {
@@ -402,13 +361,6 @@ export const ADMIN_HTML = `<!doctype html>
             })
             .catch(function (e) { setStatus("load failed: " + e.message, true); });
         }
-
-        tokenBtn.addEventListener("click", function () {
-          token = tokenInput.value.trim();
-          try { if (token) localStorage.setItem("cmg_admin_token", token); else localStorage.removeItem("cmg_admin_token"); } catch (e) {}
-          setStatus(token ? "token saved - reloading devices" : "token cleared");
-          load();
-        });
 
         addBtn.addEventListener("click", function () {
           renderRow({ deviceId: "", token: "", online: false }, true);

@@ -108,6 +108,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | No one can intercept relay traffic | Same token required on `/mcp` before the DO is touched |
 | No existence oracle | Unknown deviceId → identical 401; no DO created for unauthenticated probes |
 | No roster leak | `/devices` hidden (404) without admin token; admin-gated (401) otherwise |
+| Admin UI | `/admin` + registry API behind Cloudflare Access (email policies) |
 | No register takeover | Register message with a different deviceId is rejected |
 | No slow-device DoS | Per-device pending budget; body cap (413) |
 | No stale tunnels | Keepalive alarm drops dead tunnels |
@@ -118,10 +119,18 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/devices` | admin | List online devices (token-gated) |
+| `GET` | `/admin` | Cloudflare Access | Device registry UI (operator) |
+| `GET` / `POST` / `DELETE` | `/admin/api/devices(/{id})` | Cloudflare Access | List / register / remove devices |
+| `GET` | `/devices` | admin token | List online devices (machine endpoint) |
 | `POST` | `/mcp/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
 | `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
+
+> **Admin UI**: `/admin` and `/admin/api/*` are protected by a Cloudflare
+> **Access** application scoped to `<worker>/admin` (policies: allow the
+> operator's email + `@tuanm.dev`). No worker-level admin token is required
+> there - Access is the trust boundary. `GET /devices` stays admin-token
+> gated so scripts can query it without Access.
 
 ## Local development
 

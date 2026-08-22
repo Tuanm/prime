@@ -270,10 +270,9 @@ async function s22_admin_registry(): Promise<void> {
     if (r.status !== 200 || !html.includes("<h1>Admin</h1>")) {
       return bad("s22_admin_ui", "status=" + r.status);
     }
-    // 2. API is admin-gated; seeded device is listed
+    // 2. API is open to the Access-protected path (no worker-level token);
+    //    the seeded device is listed
     r = await fetch(g.base + "/admin/api/devices");
-    if (r.status !== 401) return bad("s22_admin_api_auth", "status=" + r.status);
-    r = await fetch(g.base + "/admin/api/devices", { headers: { authorization: "Bearer " + ADM } });
     const list = (await r.json()) as any;
     if (r.status !== 200 || !(list.devices || []).some((d: any) => d.deviceId === "seed-dev")) {
       return bad("s22_admin_list", "status=" + r.status + " body=" + JSON.stringify(list));
@@ -281,7 +280,7 @@ async function s22_admin_registry(): Promise<void> {
     // 3. register a device -> it can now connect over WS
     r = await fetch(g.base + "/admin/api/devices", {
       method: "POST",
-      headers: { authorization: "Bearer " + ADM, "content-type": "application/json" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ deviceId: "admin-dev", token: "admin-tok" }),
     });
     if (r.status !== 200) return bad("s22_admin_register", "status=" + r.status + " body=" + (await r.text()));
@@ -290,7 +289,7 @@ async function s22_admin_registry(): Promise<void> {
     ws.close();
     await Bun.sleep(200);
     // 4. delete -> the device is rejected again
-    r = await fetch(g.base + "/admin/api/devices/admin-dev", { method: "DELETE", headers: { authorization: "Bearer " + ADM } });
+    r = await fetch(g.base + "/admin/api/devices/admin-dev", { method: "DELETE" });
     if (r.status !== 200) return bad("s22_admin_delete", "status=" + r.status + " body=" + (await r.text()));
     let stillOpen = false;
     try {

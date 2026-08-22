@@ -65,12 +65,6 @@ function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
   return rateLimiter;
 }
 
-function adminOk(request: Request, url: URL, cfg: GatewayConfig): boolean {
-  if (!cfg.adminToken) return false;
-  const t = extractToken(request, url, "auth");
-  return !!t && timingSafeEq(t, cfg.adminToken);
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
@@ -87,8 +81,11 @@ export default {
     }
 
     // ---- Admin API (device registry) ----
+    // Auth is delegated to Cloudflare Access at the edge (the Access app is
+    // scoped to /admin*, so every request here already passed the policy
+    // check). No worker-level admin token is required - the UI is the only
+    // consumer and it lives behind the same Access app.
     if (url.pathname.startsWith("/admin/api/")) {
-      if (!adminOk(request, url, cfg)) return unauthorized();
       const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
 
       if (request.method === "GET" && url.pathname === "/admin/api/devices") {
