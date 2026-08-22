@@ -233,7 +233,25 @@ export const ADMIN_HTML = `<!doctype html>
           });
         }
 
-        function renderRow(dev, isNew) {
+                // Unsaved rows created via "+" - preserved across re-renders so
+        // typing is never lost.
+        var devices = [];
+        var pendingNew = [];
+
+        function render() {
+          listEl.innerHTML = "";
+          if (!devices.length && !pendingNew.length) {
+            var empty = document.createElement("li");
+            empty.className = "empty";
+            empty.textContent = "No devices registered. Click + to add one.";
+            listEl.appendChild(empty);
+            return;
+          }
+          devices.forEach(function (d) { renderRow(d, false, null); });
+          pendingNew.forEach(function (p) { renderRow({ deviceId: p.id, token: p.token, online: false }, true, p); });
+        }
+
+        function renderRow(dev, isNew, pendingObj) {
           var li = document.createElement("li");
           li.className = "row";
           li.dataset.deviceId = dev.deviceId || "";
@@ -263,6 +281,11 @@ export const ADMIN_HTML = `<!doctype html>
             tokInput.addEventListener("focus", function () {
               if (tokInput.value === masked) tokInput.select();
             });
+          }
+          if (isNew && pendingObj) {
+            // Keep the pending row in sync so a later re-render preserves it.
+            idInput.addEventListener("input", function () { pendingObj.id = idInput.value; });
+            tokInput.addEventListener("input", function () { pendingObj.token = tokInput.value; });
           }
 
           var menuWrap = document.createElement("span");
@@ -304,6 +327,13 @@ export const ADMIN_HTML = `<!doctype html>
             if (!wasOpen) menu.classList.add("open");
           });
 
+          function dropPending() {
+            if (pendingObj) {
+              var ix = pendingNew.indexOf(pendingObj);
+              if (ix >= 0) pendingNew.splice(ix, 1);
+            }
+          }
+
           saveItem.addEventListener("click", function () {
             closeMenus();
             var id = (idInput.value || "").trim();
@@ -314,7 +344,11 @@ export const ADMIN_HTML = `<!doctype html>
             if (!tokVal) return setStatus("enter a token", true);
             setStatus("saving " + id + " ...");
             function fail(e) { setStatus("save failed: " + e.message, true); }
-            function done() { setStatus("saved " + id); load(); }
+            function done() {
+              dropPending();
+              setStatus("saved " + id);
+              load();
+            }
             var upsert = api("/admin/api/devices", { method: "POST", body: JSON.stringify({ deviceId: id, token: tokVal }) });
             if (!isNew && id !== dev.deviceId) {
               // ID changed on an existing device: create the new pair and
@@ -331,6 +365,13 @@ export const ADMIN_HTML = `<!doctype html>
             closeMenus();
             var id = (idInput.value || "").trim() || (dev.deviceId || "");
             if (!id) return setStatus("no device to delete", true);
+            if (pendingObj) {
+              // Unsaved row: just discard it locally.
+              dropPending();
+              render();
+              setStatus("");
+              return;
+            }
             setStatus("deleting " + id + " ...");
             api("/admin/api/devices/" + encodeURIComponent(id), { method: "DELETE" })
               .then(function () {
@@ -349,26 +390,41 @@ export const ADMIN_HTML = `<!doctype html>
         function load() {
           return api("/admin/api/devices")
             .then(function (j) {
-              var devices = (j && j.devices) || [];
-              listEl.innerHTML = "";
-              if (!devices.length) {
-                var empty = document.createElement("li");
-                empty.className = "empty";
-                empty.textContent = "No devices registered. Click + to add one.";
-                listEl.appendChild(empty);
-                return;
-              }
-              devices.forEach(function (d) { renderRow(d, false); });
+              devices = (j && j.devices) || [];
+              render();
             })
             .catch(function (e) { setStatus("load failed: " + e.message, true); });
         }
 
+        // Poll ONLY the status dots - never rebuild rows while the user is
+        // typing (a rebuild would wipe in-progress edits and unsaved rows).
+        function refreshDots() {
+          api("/admin/api/devices")
+            .then(function (j) {
+              var map = {};
+              (j.devices || []).forEach(function (d) { map[d.deviceId] = !!d.online; });
+              var rows = listEl.querySelectorAll("li.row");
+              for (var i = 0; i < rows.length; i++) {
+                var id = rows[i].dataset.deviceId;
+                var dot = rows[i].querySelector(".dot");
+                if (dot) dot.className = "dot " + (map[id] ? "on" : "off");
+              }
+            })
+            .catch(function () {});
+        }
+
         addBtn.addEventListener("click", function () {
-          renderRow({ deviceId: "", token: "", online: false }, true);
+          // Append ONLY the new row - do not rebuild existing rows, so any
+          // in-progress edits elsewhere stay untouched.
+          var empty = listEl.querySelector("li.empty");
+          if (empty) empty.remove();
+          var p = { id: "", token: "" };
+          pendingNew.push(p);
+          renderRow({ deviceId: "", token: "", online: false }, true, p);
         });
 
         load();
-        setInterval(load, 5000);
+        setInterval(refreshDots, 5000);
       })();
     </script>
   </body>
