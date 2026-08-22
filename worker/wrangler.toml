@@ -1,0 +1,49 @@
+# Cloudflare Worker configuration for the code-mcp gateway.
+#
+# Deploy:
+#   cd worker
+#   wrangler secret put GATEWAY_TOKEN     # optional bearer token for /mcp/*
+#   wrangler secret put DEVICE_TOKEN      # optional bearer token for /ws/* device auth
+#   wrangler secret put ADMIN_TOKEN       # optional; defaults to GATEWAY_TOKEN for /devices
+#   wrangler deploy
+#
+# Rate limiting note: the in-isolate limiter is a cheap first line. For global
+# per-IP limits add a Cloudflare Rate Limiting rule in the dashboard targeting
+# CF-Connecting-IP.
+
+name = "code-mcp-gateway"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Objects are required: each deviceId maps to one DeviceDO instance that
+# owns both the WebSocket and the pending-request registry. Without them a
+# Worker's per-isolate memory could not route /mcp to the right tunnel.
+[durable_objects]
+bindings = [
+  { name = "DEVICES", class_name = "DeviceDO" },
+  { name = "REGISTRY", class_name = "RegistryDO" },
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DeviceDO", "RegistryDO"]
+
+# Tunables (mirror the Bun gateway flags). Override via vars / secret per env.
+[vars]
+RATE_LIMIT_WINDOW_MS = "60000"
+RATE_LIMIT_MAX = "100"
+TIMEOUT_MS = "30000"
+MAX_PENDING_PER_DEVICE = "100"
+MAX_BODY_BYTES = "1048576"
+KEEPALIVE_TIMEOUT_MS = "90000"
+PING_INTERVAL_MS = "30000"
+PING_MAX_MISSES = "2"
+IDLE_TIMEOUT_MS = "120000"
+ENVIRONMENT = "production"
+
+# Optional comma-separated WS origin whitelist, e.g. ALLOWED_ORIGINS =
+# "https://app.example.com,https://admin.example.com"
+# ALLOWED_ORIGINS = ""
+
+# Workers plans: Durable Objects are available on the Paid plan (and higher).
