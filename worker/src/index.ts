@@ -100,6 +100,12 @@ export default {
         });
         return reg.fetch(upstream);
       }
+      if (request.method === "GET" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/clients")) {
+        const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/clients".length);
+        if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+        const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
+        return stub.fetch("https://device/clients");
+      }
       if (request.method === "DELETE" && url.pathname.startsWith("/admin/api/devices/")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length);
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
@@ -170,6 +176,8 @@ export default {
       const headers = new Headers();
       headers.set("content-type", request.headers.get("content-type") || "application/json");
       headers.set("x-device-id", deviceId);
+      const cip = clientIp(request);
+      if (cip && cip !== "unknown") headers.set("x-client-ip", cip);
       const xdt = request.headers.get("x-device-token");
       if (xdt) headers.set("x-device-token", xdt);
       // Preserve auth params for the DO's own device-auth check.

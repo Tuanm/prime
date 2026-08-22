@@ -38,9 +38,12 @@ interface PendingEntry {
   timer: ReturnType<typeof setTimeout>;
 }
 
+const CLIENT_TTL_MS = 600_000; // relay clients shown for the last 10 min
+
 export class DeviceDO extends DurableObject<Env> {
   private ws: WebSocket | null = null;
   private lastRegistryAt = 0; // last time we refreshed the registry online marker
+  private clients = new Map<string, { ip: string; name?: string; lastSeen: number; count: number }>();
   private pending = new Map<string, PendingEntry>();
   private lastSeen = 0;
   private keepaliveTimeoutMs = 90_000;
@@ -93,6 +96,18 @@ export class DeviceDO extends DurableObject<Env> {
     // HTTP relay: POST /mcp (JSON-RPC body)
     if (request.method === "POST" && (url.pathname === "/mcp" || url.pathname === "/")) {
       return this.handleMcp(request);
+    }
+
+    // Admin: relay clients seen for this device (recent, TTL-swept).
+    if (request.method === "GET" && url.pathname === "/clients") {
+      const now = Date.now();
+      const list: Array<{ ip: string; name?: string; lastSeen: number; count: number }> = [];
+      for (const [key, c] of this.clients) {
+        if (now - c.lastSeen > CLIENT_TTL_MS) this.clients.delete(key);
+        else list.push(c);
+      }
+      list.sort((a, b) => b.lastSeen - a.lastSeen);
+      return Response.json({ clients: list });
     }
 
     return Response.json({ error: "not found" }, { status: 404 });
@@ -222,6 +237,31 @@ export class DeviceDO extends DurableObject<Env> {
       .catch(() => {});
   }
 
+  private recordClient(request: Request, body: unknown): void {
+    try {
+      const ip = request.headers.get("x-client-ip") || "unknown";
+      const now = Date.now();
+      let name: string | undefined;
+      const m = (body || {}) as { method?: string; params?: { clientInfo?: { name?: string } } };
+      if (
+        m.method === "initialize" &&
+        m.params &&
+        m.params.clientInfo &&
+        typeof m.params.clientInfo.name === "string"
+      ) {
+        name = m.params.clientInfo.name.slice(0, 64);
+      }
+      const existing = this.clients.get(ip);
+      if (existing) {
+        existing.lastSeen = now;
+        existing.count += 1;
+        if (name) existing.name = name;
+      } else {
+        this.clients.set(ip, { ip, name, lastSeen: now, count: 1 });
+      }
+    } catch {}
+  }
+
   private async unregisterFromRegistry(): Promise<void> {
     try {
       const reg = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global"));
@@ -291,6 +331,10 @@ export class DeviceDO extends DurableObject<Env> {
     } catch {
       return Response.json({ error: "invalid json" }, { status: 400 });
     }
+
+    // Track relay clients (admin "Clients" view): keyed by client IP, with
+    // the MCP client name captured from initialize when present.
+    this.recordClient(request, body);
 
     // Relay token (device-side auth, opaque to the gateway) - same as Bun.
     const relayToken =

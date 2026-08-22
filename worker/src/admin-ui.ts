@@ -377,6 +377,9 @@ export const ADMIN_HTML = `<!doctype html>
           var toolsItem = document.createElement("button");
           toolsItem.type = "button";
           toolsItem.textContent = "Tools";
+          var clientsItem = document.createElement("button");
+          clientsItem.type = "button";
+          clientsItem.textContent = "Clients";
           var saveItem = document.createElement("button");
           saveItem.type = "button";
           saveItem.textContent = "Save";
@@ -385,6 +388,7 @@ export const ADMIN_HTML = `<!doctype html>
           delItem.className = "danger";
           delItem.textContent = "Delete";
           menu.appendChild(toolsItem);
+          menu.appendChild(clientsItem);
           menu.appendChild(saveItem);
           menu.appendChild(delItem);
           menuWrap.appendChild(btn);
@@ -416,7 +420,9 @@ export const ADMIN_HTML = `<!doctype html>
           }
 
           function updateMenuState() {
-            toolsItem.disabled = li.dataset.online !== "1"; // Tools needs a live tunnel
+            var online = li.dataset.online === "1";
+            toolsItem.disabled = !online; // Tools needs a live tunnel
+            clientsItem.disabled = !online; // Clients needs a live tunnel
             saveItem.disabled = !isDirty(); // Save only after the user edits
           }
 
@@ -424,6 +430,12 @@ export const ADMIN_HTML = `<!doctype html>
             closeMenus();
             if (li.dataset.online !== "1") return;
             showToolsDialog(idInput.value.trim() || dev.deviceId, realToken);
+          });
+
+          clientsItem.addEventListener("click", function () {
+            closeMenus();
+            if (li.dataset.online !== "1") return;
+            showClientsDialog(idInput.value.trim() || dev.deviceId);
           });
 
           btn.addEventListener("click", function (e) {
@@ -494,24 +506,37 @@ export const ADMIN_HTML = `<!doctype html>
           });
         }
 
-        // Fetch the device's tools through the gateway relay and show them in a dialog.
-        function showToolsDialog(deviceId, token) {
+        // Shared dialog scaffolding (black/white, JetBrains Mono vibe).
+        function openDialog(title, deviceId) {
           var overlay = document.createElement("div");
           overlay.className = "overlay";
           overlay.innerHTML =
             '<div class="dlg">' +
-            '<div class="dlg-head"><span>Tools</span><span class="dlg-id">' + deviceId + '</span>' +
+            '<div class="dlg-head"><span>' + title + '</span><span class="dlg-id">' + deviceId + '</span>' +
             '<button type="button" class="dlg-close" title="Close">&times;</button></div>' +
-            '<div class="dlg-body"><div class="dlg-msg">Loading tools&hellip;</div></div>' +
+            '<div class="dlg-body"><div class="dlg-msg">Loading&hellip;</div></div>' +
             "</div>";
           document.body.appendChild(overlay);
           var bodyEl = overlay.querySelector(".dlg-body");
           var closeBtn = overlay.querySelector(".dlg-close");
-
           function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
           closeBtn.addEventListener("click", close);
           overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+          return { overlay: overlay, bodyEl: bodyEl, close: close };
+        }
 
+        function ago(ts) {
+          var sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+          if (sec < 5) return "just now";
+          if (sec < 60) return sec + "s ago";
+          var min = Math.floor(sec / 60);
+          if (min < 60) return min + "m ago";
+          return Math.floor(min / 60) + "h ago";
+        }
+
+        // List the device's tools, relayed through the gateway tunnel.
+        function showToolsDialog(deviceId, token) {
+          var d = openDialog("Tools", deviceId);
           fetch("/mcp/" + encodeURIComponent(deviceId), {
             method: "POST",
             headers: { "content-type": "application/json", "x-device-token": token },
@@ -522,9 +547,9 @@ export const ADMIN_HTML = `<!doctype html>
             .then(function (j) {
               var tools = j && j.result && j.result.tools;
               if (!tools) throw new Error((j && j.error && j.error.message) || "device did not respond");
-              bodyEl.innerHTML = "";
+              d.bodyEl.innerHTML = "";
               if (!tools.length) {
-                bodyEl.innerHTML = '<div class="dlg-msg">No tools reported.</div>';
+                d.bodyEl.innerHTML = '<div class="dlg-msg">No tools reported.</div>';
                 return;
               }
               tools.forEach(function (t) {
@@ -538,11 +563,46 @@ export const ADMIN_HTML = `<!doctype html>
                 desc.textContent = t.description || "";
                 el.appendChild(name);
                 el.appendChild(desc);
-                bodyEl.appendChild(el);
+                d.bodyEl.appendChild(el);
               });
             })
             .catch(function (e) {
-              bodyEl.innerHTML = '<div class="dlg-msg err">' + ((e && e.message) || "failed to load tools") + "</div>";
+              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + ((e && e.message) || "failed to load tools") + "</div>";
+            });
+        }
+
+        // List the MCP clients currently relaying through this device.
+        function showClientsDialog(deviceId) {
+          var d = openDialog("Clients", deviceId);
+          fetch("/admin/api/devices/" + encodeURIComponent(deviceId) + "/clients")
+            .then(function (r) { return r.json().catch(function () { return {}; }); })
+            .then(function (j) {
+              var clients = j && j.clients;
+              if (!clients) throw new Error((j && j.error) || "failed to load clients");
+              d.bodyEl.innerHTML = "";
+              if (!clients.length) {
+                d.bodyEl.innerHTML = '<div class="dlg-msg">No clients connected.</div>';
+                return;
+              }
+              clients.forEach(function (c) {
+                var el = document.createElement("div");
+                el.className = "dlg-tool";
+                var name = document.createElement("div");
+                name.className = "t-name";
+                name.textContent = c.name || c.ip;
+                var meta = document.createElement("div");
+                meta.className = "t-desc";
+                meta.textContent =
+                  (c.name ? c.ip + " &middot; " : "") +
+                  c.count + " request" + (c.count === 1 ? "" : "s") +
+                  " &middot; " + ago(c.lastSeen);
+                el.appendChild(name);
+                el.appendChild(meta);
+                d.bodyEl.appendChild(el);
+              });
+            })
+            .catch(function (e) {
+              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + ((e && e.message) || "failed to load clients") + "</div>";
             });
         }
 

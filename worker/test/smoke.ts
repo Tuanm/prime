@@ -340,6 +340,50 @@ async function s23_online_status_persists(): Promise<void> {
   }
 }
 
+
+async function s24_admin_clients(): Promise<void> {
+  // Relay clients are tracked per device and listed via the admin API.
+  const g = await startWrangler(8809, [
+    "DEVICE_TOKENS=" + JSON.stringify({ "client-dev": "client-tok" }),
+    "KEEPALIVE_TIMEOUT_MS=5000",
+  ]);
+  try {
+    const dev = await connectWs(g.base + "/ws/client-dev?token=client-tok");
+    await recvJson(dev, (m) => m.type === "registered");
+    dev.addEventListener("message", (e) => {
+      let env: any;
+      try { env = JSON.parse(typeof e.data === "string" ? e.data : ""); } catch { return; }
+      if (env?.id && env?.request) {
+        dev.send(JSON.stringify({ id: env.id, response: { jsonrpc: "2.0", id: env.request.id, result: { ok: true } } }));
+      }
+    });
+    // client: initialize (carries clientInfo.name) then a second request
+    let r = await fetch(g.base + "/mcp/client-dev?token=client-tok", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "test-client", version: "1" } } }),
+    });
+    if (r.status !== 200) return bad("s24_mcp", "status=" + r.status);
+    r = await fetch(g.base + "/mcp/client-dev?token=client-tok", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }),
+    });
+    r = await fetch(g.base + "/admin/api/devices/client-dev/clients");
+    const j = (await r.json()) as any;
+    const clients = j.clients || [];
+    const c = clients[0];
+    if (r.status !== 200 || !c || c.name !== "test-client" || c.count < 2 || !c.ip) {
+      return bad("s24_clients", "status=" + r.status + " clients=" + JSON.stringify(clients));
+    }
+    dev.close();
+    await Bun.sleep(200);
+    ok("s24_admin_clients");
+  } finally {
+    await stopWrangler(g.proc);
+  }
+}
+
 async function s14_keepalive_ack(): Promise<void> {
   const ws = await connectWs(plainBase + "/ws/s14-dev");
   await recvJson(ws, (m) => m.type === "registered");
@@ -577,6 +621,7 @@ async function main(): Promise<void> {
     ["s21", s21_long_call],
     ["s22", s22_admin_registry],
     ["s23", s23_online_status_persists],
+    ["s24", s24_admin_clients],
   ];
   const authScenarios: Array<[string, () => Promise<void>]> = [
     ["a1", a1_devices_token_gated],
