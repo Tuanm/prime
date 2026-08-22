@@ -16,7 +16,7 @@
 
 ```mermaid
 flowchart LR
-    C[MCP client] -->|POST /mcp/{deviceId}| W
+    C[MCP client] -->|"POST /mcp/{deviceId}"| W
     D[Device<br/>code-mcp] -->|"wss /ws/{deviceId}?token=…"| W
     subgraph CF [Cloudflare Worker]
         W[entry — src/index.ts<br/>routing, auth, rate limit]
@@ -26,7 +26,7 @@ flowchart LR
     W -->|stub.fetch| DO
     W -->|idFromName| R
     DO <-->|"register / keepalive / JSON-RPC"| D
-    R -.->|GET /devices — admin token| C
+    R -.->|"GET /devices — admin token"| C
 ```
 
 | Component | Responsibility |

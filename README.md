@@ -16,8 +16,8 @@
 ## How it works
 ```mermaid
 flowchart LR
-    C[MCP client] -->|POST /mcp/{deviceId}| W
-    D[Device<br/>code-mcp] -->|wss /ws/{deviceId}?token=…| W
+    C[MCP client] -->|"POST /mcp/{deviceId}"| W
+    D[Device<br/>code-mcp] -->|"wss /ws/{deviceId}?token=…"| W
     subgraph Worker [Cloudflare Worker]
         W[entry<br/>auth + routing]
         DO[DeviceDO<br/>per deviceId<br/>WS + pending registry]
@@ -26,7 +26,7 @@ flowchart LR
     W -->|stub.fetch| DO
     W -->|idFromName| R
     DO <-->|"WebSocket<br/>register / keepalive / JSON-RPC"| D
-    R -.->|GET /devices<br/>(admin token)| C
+    R -.->|"GET /devices<br/>(admin token)"| C
 ```
 
 - A device connects once via WebSocket; its tunnel and pending requests are owned by one Durable Object, so any isolate can serve `/mcp` requests for it.
