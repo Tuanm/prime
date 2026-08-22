@@ -74,10 +74,7 @@ export const ADMIN_HTML = `<!doctype html>
         display: flex;
         align-items: center;
         gap: 10px;
-        padding: 10px 12px;
-        border: 1px solid #111;
         margin-bottom: 8px;
-        background: #fff;
       }
       .dot {
         width: 10px;
@@ -92,48 +89,38 @@ export const ADMIN_HTML = `<!doctype html>
         background: #fff;
         border: 1.5px solid #b91c1c;
       }
-      .cell-id {
+      .box {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid #111;
+        padding: 8px 10px;
+        background: #fff;
+      }
+      .box input {
+        border: none;
+        border-bottom: 1px dotted #999;
+        font-family: inherit;
+        padding: 2px 0;
+        background: transparent;
+        color: #111;
+      }
+      .box input:focus {
+        outline: none;
+        border-bottom-color: #111;
+      }
+      .id-input {
         flex: 1;
         min-width: 0;
         font-size: 13px;
         font-weight: 600;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
-      .cell-id input {
-        width: 100%;
-        border: none;
-        border-bottom: 1px dotted #999;
-        font-family: inherit;
-        font-size: 13px;
-        font-weight: 600;
-        padding: 2px 0;
-        background: transparent;
-        color: #111;
-      }
-      .cell-id input:focus {
-        outline: none;
-        border-bottom-color: #111;
-      }
-      .cell-tok {
+      .tok-input {
         width: 140px;
         font-size: 12px;
         color: #666;
-      }
-      .cell-tok input {
-        width: 100%;
-        border: none;
-        border-bottom: 1px dotted #999;
-        font-family: inherit;
-        font-size: 12px;
-        padding: 2px 0;
-        background: transparent;
-        color: #111;
-      }
-      .cell-tok input:focus {
-        outline: none;
-        border-bottom-color: #111;
       }
       .menu-wrap {
         position: relative;
@@ -251,27 +238,32 @@ export const ADMIN_HTML = `<!doctype html>
           li.className = "row";
           li.dataset.deviceId = dev.deviceId || "";
 
+          // Status dot lives OUTSIDE the device box.
           var dot = document.createElement("span");
           dot.className = "dot " + (dev.online ? "on" : "off");
 
-          var idCell = document.createElement("span");
-          idCell.className = "cell-id";
-          if (isNew) {
-            var idInput = document.createElement("input");
-            idInput.placeholder = "device id";
-            idInput.value = dev.deviceId || "";
-            idCell.appendChild(idInput);
-          } else {
-            idCell.textContent = dev.deviceId;
-          }
+          var box = document.createElement("div");
+          box.className = "box";
 
-          var tokCell = document.createElement("span");
-          tokCell.className = "cell-tok";
+          var realToken = dev.token || "";
+          var masked = maskToken(realToken);
+
+          var idInput = document.createElement("input");
+          idInput.className = "id-input";
+          idInput.placeholder = "device id";
+          idInput.value = dev.deviceId || "";
+
           var tokInput = document.createElement("input");
+          tokInput.className = "tok-input";
           tokInput.type = "text";
-          tokInput.value = isNew ? (dev.token || "") : maskToken(dev.token || "");
+          tokInput.value = isNew ? realToken : masked;
           tokInput.placeholder = "token";
-          tokCell.appendChild(tokInput);
+          if (!isNew) {
+            // Selecting the masked token on focus makes editing replace it.
+            tokInput.addEventListener("focus", function () {
+              if (tokInput.value === masked) tokInput.select();
+            });
+          }
 
           var menuWrap = document.createElement("span");
           menuWrap.className = "menu-wrap";
@@ -293,10 +285,11 @@ export const ADMIN_HTML = `<!doctype html>
           menuWrap.appendChild(btn);
           menuWrap.appendChild(menu);
 
+          box.appendChild(idInput);
+          box.appendChild(tokInput);
+          box.appendChild(menuWrap);
           li.appendChild(dot);
-          li.appendChild(idCell);
-          li.appendChild(tokCell);
-          li.appendChild(menuWrap);
+          li.appendChild(box);
           listEl.appendChild(li);
 
           function closeMenus() {
@@ -313,22 +306,30 @@ export const ADMIN_HTML = `<!doctype html>
 
           saveItem.addEventListener("click", function () {
             closeMenus();
-            var id = isNew ? (idInput.value || "").trim() : (dev.deviceId || "");
+            var id = (idInput.value || "").trim();
             var tokVal = tokInput.value.trim();
+            // Unchanged masked token means "keep the real token".
+            if (!isNew && tokVal === masked) tokVal = realToken;
             if (!id) return setStatus("enter a device ID", true);
             if (!tokVal) return setStatus("enter a token", true);
             setStatus("saving " + id + " ...");
-            api("/admin/api/devices", { method: "POST", body: JSON.stringify({ deviceId: id, token: tokVal }) })
-              .then(function () {
-                setStatus("saved " + id);
-                load();
-              })
-              .catch(function (e) { setStatus("save failed: " + e.message, true); });
+            function fail(e) { setStatus("save failed: " + e.message, true); }
+            function done() { setStatus("saved " + id); load(); }
+            var upsert = api("/admin/api/devices", { method: "POST", body: JSON.stringify({ deviceId: id, token: tokVal }) });
+            if (!isNew && id !== dev.deviceId) {
+              // ID changed on an existing device: create the new pair and
+              // remove the old one (rename semantics).
+              upsert.then(function () {
+                return api("/admin/api/devices/" + encodeURIComponent(dev.deviceId), { method: "DELETE" });
+              }).then(done).catch(fail);
+            } else {
+              upsert.then(done).catch(fail);
+            }
           });
 
           delItem.addEventListener("click", function () {
             closeMenus();
-            var id = isNew ? (idInput.value || "").trim() : (dev.deviceId || "");
+            var id = (idInput.value || "").trim() || (dev.deviceId || "");
             if (!id) return setStatus("no device to delete", true);
             setStatus("deleting " + id + " ...");
             api("/admin/api/devices/" + encodeURIComponent(id), { method: "DELETE" })
