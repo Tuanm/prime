@@ -40,6 +40,7 @@ interface PendingEntry {
 
 export class DeviceDO extends DurableObject<Env> {
   private ws: WebSocket | null = null;
+  private lastRegistryAt = 0; // last time we refreshed the registry online marker
   private pending = new Map<string, PendingEntry>();
   private lastSeen = 0;
   private keepaliveTimeoutMs = 90_000;
@@ -134,6 +135,7 @@ export class DeviceDO extends DurableObject<Env> {
         "https://registry/register?id=" + encodeURIComponent(this.deviceId),
         { method: "POST" },
       );
+      this.lastRegistryAt = Date.now();
     } catch {}
     this.scheduleKeepaliveCheck();
 
@@ -144,6 +146,10 @@ export class DeviceDO extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     this.lastSeen = Date.now();
+    // The registry TTL-sweeps its online entries; re-register periodically so
+    // a long-lived tunnel stays "online" in the admin UI (throttled - the
+    // keepalive every 25s keeps this cheap).
+    this.maybeRefreshRegistry();
     try {
       ws.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen });
     } catch {}
@@ -203,6 +209,17 @@ export class DeviceDO extends DurableObject<Env> {
     if (this.ws === ws) this.ws = null;
     await this.unregisterFromRegistry();
     this.failDevice("device error");
+  }
+
+  private maybeRefreshRegistry(): void {
+    const now = Date.now();
+    const intervalMs = parseInt(this.env.REGISTRY_REFRESH_MS || "30000", 10) || 30000;
+    if (now - this.lastRegistryAt < intervalMs) return;
+    this.lastRegistryAt = now;
+    this.env.REGISTRY
+      .get(this.env.REGISTRY.idFromName("global"))
+      .fetch("https://registry/register?id=" + encodeURIComponent(this.deviceId), { method: "POST" })
+      .catch(() => {});
   }
 
   private async unregisterFromRegistry(): Promise<void> {

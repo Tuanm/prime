@@ -304,6 +304,42 @@ async function s22_admin_registry(): Promise<void> {
   }
 }
 
+
+async function s23_online_status_persists(): Promise<void> {
+  // A live tunnel must stay "online" in the registry past the online TTL.
+  // Dedicated instance with a short TTL (4s) and fast re-register (1s).
+  const g = await startWrangler(8808, [
+    "DEVICE_TOKENS=" + JSON.stringify({ "live-dev": "live-tok" }),
+    "ONLINE_TTL_MS=4000",
+    "REGISTRY_REFRESH_MS=1000",
+    "KEEPALIVE_TIMEOUT_MS=5000",
+  ]);
+  try {
+    const dev = await connectWs(g.base + "/ws/live-dev?token=live-tok");
+    await recvJson(dev, (m) => m.type === "registered");
+    // online right after connect
+    let r = await fetch(g.base + "/admin/api/devices");
+    let j = (await r.json()) as any;
+    const onlineNow = (j.devices || []).find((d: any) => d.deviceId === "live-dev")?.online;
+    if (r.status !== 200 || !onlineNow) return bad("s23_online_initial", "online=" + onlineNow);
+    // keepalive every 1s for 6s (past the 4s TTL; without re-register the
+    // registry would sweep the device offline)
+    for (let i = 0; i < 6; i++) {
+      dev.send(JSON.stringify({ type: "keepalive" }));
+      await Bun.sleep(1000);
+    }
+    r = await fetch(g.base + "/admin/api/devices");
+    j = (await r.json()) as any;
+    const onlineLater = (j.devices || []).find((d: any) => d.deviceId === "live-dev")?.online;
+    if (!onlineLater) return bad("s23_online_persists", "online after 6s=" + onlineLater);
+    dev.close();
+    await Bun.sleep(200);
+    ok("s23_online_status_persists");
+  } finally {
+    await stopWrangler(g.proc);
+  }
+}
+
 async function s14_keepalive_ack(): Promise<void> {
   const ws = await connectWs(plainBase + "/ws/s14-dev");
   await recvJson(ws, (m) => m.type === "registered");
@@ -540,6 +576,7 @@ async function main(): Promise<void> {
     ["s20", s20_per_device_unknown_id_401],
     ["s21", s21_long_call],
     ["s22", s22_admin_registry],
+    ["s23", s23_online_status_persists],
   ];
   const authScenarios: Array<[string, () => Promise<void>]> = [
     ["a1", a1_devices_token_gated],

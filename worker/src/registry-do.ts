@@ -13,7 +13,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
 import { validDeviceId } from "./config";
 
-const ONLINE_TTL_MS = 150_000; // longer than keepalive timeout; swept on read
+const ONLINE_TTL_DEFAULT_MS = 150_000; // longer than keepalive timeout; swept on read
 const TOKEN_MAX = 256; // token length cap (sanity bound)
 
 interface DeviceRec {
@@ -23,9 +23,12 @@ interface DeviceRec {
 export class RegistryDO extends DurableObject<Env> {
   private online = new Map<string, DeviceRec>();
   private tokens = new Map<string, string>(); // deviceId -> token (authoritative)
+  private onlineTtlMs = ONLINE_TTL_DEFAULT_MS;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    const ttl = parseInt(env.ONLINE_TTL_MS || "", 10);
+    if (Number.isFinite(ttl) && ttl > 0) this.onlineTtlMs = ttl;
     // Warm from durable storage on wake (hibernation restores memory too, but
     // this covers cold starts after eviction). Seed the device map from the
     // DEVICE_TOKENS secret the first time the object is created.
@@ -153,7 +156,7 @@ export class RegistryDO extends DurableObject<Env> {
     const now = Date.now();
     let changed = false;
     for (const [id, rec] of this.online) {
-      if (now - rec.seenAt > ONLINE_TTL_MS) {
+      if (now - rec.seenAt > this.onlineTtlMs) {
         this.online.delete(id);
         changed = true;
       }

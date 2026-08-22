@@ -137,7 +137,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 ```bash
 cd worker
 npm run dev          # wrangler dev --local (miniflare/workerd on :8787)
-npm test             # 19 smoke scenarios on local wrangler instances
+npm test             # 20 smoke scenarios on local wrangler instances
 npm run typecheck    # tsc --noEmit
 ```
 
