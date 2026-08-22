@@ -30,11 +30,20 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["DeviceDO", "RegistryDO"]
 
+# Secrets (set with `wrangler secret put`):
+#   DEVICE_TOKENS   JSON map { "deviceId": "token", ... } - REQUIRED for secure
+#                   deployments. Authenticates devices at /ws connect and
+#                   relay requests at /mcp, so an attacker cannot claim or
+#                   intercept a deviceId, and cannot enumerate the roster.
+#   GATEWAY_TOKEN   optional client -> gateway auth for /mcp/*
+#   DEVICE_TOKEN    optional shared fallback token for all devices
+#   ADMIN_TOKEN     optional /devices auth (defaults to GATEWAY_TOKEN)
+
 # Tunables (mirror the Bun gateway flags). Override via vars / secret per env.
 [vars]
 RATE_LIMIT_WINDOW_MS = "60000"
 RATE_LIMIT_MAX = "100"
-TIMEOUT_MS = "30000"
+TIMEOUT_MS = "300000" # 5 min: long tool calls (record, wait_for, downloads)
 MAX_PENDING_PER_DEVICE = "100"
 MAX_BODY_BYTES = "1048576"
 KEEPALIVE_TIMEOUT_MS = "90000"

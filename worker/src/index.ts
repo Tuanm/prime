@@ -12,8 +12,16 @@
 // gateway: on Workers, plain in-memory state would be per-isolate and would
 // break cross-isolate routing.
 
-import { loadConfig, timingSafeEq, extractToken, validDeviceId } from "./config";
-import type { Env } from "./config";
+import {
+  loadConfig,
+  timingSafeEq,
+  extractToken,
+  extractDeviceToken,
+  deviceTokenFor,
+  deviceKnown,
+  validDeviceId,
+} from "./config";
+import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 
 export { DeviceDO } from "./device-do";
@@ -41,14 +49,14 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
     const url = new URL(request.url);
-    // /devices - admin listing. Requires the admin (or gateway) token. There is
-    // no loopback concept on Workers, so token auth replaces the Bun
-    // loopback-and-no-proxy-header check.
+    // /devices - admin listing. NEVER public: it reveals which devices are
+    // online. Requires the admin (or gateway) token; if no admin token is
+    // configured the endpoint is hidden entirely (404), so a misconfigured
+    // gateway does not silently leak the device roster.
     if (request.method === "GET" && url.pathname === "/devices") {
-      if (cfg.adminToken) {
-        const t = extractToken(request, url, "auth");
-        if (!t || !timingSafeEq(t, cfg.adminToken)) return unauthorized();
-      }
+      if (!cfg.adminToken) return Response.json({ error: "not found" }, { status: 404 });
+      const t = extractToken(request, url, "auth");
+      if (!t || !timingSafeEq(t, cfg.adminToken)) return unauthorized();
       const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
       return reg.fetch("https://registry/devices");
     }
@@ -68,6 +76,17 @@ export default {
       const deviceId = url.pathname.slice(5);
       if (!validDeviceId(deviceId)) {
         return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      }
+
+      // Device credential check BEFORE touching the DO. In per-device mode an
+      // unknown deviceId is rejected outright (no existence oracle) and
+      // unauthenticated probes get 401 - never instantiating a Durable Object
+      // for them (no DO churn / cost).
+      if (!deviceKnown(cfg, deviceId)) return unauthorized();
+      const expected = deviceTokenFor(cfg, deviceId);
+      if (expected !== undefined) {
+        const given = extractDeviceToken(request, url);
+        if (!given || !timingSafeEq(given, expected)) return unauthorized();
       }
 
       const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
@@ -113,17 +132,27 @@ export default {
         return Response.json({ error: "invalid deviceId" }, { status: 400 });
       }
 
-      // Device auth at connect (checked again inside the DO for defense in
-      // depth; here we reject before creating a DO instance).
-      if (cfg.deviceToken) {
-        const t = extractToken(request, url, "auth");
-        if (!t || !timingSafeEq(t, cfg.deviceToken)) return unauthorized();
+      // Device auth at connect, checked BEFORE creating a DO instance:
+      // an attacker must know the device's secret to claim its identity, so
+      // hijacking / intercepting an in-use deviceId is impossible. Unknown
+      // deviceIds get the same 401 (no existence oracle). The DO re-checks
+      // the credential for defense in depth.
+      if (!deviceKnown(cfg, deviceId)) return unauthorized();
+      const expected = deviceTokenFor(cfg, deviceId);
+      if (expected !== undefined) {
+        const given = extractDeviceToken(request, url);
+        if (!given || !timingSafeEq(given, expected)) return unauthorized();
       }
 
       const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
-      // Keep the upgrade headers; add x-device-id for the DO.
+      // Keep the upgrade headers; add x-device-id for the DO, and forward the
+      // validated device token as x-auth-token so the DO's defense-in-depth
+      // check passes (the DO reads x-auth-token first, then ?auth= - it does
+      // NOT read ?token=, which is the extension's credential form).
       const headers = new Headers(request.headers);
       headers.set("x-device-id", deviceId);
+      const givenToken = extractDeviceToken(request, url);
+      if (givenToken) headers.set("x-auth-token", givenToken);
       const upstream = new Request(url, { headers, method: request.method });
       return stub.fetch(upstream);
     }

@@ -45,9 +45,10 @@ cd worker
 npm install
 
 # Configure secrets (tokens are NEVER committed; use wrangler secrets)
+# RECOMMENDED: per-device tokens so no one can claim/intercept another device.
+npx wrangler secret put DEVICE_TOKENS    # JSON map: {"deviceId": "token", ...}
 npx wrangler secret put GATEWAY_TOKEN    # optional bearer token for /mcp/*
-npx wrangler secret put DEVICE_TOKEN     # optional bearer token for /ws/* device auth
-npx wrangler secret put ADMIN_TOKEN      # optional; defaults to GATEWAY_TOKEN for /devices
+npx wrangler secret put ADMIN_TOKEN      # optional /devices auth (defaults to GATEWAY_TOKEN)
 
 npx wrangler deploy
 ```
@@ -57,6 +58,12 @@ Tunables live in `wrangler.toml` under `[vars]` (mirror the Bun gateway flags):
 `MAX_PENDING_PER_DEVICE`, `MAX_BODY_BYTES`, `KEEPALIVE_TIMEOUT_MS`,
 `PING_INTERVAL_MS`, `PING_MAX_MISSES`, `IDLE_TIMEOUT_MS`,
 `ALLOWED_ORIGINS` (comma-separated origin whitelist).
+
+> **Long tool calls**: `TIMEOUT_MS` defaults to 300s (5 minutes). Cloudflare
+> gives Durable Objects and incoming HTTP requests **unlimited wall time** while
+> the caller stays connected, so long operations (recording, `wait_for`,
+> downloads) are relayed correctly as long as the client keeps the connection
+> open - the per-device keepalive (25s) does exactly that.
 
 > Durable Objects require a Cloudflare **Paid** plan (or higher).
 
@@ -97,11 +104,24 @@ forwarding.
 
 ## Security model
 
-Identical guarantees to the Bun gateway:
+Hardened beyond the Bun gateway - designed so no attacker can steal or
+intercept a connection, and no one can learn who is connected:
 
-- **Two separate tokens**: `GATEWAY_TOKEN` (HTTP clients -> /mcp) and
-  `DEVICE_TOKEN` (devices -> /ws). Both accept `Authorization: Bearer` or
-  `?auth=`; compared in constant time.
+- **Per-device authentication** (`DEVICE_TOKENS`, a JSON map
+  `{deviceId: token}`). At `/ws` connect AND at `/mcp` relay, the device's
+  secret is required and compared in constant time. An attacker who does not
+  know a device's token cannot:
+  - claim that deviceId over WebSocket (hijack), or
+  - relay requests to it over `/mcp` (intercept), or
+  - learn whether the deviceId exists (unknown ids return the same 401 -
+    no existence oracle), or
+  - force Durable Object creation for made-up ids (no DO churn / cost).
+  A shared `DEVICE_TOKEN` fallback is supported for deployments that do not
+  need per-device secrets.
+- **/devices is NEVER public**: it requires the admin token; if no admin token
+  is configured the endpoint is hidden entirely (404), so a misconfigured
+  gateway does not leak the device roster.
+- **`GATEWAY_TOKEN`** (optional): additional client -> gateway auth for /mcp.
 - **DeviceId collision rejection** (409) — a second client cannot hijack an
   in-use deviceId (enforced atomically inside the DO).
 - **Register-message mismatch rejected** — a device bound to one DO cannot rebind

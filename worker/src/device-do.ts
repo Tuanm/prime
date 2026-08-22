@@ -19,6 +19,19 @@ import type { Env } from "./config";
 import { validDeviceId, timingSafeEq, extractToken } from "./config";
 import type { TunnelRequest, TunnelMessage } from "./protocol";
 
+// Per-device token lookup (parsed once per DO instance).
+function perDeviceToken(env: Env, deviceId: string): string | undefined {
+  const raw = env.DEVICE_TOKENS;
+  if (!raw) return undefined;
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const v = obj[deviceId];
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 interface PendingEntry {
   deviceId: string;
   resolve: (res: Response) => void;
@@ -34,6 +47,7 @@ export class DeviceDO extends DurableObject<Env> {
   private timeoutMs = 30_000;
   private maxBodyBytes = 1024 * 1024;
   private deviceToken?: string;
+  private perDeviceToken: string | null = null;
   private deviceId = "";
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -44,6 +58,7 @@ export class DeviceDO extends DurableObject<Env> {
     this.timeoutMs = num(env.TIMEOUT_MS, 30_000);
     this.maxBodyBytes = num(env.MAX_BODY_BYTES, 1024 * 1024);
     this.deviceToken = env.DEVICE_TOKEN || undefined;
+    this.perDeviceToken = null;
     // Restore a live WebSocket after hibernation wake: class fields are reset
     // when the object is thawed, so re-attach from ctx.getWebSockets().
     const sockets = this.ctx.getWebSockets();
@@ -85,8 +100,11 @@ export class DeviceDO extends DurableObject<Env> {
   // ---- WebSocket lifecycle -------------------------------------------------
 
   private async handleUpgrade(request: Request, url: URL, authToken: string | null): Promise<Response> {
-    // Device auth at connect time (optional).
-    if (this.deviceToken && (!authToken || !timingSafeEq(authToken, this.deviceToken))) {
+    // Device auth at connect time (defense in depth; the worker entry already
+    // checked). Prefer the per-device token, fall back to the shared token.
+    if (this.deviceId) this.perDeviceToken = perDeviceToken(this.env, this.deviceId) ?? null;
+    const expected = this.perDeviceToken ?? this.deviceToken;
+    if (expected && (!authToken || !timingSafeEq(authToken, expected))) {
       return Response.json({ error: "unauthorized" }, { status: 401 });
     }
     // A deviceId may only have ONE live tunnel. If an existing ws is attached

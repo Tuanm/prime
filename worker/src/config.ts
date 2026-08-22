@@ -3,7 +3,8 @@
 
 export interface GatewayConfig {
   gatewayToken?: string; // client -> gateway auth for /mcp/*
-  deviceToken?: string; // device -> gateway auth at WS connect
+  deviceToken?: string; // shared device -> gateway auth at WS connect (fallback)
+  deviceTokens?: Map<string, string>; // per-device token map (preferred over deviceToken)
   adminToken?: string; // /devices endpoint auth (defaults to gatewayToken)
   rateWindowMs: number;
   rateMax: number;
@@ -21,6 +22,7 @@ export interface GatewayConfig {
 export interface Env {
   GATEWAY_TOKEN?: string;
   DEVICE_TOKEN?: string;
+  DEVICE_TOKENS?: string; // JSON map { deviceId: token } - per-device secrets (secret)
   ADMIN_TOKEN?: string;
   RATE_LIMIT_WINDOW_MS?: string;
   RATE_LIMIT_MAX?: string;
@@ -44,14 +46,29 @@ function num(env: Env, key: string, def: number): number {
   return Number.isFinite(n) && n >= 0 ? n : def;
 }
 
+function parseDeviceTokens(raw: string | undefined): Map<string, string> | undefined {
+  if (!raw) return undefined;
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const m = new Map<string, string>();
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === "string" && validDeviceId(k) && v.length > 0) m.set(k, v);
+    }
+    return m.size ? m : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function loadConfig(env: Env): GatewayConfig {
   return {
     gatewayToken: env.GATEWAY_TOKEN || undefined,
     deviceToken: env.DEVICE_TOKEN || undefined,
+    deviceTokens: parseDeviceTokens(env.DEVICE_TOKENS),
     adminToken: env.ADMIN_TOKEN || env.GATEWAY_TOKEN || undefined,
     rateWindowMs: num(env, "RATE_LIMIT_WINDOW_MS", 60_000),
     rateMax: num(env, "RATE_LIMIT_MAX", 100),
-    timeoutMs: num(env, "TIMEOUT_MS", 30_000),
+    timeoutMs: num(env, "TIMEOUT_MS", 300_000),
     maxPendingPerDevice: num(env, "MAX_PENDING_PER_DEVICE", 100),
     maxBodyBytes: num(env, "MAX_BODY_BYTES", 1024 * 1024),
     allowedOrigins: env.ALLOWED_ORIGINS
@@ -88,4 +105,30 @@ export function extractToken(req: Request, url: URL, queryName: string): string 
   const q = url.searchParams.get(queryName);
   if (q) return q;
   return null;
+}
+
+// Device credential: prefers X-Device-Token header, then ?token=, then
+// Authorization Bearer, then ?auth=. The extension sends ?token= on /mcp and
+// (after the client update) on /ws; the relay header is the canonical form.
+export function extractDeviceToken(req: Request, url: URL): string | null {
+  const h = req.headers.get("x-device-token");
+  if (h) return h.trim();
+  const t = url.searchParams.get("token");
+  if (t) return t;
+  return extractToken(req, url, "auth");
+}
+
+// Resolve the expected token for a device: per-device map first, then shared.
+export function deviceTokenFor(cfg: GatewayConfig, deviceId: string): string | undefined {
+  if (cfg.deviceTokens && cfg.deviceTokens.has(deviceId)) return cfg.deviceTokens.get(deviceId);
+  return cfg.deviceToken;
+}
+
+// In per-device mode (map configured) an id NOT in the map must be rejected -
+// otherwise an attacker could distinguish configured ids (401) from unknown
+// ids (503), an existence oracle. Returns true when the id is authorized to
+// exist at all (i.e. auth should be enforced, not skipped).
+export function deviceKnown(cfg: GatewayConfig, deviceId: string): boolean {
+  if (cfg.deviceTokens && cfg.deviceTokens.size > 0) return cfg.deviceTokens.has(deviceId);
+  return true; // shared-token or open mode: any valid-format id is allowed
 }

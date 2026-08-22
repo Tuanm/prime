@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
+const { rmSync } = await import("node:fs");
+try { rmSync(ROOT + "/.wrangler/state", { recursive: true, force: true }); } catch {} // fresh DO state
 const BUN = process.env.BUN_PATH || (await import("node:os")).homedir() + "/.bun/bin/bun";
 
 async function start(port: number, vars: string[]): Promise<any> {
@@ -30,6 +32,7 @@ const plain = await start(8801, [
   "ALLOWED_ORIGINS:https://good.example",
   "MAX_PENDING_PER_DEVICE:2",
   "MAX_BODY_BYTES:256",
+  "KEEPALIVE_TIMEOUT_MS:5000", // stale-socket cleanup fast in miniflare (reliable tests)
 ]);
 console.log("Starting auth wrangler (8802)...");
 const auth = await start(8802, [
