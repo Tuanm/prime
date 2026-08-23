@@ -39,6 +39,7 @@ interface PendingEntry {
 }
 
 const CLIENT_TTL_MS = 600_000; // relay clients shown for the last 10 min
+const MAX_TRACKED_CLIENTS = 2_000; // cap distinct relay-client IPs (memory guard)
 
 export class DeviceDO extends DurableObject<Env> {
   private ws: WebSocket | null = null;
@@ -257,6 +258,17 @@ export class DeviceDO extends DurableObject<Env> {
         existing.count += 1;
         if (name) existing.name = name;
       } else {
+        // Bound the map: a flood of distinct client IPs (botnet) must not grow
+        // it without limit before the TTL sweep runs. Evict the least recently
+        // seen entry when over the cap.
+        if (this.clients.size >= MAX_TRACKED_CLIENTS) {
+          let oldestKey: string | null = null;
+          let oldestSeen = Infinity;
+          for (const [k, c] of this.clients) {
+            if (c.lastSeen < oldestSeen) { oldestSeen = c.lastSeen; oldestKey = k; }
+          }
+          if (oldestKey !== null) this.clients.delete(oldestKey);
+        }
         this.clients.set(ip, { ip, name, lastSeen: now, count: 1 });
       }
     } catch {}
