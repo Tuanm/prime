@@ -571,7 +571,8 @@ async function startWrangler(port: number, vars: string[]): Promise<any> {
   const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
   const { spawn } = await import("node:child_process");
   const args = [
-    WRANGLER, "dev", "--local", "--port", String(port), "--ip", "127.0.0.1",
+    WRANGLER, "dev", "--local", "-c", ROOT + "/wrangler.dev.toml",
+    "--port", String(port), "--ip", "127.0.0.1",
     // Isolate durable state per instance - all instances share one workerd
     // otherwise and their Durable Objects collide (registry + stale sockets).
     "--persist-to", ROOT + "/.wrangler/state-" + port,

@@ -9,8 +9,11 @@ try { rmSync(ROOT + "/.wrangler", { recursive: true, force: true }); } catch {} 
 const BUN = process.env.BUN_PATH || (await import("node:os")).homedir() + "/.bun/bin/bun";
 
 async function start(port: number, vars: string[]): Promise<any> {
+  // Use wrangler.dev.toml: it omits the [[containers]] block, which would make
+  // wrangler dev try to build the Docker image (no Docker on CI runners).
   const args = [
-    WRANGLER, "dev", "--local", "--port", String(port), "--ip", "127.0.0.1",
+    WRANGLER, "dev", "--local", "-c", ROOT + "/wrangler.dev.toml",
+    "--port", String(port), "--ip", "127.0.0.1",
     "--persist-to", ROOT + "/.wrangler/state-" + port,
     ...vars.flatMap((v) => ["--var", v]),
   ];
