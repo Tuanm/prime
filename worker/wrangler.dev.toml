@@ -1,0 +1,35 @@
+# Dev-only config: same worker, no containers block (local workerd cannot
+# run firecracker containers - container tools are exercised on prod).
+name = "code-mcp"
+account_id = "b04dd6c1528d6cf40ffd645269716025"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "DEVICES", class_name = "DeviceDO" },
+  { name = "REGISTRY", class_name = "RegistryDO" },
+  { name = "CODING_SANDBOX", class_name = "CodingSandbox" },
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DeviceDO", "RegistryDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CodingSandbox"]
+
+[[kv_namespaces]]
+binding = "KV"
+id = "d36acd23e12945058bf9910182deeec7"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "code-mcp-db"
+database_id = "00e3f87d-928a-47ba-b6f0-d1c607bade9f"
+
+[vars]
+ENVIRONMENT = "dev"
+VIRTUAL_DEVICE_IDS = "cloud"

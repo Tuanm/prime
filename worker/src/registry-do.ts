@@ -24,6 +24,7 @@ export class RegistryDO extends DurableObject<Env> {
   private online = new Map<string, DeviceRec>();
   private tokens = new Map<string, string>(); // deviceId -> token (authoritative)
   private virtual = new Set<string>(); // in-process devices: always online, never swept
+  private disabled = new Set<string>(); // deactivated devices: rejected at /mcp + /ws
   private onlineTtlMs = ONLINE_TTL_DEFAULT_MS;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -74,6 +75,10 @@ export class RegistryDO extends DurableObject<Env> {
           this.virtual.add(id);
           this.online.set(id, { seenAt: Date.now() });
         }
+        const savedDisabled = (await this.ctx.storage.get<string[]>("disabled")) || [];
+        for (const id of savedDisabled) {
+          if (validDeviceId(id)) this.disabled.add(id);
+        }
       } catch {}
     });
   }
@@ -108,6 +113,29 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({ map: Object.fromEntries(this.tokens) });
     }
 
+    if (request.method === "GET" && path === "/disabled") {
+      return Response.json({ disabled: [...this.disabled] });
+    }
+
+    // Deactivate/activate a device (persisted). Disabled devices are rejected
+    // with 403 by the gateway entry before any request reaches a tunnel/DO.
+    if (request.method === "POST" && path === "/setstate") {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: "invalid json" }, { status: 400 });
+      }
+      const { deviceId, disabled } = (body || {}) as { deviceId?: unknown; disabled?: unknown };
+      const id = String(deviceId || "").trim();
+      if (!validDeviceId(id)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      const dis = disabled === true || disabled === "true";
+      if (dis) this.disabled.add(id);
+      else this.disabled.delete(id);
+      await this.persistDisabled();
+      return Response.json({ ok: true, deviceId: id, disabled: dis });
+    }
+
     if (request.method === "GET" && path === "/full") {
       this.sweep();
       const devices = [...this.tokens.entries()].map(([deviceId, token]) => ({
@@ -115,6 +143,7 @@ export class RegistryDO extends DurableObject<Env> {
         token,
         online: this.online.has(deviceId),
         virtual: this.virtual.has(deviceId),
+        disabled: this.disabled.has(deviceId),
       }));
       return Response.json({ devices });
     }
@@ -158,8 +187,10 @@ export class RegistryDO extends DurableObject<Env> {
       if (!validDeviceId(id)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
       this.tokens.delete(id);
       this.online.delete(id);
+      this.disabled.delete(id);
       await this.persistTokens();
       await this.persist();
+      await this.persistDisabled();
       this.sweep();
       return Response.json({
         ok: true,
@@ -197,6 +228,12 @@ export class RegistryDO extends DurableObject<Env> {
   private async persistTokens(): Promise<void> {
     try {
       await this.ctx.storage.put("device_tokens", Object.fromEntries(this.tokens));
+    } catch {}
+  }
+
+  private async persistDisabled(): Promise<void> {
+    try {
+      await this.ctx.storage.put("disabled", [...this.disabled]);
     } catch {}
   }
 }

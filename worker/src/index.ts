@@ -40,6 +40,27 @@ let limiterMax = 0;
 let mapCache: { at: number; map: Map<string, string> } | null = null;
 const MAP_CACHE_TTL_MS = 2_000;
 
+// Cached set of disabled (deactivated) deviceIds. Same TTL/caching model as the
+// device map; invalidated by admin /state mutations.
+let disabledCache: { at: number; set: Set<string> } | null = null;
+
+async function effectiveDisabledSet(env: Env): Promise<Set<string>> {
+  if (disabledCache && Date.now() - disabledCache.at < MAP_CACHE_TTL_MS) return disabledCache.set;
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const set = new Set<string>();
+  try {
+    const r = await reg.fetch("https://registry/disabled");
+    if (r.ok) {
+      const j = (await r.json()) as { disabled?: string[] };
+      for (const id of j.disabled || []) {
+        if (validDeviceId(id)) set.add(id);
+      }
+    }
+  } catch {}
+  disabledCache = { at: Date.now(), set };
+  return set;
+}
+
 async function effectiveDeviceMap(env: Env): Promise<Map<string, string>> {
   if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.map;
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
@@ -108,10 +129,31 @@ export default {
         const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
         return stub.fetch("https://device/clients");
       }
+      if (request.method === "POST" && url.pathname.endsWith("/state")) {
+        const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/state".length);
+        if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return Response.json({ error: "invalid json" }, { status: 400 });
+        }
+        const disabled = !!(body as { disabled?: unknown })?.disabled;
+        mapCache = null;
+        disabledCache = null;
+        return reg.fetch(
+          new Request("https://registry/setstate", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ deviceId, disabled }),
+          }),
+        );
+      }
       if (request.method === "DELETE" && url.pathname.startsWith("/admin/api/devices/")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length);
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
         mapCache = null;
+        disabledCache = null;
         return reg.fetch(
           new Request("https://registry/remove", {
             method: "POST",
@@ -174,6 +216,11 @@ export default {
       if (expected !== undefined) {
         const given = extractDeviceToken(request, url);
         if (!given || !timingSafeEq(given, expected)) return unauthorized();
+      }
+
+      // Deactivated devices are rejected outright (admin UI toggle).
+      if ((await effectiveDisabledSet(env)).has(deviceId)) {
+        return Response.json({ error: "device disabled" }, { status: 403 });
       }
 
       // Virtual devices (in-process, no tunnel): handle the MCP request right
@@ -241,6 +288,11 @@ export default {
       if (expected !== undefined) {
         const given = extractDeviceToken(request, url);
         if (!given || !timingSafeEq(given, expected)) return unauthorized();
+      }
+
+      // Deactivated devices are rejected outright (admin UI toggle).
+      if ((await effectiveDisabledSet(env)).has(deviceId)) {
+        return Response.json({ error: "device disabled" }, { status: 403 });
       }
 
       // Virtual devices are in-process only - they have no tunnel to upgrade.

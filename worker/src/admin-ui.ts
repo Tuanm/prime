@@ -90,6 +90,31 @@ export const ADMIN_HTML = `<!doctype html>
         background: #fff;
         border: 1.5px solid #b91c1c;
       }
+      .cloud-ic {
+        width: 13px;
+        height: 13px;
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .cloud-ic svg {
+        width: 100%;
+        height: 100%;
+        fill: currentColor;
+      }
+      .cloud-ic.on {
+        color: #16a34a;
+      }
+      .cloud-ic.off {
+        color: #999;
+      }
+      .row.disabled .box {
+        opacity: 0.55;
+      }
+      .row.disabled .id-input {
+        color: #999;
+      }
       .box {
         flex: 1;
         min-width: 0;
@@ -326,18 +351,35 @@ export const ADMIN_HTML = `<!doctype html>
             listEl.appendChild(empty);
             return;
           }
-          devices.forEach(function (d) { renderRow(d, false, null); });
+          // Pin virtual (cloud) devices to the top.
+          var pinned = [], rest = [];
+          devices.forEach(function (d) { (d.virtual ? pinned : rest).push(d); });
+          pinned.forEach(function (d) { renderRow(d, false, null); });
+          rest.forEach(function (d) { renderRow(d, false, null); });
           pendingNew.forEach(function (p) { renderRow({ deviceId: p.id, token: p.token, online: false }, true, p); });
         }
 
         function renderRow(dev, isNew, pendingObj) {
           var li = document.createElement("li");
-          li.className = "row";
+          li.className = "row" + (dev.disabled ? " disabled" : "");
           li.dataset.deviceId = dev.deviceId || "";
 
-          // Status dot lives OUTSIDE the device box.
-          var dot = document.createElement("span");
-          dot.className = "dot " + (dev.online ? "on" : "off");
+          var virtual = !!dev.virtual;
+
+          // Virtual devices show a cloud icon (active green / disabled gray)
+          // instead of the tunnel status dot.
+          var dot = null;
+          if (virtual) {
+            var cloud = document.createElement("span");
+            cloud.className = "cloud-ic " + (dev.disabled ? "off" : "on");
+            cloud.title = "cloud device (in-process)";
+            cloud.innerHTML =
+              '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg>';
+          } else {
+            // Status dot lives OUTSIDE the device box.
+            dot = document.createElement("span");
+            dot.className = "dot " + (dev.online ? "on" : "off");
+          }
 
           var box = document.createElement("div");
           box.className = "box";
@@ -349,6 +391,8 @@ export const ADMIN_HTML = `<!doctype html>
           idInput.className = "id-input";
           idInput.placeholder = "device id";
           idInput.value = dev.deviceId || "";
+          // Cloud devices are registry-managed: the id is read-only.
+          if (virtual) idInput.readOnly = true;
 
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
@@ -388,10 +432,19 @@ export const ADMIN_HTML = `<!doctype html>
           delItem.type = "button";
           delItem.className = "danger";
           delItem.textContent = "Delete";
+          var stateItem = null;
+          if (virtual) {
+            // Cloud devices toggle Deactivate/Activate instead of Delete.
+            stateItem = document.createElement("button");
+            stateItem.type = "button";
+            stateItem.textContent = dev.disabled ? "Activate" : "Deactivate";
+            if (!dev.disabled) stateItem.className = "danger";
+          }
           menu.appendChild(toolsItem);
           menu.appendChild(clientsItem);
           menu.appendChild(saveItem);
-          menu.appendChild(delItem);
+          if (stateItem) menu.appendChild(stateItem);
+          else menu.appendChild(delItem);
           menuWrap.appendChild(btn);
           menuWrap.appendChild(menu);
 
@@ -423,7 +476,7 @@ export const ADMIN_HTML = `<!doctype html>
           function updateMenuState() {
             var online = li.dataset.online === "1";
             toolsItem.disabled = !online; // Tools needs a live tunnel
-            clientsItem.disabled = !online; // Clients needs a live tunnel
+            clientsItem.disabled = virtual || !online; // Clients needs a live tunnel
             saveItem.disabled = !isDirty(); // Save only after the user edits
           }
 
@@ -500,6 +553,25 @@ export const ADMIN_HTML = `<!doctype html>
               })
               .catch(function (e) { setStatus("delete failed: " + e.message, true); });
           });
+
+          if (stateItem) {
+            stateItem.addEventListener("click", function () {
+              closeMenus();
+              var id = (idInput.value || "").trim() || (dev.deviceId || "");
+              if (!id) return setStatus("no device to toggle", true);
+              var turningOff = !dev.disabled; // current state decides the action
+              setStatus((turningOff ? "deactivating " : "activating ") + id + " ...");
+              api("/admin/api/devices/" + encodeURIComponent(id) + "/state", {
+                method: "POST",
+                body: JSON.stringify({ disabled: turningOff }),
+              })
+                .then(function () {
+                  setStatus((turningOff ? "deactivated " : "activated ") + id);
+                  load();
+                })
+                .catch(function (e) { setStatus("state change failed: " + e.message, true); });
+            });
+          }
 
           document.addEventListener("click", function handler(ev) {
             if (!menuWrap.contains(ev.target)) closeMenus();
@@ -631,15 +703,22 @@ export const ADMIN_HTML = `<!doctype html>
         function refreshDots() {
           api("/admin/api/devices")
             .then(function (j) {
-              var map = {};
-              (j.devices || []).forEach(function (d) { map[d.deviceId] = !!d.online; });
+              var map = {}, disMap = {};
+              (j.devices || []).forEach(function (d) {
+                map[d.deviceId] = !!d.online;
+                disMap[d.deviceId] = !!d.disabled;
+              });
               var rows = listEl.querySelectorAll("li.row");
               for (var i = 0; i < rows.length; i++) {
                 var id = rows[i].dataset.deviceId;
-                var dot = rows[i].querySelector(".dot");
                 var on = !!map[id];
+                var dis = !!disMap[id];
+                var dot = rows[i].querySelector(".dot");
                 if (dot) dot.className = "dot " + (on ? "on" : "off");
+                var cloud = rows[i].querySelector(".cloud-ic");
+                if (cloud) cloud.className = "cloud-ic " + (dis ? "off" : "on");
                 rows[i].dataset.online = on ? "1" : "0";
+                rows[i].className = "row" + (dis ? " disabled" : "");
               }
             })
             .catch(function () {});
