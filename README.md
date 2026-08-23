@@ -27,6 +27,9 @@ Connect to a [code-mcp-gateway](https://github.com/Tuanm/code-mcp-gateway) to ex
 bun code-mcp.ts     --gateway wss://gateway.example.workers.dev --port 7777
 ```
 
+A bare `--gateway` (no URL) connects to the managed gateway at
+`wss://code-mcp.tuanm.workers.dev`.
+
 The gateway authenticates every device at connect time against its device
 registry (unknown ids or missing/mismatched tokens are rejected with 401, so
 nobody can hijack a registered device). Pass `--id` with the registered device
@@ -64,7 +67,7 @@ liveness detection:
 | `--public`                  | Expose via Cloudflare quick tunnel (requires `cloudflared`)            | disabled          |
 | `--domain <host>`           | Use existing public hostname (mutually exclusive with `--public`)      | none              |
 | `--mcp <path>`              | Aggregate tools from external MCP servers (Claude Desktop JSON config) | none              |
-| `--gateway <url>`           | Connect to a gateway server and tunnel requests via WebSocket          | none              |
+| `--gateway [url]`          | Connect to a gateway server and tunnel requests via WebSocket; bare flag uses the default managed gateway | `wss://code-mcp.tuanm.workers.dev` |
 | `--id <uuid>`               | Use specific device ID for gateway connection                          | random UUID       |
 
 ### MCP Config Format
