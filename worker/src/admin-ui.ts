@@ -525,6 +525,16 @@ export const ADMIN_HTML = `<!doctype html>
           return { overlay: overlay, bodyEl: bodyEl, close: close };
         }
 
+        // Escape untrusted text before it can reach innerHTML: device-supplied
+        // error messages could otherwise inject markup into the admin page.
+        function esc(s) {
+          return String(s == null ? "" : s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
         function ago(ts) {
           var sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
           if (sec < 5) return "just now";
@@ -567,7 +577,7 @@ export const ADMIN_HTML = `<!doctype html>
               });
             })
             .catch(function (e) {
-              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + ((e && e.message) || "failed to load tools") + "</div>";
+              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + esc((e && e.message) || "failed to load tools") + "</div>";
             });
         }
 
@@ -602,7 +612,7 @@ export const ADMIN_HTML = `<!doctype html>
               });
             })
             .catch(function (e) {
-              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + ((e && e.message) || "failed to load clients") + "</div>";
+              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + esc((e && e.message) || "failed to load clients") + "</div>";
             });
         }
 
