@@ -90,15 +90,19 @@ export const ADMIN_HTML = `<!doctype html>
         background: #fff;
         border: 1.5px solid #b91c1c;
       }
+      /* display:flex + line-height:0 keep the icon perfectly centered next to
+         the rows' 10px dots; inline-flex would introduce a baseline offset. */
       .cloud-ic {
-        width: 13px;
-        height: 13px;
+        width: 12px;
+        height: 12px;
         flex: none;
-        display: inline-flex;
+        display: flex;
         align-items: center;
         justify-content: center;
+        line-height: 0;
       }
       .cloud-ic svg {
+        display: block;
         width: 100%;
         height: 100%;
         fill: currentColor;

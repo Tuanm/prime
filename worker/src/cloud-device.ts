@@ -7,15 +7,20 @@
 // index.ts), authenticated with the device token registered for it in the
 // registry (VIRTUAL_DEVICE_TOKENS secret, merged by RegistryDO).
 //
-// The cloud device is a BACKEND, not an AI: it exposes storage / data /
-// web primitives that AI harnesses running on other devices (codex, code-mcp)
-// connect to through the gateway and use to do work. No model runs here.
-//
-// Tool surface (v1, all GA / free tier):
-//   web.fetch  - fetch any URL server-side (no CORS, no local network limits)
-//   kv.get/set/list/delete - Cloudflare KV (lightweight shared key-value store)
-//   d1.query   - SQL against the code-mcp D1 database (SELECT/INSERT/...)
-//   r2.*       - (planned) object storage once R2 is enabled on the account
+// The cloud device is a BACKEND, not an AI: it exposes storage / data / web /
+// sandbox primitives that AI harnesses running on other devices (codex,
+// code-mcp) connect to through the gateway and use to do work. No model runs
+// here. Tool names follow the code-mcp convention (single lowercase words):
+//   bash    - run a shell command in the dev container (real processes)
+//   read    - read a file from the container filesystem
+//   write   - write a file in the container filesystem
+//   ls      - list a directory in the container filesystem
+//   job     - background jobs: mode=start|status|stop
+//   fetch   - fetch any URL server-side (no CORS, no local network limits)
+//   search  - web search (DuckDuckGo HTML + Instant Answer, Wikipedia fallback)
+//   kv      - Cloudflare KV: mode=get|set|list|delete
+//   sql     - SQL against the code-mcp D1 database (SELECT/INSERT/...)
+//   guide   - this overview, so agents know how to use the device
 //
 // Missing bindings degrade to a clear per-tool "not configured" error instead
 // of crashing, so the gateway deploys even without them.
@@ -38,7 +43,7 @@ class McpError extends Error {
 }
 
 const SERVER_NAME = "cloud-mcp";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 const PROTOCOL_VERSION = "2024-11-05"; // matches code-mcp.ts so clients handshake identically
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TEXT_OUTPUT = 64 * 1024; // truncate tool text output
@@ -51,7 +56,68 @@ interface ToolDef {
 
 const TOOLS: ToolDef[] = [
   {
-    name: "web.fetch",
+    name: "bash",
+    description:
+      "Run a shell command inside the cloud device's dev container (bash -lc; node, bun, python, git, ripgrep " +
+      "installed). Returns { pid, exitCode, stdout, stderr }. Use for builds, tests, git, scripts. " +
+      "Filesystem is ephemeral: work in /workspace, persist durable data with kv/sql.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cmd: { type: "string", description: "shell command to run" },
+        cwd: { type: "string", description: "working directory inside the container (default /workspace)" },
+        stdin: { type: "string", description: "optional text to pipe to the process stdin" },
+      },
+      required: ["cmd"],
+    },
+  },
+  {
+    name: "read",
+    description: "Read a file from the cloud device's container filesystem.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+    },
+  },
+  {
+    name: "write",
+    description: "Write (create/overwrite) a file in the cloud device's container filesystem.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "ls",
+    description: "List a directory in the cloud device's container filesystem (ls -la).",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string", default: "/workspace" } },
+      required: ["path"],
+    },
+  },
+  {
+    name: "job",
+    description:
+      "Manage background jobs in the container. mode=start (cmd) returns a pid; mode=status (pid) reports " +
+      "RUNNING/EXITED plus the last 50 log lines; mode=stop (pid) kills it. Output is captured to a job log.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["start", "status", "stop"] },
+        cmd: { type: "string", description: "command to run (mode=start)" },
+        pid: { type: "number", description: "job pid (mode=status|stop)" },
+      },
+      required: ["mode"],
+    },
+  },
+  {
+    name: "fetch",
     description:
       "Fetch a URL from the Cloudflare edge and return status + body text (truncated to ~64KB). " +
       "Useful for reading docs/APIs from any agent session without local network or CORS constraints.",
@@ -67,51 +133,41 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "kv.get",
-    description: "Read a value from the code-mcp Cloudflare KV namespace (cloud device workspace).",
-    inputSchema: {
-      type: "object",
-      properties: { key: { type: "string" } },
-      required: ["key"],
-    },
-  },
-  {
-    name: "kv.set",
-    description: "Write a value to the code-mcp Cloudflare KV namespace. Non-string values are JSON-encoded.",
+    name: "search",
+    description:
+      "Web search from the Cloudflare edge (DuckDuckGo, Wikipedia fallback). Returns up to max results with " +
+      "title, url, and snippet. No API key needed.",
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string" },
-        value: { description: "string or JSON-serializable value" },
-        ttlSeconds: { type: "number", description: "optional expiration, seconds from now" },
+        query: { type: "string" },
+        max: { type: "number", default: 5, description: "max results (1-8)" },
       },
-      required: ["key", "value"],
+      required: ["query"],
     },
   },
   {
-    name: "kv.list",
-    description: "List keys in the code-mcp Cloudflare KV namespace (optionally filtered by prefix).",
+    name: "kv",
+    description:
+      "Cloudflare KV key-value store (durable across container restarts). mode=get (key), set (key+value, " +
+      "optional ttlSeconds), list (optional prefix, limit), delete (key).",
     inputSchema: {
       type: "object",
       properties: {
+        mode: { type: "string", enum: ["get", "set", "list", "delete"] },
+        key: { type: "string" },
+        value: { description: "value to store (mode=set); non-strings are JSON-encoded" },
+        ttlSeconds: { type: "number" },
         prefix: { type: "string" },
         limit: { type: "number", default: 100 },
       },
+      required: ["mode"],
     },
   },
   {
-    name: "kv.delete",
-    description: "Delete a key from the code-mcp Cloudflare KV namespace.",
-    inputSchema: {
-      type: "object",
-      properties: { key: { type: "string" } },
-      required: ["key"],
-    },
-  },
-  {
-    name: "d1.query",
+    name: "sql",
     description:
-      "Run a SQL statement against the code-mcp D1 database. Supports SELECT/INSERT/UPDATE/DELETE/DDL. " +
+      "Run a SQL statement against the code-mcp D1 database (durable). Supports SELECT/INSERT/UPDATE/DELETE/DDL. " +
       "Use ? placeholders with the params array. Returns rows for SELECT, changes/meta for writes.",
     inputSchema: {
       type: "object",
@@ -122,82 +178,12 @@ const TOOLS: ToolDef[] = [
       required: ["sql"],
     },
   },
-  // ---- coding sandbox (Cloudflare Containers) tools ----
-  // These exec real processes in the cloud device's dev container
-  // (node/bun/python/git/bash/ripgrep). Returns { pid, exitCode, stdout, stderr }.
   {
-    name: "shell.run",
+    name: "guide",
     description:
-      "Run a shell command inside the cloud device's dev container (bash -lc). " +
-      "Returns { pid, exitCode, stdout, stderr }. Use for builds, tests, scripts, anything a shell can do.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        cmd: { type: "string", description: "shell command to run" },
-        cwd: { type: "string", description: "working directory inside the container" },
-        stdin: { type: "string", description: "optional text to pipe to the process stdin" },
-      },
-      required: ["cmd"],
-    },
-  },
-  {
-    name: "fs.read",
-    description: "Read a file from the cloud device's container filesystem.",
-    inputSchema: {
-      type: "object",
-      properties: { path: { type: "string" } },
-      required: ["path"],
-    },
-  },
-  {
-    name: "fs.write",
-    description: "Write (create/overwrite) a file in the cloud device's container filesystem.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        content: { type: "string" },
-      },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "fs.list",
-    description: "List a directory in the cloud device's container filesystem (ls -la).",
-    inputSchema: {
-      type: "object",
-      properties: { path: { type: "string", default: "/workspace" } },
-      required: ["path"],
-    },
-  },
-  {
-    name: "jobs.start",
-    description:
-      "Start a background job in the container (nohup). Returns the pid; poll with jobs.status, " +
-      "stop with jobs.stop. Output is captured to a job log.",
-    inputSchema: {
-      type: "object",
-      properties: { cmd: { type: "string", description: "command to run in the background" } },
-      required: ["cmd"],
-    },
-  },
-  {
-    name: "jobs.status",
-    description: "Check a background job: RUNNING/EXITED plus the last 50 lines of its log.",
-    inputSchema: {
-      type: "object",
-      properties: { pid: { type: "number" } },
-      required: ["pid"],
-    },
-  },
-  {
-    name: "jobs.stop",
-    description: "Kill a background job by pid.",
-    inputSchema: {
-      type: "object",
-      properties: { pid: { type: "number" } },
-      required: ["pid"],
-    },
+      "How to use the cloud device: tool list, filesystem semantics (ephemeral /workspace, durable kv/sql), " +
+      "and the clone-a-repo-and-work-on-it workflow.",
+    inputSchema: { type: "object", properties: {} },
   },
 ];
 
@@ -278,32 +264,26 @@ async function dispatch(env: Env, method: string, params: unknown): Promise<unkn
 async function runTool(env: Env, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   try {
     switch (name) {
-      case "web.fetch":
-        return await toolWebFetch(args);
-      case "kv.get":
-        return await toolKvGet(env, args);
-      case "kv.set":
-        return await toolKvSet(env, args);
-      case "kv.list":
-        return await toolKvList(env, args);
-      case "kv.delete":
-        return await toolKvDelete(env, args);
-      case "d1.query":
-        return await toolD1(env, args);
-      case "shell.run":
+      case "bash":
         return await toolSandbox(env, "shellRun", args);
-      case "fs.read":
+      case "read":
         return await toolSandbox(env, "fsRead", args);
-      case "fs.write":
+      case "write":
         return await toolSandbox(env, "fsWrite", args);
-      case "fs.list":
+      case "ls":
         return await toolSandbox(env, "fsList", args);
-      case "jobs.start":
-        return await toolSandbox(env, "jobStart", args);
-      case "jobs.status":
-        return await toolSandbox(env, "jobStatus", args);
-      case "jobs.stop":
-        return await toolSandbox(env, "jobStop", args);
+      case "job":
+        return await toolJob(env, args);
+      case "fetch":
+        return await toolFetch(args);
+      case "search":
+        return await toolSearch(args);
+      case "kv":
+        return await toolKv(env, args);
+      case "sql":
+        return await toolSql(env, args);
+      case "guide":
+        return toolGuide();
       default:
         return text(`unknown tool: ${name}`, true);
     }
@@ -336,14 +316,14 @@ function sandboxStub(env: Env): SandboxRpc {
   return ns.get(ns.idFromName("default")) as unknown as SandboxRpc;
 }
 
-// Map MCP tool name -> RPC method + argument conversion.
+// Map MCP tool -> RPC method + argument conversion.
 async function toolSandbox(env: Env, method: keyof SandboxRpc, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const sb = sandboxStub(env);
   let res: SandboxExecResult;
   switch (method) {
     case "shellRun":
       res = await sb.shellRun(String(args.cmd || ""), {
-        cwd: typeof args.cwd === "string" && args.cwd ? args.cwd : undefined,
+        cwd: typeof args.cwd === "string" && args.cwd ? args.cwd : "/workspace",
         stdin: typeof args.stdin === "string" ? args.stdin : undefined,
       });
       break;
@@ -354,32 +334,50 @@ async function toolSandbox(env: Env, method: keyof SandboxRpc, args: Record<stri
       res = await sb.fsWrite(String(args.path || ""), String(args.content ?? ""));
       break;
     case "fsList":
-      res = await sb.fsList(String(args.path || "/"));
-      break;
-    case "jobStart":
-      res = await sb.jobStart(String(args.cmd || ""));
-      break;
-    case "jobStatus":
-      res = await sb.jobStatus(Number(args.pid));
-      break;
-    case "jobStop":
-      res = await sb.jobStop(Number(args.pid));
+      res = await sb.fsList(String(args.path || "/workspace"));
       break;
     default:
       return text(`unknown sandbox method: ${String(method)}`, true);
   }
+  return sandboxResult(res);
+}
+
+function sandboxResult(res: SandboxExecResult): Record<string, unknown> {
   if (res.exitCode !== 0 && res.stderr) {
-    return text(
-      JSON.stringify({ pid: res.pid, exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr }, null, 2),
-      true,
-    );
+    return text(JSON.stringify({ pid: res.pid, exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr }, null, 2), true);
   }
   return { pid: res.pid, exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr };
 }
 
+async function toolJob(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const sb = sandboxStub(env);
+  const mode = String(args.mode || "");
+  switch (mode) {
+    case "start": {
+      const res = await sb.jobStart(String(args.cmd || ""));
+      return sandboxResult(res);
+    }
+    case "status": {
+      const res = await sb.jobStatus(Number(args.pid));
+      return sandboxResult(res);
+    }
+    case "stop": {
+      const res = await sb.jobStop(Number(args.pid));
+      return sandboxResult(res);
+    }
+    default:
+      return text(`job mode must be start|status|stop (got '${mode}')`, true);
+  }
+}
+
 // ---- tools ----------------------------------------------------------------
 
-async function toolWebFetch(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+function need<T>(v: T | undefined, label: string): T {
+  if (v === undefined) throw new Error(`${label} binding not configured on this gateway (check wrangler.toml)`);
+  return v;
+}
+
+async function toolFetch(args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const url = String(args.url || "");
   if (!/^https?:\/\//i.test(url)) return text("url must start with http:// or https://", true);
   const method = String(args.method || "GET").toUpperCase();
@@ -402,47 +400,144 @@ async function toolWebFetch(args: Record<string, unknown>): Promise<Record<strin
   };
 }
 
-function need<T>(v: T | undefined, label: string): T {
-  if (v === undefined) throw new Error(`${label} binding not configured on this gateway (check wrangler.toml)`);
-  return v;
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&nbsp;/g, " ");
 }
 
-async function toolKvGet(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+function stripTags(s: string): string {
+  return s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+// Parse DuckDuckGo's HTML result page.
+function parseDdg(html: string): SearchResult[] {
+  const out: SearchResult[] = [];
+  const blocks = html.split(/<div class="result /);
+  for (const b of blocks.slice(1)) {
+    const a = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(b);
+    if (!a) continue;
+    let url = a[1];
+    if (url.startsWith("//")) url = "https:" + url;
+    const uddg = /[?&]uddg=([^&]+)/.exec(url);
+    if (uddg) {
+      try {
+        url = decodeURIComponent(uddg[1]);
+      } catch {}
+    }
+    const sn = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/.exec(b);
+    out.push({
+      title: decodeEntities(stripTags(a[2])),
+      url,
+      snippet: sn ? decodeEntities(stripTags(sn[1])).slice(0, 300) : "",
+    });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+async function toolSearch(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const q = String(args.query || "").trim();
+  if (!q) return text("query is required", true);
+  const max = Math.min(Math.max(Number(args.max) || 5, 1), 8);
+
+  // 1) DuckDuckGo HTML results (general web search, no key).
+  try {
+    const res = await fetch("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(q), {
+      headers: { "user-agent": "Mozilla/5.0 (compatible; code-mcp-cloud/1.0)" },
+      redirect: "follow",
+    });
+    if (res.ok) {
+      const results = parseDdg(await res.text()).slice(0, max);
+      if (results.length > 0) return { query: q, engine: "duckduckgo", results };
+    }
+  } catch {}
+
+  // 2) DuckDuckGo Instant Answer API (fallback).
+  try {
+    const res = await fetch(
+      "https://api.duckduckgo.com/?q=" + encodeURIComponent(q) + "&format=json&no_html=1&skip_disambig=1",
+      { headers: { "user-agent": "code-mcp-cloud/1.0" } },
+    );
+    const j = (await res.json()) as {
+      AbstractText?: string;
+      Answer?: string;
+      AbstractURL?: string;
+      RelatedTopics?: Array<{ Text?: string; FirstURL?: string }>;
+    };
+    const topics = (j.RelatedTopics || []).slice(0, max).filter((t) => t.Text).map((t) => ({ title: t.Text, url: t.FirstURL, snippet: "" }));
+    return { query: q, engine: "duckduckgo-instant", answer: j.Answer || "", abstract: j.AbstractText || "", abstractUrl: j.AbstractURL || "", results: topics };
+  } catch {}
+
+  // 3) Wikipedia search API (last resort, open + reliable).
+  try {
+    const res = await fetch(
+      "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" +
+        encodeURIComponent(q) +
+        "&format=json&srlimit=" +
+        max +
+        "&origin=*",
+      { headers: { "user-agent": "code-mcp-cloud/1.0" } },
+    );
+    const j = (await res.json()) as { query?: { search?: Array<{ title: string; snippet: string }> } };
+    const results = (j.query?.search || []).map((r) => ({
+      title: r.title,
+      url: "https://en.wikipedia.org/wiki/" + encodeURIComponent(r.title.replace(/ /g, "_")),
+      snippet: decodeEntities(stripTags(r.snippet)),
+    }));
+    if (results.length > 0) return { query: q, engine: "wikipedia", results };
+  } catch {}
+
+  return text("search failed (all engines unreachable)", true);
+}
+
+async function toolKv(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const kv = need(env.KV, "KV");
-  const key = String(args.key || "");
-  if (!key) return text("key is required", true);
-  const value = await kv.get(key);
-  return { key, value: value ?? null };
+  const mode = String(args.mode || "");
+  switch (mode) {
+    case "get": {
+      const key = String(args.key || "");
+      if (!key) return text("key is required", true);
+      return { key, value: (await kv.get(key)) ?? null };
+    }
+    case "set": {
+      const key = String(args.key || "");
+      if (!key) return text("key is required", true);
+      const value = typeof args.value === "string" ? args.value : JSON.stringify(args.value);
+      const ttl = typeof args.ttlSeconds === "number" && Number.isFinite(args.ttlSeconds) ? args.ttlSeconds : undefined;
+      if (ttl !== undefined) await kv.put(key, value, { expirationTtl: ttl });
+      else await kv.put(key, value);
+      return { ok: true, key };
+    }
+    case "list": {
+      const prefix = typeof args.prefix === "string" ? args.prefix : "";
+      const limit = Math.min(Math.max(Number(args.limit) || 100, 1), 1000);
+      const res = await kv.list({ prefix, limit });
+      return { keys: res.keys.map((k) => ({ name: k.name, expiration: k.expiration ?? null })) };
+    }
+    case "delete": {
+      const key = String(args.key || "");
+      if (!key) return text("key is required", true);
+      await kv.delete(key);
+      return { ok: true, deleted: key };
+    }
+    default:
+      return text(`kv mode must be get|set|list|delete (got '${mode}')`, true);
+  }
 }
 
-async function toolKvSet(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const kv = need(env.KV, "KV");
-  const key = String(args.key || "");
-  if (!key) return text("key is required", true);
-  const value = typeof args.value === "string" ? args.value : JSON.stringify(args.value);
-  const ttl = typeof args.ttlSeconds === "number" && Number.isFinite(args.ttlSeconds) ? args.ttlSeconds : undefined;
-  if (ttl !== undefined) await kv.put(key, value, { expirationTtl: ttl });
-  else await kv.put(key, value);
-  return { ok: true, key };
-}
-
-async function toolKvList(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const kv = need(env.KV, "KV");
-  const prefix = typeof args.prefix === "string" ? args.prefix : "";
-  const limit = Math.min(Math.max(Number(args.limit) || 100, 1), 1000);
-  const res = await kv.list({ prefix, limit });
-  return { keys: res.keys.map((k) => ({ name: k.name, expiration: k.expiration ?? null })) };
-}
-
-async function toolKvDelete(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const kv = need(env.KV, "KV");
-  const key = String(args.key || "");
-  if (!key) return text("key is required", true);
-  await kv.delete(key);
-  return { ok: true, deleted: key };
-}
-
-async function toolD1(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function toolSql(env: Env, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const db = need(env.DB, "DB");
   const sql = String(args.sql || "").trim();
   if (!sql) return text("sql is required", true);
@@ -455,4 +550,22 @@ async function toolD1(env: Env, args: Record<string, unknown>): Promise<Record<s
   return out;
 }
 
-
+function toolGuide(): Record<string, unknown> {
+  return {
+    device: "cloud",
+    description:
+      "In-process backend device on the code-mcp gateway: storage, data, web, and a real coding sandbox (Cloudflare Containers). No AI model runs here - an AI harness on another device calls these tools through the gateway.",
+    tools: "bash, read, write, ls, job, fetch, search, kv, sql",
+    filesystem:
+      "bash/read/write/ls operate inside the dev container (node, bun, python, git, bash, ripgrep). /workspace is the default workdir and the container has internet access (git clone, npm/pip install work). The filesystem is EPHEMERAL: it resets when the container instance sleeps or recycles (scale-to-zero). Use kv/sql for anything that must survive.",
+    workflow: [
+      'Clone a repo: bash(cmd="git clone <url>", cwd="/workspace")',
+      'Work on it: bash(cmd="npm install && npm test", cwd="/workspace/<repo>")',
+      "Long-running processes: job(mode=start, cmd=...) -> job(mode=status, pid=...) -> job(mode=stop, pid=...)",
+      "Durable state: kv(mode=get|set|list|delete) and sql (D1 database)",
+      "Web: fetch(url) for pages/APIs, search(query) for web search",
+    ],
+    cost:
+      "The container scales to zero when idle; you are billed only for actively-running time (covered by the Workers Paid plan allotment). Deactivating the device stops all requests - no cost while deactivated.",
+  };
+}

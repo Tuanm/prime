@@ -83,7 +83,7 @@ npx wrangler deploy
 
 The gateway also exposes an **in-process device** (`deviceId: cloud`, from `VIRTUAL_DEVICE_IDS`) that needs no tunnel. Its tools run in the Worker against Cloudflare services, and — for shell/file/jobs — inside a **Cloudflare Container** (dev image: node, bun, python, git, bash, ripgrep; see `Dockerfile` + `src/coding-sandbox.ts`).
 
-Tools: `web.fetch`, `kv.get/set/list/delete`, `d1.query`, `shell.run`, `fs.read/write/list`, `jobs.start/status/stop`. The sandbox is the only place with real processes: plain Workers cannot spawn them.
+Tools (code-mcp naming convention): `bash`, `read`, `write`, `ls`, `job`, `fetch`, `search`, `kv`, `sql`, `guide`. The sandbox is the only place with real processes: plain Workers cannot spawn them.
 
 | Component | Responsibility |
 | --- | --- |
