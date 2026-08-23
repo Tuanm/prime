@@ -78,6 +78,20 @@ npx wrangler deploy
 | `DEVICE_TOKENS` | recommended | JSON map `{"deviceId":"token",…}`; authenticates devices at `/ws` and relay requests at `/mcp` |
 | `DEVICE_TOKEN` | optional | Shared fallback token for all devices when no per-device map is set |
 | `GATEWAY_TOKEN` | optional | Client → gateway bearer auth for `/mcp/*` |
+
+## Cloud device (virtual device + coding sandbox)
+
+The gateway also exposes an **in-process device** (`deviceId: cloud`, from `VIRTUAL_DEVICE_IDS`) that needs no tunnel. Its tools run in the Worker against Cloudflare services, and — for shell/file/jobs — inside a **Cloudflare Container** (dev image: node, bun, python, git, bash, ripgrep; see `Dockerfile` + `src/coding-sandbox.ts`).
+
+Tools: `web.fetch`, `kv.get/set/list/delete`, `d1.query`, `shell.run`, `fs.read/write/list`, `jobs.start/status/stop`. The sandbox is the only place with real processes: plain Workers cannot spawn them.
+
+| Component | Responsibility |
+| --- | --- |
+| `src/cloud-device.ts` | In-process MCP server for virtual devices; routes tools to KV/D1 or the sandbox |
+| `src/coding-sandbox.ts` | `CodingSandbox` — Container DO with RPC methods (`shellRun`, `fs*`, `job*`) |
+| `Dockerfile` | Dev image built on deploy (needs a local Docker daemon, e.g. `colima start`) |
+
+Deploy requires the `[[containers]]` binding + a `CODING_SANDBOX` DO binding + migration `v2`. First deploy builds/pushes the image and provisions the container (can take a few minutes).
 | `ADMIN_TOKEN` | optional | `GET /devices` auth (defaults to `GATEWAY_TOKEN`); endpoint hidden (404) when neither is set |
 
 Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>`, `?token=<token>`, or `X-Device-Token` (device credentials).

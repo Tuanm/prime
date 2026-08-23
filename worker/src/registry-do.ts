@@ -11,7 +11,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
-import { validDeviceId } from "./config";
+import { validDeviceId, virtualDeviceIds } from "./config";
 
 const ONLINE_TTL_DEFAULT_MS = 150_000; // longer than keepalive timeout; swept on read
 const TOKEN_MAX = 256; // token length cap (sanity bound)
@@ -23,6 +23,7 @@ interface DeviceRec {
 export class RegistryDO extends DurableObject<Env> {
   private online = new Map<string, DeviceRec>();
   private tokens = new Map<string, string>(); // deviceId -> token (authoritative)
+  private virtual = new Set<string>(); // in-process devices: always online, never swept
   private onlineTtlMs = ONLINE_TTL_DEFAULT_MS;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -53,6 +54,25 @@ export class RegistryDO extends DurableObject<Env> {
             }
             if (this.tokens.size > 0) await this.persistTokens();
           } catch {}
+        }
+        // Virtual devices: merge their tokens unconditionally (they may be the
+        // only entries on a fresh registry) and mark them always-online.
+        if (this.env.VIRTUAL_DEVICE_TOKENS) {
+          try {
+            const seed = JSON.parse(this.env.VIRTUAL_DEVICE_TOKENS) as Record<string, unknown>;
+            let changed = false;
+            for (const [id, tok] of Object.entries(seed)) {
+              if (typeof tok === "string" && validDeviceId(id) && tok.length > 0) {
+                this.tokens.set(id, tok);
+                changed = true;
+              }
+            }
+            if (changed) await this.persistTokens();
+          } catch {}
+        }
+        for (const id of virtualDeviceIds(this.env)) {
+          this.virtual.add(id);
+          this.online.set(id, { seenAt: Date.now() });
         }
       } catch {}
     });
@@ -94,6 +114,7 @@ export class RegistryDO extends DurableObject<Env> {
         deviceId,
         token,
         online: this.online.has(deviceId),
+        virtual: this.virtual.has(deviceId),
       }));
       return Response.json({ devices });
     }
@@ -121,6 +142,7 @@ export class RegistryDO extends DurableObject<Env> {
           deviceId,
           token: t,
           online: this.online.has(deviceId),
+          virtual: this.virtual.has(deviceId),
         })),
       });
     }
@@ -145,6 +167,7 @@ export class RegistryDO extends DurableObject<Env> {
           deviceId,
           token: t,
           online: this.online.has(deviceId),
+          virtual: this.virtual.has(deviceId),
         })),
       });
     }
@@ -156,6 +179,7 @@ export class RegistryDO extends DurableObject<Env> {
     const now = Date.now();
     let changed = false;
     for (const [id, rec] of this.online) {
+      if (this.virtual.has(id)) continue; // virtual devices never go stale
       if (now - rec.seenAt > this.onlineTtlMs) {
         this.online.delete(id);
         changed = true;

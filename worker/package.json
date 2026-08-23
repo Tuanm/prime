@@ -18,5 +18,8 @@
     "workerd@1.20250718.0": true,
     "esbuild@0.17.19": true,
     "sharp@0.33.5": true
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
   }
 }

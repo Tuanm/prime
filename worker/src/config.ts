@@ -37,6 +37,17 @@ export interface Env {
   ONLINE_TTL_MS?: string; // registry online-entry lifetime (default 150s)
   REGISTRY_REFRESH_MS?: string; // device -> registry re-register cadence (default 30s)
   ENVIRONMENT?: string;
+  // Virtual (in-process) devices: ids handled by the gateway itself instead of
+  // a WebSocket tunnel (see src/cloud-device.ts). VIRTUAL_DEVICE_IDS is a
+  // comma-separated var; VIRTUAL_DEVICE_TOKENS is a JSON map { id: token } that
+  // the RegistryDO merges into the device registry.
+  VIRTUAL_DEVICE_IDS?: string;
+  VIRTUAL_DEVICE_TOKENS?: string;
+  // Optional Cloud-service bindings for the cloud device tools.
+  DB?: D1Database;
+  KV?: KVNamespace;
+  // The coding sandbox container (CodingSandbox DO) - shell/fs/jobs tools.
+  CODING_SANDBOX: DurableObjectNamespace;
   DEVICES: DurableObjectNamespace;
   REGISTRY: DurableObjectNamespace;
 }
@@ -89,6 +100,16 @@ export function loadConfig(env: Env): GatewayConfig {
 const DEVICE_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 export function validDeviceId(s: string): boolean {
   return DEVICE_ID_RE.test(s);
+}
+
+// Parse the VIRTUAL_DEVICE_IDS var into a set of valid device ids.
+export function virtualDeviceIds(env: Env): Set<string> {
+  const out = new Set<string>();
+  for (const part of (env.VIRTUAL_DEVICE_IDS || "").split(",")) {
+    const id = part.trim();
+    if (validDeviceId(id)) out.add(id);
+  }
+  return out;
 }
 
 export function timingSafeEq(a: string, b: string): boolean {

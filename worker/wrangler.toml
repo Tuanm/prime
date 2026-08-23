@@ -24,17 +24,50 @@ compatibility_flags = ["nodejs_compat"]
 bindings = [
   { name = "DEVICES", class_name = "DeviceDO" },
   { name = "REGISTRY", class_name = "RegistryDO" },
+  { name = "CODING_SANDBOX", class_name = "CodingSandbox" },
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DeviceDO", "RegistryDO"]
 
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CodingSandbox"]
+
+# Coding sandbox container: the dev image the cloud device's shell/fs/jobs
+# tools exec into. Built from ./Dockerfile (needs a local Docker daemon or
+# Workers Builds) and pushed to the Cloudflare container registry on deploy.
+[[containers]]
+class_name = "CodingSandbox"
+image = "./Dockerfile"
+instance_type = "standard-1"
+max_instances = 1
+
+# ---- Cloud device ("virtual device") bindings -----------------------------
+# The gateway exposes an in-process MCP device (deviceId from VIRTUAL_DEVICE_IDS,
+# default "cloud") that executes tools directly against Cloudflare services -
+# no WebSocket tunnel needed. Add/remove bindings freely; tools that find their
+# binding missing report "not configured" instead of failing hard.
+# NB: keep root-level keys (like 'ai' above) ABOVE all [[table]] headers.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "code-mcp-db"
+database_id = "00e3f87d-928a-47ba-b6f0-d1c607bade9f"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "d36acd23e12945058bf9910182deeec7"
+
 # Secrets (set with `wrangler secret put`):
 #   DEVICE_TOKENS   JSON map { "deviceId": "token", ... } - REQUIRED for secure
 #                   deployments. Authenticates devices at /ws connect and
 #                   relay requests at /mcp, so an attacker cannot claim or
 #                   intercept a deviceId, and cannot enumerate the roster.
+#   VIRTUAL_DEVICE_TOKENS   JSON map { "cloud": "token", ... } - credentials for
+#                   the in-process virtual devices (see VIRTUAL_DEVICE_IDS).
+#                   Merged into the registry alongside DEVICE_TOKENS.
 #   GATEWAY_TOKEN   optional client -> gateway auth for /mcp/*
 #   DEVICE_TOKEN    optional shared fallback token for all devices
 #   ADMIN_TOKEN     optional /devices auth (defaults to GATEWAY_TOKEN)
@@ -51,6 +84,9 @@ PING_INTERVAL_MS = "30000"
 PING_MAX_MISSES = "2"
 IDLE_TIMEOUT_MS = "120000"
 ENVIRONMENT = "production"
+# Virtual devices: comma-separated deviceIds handled in-process (no tunnel).
+# Each id must also have a token in the VIRTUAL_DEVICE_TOKENS secret.
+VIRTUAL_DEVICE_IDS = "cloud"
 
 # Optional comma-separated WS origin whitelist, e.g. ALLOWED_ORIGINS =
 # "https://app.example.com,https://admin.example.com"

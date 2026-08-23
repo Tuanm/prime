@@ -16,13 +16,15 @@
 // RegistryDO (durable storage), seeded once from the DEVICE_TOKENS secret, so
 // the admin UI can register devices at runtime without a redeploy.
 
-import { loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId } from "./config";
+import { loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { ADMIN_HTML } from "./admin-ui";
+import { handleCloudMcp } from "./cloud-device";
 
 export { DeviceDO } from "./device-do";
 export { RegistryDO } from "./registry-do";
+export { CodingSandbox } from "./coding-sandbox";
 
 const unauthorized = () => Response.json({ error: "unauthorized" }, { status: 401 });
 
@@ -174,6 +176,14 @@ export default {
         if (!given || !timingSafeEq(given, expected)) return unauthorized();
       }
 
+      // Virtual devices (in-process, no tunnel): handle the MCP request right
+      // here. Auth above already validated the gateway token and the device
+      // credential (registered via VIRTUAL_DEVICE_TOKENS), so this is the same
+      // trust boundary as a tunnel device - just without a WebSocket.
+      if (virtualDeviceIds(env).has(deviceId)) {
+        return handleCloudMcp(env, request);
+      }
+
       const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
       // Rewrite the path to /mcp (the DO matches that) and add x-device-id so
       // the DO knows its device regardless of the URL.
@@ -231,6 +241,11 @@ export default {
       if (expected !== undefined) {
         const given = extractDeviceToken(request, url);
         if (!given || !timingSafeEq(given, expected)) return unauthorized();
+      }
+
+      // Virtual devices are in-process only - they have no tunnel to upgrade.
+      if (virtualDeviceIds(env).has(deviceId)) {
+        return Response.json({ error: "virtual device has no tunnel" }, { status: 400 });
       }
 
       const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
