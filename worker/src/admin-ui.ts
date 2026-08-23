@@ -451,7 +451,8 @@ export const ADMIN_HTML = `<!doctype html>
           box.appendChild(idInput);
           box.appendChild(tokInput);
           box.appendChild(menuWrap);
-          li.appendChild(dot);
+          if (cloud) li.appendChild(cloud); // virtual devices render a cloud icon
+          if (dot) li.appendChild(dot); // tunnel devices render a status dot
           li.appendChild(box);
           listEl.appendChild(li);
 
