@@ -90,11 +90,11 @@ export const ADMIN_HTML = `<!doctype html>
         background: #fff;
         border: 1.5px solid #b91c1c;
       }
-      /* display:flex + line-height:0 keep the icon perfectly centered next to
-         the rows' 10px dots; inline-flex would introduce a baseline offset. */
+      /* Same footprint as the 10px status dot (width + gap must match) so
+         the box's left border aligns exactly with the other rows. */
       .cloud-ic {
-        width: 12px;
-        height: 12px;
+        width: 10px;
+        height: 10px;
         flex: none;
         display: flex;
         align-items: center;
