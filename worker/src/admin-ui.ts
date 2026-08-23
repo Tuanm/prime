@@ -109,11 +109,22 @@ export const ADMIN_HTML = `<!doctype html>
       .cloud-ic.off {
         color: #999;
       }
+      /* Disabled rows dim via colors, NOT opacity: the context menu lives
+         inside .box and opacity would make the menu see-through. */
       .row.disabled .box {
-        opacity: 0.55;
+        border-color: #ccc;
+        background: #fafafa;
       }
-      .row.disabled .id-input {
+      .row.disabled .id-input,
+      .row.disabled .tok-input {
         color: #999;
+      }
+      .row.disabled .menu-btn {
+        border-color: #ccc;
+        color: #999;
+      }
+      .row.disabled .dot.on {
+        background: #999;
       }
       .box {
         flex: 1;
@@ -432,19 +443,18 @@ export const ADMIN_HTML = `<!doctype html>
           delItem.type = "button";
           delItem.className = "danger";
           delItem.textContent = "Delete";
-          var stateItem = null;
-          if (virtual) {
-            // Cloud devices toggle Deactivate/Activate instead of Delete.
-            stateItem = document.createElement("button");
-            stateItem.type = "button";
-            stateItem.textContent = dev.disabled ? "Activate" : "Deactivate";
-            if (!dev.disabled) stateItem.className = "danger";
-          }
+          // Every device can be Deactivated/Activated (a disabled device is
+          // rejected with 403 at /mcp and /ws). Tunnel devices additionally
+          // keep Delete (removes them from the registry entirely).
+          var stateItem = document.createElement("button");
+          stateItem.type = "button";
+          stateItem.textContent = dev.disabled ? "Activate" : "Deactivate";
+          if (!dev.disabled) stateItem.className = "danger";
           menu.appendChild(toolsItem);
           menu.appendChild(clientsItem);
           menu.appendChild(saveItem);
-          if (stateItem) menu.appendChild(stateItem);
-          else menu.appendChild(delItem);
+          menu.appendChild(stateItem);
+          if (!virtual) menu.appendChild(delItem);
           menuWrap.appendChild(btn);
           menuWrap.appendChild(menu);
 
