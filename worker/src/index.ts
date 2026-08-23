@@ -133,6 +133,16 @@ export default {
       return reg.fetch("https://registry/devices");
     }
 
+    // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.
+    // Return a clear 405 instead of a bare 404 so opening the URL in a browser
+    // (or an SSE-style client) gets an actionable message, not "cannot connect".
+    if (request.method !== "POST" && url.pathname.startsWith("/mcp/")) {
+      return Response.json(
+        { error: "method not allowed", hint: "POST JSON-RPC to this URL; GET/HEAD are not supported (Streamable HTTP)" },
+        { status: 405 },
+      );
+    }
+
     // POST /mcp/{deviceId}
     if (request.method === "POST" && url.pathname.startsWith("/mcp/")) {
       if (cfg.gatewayToken) {
