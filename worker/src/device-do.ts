@@ -411,11 +411,13 @@ function num(raw: string | undefined, def: number): number {
 }
 
 function toJsonRpcResponse(msg: TunnelMessage): Response {
-  if ("response" in msg && msg.response) {
+  if ("response" in msg && msg.response !== null && msg.response !== undefined) {
     return Response.json(msg.response);
   }
   if ("error" in msg && msg.error) {
     return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32603, message: msg.error } });
   }
-  return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "empty response" } });
+  // response:null = notification acknowledged - the client expects 204 No
+  // Content, never an error body.
+  return new Response(null, { status: 204 });
 }
