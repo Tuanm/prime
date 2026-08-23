@@ -78,6 +78,8 @@ npx wrangler deploy
 | `DEVICE_TOKENS` | recommended | JSON map `{"deviceId":"token",…}`; authenticates devices at `/ws` and relay requests at `/mcp` |
 | `DEVICE_TOKEN` | optional | Shared fallback token for all devices when no per-device map is set |
 | `GATEWAY_TOKEN` | optional | Client → gateway bearer auth for `/mcp/*` |
+| `ADMIN_TOKEN` | optional | `GET /devices` auth (defaults to `GATEWAY_TOKEN`); endpoint hidden (404) when neither is set |
+| `VIRTUAL_DEVICE_TOKENS` | for cloud device | JSON map `{"cloud":"token",…}`; credentials for the in-process virtual device |
 
 ## Cloud device (virtual device + coding sandbox)
 
@@ -92,7 +94,6 @@ Tools (code-mcp naming convention): `bash`, `read`, `write`, `ls`, `job`, `fetch
 | `Dockerfile` | Dev image built on deploy (needs a local Docker daemon, e.g. `colima start`) |
 
 Deploy requires the `[[containers]]` binding + a `CODING_SANDBOX` DO binding + migration `v2`. First deploy builds/pushes the image and provisions the container (can take a few minutes).
-| `ADMIN_TOKEN` | optional | `GET /devices` auth (defaults to `GATEWAY_TOKEN`); endpoint hidden (404) when neither is set |
 
 Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>`, `?token=<token>`, or `X-Device-Token` (device credentials).
 
@@ -122,7 +123,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | No one can intercept relay traffic | Same token required on `/mcp` before the DO is touched |
 | No existence oracle | Unknown deviceId → identical 401; no DO created for unauthenticated probes |
 | No roster leak | `/devices` hidden (404) without admin token; admin-gated (401) otherwise |
-| Admin UI | `/admin` + registry API behind Cloudflare Access (email policies) |
+| Admin UI | `/admin` + registry API behind Cloudflare Access (identity policy configured in the dashboard) |
 | No register takeover | Register message with a different deviceId is rejected |
 | No slow-device DoS | Per-device pending budget; body cap (413) |
 | No stale tunnels | Keepalive alarm drops dead tunnels |
@@ -140,11 +141,10 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 
-> **Admin UI**: `/admin` and `/admin/api/*` are protected by a Cloudflare
-> **Access** application scoped to `<worker>/admin` (policies: allow the
-> operator's email + `@tuanm.dev`). No worker-level admin token is required
-> there - Access is the trust boundary. `GET /devices` stays admin-token
-> gated so scripts can query it without Access.
+> **Admin UI** — `/admin` and `/admin/api/*` are protected by **Cloudflare
+> Access**; the identity policy is configured in the Cloudflare dashboard.
+> `GET /devices` uses the admin token instead, so scripts can query it
+> without an Access session.
 
 ## Local development
 
