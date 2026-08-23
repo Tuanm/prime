@@ -27,6 +27,17 @@ Connect to a [code-mcp-gateway](https://github.com/Tuanm/code-mcp-gateway) to ex
 bun code-mcp.ts     --gateway wss://gateway.example.workers.dev --port 7777
 ```
 
+The gateway authenticates every device at connect time against its device
+registry (unknown ids or missing/mismatched tokens are rejected with 401, so
+nobody can hijack a registered device). Pass `--id` with the registered device
+ID and `--token` with that device's token; the token is presented to the
+gateway as `X-Device-Token` on the WebSocket upgrade:
+```bash
+```
+
+Need a credential that differs from the local server token? Use
+`--gateway-token` — it overrides `--token` for the gateway connection only.
+
 The client implements the same gateway WebSocket protocol with proactive
 liveness detection:
 
@@ -46,7 +57,8 @@ liveness detection:
 | --------------------------- | ---------------------------------------------------------------------- | ----------------- |
 | `--port <n>`                | Listen port                                                            | `7777` or `$PORT` |
 | `--bind <addr>`             | Bind address                                                           | `127.0.0.1`       |
-| `--token <s>`               | Require `?token=<s>` or `Authorization: Bearer <s>` on every request   | no auth           |
+| `--token <s>`               | Require `?token=<s>` or `Authorization: Bearer <s>` on every request; in gateway mode also presented to the gateway as the device credential | no auth |
+| `--gateway-token <s>`      | Device credential sent to the gateway on connect (overrides `--token`); must match the token registered for `--id` in the gateway | `--token` |
 | `--enable-memory`           | Enable remember/forget/recall tools                                    | disabled          |
 | `--disallowed-tools <list>` | Comma-separated list of tools to disable                               | none              |
 | `--public`                  | Expose via Cloudflare quick tunnel (requires `cloudflared`)            | disabled          |
