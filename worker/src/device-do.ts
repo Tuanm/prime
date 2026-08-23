@@ -412,6 +412,13 @@ function num(raw: string | undefined, def: number): number {
 
 function toJsonRpcResponse(msg: TunnelMessage): Response {
   if ("response" in msg && msg.response !== null && msg.response !== undefined) {
+    // Bare {} = notification acknowledged by a legacy device client (it has no
+    // response body for notifications). Answer 204 No Content - strict clients
+    // reject error bodies here. Real tool responses always carry the full
+    // JSON-RPC envelope, so a key-less object is unambiguous.
+    if (typeof msg.response === "object" && Object.keys(msg.response).length === 0) {
+      return new Response(null, { status: 204 });
+    }
     return Response.json(msg.response);
   }
   if ("error" in msg && msg.error) {
