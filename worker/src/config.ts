@@ -33,6 +33,8 @@ export interface Env {
   KEEPALIVE_TIMEOUT_MS?: string;
   PING_INTERVAL_MS?: string;
   PING_MAX_MISSES?: string;
+  SSE_IDLE_TIMEOUT_MS?: string; // close an SSE session after this long idle (default 120s)
+  MAX_SSE_SESSIONS?: string; // cap concurrent SSE streams per device (default 32)
   IDLE_TIMEOUT_MS?: string;
   ONLINE_TTL_MS?: string; // registry online-entry lifetime (default 150s)
   REGISTRY_REFRESH_MS?: string; // device -> registry re-register cadence (default 30s)

@@ -7,6 +7,8 @@
 //   DELETE /admin/api/devices/{id}-> remove a device (admin token)
 //   GET  /devices                 -> online deviceIds (admin token)
 //   POST /mcp/{deviceId}          -> gateway auth + rate limit -> DeviceDO
+//   GET  /sse/{deviceId}          -> gateway auth + rate limit -> DeviceDO SSE stream
+//   POST /messages/{deviceId}     -> SSE client->server leg (202 + stream response)
 //   WS   /ws/{deviceId}           -> device auth + origin check -> DeviceDO upgrade
 //   WS   /ws?deviceId=            -> legacy path -> DeviceDO upgrade
 //
@@ -61,6 +63,17 @@ async function effectiveDisabledSet(env: Env): Promise<Set<string>> {
   return set;
 }
 
+// Per-device auth mode must be driven ONLY by real (tunnel) device tokens.
+// The in-process virtual devices (e.g. the built-in "cloud" worker device) are a
+// separate concern: they must NOT force every tunnel deviceId into per-device
+// mode, or a gateway that is only running the cloud device would 401 any
+// unregistered tunnel device (silently disabling open / shared-token access).
+function hasNonVirtualDevice(map: Map<string, string>, env: Env): boolean {
+  const virt = virtualDeviceIds(env);
+  for (const id of map.keys()) if (!virt.has(id)) return true;
+  return false;
+}
+
 async function effectiveDeviceMap(env: Env): Promise<Map<string, string>> {
   if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.map;
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
@@ -86,6 +99,47 @@ function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
     limiterMax = cfg.rateMax;
   }
   return rateLimiter;
+}
+
+// Shared authorization for the relay endpoints (POST /mcp, GET /sse, POST
+// /messages). Every relay request must pass the same gates: gateway token,
+// rate limit, valid deviceId, device credential, disabled + virtual checks.
+// Returns null when authorized, else an error Response. The caller then forwards
+// to the DeviceDO (which re-checks / records the client for defense in depth).
+async function authorizeRelay(
+  deviceId: string,
+  request: Request,
+  url: URL,
+  cfg: GatewayConfig,
+  env: Env,
+): Promise<Response | null> {
+  if (cfg.gatewayToken) {
+    const t = extractToken(request, url, "auth");
+    if (!t || !timingSafeEq(t, cfg.gatewayToken)) return unauthorized();
+  }
+  if (!getLimiter(cfg).allow(clientIp(request))) {
+    return Response.json({ error: "rate limited" }, { status: 429 });
+  }
+  if (!validDeviceId(deviceId)) {
+    return Response.json({ error: "invalid deviceId" }, { status: 400 });
+  }
+  const map = await effectiveDeviceMap(env);
+  const perDeviceMode = hasNonVirtualDevice(map, env);
+  if (perDeviceMode && !map.has(deviceId)) return unauthorized();
+  const expected = map.get(deviceId) ?? cfg.deviceToken;
+  if (expected !== undefined) {
+    const given = extractDeviceToken(request, url);
+    if (!given || !timingSafeEq(given, expected)) return unauthorized();
+  }
+  if ((await effectiveDisabledSet(env)).has(deviceId)) {
+    return Response.json({ error: "device disabled" }, { status: 403 });
+  }
+  if (virtualDeviceIds(env).has(deviceId)) {
+    // Virtual devices are in-process only (handleCloudMcp) - there is no tunnel
+    // to stream over, so SSE cannot serve them (same as the WS upgrade).
+    return Response.json({ error: "virtual device has no tunnel" }, { status: 400 });
+  }
+  return null;
 }
 
 export default {
@@ -210,7 +264,7 @@ export default {
       // and unauthenticated probes get 401 - never instantiating a Durable
       // Object for them (no DO churn / cost).
       const map = await effectiveDeviceMap(env);
-      const perDeviceMode = map.size > 0;
+      const perDeviceMode = hasNonVirtualDevice(map, env);
       if (perDeviceMode && !map.has(deviceId)) return unauthorized();
       const expected = map.get(deviceId) ?? cfg.deviceToken;
       if (expected !== undefined) {
@@ -254,6 +308,55 @@ export default {
       return stub.fetch(upstream);
     }
 
+    // ---- SSE transport ----------------------------------------------------
+    // GET /sse/{deviceId} opens a server->client text/event-stream. The first
+    // event tells the client the /messages POST endpoint, on which it then sends
+    // JSON-RPC requests (responses arrive over the stream). Auth is identical to
+    // POST /mcp; GET /sse?deviceId= is a legacy alias. Virtual devices have no
+    // tunnel, so SSE cannot serve them (401/400 like the WS upgrade path).
+    if (request.method === "GET" && (url.pathname.startsWith("/sse/") || url.pathname === "/sse")) {
+      const deviceId = url.pathname.startsWith("/sse/")
+        ? url.pathname.slice(5)
+        : url.searchParams.get("deviceId") || "";
+      const denied = await authorizeRelay(deviceId, request, url, cfg, env);
+      if (denied) return denied;
+
+      const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
+      const doUrl = new URL(url);
+      doUrl.pathname = "/sse";
+      const headers = new Headers();
+      headers.set("x-device-id", deviceId);
+      const cip = clientIp(request);
+      if (cip && cip !== "unknown") headers.set("x-client-ip", cip);
+      const t = extractToken(request, url, "auth");
+      if (t) headers.set("x-auth-token", t);
+      return stub.fetch(new Request(doUrl, { method: "GET", headers }));
+    }
+
+    // POST /messages/{deviceId}?session=... - the SSE client->server leg. A
+    // POST is ACKed with 202; the JSON-RPC response is pushed over the stream.
+    if (request.method === "POST" && (url.pathname.startsWith("/messages/") || url.pathname === "/messages")) {
+      const deviceId = url.pathname.startsWith("/messages/")
+        ? url.pathname.slice(10)
+        : url.searchParams.get("deviceId") || "";
+      const denied = await authorizeRelay(deviceId, request, url, cfg, env);
+      if (denied) return denied;
+
+      const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
+      const doUrl = new URL(url);
+      doUrl.pathname = "/messages";
+      const headers = new Headers();
+      headers.set("content-type", request.headers.get("content-type") || "application/json");
+      headers.set("x-device-id", deviceId);
+      const cip = clientIp(request);
+      if (cip && cip !== "unknown") headers.set("x-client-ip", cip);
+      const xdt = request.headers.get("x-device-token");
+      if (xdt) headers.set("x-device-token", xdt);
+      const t = extractToken(request, url, "auth");
+      if (t) headers.set("x-auth-token", t);
+      return stub.fetch(new Request(doUrl, { method: "POST", headers, body: request.body }));
+    }
+
     // WS upgrade: /ws/{deviceId} (preferred) or /ws?deviceId= (legacy)
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       // Origin whitelist applies to browser-style WS clients.
@@ -282,7 +385,7 @@ export default {
       // deviceIds get the same 401 (no existence oracle). The DO re-checks
       // the credential for defense in depth.
       const map = await effectiveDeviceMap(env);
-      const perDeviceMode = map.size > 0;
+      const perDeviceMode = hasNonVirtualDevice(map, env);
       if (perDeviceMode && !map.has(deviceId)) return unauthorized();
       const expected = map.get(deviceId) ?? cfg.deviceToken;
       if (expected !== undefined) {

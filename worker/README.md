@@ -10,6 +10,7 @@
 | **Where** | Cloudflare Worker + Durable Objects (needs a **Paid** plan) |
 | **Why DOs** | A Worker's memory is per-isolate; only a Durable Object per `deviceId` guarantees every `/mcp` request finds the device's WebSocket |
 | **Protocol** | Wire-compatible with the code-mcp device protocol: register / keepalive / JSON-RPC envelope |
+| **Client transports** | **Streamable HTTP** (`POST /mcp/{id}`) and **HTTP with SSE** (`GET /sse/{id}` + `POST /messages/{id}`) — auth-identical, both relay over the device tunnel |
 | **Cost model** | Idle tunnels hibernate (WebSocket Hibernation API); no servers to run |
 
 ## Architecture
@@ -109,6 +110,8 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `IDLE_TIMEOUT_MS` | `120000` | Hibernation idle threshold |
 | `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `60000` / `100` | Per-isolate in-memory limiter |
 | `ALLOWED_ORIGINS` | unset | Comma-separated WS origin whitelist (403 otherwise) |
+| `SSE_IDLE_TIMEOUT_MS` | `120000` | Close an SSE session after this long with no activity (stream-spam guard) |
+| `MAX_SSE_SESSIONS` | `32` | Cap concurrent SSE streams per device (memory guard → `503` when full) |
 
 > **Long tool calls** — Durable Objects and incoming HTTP requests have
 > **unlimited wall time** while the caller stays connected; only CPU time is
@@ -138,6 +141,8 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `GET` / `POST` / `DELETE` | `/admin/api/devices(/{id})` | Cloudflare Access | List / register / remove devices |
 | `GET` | `/devices` | admin token | List online devices (machine endpoint) |
 | `POST` | `/mcp/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
+| `GET` | `/sse/{deviceId}` | gateway + device | Open a `text/event-stream`; first `endpoint` event tells the client the `/messages` POST URL (`/sse?deviceId=` legacy alias) |
+| `POST` | `/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
 | `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 

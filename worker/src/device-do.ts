@@ -32,14 +32,21 @@ function perDeviceToken(env: Env, deviceId: string): string | undefined {
   }
 }
 
-interface PendingEntry {
-  deviceId: string;
-  resolve: (res: Response) => void;
-  timer: ReturnType<typeof setTimeout>;
+type PendingEntry =
+  | { kind: "http"; deviceId: string; resolve: (res: Response) => void; timer: ReturnType<typeof setTimeout> }
+  | { kind: "sse"; deviceId: string; sessionId: string; clientId: unknown; timer: ReturnType<typeof setTimeout> };
+
+interface SseSession {
+  sessionId: string;
+  controller: ReadableStreamDefaultController<Uint8Array> | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  inbound: number;
 }
 
 const CLIENT_TTL_MS = 600_000; // relay clients shown for the last 10 min
 const MAX_TRACKED_CLIENTS = 2_000; // cap distinct relay-client IPs (memory guard)
+const SSE_IDLE_TIMEOUT_MS = 120_000; // close an SSE session with no activity (stream-spam guard)
+const MAX_SSE_SESSIONS = 32; // cap concurrent SSE streams per device (memory guard)
 
 export class DeviceDO extends DurableObject<Env> {
   private ws: WebSocket | null = null;
@@ -51,6 +58,9 @@ export class DeviceDO extends DurableObject<Env> {
   private maxPending = 100;
   private timeoutMs = 30_000;
   private maxBodyBytes = 1024 * 1024;
+  private sseSessions = new Map<string, SseSession>();
+  private sseIdleTimeoutMs = SSE_IDLE_TIMEOUT_MS;
+  private maxSseSessions = MAX_SSE_SESSIONS;
   private deviceToken?: string;
   private perDeviceToken: string | null = null;
   private deviceId = "";
@@ -62,6 +72,8 @@ export class DeviceDO extends DurableObject<Env> {
     this.maxPending = num(env.MAX_PENDING_PER_DEVICE, 100);
     this.timeoutMs = num(env.TIMEOUT_MS, 30_000);
     this.maxBodyBytes = num(env.MAX_BODY_BYTES, 1024 * 1024);
+    this.sseIdleTimeoutMs = num(env.SSE_IDLE_TIMEOUT_MS, SSE_IDLE_TIMEOUT_MS);
+    this.maxSseSessions = num(env.MAX_SSE_SESSIONS, MAX_SSE_SESSIONS);
     this.deviceToken = env.DEVICE_TOKEN || undefined;
     this.perDeviceToken = null;
     // Restore a live WebSocket after hibernation wake: class fields are reset
@@ -97,6 +109,16 @@ export class DeviceDO extends DurableObject<Env> {
     // HTTP relay: POST /mcp (JSON-RPC body)
     if (request.method === "POST" && (url.pathname === "/mcp" || url.pathname === "/")) {
       return this.handleMcp(request);
+    }
+
+    // SSE transport: GET /sse opens a server->client stream, POST /messages
+    // carries client->server JSON-RPC. Both are reached from index.ts (which
+    // rewrites /sse/{id} -> /sse and /messages/{id} -> /messages after auth).
+    if (request.method === "GET" && url.pathname === "/sse") {
+      return this.handleSse(request);
+    }
+    if (request.method === "POST" && url.pathname === "/messages") {
+      return this.handleMessages(request);
     }
 
     // Admin: relay clients seen for this device (recent, TTL-swept).
@@ -360,11 +382,8 @@ export class DeviceDO extends DurableObject<Env> {
     };
 
     return new Promise<Response>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        resolve(Response.json({ error: "timeout" }, { status: 504 }));
-      }, this.timeoutMs);
-      this.pending.set(id, { deviceId: this.deviceId, resolve, timer });
+      const timer = setTimeout(() => this.expirePending(id), this.timeoutMs);
+      this.pending.set(id, { kind: "http", deviceId: this.deviceId, resolve, timer });
 
       try {
         const ws = this.ws;
@@ -383,13 +402,196 @@ export class DeviceDO extends DurableObject<Env> {
     });
   }
 
+  // ---- SSE transport: GET /sse + POST /messages --------------------------
+  //
+  // Legacy MCP "HTTP with SSE" transport. index.ts authenticates each request
+  // (gateway token + device token + rate limit + disabled/virtual checks) and
+  // rewrites the path to /sse or /messages before calling here. This DO already
+  // owns the device tunnel (this.ws) and the pending-request registry, so the
+  // SSE stream reuses both: POST /messages sends a tunnel request, and the
+  // device's response is pushed onto the open SSE stream instead of an HTTP body.
+
+  private async handleSse(request: Request): Promise<Response> {
+    if (!this.deviceId || !validDeviceId(this.deviceId)) {
+      return Response.json({ error: "invalid deviceId" }, { status: 400 });
+    }
+    if (this.sseSessions.size >= this.maxSseSessions) {
+      return Response.json({ error: "too many streams" }, { status: 503 });
+    }
+    // The stream is only useful while the device tunnel is up; reject eagerly so
+    // a client does not hold a dead stream open (parity with /mcp's 503).
+    if (!this.ws || this.ws.readyState !== 1) {
+      return Response.json({ error: "device offline" }, { status: 503 });
+    }
+
+    const sessionId = crypto.randomUUID();
+    const sess: SseSession = { sessionId, controller: null, timer: null, inbound: 0 };
+    const rs = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        sess.controller = controller;
+      },
+      cancel: () => {
+        // Client went away (or the response was aborted): drop the session.
+        this.closeSession(sessionId, null);
+      },
+    });
+    this.sseSessions.set(sessionId, sess);
+    this.resetSessionIdle(sess);
+
+    // First event tells the client where to POST JSON-RPC messages. Standard
+    // MCP clients resolve it against their SSE URL (new URL(data, base)).
+    const endpoint = "/messages/" + encodeURIComponent(this.deviceId) + "?session=" + encodeURIComponent(sessionId);
+    this.pushSseFrame(sess, "endpoint", endpoint);
+
+    return new Response(rs, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "x-accel-buffering": "no",
+      },
+    });
+  }
+
+  private async handleMessages(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const sessionId = url.searchParams.get("session") || request.headers.get("mcp-session-id") || "";
+    if (!sessionId || !this.sseSessions.has(sessionId)) {
+      return Response.json({ error: "unknown session" }, { status: 400 });
+    }
+
+    const length = Number(request.headers.get("content-length") || 0);
+    if (length > this.maxBodyBytes) {
+      return Response.json({ error: "payload too large" }, { status: 413 });
+    }
+    let raw: string;
+    try {
+      raw = await request.text();
+    } catch {
+      return Response.json({ error: "invalid body" }, { status: 400 });
+    }
+    if (raw.length > this.maxBodyBytes) {
+      return Response.json({ error: "payload too large" }, { status: 413 });
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return Response.json({ error: "invalid json" }, { status: 400 });
+    }
+
+    this.recordClient(request, body);
+
+    const obj = (body && typeof body === "object" ? body : {}) as { id?: unknown };
+    const clientId = obj.id ?? null;
+
+    if (!this.ws || this.ws.readyState !== 1) {
+      return Response.json({ error: "device offline" }, { status: 503 });
+    }
+    if (this.pending.size >= this.maxPending) {
+      return Response.json({ error: "device busy" }, { status: 503 });
+    }
+
+    const relayToken =
+      request.headers.get("x-device-token") || url.searchParams.get("token") || undefined;
+
+    const id = crypto.randomUUID();
+    const tunnelReq: TunnelRequest = {
+      id,
+      request: body as TunnelRequest["request"],
+      ...(relayToken && { token: relayToken }),
+    };
+    const sess = this.sseSessions.get(sessionId)!;
+    this.resetSessionIdle(sess);
+    const timer = setTimeout(() => this.expirePending(id), this.timeoutMs);
+    this.pending.set(id, { kind: "sse", deviceId: this.deviceId, sessionId, clientId, timer });
+    try {
+      this.ws.send(JSON.stringify(tunnelReq));
+    } catch {
+      clearTimeout(timer);
+      this.pending.delete(id);
+      return Response.json({ error: "device send failed" }, { status: 502 });
+    }
+    // Accepted: the JSON-RPC response arrives asynchronously over the SSE stream.
+    return new Response(null, { status: 202 });
+  }
+
+  private expirePending(id: string): void {
+    const entry = this.pending.get(id);
+    if (!entry) return;
+    this.pending.delete(id);
+    clearTimeout(entry.timer);
+    if (entry.kind === "http") {
+      entry.resolve(Response.json({ error: "timeout" }, { status: 504 }));
+    } else {
+      const sess = this.sseSessions.get(entry.sessionId);
+      if (sess) this.pushSseError(sess, entry.clientId, -32603, "timeout");
+    }
+  }
+
+  private pushSseMessage(sess: SseSession, msg: TunnelMessage): boolean {
+    const payload = jsonRpcPayload(msg);
+    if (payload === null) return true; // notification acknowledged - no frame
+    return this.pushSseFrame(sess, "message", JSON.stringify(payload));
+  }
+
+  private pushSseError(sess: SseSession, id: unknown, code: number, message: string): boolean {
+    const payload = { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
+    return this.pushSseFrame(sess, "message", JSON.stringify(payload));
+  }
+
+  private pushSseFrame(sess: SseSession, event: string, data: string): boolean {
+    if (!sess.controller) return false;
+    const frame = "event: " + event + "\ndata: " + data + "\n\n";
+    try {
+      sess.controller.enqueue(new TextEncoder().encode(frame));
+      return true;
+    } catch {
+      this.closeSession(sess.sessionId, null);
+      return false;
+    }
+  }
+
+  private resetSessionIdle(sess: SseSession): void {
+    if (sess.timer) clearTimeout(sess.timer);
+    sess.timer = setTimeout(() => this.closeSession(sess.sessionId, null), this.sseIdleTimeoutMs);
+  }
+
+  private closeSession(sessionId: string, err: { code: number; message: string } | null): void {
+    const sess = this.sseSessions.get(sessionId);
+    if (!sess) return;
+    this.sseSessions.delete(sessionId);
+    if (sess.timer) clearTimeout(sess.timer);
+    // Drop any in-flight requests bound to this session.
+    for (const [id, e] of this.pending) {
+      if (e.kind === "sse" && e.sessionId === sessionId) {
+        clearTimeout(e.timer);
+        this.pending.delete(id);
+      }
+    }
+    if (err) this.pushSseFrame(sess, "message", JSON.stringify({ jsonrpc: "2.0", id: null, error: err }));
+    if (sess.controller) {
+      try {
+        sess.controller.close();
+      } catch {}
+    }
+  }
+
   private resolveFromDevice(id: string, msg: TunnelMessage): void {
     const entry = this.pending.get(id);
     if (!entry) return;
     // entry.deviceId === this.deviceId always (DO owns one device).
     clearTimeout(entry.timer);
     this.pending.delete(id);
-    entry.resolve(toJsonRpcResponse(msg));
+    if (entry.kind === "http") {
+      entry.resolve(toJsonRpcResponse(msg));
+    } else {
+      const sess = this.sseSessions.get(entry.sessionId);
+      if (sess) {
+        this.resetSessionIdle(sess);
+        this.pushSseMessage(sess, msg);
+      }
+    }
   }
 
   private failDevice(reason: string): void {
@@ -397,10 +599,18 @@ export class DeviceDO extends DurableObject<Env> {
     this.pending.clear();
     for (const v of victims) {
       clearTimeout(v.timer);
-      try {
-        v.resolve(Response.json({ error: reason }, { status: 503 }));
-      } catch {}
+      if (v.kind === "http") {
+        try {
+          v.resolve(Response.json({ error: reason }, { status: 503 }));
+        } catch {}
+      } else {
+        const sess = this.sseSessions.get(v.sessionId);
+        if (sess) this.pushSseError(sess, v.clientId, -32603, reason);
+      }
     }
+    // The device tunnel is gone: every open SSE stream is now unserviceable and
+    // must be closed (in-flight requests were already errored above).
+    for (const sid of [...this.sseSessions.keys()]) this.closeSession(sid, null);
   }
 }
 
@@ -410,21 +620,28 @@ function num(raw: string | undefined, def: number): number {
   return Number.isFinite(n) && n >= 0 ? n : def;
 }
 
-function toJsonRpcResponse(msg: TunnelMessage): Response {
+// Shared: extract the JSON-RPC payload from a tunnel message. Returns null when
+// the message is a notification acknowledgement (bare {} or response:null) -
+// the client expects no response body, so callers end the exchange silently.
+function jsonRpcPayload(msg: TunnelMessage): unknown | null {
   if ("response" in msg && msg.response !== null && msg.response !== undefined) {
     // Bare {} = notification acknowledged by a legacy device client (it has no
-    // response body for notifications). Answer 204 No Content - strict clients
-    // reject error bodies here. Real tool responses always carry the full
-    // JSON-RPC envelope, so a key-less object is unambiguous.
-    if (typeof msg.response === "object" && Object.keys(msg.response).length === 0) {
-      return new Response(null, { status: 204 });
+    // response body for notifications). Real tool responses always carry the
+    // full JSON-RPC envelope, so a key-less object is unambiguous.
+    if (typeof msg.response === "object" && Object.keys(msg.response as unknown as Record<string, unknown>).length === 0) {
+      return null;
     }
-    return Response.json(msg.response);
+    return msg.response;
   }
   if ("error" in msg && msg.error) {
-    return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32603, message: msg.error } });
+    return { jsonrpc: "2.0", id: null, error: { code: -32603, message: String(msg.error) } };
   }
-  // response:null = notification acknowledged - the client expects 204 No
-  // Content, never an error body.
-  return new Response(null, { status: 204 });
+  // response:null (or no response) = notification acknowledged - no body.
+  return null;
+}
+
+function toJsonRpcResponse(msg: TunnelMessage): Response {
+  const payload = jsonRpcPayload(msg);
+  if (payload === null) return new Response(null, { status: 204 });
+  return Response.json(payload);
 }

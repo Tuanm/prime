@@ -54,6 +54,56 @@ function recvJson<T = any>(ws: WebSocket, predicate: (m: any) => boolean, timeou
   });
 }
 
+
+// ---- SSE stream reader (for the SSE transport smoke scenarios) --------------
+// MCP "HTTP with SSE": GET /sse opens a text/event-stream; the first event is
+// 'endpoint' (the POST url), subsequent 'message' events carry JSON-RPC.
+interface SseHandle {
+  ev: AsyncGenerator<{ event: string; data: string }>;
+  close: () => Promise<void>;
+}
+async function openSse(url: string, timeoutMs = 4000): Promise<SseHandle> {
+  const res = await fetch(url, { headers: { accept: "text/event-stream" } });
+  const ct = res.headers.get("content-type") || "";
+  if (ct.indexOf("text/event-stream") === -1) {
+    throw new Error("not SSE: status=" + res.status + " ct=" + ct + " body=" + (await res.clone().text()).slice(0, 120));
+  }
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let closed = false;
+  const gen = (async function* () {
+    while (!closed) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let event = "message"; // SSE default event name
+        let data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data = (data ? data + "\n" : "") + line.slice(5).trim();
+        }
+        yield { event, data };
+      }
+      if (buf.length > 1024 * 1024) return; // malformed guard
+    }
+  })();
+  return { ev: gen, close: async () => { closed = true; await reader.cancel().catch(() => {}); } };
+}
+async function nextSse(h: SseHandle, timeoutMs = 4000): Promise<{ event: string; data: string } | null> {
+  const t = setTimeout(() => {}, 0); // no-op
+  const p = await Promise.race([
+    h.ev.next().then((r) => (r.done ? null : r.value)),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ]);
+  clearTimeout(t);
+  return p;
+}
+
 // ---------- wrangler lifecycle (two persistent instances, started externally) ----------
 // Expected running instances (see package.json scripts / README):
 //   wrangler dev --local --port 8801 (no tokens)
@@ -597,6 +647,150 @@ async function stopWrangler(proc: any): Promise<void> {
 
 // ---------- run all ----------
 
+
+// ---------- SSE transport scenarios ----------
+
+async function s25_sse_e2e(): Promise<void> {
+  await registerDevice(plainBase, "sse-dev", "sse-tok");
+  const dev = await connectWs(plainBase + "/ws/sse-dev?token=sse-tok");
+  await recvJson(dev, (m) => m.type === "registered");
+  dev.addEventListener("message", (e) => {
+    let env: any;
+    try { env = JSON.parse(typeof e.data === "string" ? e.data : ""); } catch { return; }
+    if (env?.id && env?.request) {
+      dev.send(JSON.stringify({ id: env.id, response: { jsonrpc: "2.0", id: env.request.id, result: { echoed: env.request.params } } }));
+    }
+  });
+  const sse = await openSse(plainBase + "/sse/sse-dev?token=sse-tok");
+  try {
+    const ep = await nextSse(sse);
+    if (!ep || ep.event !== "endpoint") return bad("s25_sse_endpoint", "first event=" + JSON.stringify(ep));
+    const postUrl = new URL(ep.data, plainBase);
+    postUrl.searchParams.set("token", "sse-tok");
+    const r = await fetch(postUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 42, method: "echo", params: { hello: "world" } }) });
+    if (r.status !== 202) return bad("s25_messages_202", "status=" + r.status);
+    const resp = await nextSse(sse);
+    if (!resp || resp.event !== "message") return bad("s25_message_event", "got=" + JSON.stringify(resp));
+    const body = JSON.parse(resp.data);
+    if (body.id !== 42 || body.result?.echoed?.hello !== "world") return bad("s25_message_body", "body=" + resp.data);
+    ok("s25_sse_e2e");
+  } catch (e: any) {
+    bad("s25_sse_e2e", e?.message || String(e));
+  } finally {
+    await sse.close();
+    dev.close();
+    await Bun.sleep(200);
+  }
+}
+
+async function s28_sse_unknown_session(): Promise<void> {
+  await registerDevice(plainBase, "sse-ghost", "sse-tok");
+  const dev = await connectWs(plainBase + "/ws/sse-ghost?token=sse-tok");
+  await recvJson(dev, (m) => m.type === "registered");
+  const r = await fetch(plainBase + "/messages/sse-ghost?session=does-not-exist&token=sse-tok", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "m" }) });
+  if (r.status !== 400) return bad("s28_unknown_session", "status=" + r.status);
+  const body = (await r.json()) as any;
+  if (body.error !== "unknown session") return bad("s28_unknown_session", "body=" + JSON.stringify(body));
+  dev.close();
+  await Bun.sleep(200);
+  ok("s28_sse_unknown_session");
+}
+
+async function s29_sse_relay_token_forwarded(): Promise<void> {
+  await registerDevice(plainBase, "sse-relay", "relay-secret");
+  const dev = await connectWs(plainBase + "/ws/sse-relay?token=relay-secret");
+  await recvJson(dev, (m) => m.type === "registered");
+  let gotToken: string | null = null;
+  dev.addEventListener("message", (e) => {
+    let env: any;
+    try { env = JSON.parse(typeof e.data === "string" ? e.data : ""); } catch { return; }
+    if (env?.id && env?.request) {
+      gotToken = env.token || null;
+      dev.send(JSON.stringify({ id: env.id, response: { jsonrpc: "2.0", id: env.request.id, result: { token: gotToken } } }));
+    }
+  });
+  const sse = await openSse(plainBase + "/sse/sse-relay?token=relay-secret");
+  try {
+    const ep = await nextSse(sse);
+    if (!ep || ep.event !== "endpoint") return bad("s29_endpoint", JSON.stringify(ep));
+    const postUrl = new URL(ep.data, plainBase);
+    postUrl.searchParams.set("token", "relay-secret");
+    const r = await fetch(postUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "m" }) });
+    if (r.status !== 202) return bad("s29_202", "status=" + r.status);
+    const resp = await nextSse(sse);
+    if (!resp || resp.event !== "message") return bad("s29_response", JSON.stringify(resp));
+    const body = JSON.parse(resp.data);
+    if (body.result?.token !== "relay-secret") return bad("s29_relay_token", "device saw=" + JSON.stringify(gotToken) + " body=" + resp.data);
+    ok("s29_sse_relay_token_forwarded");
+  } catch (e: any) {
+    bad("s29_sse_relay_token_forwarded", e?.message || String(e));
+  } finally {
+    await sse.close();
+    dev.close();
+    await Bun.sleep(200);
+  }
+}
+
+async function s30_sse_device_gone_closes_stream(): Promise<void> {
+  await registerDevice(plainBase, "sse-drop", "sse-tok");
+  const dev = await connectWs(plainBase + "/ws/sse-drop?token=sse-tok");
+  await recvJson(dev, (m) => m.type === "registered");
+  const sse = await openSse(plainBase + "/sse/sse-drop?token=sse-tok");
+  const ep = await nextSse(sse);
+  if (!ep || ep.event !== "endpoint") { await sse.close(); dev.close(); return bad("s30_endpoint", "no endpoint"); }
+  dev.close(); // device tunnel drops -> the DO must close the SSE stream
+  const again = await nextSse(sse, 3000);
+  if (again !== null) return bad("s30_stream_closed", "got event after device drop: " + JSON.stringify(again));
+  await sse.close();
+  await Bun.sleep(200);
+  ok("s30_sse_device_gone_closes_stream");
+}
+
+async function s26_sse_auth(): Promise<void> {
+  // No credentials -> 401
+  const r0 = await fetch(authBase + "/sse/anon-dev", { headers: { accept: "text/event-stream" } });
+  if (r0.status !== 401) return bad("s26_no_auth_401", "status=" + r0.status);
+  // Full credentials -> stream opens; POST works.
+  await registerDevice(authBase, "sse-auth-dev", DEV);
+  const dev = await connectWs(authBase + "/ws/sse-auth-dev?token=" + DEV);
+  await recvJson(dev, (m) => m.type === "registered");
+  dev.addEventListener("message", (e) => {
+    let env: any;
+    try { env = JSON.parse(typeof e.data === "string" ? e.data : ""); } catch { return; }
+    if (env?.id && env?.request) dev.send(JSON.stringify({ id: env.id, response: { jsonrpc: "2.0", id: env.request.id, result: { ok: true } } }));
+  });
+  const sse = await openSse(authBase + "/sse/sse-auth-dev?auth=" + GW + "&token=" + DEV);
+  try {
+    const ep = await nextSse(sse);
+    if (!ep || ep.event !== "endpoint") return bad("s26_endpoint", JSON.stringify(ep));
+    const postUrl = new URL(ep.data, authBase);
+    postUrl.searchParams.set("auth", GW);
+    postUrl.searchParams.set("token", DEV);
+    const r = await fetch(postUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "m" }) });
+    if (r.status !== 202) return bad("s26_messages_202", "status=" + r.status);
+    const resp = await nextSse(sse);
+    if (!resp || resp.event !== "message") return bad("s26_response", JSON.stringify(resp));
+    ok("s26_sse_auth");
+  } catch (e: any) {
+    bad("s26_sse_auth", e?.message || String(e));
+  } finally {
+    await sse.close();
+    dev.close();
+    await Bun.sleep(200);
+  }
+}
+
+// Local per-device auth mode (the registry is seeded with the in-process cloud
+// device) means an unregistered deviceId gets 401. Register the device first so
+// these scenarios pass in that mode - same pattern as s22/s23/s24 (DEVICE_TOKENS).
+async function registerDevice(base: string, deviceId: string, token: string): Promise<void> {
+  await fetch(base + "/admin/api/devices", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deviceId, token }),
+  }).catch(() => {});
+}
+
 async function main(): Promise<void> {
   console.log("Waiting for plain wrangler at", plainBase, "...");
   await waitReady(plainBase);
@@ -623,11 +817,16 @@ async function main(): Promise<void> {
     ["s22", s22_admin_registry],
     ["s23", s23_online_status_persists],
     ["s24", s24_admin_clients],
+    ["s25", s25_sse_e2e],
+    ["s28", s28_sse_unknown_session],
+    ["s29", s29_sse_relay_token_forwarded],
+    ["s30", s30_sse_device_gone_closes_stream],
   ];
   const authScenarios: Array<[string, () => Promise<void>]> = [
     ["a1", a1_devices_token_gated],
     ["a2", a2_gateway_auth],
     ["a3", a3_device_auth],
+    ["s26", s26_sse_auth],
   ];
   for (const [, fn] of plainScenarios) {
     try { await fn(); } catch (e: any) { bad(fn.name, e?.message || String(e)); }
