@@ -91,6 +91,40 @@ async function effectiveDeviceMap(env: Env): Promise<Map<string, string>> {
   return map;
 }
 
+// Always read the authoritative device -> token map from the registry DO,
+// bypassing the per-isolate TTL cache.
+async function freshDeviceMap(env: Env): Promise<Map<string, string>> {
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const map = new Map<string, string>();
+  try {
+    const r = await reg.fetch("https://registry/map");
+    if (r.ok) {
+      const j = (await r.json()) as { map?: Record<string, string> };
+      for (const [id, tok] of Object.entries(j.map || {})) {
+        if (typeof tok === "string" && tok.length > 0) map.set(id, tok);
+      }
+    }
+  } catch {}
+  return map;
+}
+
+// Resolve the device -> token map for identity checks. A device registered via
+// the admin UI moments ago may not be visible to every isolate yet because the
+// TTL cache (MAP_CACHE_TTL_MS) is per-isolate and the admin mutation only
+// invalidates the isolate that serviced it. Without a fresh read, a legitimate
+// first connection right after registration would be spuriously 401'd (the
+// gateway CI flake "Expected 101"). Re-reading the registry when the cached map
+// would reject an unknown id closes that window; genuinely unknown ids are still
+// 401, preserving the no-existence-oracle property.
+async function resolveDeviceMap(env: Env, deviceId: string): Promise<Map<string, string>> {
+  let map = await effectiveDeviceMap(env);
+  const perDeviceMode = hasNonVirtualDevice(map, env);
+  if (perDeviceMode && !map.has(deviceId)) {
+    map = await freshDeviceMap(env);
+  }
+  return map;
+}
+
 function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
   if (!rateLimiter || limiterWindowMs !== cfg.rateWindowMs || limiterMax !== cfg.rateMax) {
     if (rateLimiter) rateLimiter.stop();
@@ -123,7 +157,7 @@ async function authorizeRelay(
   if (!validDeviceId(deviceId)) {
     return Response.json({ error: "invalid deviceId" }, { status: 400 });
   }
-  const map = await effectiveDeviceMap(env);
+  const map = await resolveDeviceMap(env, deviceId);
   const perDeviceMode = hasNonVirtualDevice(map, env);
   if (perDeviceMode && !map.has(deviceId)) return unauthorized();
   const expected = map.get(deviceId) ?? cfg.deviceToken;
@@ -263,7 +297,7 @@ export default {
       // mode an unknown deviceId is rejected outright (no existence oracle)
       // and unauthenticated probes get 401 - never instantiating a Durable
       // Object for them (no DO churn / cost).
-      const map = await effectiveDeviceMap(env);
+      const map = await resolveDeviceMap(env, deviceId);
       const perDeviceMode = hasNonVirtualDevice(map, env);
       if (perDeviceMode && !map.has(deviceId)) return unauthorized();
       const expected = map.get(deviceId) ?? cfg.deviceToken;
@@ -359,6 +393,11 @@ export default {
 
     // WS upgrade: /ws/{deviceId} (preferred) or /ws?deviceId= (legacy)
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      // Probe gate: bound how many WS upgrades an IP can initiate, which also
+      // caps the cost of the fresh-identity read for unknown ids below.
+      if (!getLimiter(cfg).allow(clientIp(request))) {
+        return Response.json({ error: "rate limited" }, { status: 429 });
+      }
       // Origin whitelist applies to browser-style WS clients.
       if (cfg.allowedOrigins && cfg.allowedOrigins.size > 0) {
         const origin = request.headers.get("origin");
@@ -384,7 +423,7 @@ export default {
       // hijacking / intercepting an in-use deviceId is impossible. Unknown
       // deviceIds get the same 401 (no existence oracle). The DO re-checks
       // the credential for defense in depth.
-      const map = await effectiveDeviceMap(env);
+      const map = await resolveDeviceMap(env, deviceId);
       const perDeviceMode = hasNonVirtualDevice(map, env);
       if (perDeviceMode && !map.has(deviceId)) return unauthorized();
       const expected = map.get(deviceId) ?? cfg.deviceToken;

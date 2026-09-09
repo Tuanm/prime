@@ -39,7 +39,26 @@ async function connectWs(url: string, headers: Record<string, string> = {}, atte
       await Bun.sleep(1000);
     }
   }
-  throw lastErr;
+  // Diagnostics: report the actual upgrade HTTP status so CI-only flakes (e.g. a
+  // spurious 401 on a just-registered device) are visible instead of a bare
+  // "Expected 101 status code".
+  throw new Error(String(lastErr?.message || lastErr) + " (upgrade http status=" + (await wsUpgradeStatus(url)) + ")");
+}
+
+async function wsUpgradeStatus(url: string): Promise<number> {
+  try {
+    const r = await fetch(url, {
+      headers: {
+        upgrade: "websocket",
+        connection: "Upgrade",
+        "sec-websocket-key": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "sec-websocket-version": "13",
+      },
+    });
+    return r.status;
+  } catch {
+    return -1;
+  }
 }
 
 function recvJson<T = any>(ws: WebSocket, predicate: (m: any) => boolean, timeoutMs = 2500): Promise<T> {
@@ -802,11 +821,22 @@ async function s26_sse_auth(): Promise<void> {
 // device) means an unregistered deviceId gets 401. Register the device first so
 // these scenarios pass in that mode - same pattern as s22/s23/s24 (DEVICE_TOKENS).
 async function registerDevice(base: string, deviceId: string, token: string): Promise<void> {
-  await fetch(base + "/admin/api/devices", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ deviceId, token }),
-  }).catch(() => {});
+  let last = 0;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const r = await fetch(base + "/admin/api/devices", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId, token }),
+      });
+      last = r.status;
+      if (r.ok) return;
+    } catch {
+      last = -1;
+    }
+    await Bun.sleep(150);
+  }
+  throw new Error("registerDevice failed (" + deviceId + "): http " + last);
 }
 
 async function main(): Promise<void> {

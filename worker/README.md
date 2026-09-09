@@ -131,7 +131,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | No register takeover | Register message with a different deviceId is rejected; a duplicate **live** tunnel is `409`, but a stale tunnel (no frame for `TUNNEL_REPLACE_GRACE_MS`) is replaced by the same authenticated device so reconnect is instant |
 | No slow-device DoS | Per-device pending budget; body cap (413) |
 | No stale tunnels | Keepalive alarm drops dead tunnels |
-| No brute force | Per-isolate rate limit + optional Cloudflare edge rule on `CF-Connecting-IP` (client-spoof-proof) |
+| No brute force | Per-isolate rate limit on relay **and** WS upgrade + optional Cloudflare edge rule on `CF-Connecting-IP` (client-spoof-proof) |
 | No cross-device leakage | One DO = one device; a WS can only resolve its own pendings |
 
 ## API
