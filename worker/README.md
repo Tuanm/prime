@@ -106,6 +106,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `MAX_PENDING_PER_DEVICE` | `100` | Concurrent in-flight requests per device (503 when full) |
 | `MAX_BODY_BYTES` | `1048576` | Request body cap (413) |
 | `KEEPALIVE_TIMEOUT_MS` | `90000` | Drop tunnel after this long with no frame (alarm-driven) |
+| `TUNNEL_REPLACE_GRACE_MS` | `5000` | An authenticated reconnect may take over a tunnel idle this long (fast reconnect after a silent drop) |
 | `PING_INTERVAL_MS` / `PING_MAX_MISSES` | `30000` / `2` | Server-side ping cadence / misses before reap |
 | `IDLE_TIMEOUT_MS` | `120000` | Hibernation idle threshold |
 | `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `60000` / `100` | Per-isolate in-memory limiter |
@@ -127,7 +128,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | No existence oracle | Unknown deviceId → identical 401; no DO created for unauthenticated probes |
 | No roster leak | `/devices` hidden (404) without admin token; admin-gated (401) otherwise |
 | Admin UI | `/admin` + registry API behind Cloudflare Access (identity policy configured in the dashboard) |
-| No register takeover | Register message with a different deviceId is rejected |
+| No register takeover | Register message with a different deviceId is rejected; a duplicate **live** tunnel is `409`, but a stale tunnel (no frame for `TUNNEL_REPLACE_GRACE_MS`) is replaced by the same authenticated device so reconnect is instant |
 | No slow-device DoS | Per-device pending budget; body cap (413) |
 | No stale tunnels | Keepalive alarm drops dead tunnels |
 | No brute force | Per-isolate rate limit + optional Cloudflare edge rule on `CF-Connecting-IP` (client-spoof-proof) |

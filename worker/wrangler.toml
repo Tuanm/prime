@@ -80,6 +80,7 @@ TIMEOUT_MS = "300000" # 5 min: long tool calls (record, wait_for, downloads)
 MAX_PENDING_PER_DEVICE = "100"
 MAX_BODY_BYTES = "1048576"
 KEEPALIVE_TIMEOUT_MS = "90000"
+TUNNEL_REPLACE_GRACE_MS = "5000" # an authenticated reconnect may take over a tunnel idle this long (fast reconnect)
 PING_INTERVAL_MS = "30000"
 PING_MAX_MISSES = "2"
 IDLE_TIMEOUT_MS = "120000"

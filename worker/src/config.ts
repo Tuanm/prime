@@ -16,6 +16,7 @@ export interface GatewayConfig {
   pingIntervalMs: number; // expected keepalive cadence (used for alarms)
   pingMaxMisses: number;
   idleTimeoutMs: number;
+  tunnelReplaceGraceMs: number; // allow an authenticated reconnect to take over a tunnel idle this long (default 5s)
   env: string; // "dev" | "prod" (informational)
 }
 
@@ -36,6 +37,7 @@ export interface Env {
   SSE_IDLE_TIMEOUT_MS?: string; // close an SSE session after this long idle (default 120s)
   MAX_SSE_SESSIONS?: string; // cap concurrent SSE streams per device (default 32)
   IDLE_TIMEOUT_MS?: string;
+  TUNNEL_REPLACE_GRACE_MS?: string; // authenticated re-connect may take over a tunnel idle this long (default 5s)
   ONLINE_TTL_MS?: string; // registry online-entry lifetime (default 150s)
   REGISTRY_REFRESH_MS?: string; // device -> registry re-register cadence (default 30s)
   ENVIRONMENT?: string;
@@ -93,6 +95,7 @@ export function loadConfig(env: Env): GatewayConfig {
     pingIntervalMs: num(env, "PING_INTERVAL_MS", 30_000),
     pingMaxMisses: num(env, "PING_MAX_MISSES", 2),
     idleTimeoutMs: num(env, "IDLE_TIMEOUT_MS", 120_000),
+    tunnelReplaceGraceMs: num(env, "TUNNEL_REPLACE_GRACE_MS", 5_000),
     env: env.ENVIRONMENT || "dev",
   };
 }

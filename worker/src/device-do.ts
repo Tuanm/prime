@@ -55,6 +55,7 @@ export class DeviceDO extends DurableObject<Env> {
   private pending = new Map<string, PendingEntry>();
   private lastSeen = 0;
   private keepaliveTimeoutMs = 90_000;
+  private tunnelReplaceGraceMs = 5_000; // authenticated re-connect may take over a tunnel idle this long
   private maxPending = 100;
   private timeoutMs = 30_000;
   private maxBodyBytes = 1024 * 1024;
@@ -69,6 +70,7 @@ export class DeviceDO extends DurableObject<Env> {
     super(ctx, env);
     // Restore configuration (env bindings are stable across hibernation).
     this.keepaliveTimeoutMs = num(env.KEEPALIVE_TIMEOUT_MS, 90_000);
+    this.tunnelReplaceGraceMs = num(env.TUNNEL_REPLACE_GRACE_MS, 5_000);
     this.maxPending = num(env.MAX_PENDING_PER_DEVICE, 100);
     this.timeoutMs = num(env.TIMEOUT_MS, 30_000);
     this.maxBodyBytes = num(env.MAX_BODY_BYTES, 1024 * 1024);
@@ -150,10 +152,27 @@ export class DeviceDO extends DurableObject<Env> {
       return Response.json({ error: "unauthorized" }, { status: 401 });
     }
     // A deviceId may only have ONE live tunnel. If an existing ws is attached
-    // (including after hibernation wake), reject the newcomer with 409 - the
-    // same collision semantics as the Bun gateway.
+    // (including after hibernation wake), a duplicate connection is 409 UNLESS the
+    // existing tunnel is stale (no frame for tunnelReplaceGraceMs). A stale socket
+    // means the device silently dropped (network blip, laptop sleep, SW restart) and
+    // its reconnect must take over immediately rather than wait ~90s for the
+    // keepalive alarm - that is what made reconnect take a few minutes. Auth is
+    // already enforced above, so only the same device principal can replace its
+    // own stale tunnel.
     if (this.ws) {
-      return Response.json({ error: "deviceId already in use" }, { status: 409 });
+      const now = Date.now();
+      const stale = now - this.lastSeen > this.tunnelReplaceGraceMs;
+      if (!stale) {
+        // Genuinely concurrent live duplicate - keep the single-tunnel guarantee.
+        return Response.json({ error: "deviceId already in use" }, { status: 409 });
+      }
+      // Detach before closing so the old socket webSocketClose cannot clear the
+      // socket this request is about to install, then replace it.
+      const old = this.ws;
+      this.ws = null;
+      try {
+        old.close(1000, "replaced by new connection");
+      } catch {}
     }
 
     const pair = new WebSocketPair();
@@ -238,15 +257,25 @@ export class DeviceDO extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
-    if (this.ws === ws) this.ws = null;
-    await this.unregisterFromRegistry();
-    this.failDevice("device disconnected");
+    const isLive = this.ws === ws;
+    if (isLive) this.ws = null;
+    // Only a close of the LIVE tunnel means the device went away. A socket we
+    // force-closed to replace it must not unregister/clear the fresh tunnel that
+    // already took its place (that would remove the registry entry until the next
+    // re-register, up to REGISTRY_REFRESH_MS).
+    if (isLive) {
+      await this.unregisterFromRegistry();
+      this.failDevice("device disconnected");
+    }
   }
 
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
-    if (this.ws === ws) this.ws = null;
-    await this.unregisterFromRegistry();
-    this.failDevice("device error");
+    const isLive = this.ws === ws;
+    if (isLive) this.ws = null;
+    if (isLive) {
+      await this.unregisterFromRegistry();
+      this.failDevice("device error");
+    }
   }
 
   private maybeRefreshRegistry(): void {

@@ -37,6 +37,7 @@ const plain = await start(8801, [
   "MAX_PENDING_PER_DEVICE:2",
   "MAX_BODY_BYTES:256",
   "KEEPALIVE_TIMEOUT_MS:5000", // stale-socket cleanup fast in miniflare (reliable tests)
+  "TUNNEL_REPLACE_GRACE_MS:1000", // fast stale-tunnel takeover so the reconnect test is quick
 ]);
 console.log("Starting auth wrangler (8802)...");
 const auth = await start(8802, [

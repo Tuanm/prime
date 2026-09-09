@@ -151,6 +151,24 @@ async function s4_duplicate_register_rejected(): Promise<void> {
   ok("s4_duplicate_register_rejected");
 }
 
+async function s31_reconnect_replaces_stale(): Promise<void> {
+  // A stale tunnel (device silently dropped, e.g. laptop sleep or a network
+  // blip) must let an authenticated reconnect of the SAME deviceId take over
+  // immediately, instead of 409 until the keepalive alarm (default 90s) reaps
+  // it - that is what keeps the device tunnel always live.
+  const a = await connectWs(plainBase + "/ws/replace-dev");
+  await recvJson(a, (m) => m.type === "registered");
+  // Send nothing on a; wait past TUNNEL_REPLACE_GRACE_MS (1000ms on plain).
+  await Bun.sleep(1300);
+  const b = await connectWs(plainBase + "/ws/replace-dev");
+  // If the stale socket was NOT taken over, this gets 409 and connectWs throws.
+  await recvJson(b, (m) => m.type === "registered");
+  a.close();
+  b.close();
+  await Bun.sleep(200);
+  ok("s31_reconnect_replaces_stale");
+}
+
 async function s5_register_message_takeover_blocked(): Promise<void> {
   const victim = await connectWs(plainBase + "/ws/victim");
   await recvJson(victim, (m) => m.type === "registered");
@@ -801,6 +819,7 @@ async function main(): Promise<void> {
   const plainScenarios: Array<[string, () => Promise<void>]> = [
     ["s1", s1_devices_plain],
     ["s4", s4_duplicate_register_rejected],
+    ["s31", s31_reconnect_replaces_stale],
     ["s5", s5_register_message_takeover_blocked],
     ["s6", s6_e2e_rpc],
     ["s7", s7_cross_device_response_blocked],
