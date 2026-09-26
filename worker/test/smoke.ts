@@ -839,6 +839,53 @@ async function registerDevice(base: string, deviceId: string, token: string): Pr
   throw new Error("registerDevice failed (" + deviceId + "): http " + last);
 }
 
+async function s32_download_relay(): Promise<void> {
+  const name = "download-dev";
+  const ticket = "a".repeat(64);
+  await registerDevice(authBase, name, DEV);
+  const ws = await connectWs(authBase + "/ws/" + name + "?token=" + DEV);
+  await recvJson(ws, (m) => m.type === "registered");
+  const bytes = new Uint8Array(150000);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+  let offset = 0, forwarded = false, pulls = 0, empty = false;
+  ws.addEventListener("message", (e) => {
+    const m = JSON.parse(String(e.data));
+    if (m.type === "download-start") {
+      forwarded = m.token === DEV && m.ticket === ticket;
+      empty = m.ticket === "b".repeat(64);
+      ws.send(JSON.stringify({ type: "download-head", id: m.id, status: 200, headers: {
+        "content-length": String(empty ? 0 : bytes.length), "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="binary.dat"', "set-cookie": "evil=yes",
+      } }));
+    } else if (m.type === "download-pull") {
+      if (empty) {
+        ws.send(JSON.stringify({ type: "download-chunk", id: m.id, data: "", done: true }));
+        return;
+      }
+      pulls++;
+      const end = Math.min(offset + 65536, bytes.length);
+      const data = Buffer.from(bytes.slice(offset, end)).toString("base64");
+      offset = end;
+      ws.send(JSON.stringify({ type: "download-chunk", id: m.id, data, done: offset === bytes.length }));
+    }
+  });
+  try {
+    const url = authBase + "/mcp/" + name + "/download/" + ticket;
+    if ((await fetch(url)).status !== 401) throw new Error("missing gateway auth accepted");
+    if ((await fetch(url, { headers: { authorization: "Bearer " + GW } })).status !== 401) throw new Error("missing device auth accepted");
+    const headers = { authorization: "Bearer " + GW, "x-device-token": DEV };
+    if ((await fetch(url + "/extra", { headers })).status === 200) throw new Error("arbitrary path accepted");
+    const r = await fetch(url, { headers });
+    if (r.headers.get("content-length") !== String(bytes.length)) throw new Error("missing binary content-length");
+    if (r.status !== 200 || r.headers.has("set-cookie")) throw new Error("unsafe headers or status " + r.status);
+    const got = new Uint8Array(await r.arrayBuffer());
+    if (!forwarded || pulls !== 3 || Buffer.compare(Buffer.from(got), Buffer.from(bytes))) throw new Error("binary relay mismatch");
+    const zero = await fetch(authBase + "/mcp/" + name + "/download/" + "b".repeat(64), { headers });
+    if (zero.status !== 200 || zero.headers.get("content-length") !== "0" || (await zero.arrayBuffer()).byteLength !== 0) throw new Error("empty download header/body mismatch");
+    ok("s32_download_relay");
+  } finally { ws.close(); await Bun.sleep(200); }
+}
+
 async function main(): Promise<void> {
   console.log("Waiting for plain wrangler at", plainBase, "...");
   await waitReady(plainBase);
@@ -876,6 +923,7 @@ async function main(): Promise<void> {
     ["a2", a2_gateway_auth],
     ["a3", a3_device_auth],
     ["s26", s26_sse_auth],
+    ["s32", s32_download_relay],
   ];
   for (const [, fn] of plainScenarios) {
     try { await fn(); } catch (e: any) { bad(fn.name, e?.message || String(e)); }

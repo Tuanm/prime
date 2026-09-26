@@ -64,6 +64,10 @@ sequenceDiagram
 
 ## Deploy
 
+Use Node.js 22 or newer and the repository's locked Wrangler 4 dependencies.
+The production configuration includes a container image; Docker with the buildx
+plugin must be available. The local test configuration omits containers.
+
 ```bash
 cd worker
 npm install
@@ -166,3 +170,47 @@ Smoke coverage: gateway/device auth, duplicate-registration rejection, register-
 > **Miniflare note** — local DO state persists under `.wrangler/state`. After a
 > hard kill, stale sockets linger until the keepalive alarm fires; for a clean
 > run: `rm -rf worker/.wrangler/state` before starting.
+
+### Ticket-based file downloads
+
+Devices that implement the download protocol can return a download URL under
+`/mcp/{deviceId}/download/{ticket}`. Tickets are exactly 64 lowercase hex digits;
+they identify a device-issued download, never a filesystem path or proxy URL.
+Only GET is supported. The endpoint uses the same gateway authentication,
+per-device credentials, disabled-device checks and rate limit as MCP. Virtual
+cloud devices have no tunnel and cannot use this endpoint.
+
+```sh
+curl --fail --output artifact.zip \
+  --header "Authorization: Bearer $GATEWAY_TOKEN" \
+  --header "X-Device-Token: $DEVICE_TOKEN" \
+  "https://YOUR_GATEWAY/mcp/YOUR_DEVICE/download/$TICKET"
+```
+
+`X-Device-Token` is required for downloads, including when the same credential
+was supplied in a query parameter. Keep credentials out of copied download URLs.
+The device is responsible for ticket authorization, expiry and revocation.
+
+Wire protocol (JSON WebSocket frames):
+
+1. Gateway sends `{type:"download-start",id,ticket,token}` with a fresh UUID.
+2. Device responds `{type:"download-head",id,status:200,headers}`. A decimal
+   `content-length` is required and must be between 0 and 104857600 inclusive.
+   Only `content-length`, `content-type` and `content-disposition` are forwarded.
+   Gateway forces attachment disposition, no-store caching and nosniff.
+   A 400–599 head instead ends the request with an empty error response.
+3. HTTP stream demand sends `{type:"download-pull",id}`. Device responds once
+   with `{type:"download-chunk",id,data,done}`; `data` is canonical base64 for at
+   most 65536 bytes, and `done` is boolean. Empty files return empty data and
+   `done:true`. Final received bytes must exactly match content-length.
+4. Cancellation, invalid frames, timeout or device failure sends
+   `{type:"download-cancel",id}` when the tunnel is still available. A device
+   can fail a transfer with `{type:"download-error",id}`.
+
+There is one outstanding pull per stream, no application chunk queue, at most
+four concurrent downloads per device, a `TIMEOUT_MS` deadline for each head/pull
+(default 30 seconds), and a ten-minute overall deadline. Disconnects and tunnel
+replacement fail all pending requests and streams. Unknown completed transfer
+IDs are ignored. Errors after HTTP headers terminate the stream; clients must
+check transfer success and declared length. Existing JSON-RPC and SSE clients
+need no protocol changes.

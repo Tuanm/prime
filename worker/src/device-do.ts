@@ -14,6 +14,7 @@
 // tunnels. Pending HTTP requests keep the object alive while awaiting the
 // device reply, so setTimeout for the request timeout is safe.
 
+import { DownloadRelay } from "./download-relay";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
 import { validDeviceId, timingSafeEq, extractToken } from "./config";
@@ -50,6 +51,7 @@ const MAX_SSE_SESSIONS = 32; // cap concurrent SSE streams per device (memory gu
 
 export class DeviceDO extends DurableObject<Env> {
   private ws: WebSocket | null = null;
+  private downloads: DownloadRelay;
   private lastRegistryAt = 0; // last time we refreshed the registry online marker
   private clients = new Map<string, { ip: string; name?: string; lastSeen: number; count: number }>();
   private pending = new Map<string, PendingEntry>();
@@ -73,6 +75,10 @@ export class DeviceDO extends DurableObject<Env> {
     this.tunnelReplaceGraceMs = num(env.TUNNEL_REPLACE_GRACE_MS, 5_000);
     this.maxPending = num(env.MAX_PENDING_PER_DEVICE, 100);
     this.timeoutMs = num(env.TIMEOUT_MS, 30_000);
+    this.downloads = new DownloadRelay((frame) => {
+      if (!this.ws || this.ws.readyState !== 1) throw new Error("device offline");
+      this.ws.send(JSON.stringify(frame));
+    }, this.timeoutMs);
     this.maxBodyBytes = num(env.MAX_BODY_BYTES, 1024 * 1024);
     this.sseIdleTimeoutMs = num(env.SSE_IDLE_TIMEOUT_MS, SSE_IDLE_TIMEOUT_MS);
     this.maxSseSessions = num(env.MAX_SSE_SESSIONS, MAX_SSE_SESSIONS);
@@ -106,6 +112,20 @@ export class DeviceDO extends DurableObject<Env> {
     // WebSocket upgrade: /ws (device tunnel)
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       return this.handleUpgrade(request, url, authToken);
+    }
+
+    const download = /^\/download\/([a-f0-9]{64})$/.exec(url.pathname);
+    if (request.method === "GET" && download) {
+      if (!this.ws || this.ws.readyState !== 1) return Response.json({ error: "device offline" }, { status: 503 });
+      const token = request.headers.get("x-device-token");
+      if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+      const response = await this.downloads.start(download[1], token, request.signal);
+      if (response.status !== 200 || !response.body) return response;
+      // Workers only preserves Content-Length for known-length stream bodies.
+      // FixedLengthStream also independently enforces the declared byte count.
+      const fixed = new FixedLengthStream(Number(response.headers.get("content-length")));
+      this.ctx.waitUntil(response.body.pipeTo(fixed.writable).catch(() => {}));
+      return new Response(fixed.readable, { status: response.status, headers: response.headers });
     }
 
     // HTTP relay: POST /mcp (JSON-RPC body)
@@ -168,6 +188,7 @@ export class DeviceDO extends DurableObject<Env> {
       }
       // Detach before closing so the old socket webSocketClose cannot clear the
       // socket this request is about to install, then replace it.
+      this.failDevice("device tunnel replaced");
       const old = this.ws;
       this.ws = null;
       try {
@@ -202,6 +223,7 @@ export class DeviceDO extends DurableObject<Env> {
   // Hibernation callbacks -----------------------------------------------------
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (ws !== this.ws) return;
     this.lastSeen = Date.now();
     // The registry TTL-sweeps its online entries; re-register periodically so
     // a long-lived tunnel stays "online" in the admin UI (throttled - the
@@ -219,6 +241,11 @@ export class DeviceDO extends DurableObject<Env> {
       return;
     }
     if (!msg || typeof msg !== "object") return;
+
+    if ("type" in msg && typeof msg.type === "string" && msg.type.startsWith("download-")) {
+      this.downloads.frame(msg as unknown as Record<string, unknown>);
+      return;
+    }
 
     // Any well-formed frame proves liveness (HTTP/2-tunnel safe).
     this.lastSeen = Date.now();
@@ -264,8 +291,8 @@ export class DeviceDO extends DurableObject<Env> {
     // already took its place (that would remove the registry entry until the next
     // re-register, up to REGISTRY_REFRESH_MS).
     if (isLive) {
-      await this.unregisterFromRegistry();
       this.failDevice("device disconnected");
+      await this.unregisterFromRegistry();
     }
   }
 
@@ -273,8 +300,8 @@ export class DeviceDO extends DurableObject<Env> {
     const isLive = this.ws === ws;
     if (isLive) this.ws = null;
     if (isLive) {
-      await this.unregisterFromRegistry();
       this.failDevice("device error");
+      await this.unregisterFromRegistry();
     }
   }
 
@@ -624,6 +651,7 @@ export class DeviceDO extends DurableObject<Env> {
   }
 
   private failDevice(reason: string): void {
+    this.downloads.failAll(reason);
     const victims = [...this.pending.values()];
     this.pending.clear();
     for (const v of victims) {

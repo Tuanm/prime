@@ -265,6 +265,23 @@ export default {
       return reg.fetch("https://registry/devices");
     }
 
+    // Fixed ticket grammar: no arbitrary path, URL, or upstream proxy target.
+    const download = /^\/mcp\/([^/]+)\/download\/([a-f0-9]{64})$/.exec(url.pathname);
+    if (download) {
+      if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+      const denied = await authorizeRelay(download[1], request, url, cfg, env);
+      if (denied) return denied;
+      const token = request.headers.get("x-device-token");
+      if (!token) return unauthorized();
+      const target = new URL(request.url);
+      target.pathname = "/download/" + download[2];
+      target.search = "";
+      const headers = new Headers({ "x-device-id": download[1], "x-device-token": token });
+      return env.DEVICES.get(env.DEVICES.idFromName(download[1])).fetch(new Request(target, {
+        method: "GET", headers, signal: request.signal,
+      }));
+    }
+
     // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.
     // Return a clear 405 instead of a bare 404 so opening the URL in a browser
     // (or an SSE-style client) gets an actionable message, not "cannot connect".

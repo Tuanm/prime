@@ -60,3 +60,7 @@ npm test          # smoke suite: 21 scenarios against local wrangler instances
 npm run typecheck # tsc --noEmit
 npm run deploy
 ```
+
+Device-issued files can also be downloaded through authenticated
+`GET /mcp/{deviceId}/download/{ticket}` with `X-Device-Token` and gateway
+credentials. See [download protocol and curl usage](worker/README.md#ticket-based-file-downloads).
