@@ -992,8 +992,17 @@ def execute_powershell(command: str, cwd: str = ".", timeout_ms: int | None = No
     # command line mangles embedded double quotes, so a quoted "|" separator
     # became a real pipeline and PowerShell tried to run "PLAT=..." as a
     # command. Base64 has no shell metacharacters, so the script arrives intact.
-    enc = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
-    return _run_proc([binary, "-NoProfile", "-EncodedCommand", enc], cwd, timeout_ms, shell=False)
+    # Encoded commands can serialize stderr as CLIXML on Windows PowerShell.
+    # Keep errors visible and suppress module-initialization progress.
+    # Parse separately so leading param/using remain valid. Inner encoding also
+    # protects smart quotes. Preserve a final failed command's process status:
+    # invoking a script block alone resets $? after nonterminating/native errors.
+    inner = base64.b64encode((command + "\nif (-not $?) { exit 1 }").encode("utf-16-le")).decode("ascii")
+    script = ("$ProgressPreference = 'SilentlyContinue'; & ([scriptblock]::Create("
+              + "[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('" + inner + "'))))")
+    enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return _run_proc([binary, "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", enc],
+                     cwd, timeout_ms, shell=False)
 
 
 def execute_command(command: str, cwd: str = ".", timeout_ms: int | None = None) -> str:

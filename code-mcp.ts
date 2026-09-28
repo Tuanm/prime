@@ -59,7 +59,16 @@ function pwshCmd(command: string): string[] {
   // command line mangles embedded double quotes, so a quoted "|" separator
   // became a real pipeline and PowerShell tried to run "PLAT=..." as a command.
   // Base64 has no shell metacharacters, so the script arrives intact.
-  return [bin, "-NoProfile", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")];
+  // Encoded commands can serialize stderr as CLIXML on Windows PowerShell.
+  // Keep errors visible and suppress module-initialization progress.
+  // Parse separately so leading param/using remain valid. Inner encoding also
+  // protects smart quotes. Preserve a final failed command's process status:
+  // invoking a script block alone resets $? after nonterminating/native errors.
+  const inner = Buffer.from(command + "\nif (-not $?) { exit 1 }", "utf16le").toString("base64");
+  const script = "$ProgressPreference = 'SilentlyContinue'; & ([scriptblock]::Create("
+    + "[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('" + inner + "'))))";
+  return [bin, "-NoProfile", "-NonInteractive", "-OutputFormat", "Text",
+    "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
 }
 
 // Detect running shell at startup.

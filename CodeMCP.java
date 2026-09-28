@@ -492,8 +492,17 @@ public final class CodeMCP {
         // real pipeline, so PowerShell tried to run "PLAT=..." as a command.
         // Base64 carries no shell metacharacters, so the script survives intact
         // no matter how the caller built or quoted it.
-        String enc = Base64.getEncoder().encodeToString(command.getBytes(StandardCharsets.UTF_16LE));
-        return new String[]{bin, "-NoProfile", "-EncodedCommand", enc};
+        // Encoded commands can serialize stderr as CLIXML on Windows PowerShell.
+        // Keep errors visible and suppress module-initialization progress.
+        // Parse separately so leading param/using remain valid. Inner encoding also
+        // protects smart quotes. Preserve a final failed command's process status:
+        // invoking a script block alone resets $? after nonterminating/native errors.
+        String inner = Base64.getEncoder().encodeToString(
+            (command + "\nif (-not $?) { exit 1 }").getBytes(StandardCharsets.UTF_16LE));
+        String script = "$ProgressPreference = 'SilentlyContinue'; & ([scriptblock]::Create("
+            + "[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('" + inner + "'))))";
+        String enc = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_16LE));
+        return new String[]{bin, "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", enc};
     }
     
     private static String[] shellCmd(String command) {
