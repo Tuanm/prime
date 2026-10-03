@@ -1,0 +1,23 @@
+{
+  "name": "code-mcp-gateway-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "mcp - command line client for code-mcp-gateway devices and MCP tools",
+  "type": "module",
+  "module": "src/index.ts",
+  "bin": {
+    "mcp": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "build:host": "bun scripts/build.ts --host-only",
+    "bundle": "bun scripts/build.ts --bundle-only",
+    "test": "bun test test/unit.test.ts",
+    "test:e2e": "bun test/e2e.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "typescript": "^5.6.0"
+  }
+}

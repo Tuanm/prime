@@ -1,0 +1,156 @@
+// Help text. Kept in one place so every command's --help stays consistent.
+//
+// Prose uses plain quotes rather than backticks: these blocks are template
+// literals, so an unescaped backtick would terminate the string.
+
+import { bold, cyan, dim } from "./output.ts";
+
+const ROOT = `mcp - command line client for code-mcp-gateway
+
+Connects to devices exposed through a code-mcp-gateway Worker and drives their
+MCP tools. Credentials and defaults live in ~/.code-mcp-gateway/config.yaml.
+
+USAGE
+  mcp [command] [options]
+
+COMMANDS
+  devices connect <device-id> [options]   Save credentials for a device and verify it
+  devices disconnect <device-id>          Forget a device's local configuration
+  devices status <device-id>              Probe one device
+  devices list                            List configured devices
+  tools list <device-id>                  List a device's MCP tools
+  tools view <device-id>.<tool-id>        Show one tool's schema
+  tools call <device-id>.<tool-id> [json] Call one or more tools
+  help [command]                          Show help
+
+ALIASES
+  mcp                     Same as 'mcp --help'
+  mcp call                Same as 'mcp tools call'
+
+EXAMPLES
+  mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
+  mcp devices connect my-laptop                  # uses defaults from config
+  mcp devices list
+  mcp tools list my-laptop
+  mcp tools view my-laptop.snapshot
+  mcp tools call my-laptop.click '{"selector":"#submit"}'
+  echo '{"name":"my-laptop.snapshot","arguments":{}}' | mcp tools call
+  mcp call my-laptop.snapshot '{}' my-laptop.click '{"selector":"#ok"}'
+
+CONFIG
+  Precedence per field: --flag > environment > device entry > defaults section.
+  Environment: CODE_MCP_GATEWAY_CONFIG, CODE_MCP_GATEWAY_URL,
+  CODE_MCP_GATEWAY_TOKEN, CODE_MCP_GATEWAY_DEVICE_TOKEN,
+  CODE_MCP_GATEWAY_TIMEOUT_MS.
+
+EXIT CODES
+  0 success   1 error   2 usage   3 authentication   4 device offline   5 timeout
+`;
+
+const DEVICES = `mcp devices - manage device connections
+
+USAGE
+  mcp devices connect <device-id> [options]
+  mcp devices disconnect <device-id>
+  mcp devices status <device-id> [--json]
+  mcp devices list [--no-probe] [--json]
+
+${bold("connect")}
+  Stores <device-id> (and any credentials given) in the config file, then probes
+  the device. Unspecified fields fall back to environment variables, the device's
+  existing entry, then the defaults section - so after one full connect, later
+  devices need only 'mcp devices connect <device-id>'.
+
+  Options:
+    --token <token>          Device token (sent as X-Device-Token)
+    --gateway <url>          Gateway origin, e.g. https://gw.example.dev
+    --gateway-token <token>  Gateway credential (sent as Authorization: Bearer)
+    --timeout <ms>           Per-request timeout (default 300000)
+    --no-verify              Skip the reachability probe
+    --set-default            Also write the given values into the defaults section
+
+${bold("disconnect")}
+  Removes the device's entry from the config file. It does not affect the device
+  itself, which keeps its own tunnel to the gateway. Idempotent.
+
+${bold("status")}
+  Sends an MCP 'ping' and reports reachability and round-trip time. Exits 4 when
+  the device is offline, 3 when the credentials are rejected.
+
+${bold("list")}
+  Lists configured devices and probes them concurrently. --no-probe skips the
+  probes for an instant, offline listing.
+`;
+
+const TOOLS = `mcp tools - list, inspect and call device tools
+
+USAGE
+  mcp tools list <device-id> [--json]
+  mcp tools view <device-id>.<tool-id> [--json]
+  mcp tools call <device-id>.<tool-id> [<arguments-json>] [options]
+  mcp tools call <device-id>.<tool-id> <args> <device-id>.<tool-id> <args> ...
+  ... | mcp tools call
+
+${bold("list")}
+  Lists the tools a device exposes: name and one-line description.
+
+${bold("view")}
+  Prints one tool's description, JSON input schema, and a ready-to-run call
+  command with the required arguments scaffolded.
+
+${bold("call")}
+  Arguments are JSON. Three input forms:
+    1. inline      mcp tools call dev.tool '{"a":1}'
+    2. paired      mcp tools call dev1.t1 '{}' dev2.t2 '{"b":2}'
+    3. stdin       cat call.json  | mcp tools call
+                   cat calls.json | mcp tools call
+
+  stdin object:  { "name": "<device>.<tool>", "arguments": { ... } }
+  stdin array:   [ { "id": 1, "name": "<device>.<tool>", "arguments": { ... } }, ... ]
+
+  Options:
+    --json              Output raw MCP results as JSON
+    --parallel          Run multiple calls concurrently (default: sequential)
+    --handshake <mode>  auto | always | never (default auto) - when to send the
+                        MCP initialize handshake before the first request
+    --timeout <ms>      Per-call timeout
+    --device <device>   Force the device id when the label is ambiguous
+    --tool <tool>       Force the tool name when the label is ambiguous
+
+  A single reference without arguments calls the tool with {}. A tool result
+  with isError is printed and makes the command exit 1.
+`;
+
+export function rootHelp(): string {
+  return ROOT;
+}
+
+export function helpFor(topic: string | undefined, sub: string | undefined): string | undefined {
+  if (!topic) return ROOT;
+  if (topic === "devices") return DEVICES;
+  if (topic === "tools") return TOOLS;
+  if (topic === "call") return TOOLS;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: mcp help [devices|tools|call]")}`;
+  void sub;
+  return undefined;
+}
+
+/** One-line usage hint shown when a command is invoked incorrectly. */
+export function usageLine(topic: string, sub?: string): string {
+  if (topic === "devices") {
+    if (sub === "connect") return "Usage: mcp devices connect <device-id> [--token <t>] [--gateway <url>]";
+    if (sub === "disconnect") return "Usage: mcp devices disconnect <device-id>";
+    if (sub === "status") return "Usage: mcp devices status <device-id>";
+    if (sub === "list") return "Usage: mcp devices list";
+    return "Usage: mcp devices <connect|disconnect|status|list> [args]";
+  }
+  if (topic === "tools" || topic === "call") {
+    if (sub === "list") return "Usage: mcp tools list <device-id>";
+    if (sub === "view") return "Usage: mcp tools view <device-id>.<tool-id>";
+    if (sub === "call") return "Usage: mcp tools call <device-id>.<tool-id> [<arguments-json>]";
+    return "Usage: mcp tools <list|view|call> [args]";
+  }
+  return "Usage: mcp [command] [options]";
+}
+
+export const TOPIC_HINT = `Run '${cyan("mcp --help")}' for the command list.`;

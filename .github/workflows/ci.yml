@@ -36,3 +36,42 @@ jobs:
         # run-smoke.ts resolves bun via $BUN_PATH or ~/.bun/bin/bun
         # (setup-bun's install location on Linux runners).
         run: bun run test
+
+  cli:
+    name: mcp CLI (typecheck, unit, end-to-end)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The end-to-end suite boots a local wrangler gateway, so the worker's
+      # dependencies must be installed even though the CLI itself has none.
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: cli
+        run: bun run typecheck
+
+      - name: Unit tests
+        working-directory: cli
+        run: bun test
+
+      - name: End-to-end tests
+        working-directory: cli
+        run: bun test/e2e.ts

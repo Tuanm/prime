@@ -47,8 +47,27 @@ npx wrangler deploy
 | `wss://<worker>/ws/<deviceId>?token=<deviceToken>` | Device connects to its tunnel |
 | `POST <worker>/mcp/<deviceId>?token=<deviceToken>` | MCP client relays a JSON-RPC call |
 
+## CLI
+
+@BT@cli/@BT@ builds @BT@mcp@BT@, a fast, dependency-free command line client for the
+gateway: connect devices, list and inspect tools, and call one or many tools
+from inline JSON, paired arguments or stdin.
+
+@FENCE@text
+mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
+mcp devices list
+mcp tools list my-laptop
+mcp tools call my-laptop.click '{"selector":"#submit"}'
+@FENCE@
+
+Credentials and defaults live in @BT@~/.code-mcp-gateway/config.yaml@BT@; flags override
+environment variables, which override the device entry, which overrides the
+defaults section. @BT@mcp --help@BT@ lists everything, and @BT@mcp call@BT@ is an alias for
+@BT@mcp tools call@BT@.
+
 ## Documentation
 
+- [cli/README.md](cli/README.md) - the @BT@mcp@BT@ CLI: install, commands, configuration, exit codes
 - [worker/README.md](worker/README.md) — architecture, security model, deploy, tunables, test
 - [worker/src](worker/src) — entry point, DeviceDO, RegistryDO, config
 - [MCP specification](https://modelcontextprotocol.io) — the JSON-RPC protocol this gateway transports
