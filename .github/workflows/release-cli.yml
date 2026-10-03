@@ -24,7 +24,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-cli-${{ github.ref }
+  group: release-cli-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -49,10 +49,10 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ -n "${{INPUT_VERSION}" ]; then
-            VERSION="${{INPUT_VERSION}"
-          elif [ "${{REF_TYPE}" = "tag" ]; then
-            VERSION="${{REF_NAME#cli-v}"
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            VERSION="${INPUT_VERSION:-}"
+          elif [ "${REF_TYPE:-}" = "tag" ]; then
+            VERSION="${REF_NAME#cli-v}"
           else
             VERSION="$(node -p "require('./cli/package.json').version")"
           fi

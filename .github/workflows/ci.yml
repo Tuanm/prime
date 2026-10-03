@@ -60,6 +60,11 @@ jobs:
         working-directory: worker
         run: npm ci
 
+      # A malformed ${{ }} is still valid YAML, so only GitHub's parser rejects
+      # it - catch it here instead of in a red workflow run.
+      - name: Validate workflow files
+        run: bun scripts/check-workflows.ts
+
       - name: Install CLI dependencies
         working-directory: cli
         run: bun install --frozen-lockfile
