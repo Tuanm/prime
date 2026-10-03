@@ -1,15 +1,23 @@
 // `mcp tools ...` - list, view and call device tools.
 
-import { bool, str } from "./args.ts";
+import { bool, num, str, strList } from "./args.ts";
 import { type HandshakeMode, GatewayClient } from "./client.ts";
 import { type Ctx, overridesFrom, targetFor } from "./context.ts";
 import { EXIT, McpError, UsageError } from "./errors.ts";
+import { pool } from "./pool.ts";
 import { splitLabel } from "./labels.ts";
 import { bold, cyan, dim, isErrorResult, printJson, red, renderToolResult, table, truncate } from "./output.ts";
 import type { Target } from "./target.ts";
 
 interface CallRequest {
   id: number | string;
+  name: string;
+  arguments: unknown;
+}
+
+/** A call as written by the user, before ids are assigned. */
+interface ParsedCall {
+  id?: number | string;
   name: string;
   arguments: unknown;
 }
@@ -180,15 +188,43 @@ async function readStdin(): Promise<string> {
   }
 }
 
-/** Parse the stdin document: a single call object or an array of them. */
-function parseStdinCalls(text: string, source: string): CallRequest[] {
+/** Editors on Windows (and PowerShell redirects) often emit a UTF-8 BOM. */
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
+ * Read one call specification from a file. `-` means stdin, matching the
+ * convention every other CLI uses.
+ *
+ * A path is used instead of shell redirection because Windows has no `cat`:
+ *   mcp tools call --file tool_call.json
+ *   mcp tools call @tool_call.json
+ *   type tool_calls.json | mcp tools call
+ */
+async function readSpecSource(path: string): Promise<{ text: string; source: string }> {
+  if (path === "-") return { text: await readStdin(), source: "stdin" };
+  try {
+    return { text: await Bun.file(path).text(), source: path };
+  } catch (err) {
+    throw new UsageError(
+      `cannot read "${path}": ${err instanceof Error ? err.message : String(err)}`,
+      "Check the path. On Windows quote backslashes or use forward slashes.",
+    );
+  }
+}
+
+/** Parse a call specification: a single call object or an array of them. */
+function parseSpecCalls(rawText: string, source: string): ParsedCall[] {
+  const text = stripBom(rawText).trim();
+  if (text.length === 0) throw new UsageError(`${source} is empty`, "Expected a call object or an array of call objects.");
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    throw new UsageError(`stdin is not valid JSON: ${err instanceof Error ? err.message : String(err)}`, source);
+    throw new UsageError(`${source} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`, text.slice(0, 120));
   }
-  const toCall = (value: unknown, index: number): CallRequest => {
+  const toCall = (value: unknown): ParsedCall => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new UsageError("each call must be a JSON object with \"name\" and \"arguments\"");
     }
@@ -196,14 +232,56 @@ function parseStdinCalls(text: string, source: string): CallRequest[] {
     if (typeof obj.name !== "string" || obj.name.length === 0) {
       throw new UsageError("each call requires a string \"name\" field (\"<device-id>.<tool-id>\")");
     }
-    const id = typeof obj.id === "string" || typeof obj.id === "number" ? obj.id : index + 1;
+    const id = typeof obj.id === "string" || typeof obj.id === "number" ? obj.id : undefined;
     return { id, name: obj.name, arguments: obj.arguments ?? {} };
   };
   if (Array.isArray(parsed)) {
-    if (parsed.length === 0) throw new UsageError("stdin contained an empty array of calls");
+    if (parsed.length === 0) throw new UsageError(`${source} contained an empty array of calls`);
     return parsed.map(toCall);
   }
-  return [toCall(parsed, 0)];
+  return [toCall(parsed)];
+}
+
+/** Assign ids to calls that did not specify one, numbering across all sources. */
+function withIds(calls: ParsedCall[]): CallRequest[] {
+  return calls.map((call, index) => ({ ...call, id: call.id ?? index + 1 }));
+}
+
+/**
+ * Build an arguments object from repeatable `--arg name=value` flags.
+ *
+ * This is the quoting-free path: Windows cmd.exe has no single-quote syntax, so
+ * `'{"a":1}'` cannot be typed there. `--arg selector=#submit` needs no quoting
+ * at all. Values that parse as JSON scalars become numbers/booleans/null;
+ * anything else stays a string.
+ */
+function buildArgsFromFlags(pairs: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) {
+      throw new UsageError(`invalid --arg "${pair}"`, "Expected --arg <name>=<value>, e.g. --arg selector=#submit");
+    }
+    out[pair.slice(0, eq)] = parseScalar(pair.slice(eq + 1));
+  }
+  return out;
+}
+
+function parseScalar(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === "") return "";
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  if (trimmed === "null") return null;
+  if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(trimmed)) return Number(trimmed);
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Not valid JSON: keep it as the literal string the user typed.
+    }
+  }
+  return raw;
 }
 
 /** Parse the positional form: one label (args optional) or label/args pairs. */
@@ -233,28 +311,84 @@ function parsePositionalCalls(rest: string[]): { label: string; args: unknown }[
   return calls;
 }
 
-export async function toolsCall(ctx: Ctx): Promise<void> {
-  const rest = ctx.parsed.positionals.slice(2);
-  const wantJson = ctx.json;
-  const timeoutMs = overridesFrom(ctx.parsed).timeoutMs;
-  const mode = handshakeMode(ctx);
+/** How many calls `--parallel` keeps in flight at once. */
+const DEFAULT_CONCURRENCY = 8;
 
-  let requests: CallRequest[];
+const CALL_USAGE =
+  "Usage: mcp tools call <device-id>.<tool-id> '<json>' | --file calls.json | @calls.json | ... | mcp tools call";
+
+/**
+ * Collect the requested calls from whichever source the user chose.
+ *
+ * Precedence:
+ *   --file <path>...   explicit specification files (`-` = stdin)
+ *   @path ...          the same thing, positional
+ *   <label> <json> ... inline arguments
+ *   --stdin            read the specification from stdin explicitly
+ *   (piped stdin)      read it automatically when nothing else was given
+ */
+async function collectCallRequests(ctx: Ctx): Promise<CallRequest[]> {
+  const rest = ctx.parsed.positionals.slice(2);
+  const files = strList(ctx.parsed, "file");
+  const argPairs = strList(ctx.parsed, "arg");
+  const explicitStdin = bool(ctx.parsed, "stdin");
+
+  if (files.length > 0) {
+    if (rest.length > 0) {
+      throw new UsageError(
+        "--file cannot be combined with positional tool references",
+        "Use either 'mcp tools call --file calls.json' or 'mcp tools call dev.tool <json>'.",
+      );
+    }
+    const specs = await Promise.all(files.map((path) => readSpecSource(path)));
+    return withIds(specs.flatMap((spec) => parseSpecCalls(spec.text, spec.source)));
+  }
+
   if (rest.length > 0) {
-    requests = parsePositionalCalls(rest).map((call, index) => {
+    const isFileRef = rest.map((token) => token.startsWith("@"));
+    if (isFileRef.some(Boolean)) {
+      if (!isFileRef.every(Boolean)) {
+        throw new UsageError(
+          "@file references cannot be mixed with inline tool references",
+          "Pass only @file arguments, or only <device>.<tool> <json> pairs.",
+        );
+      }
+      if (argPairs.length > 0) throw new UsageError("--arg cannot be combined with @file");
+      const specs = await Promise.all(rest.map((token) => readSpecSource(token.slice(1))));
+      return withIds(specs.flatMap((spec) => parseSpecCalls(spec.text, spec.source)));
+    }
+
+    const calls = parsePositionalCalls(rest);
+    if (argPairs.length > 0) {
+      if (calls.length !== 1) throw new UsageError("--arg requires exactly one tool reference");
+      const existing = calls[0]!.args;
+      if (existing && typeof existing === "object" && Object.keys(existing as object).length > 0) {
+        throw new UsageError("--arg cannot be combined with inline JSON arguments", "Pass either '<json>' or --arg name=value.");
+      }
+      calls[0]!.args = buildArgsFromFlags(argPairs);
+    }
+    return calls.map((call, index) => {
       const { deviceId, toolName } = resolveLabel(ctx, call.label);
       return { id: index + 1, name: `${deviceId}.${toolName}`, arguments: call.args };
     });
-  } else {
-    const text = (await readStdin()).trim();
-    if (text.length === 0) {
-      throw new UsageError(
-        "no tool calls given",
-        "Usage: mcp tools call <device-id>.<tool-id> '<json>'  |  cat calls.json | mcp tools call",
-      );
-    }
-    requests = parseStdinCalls(text, "stdin");
   }
+
+  if (argPairs.length > 0) {
+    throw new UsageError("--arg requires a tool reference", "e.g. mcp tools call dev.tool --arg name=value");
+  }
+  if (explicitStdin && process.stdin.isTTY) {
+    throw new UsageError("--stdin was given but stdin is a terminal", "Pipe a file into it, or use --file <path>.");
+  }
+  const text = explicitStdin || !process.stdin.isTTY ? await readStdin() : "";
+  if (text.trim().length === 0) throw new UsageError("no tool calls given", CALL_USAGE);
+  return withIds(parseSpecCalls(text, "stdin"));
+}
+
+export async function toolsCall(ctx: Ctx): Promise<void> {
+  const wantJson = ctx.json;
+  const timeoutMs = overridesFrom(ctx.parsed).timeoutMs;
+  const mode = handshakeMode(ctx);
+  const requests = await collectCallRequests(ctx);
 
   // One client per device, reused across calls so a batch pays connection setup
   // once per device rather than once per call.
@@ -274,7 +408,19 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
   // failure class (3 auth, 4 offline, 5 timeout) and the hint reaches the user.
   // A batch aggregates instead: one bad call must not hide the others' output.
   const single = plan.length === 1;
-  const run = async (item: (typeof plan)[number]): Promise<CallOutcome> => {
+  type PlanItem = (typeof plan)[number];
+  const toFailure = (item: PlanItem, err: unknown): CallOutcome => {
+    const message = err instanceof Error ? err.message : String(err);
+    const code = err instanceof McpError ? err.code : undefined;
+    return {
+      id: item.request.id,
+      name: `${item.deviceId}.${item.toolName}`,
+      ok: false,
+      error: { message, ...(code !== undefined ? { code } : {}) },
+    };
+  };
+
+  const run = async (item: PlanItem): Promise<CallOutcome> => {
     try {
       const result = await item.client.callTool(item.toolName, item.request.arguments, { handshake: mode, timeoutMs });
       return {
@@ -286,14 +432,24 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
       };
     } catch (err) {
       if (single) throw err;
-      const message = err instanceof Error ? err.message : String(err);
-      const code = err instanceof McpError ? err.code : undefined;
-      return { id: item.request.id, name: `${item.deviceId}.${item.toolName}`, ok: false, error: { message, ...(code !== undefined ? { code } : {}) } };
+      return toFailure(item, err);
     }
   };
 
   const parallel = bool(ctx.parsed, "parallel");
-  const outcomes: CallOutcome[] = parallel ? await Promise.all(plan.map(run)) : await sequential(plan, run);
+  // Bounded concurrency, and per-call isolation: a call rejecting must never
+  // discard its siblings' results, so every rejection is converted to an
+  // outcome rather than allowed to reject the pool.
+  const outcomes: CallOutcome[] =
+    parallel && !single
+      ? await pool(plan, num(ctx.parsed, "concurrency") ?? DEFAULT_CONCURRENCY, async (item, index) => {
+          try {
+            return await run(item);
+          } catch (err) {
+            return toFailure(plan[index]!, err);
+          }
+        })
+      : await sequential(plan, run);
 
   if (wantJson) {
     if (outcomes.length === 1) {

@@ -6,7 +6,7 @@
 // documented input form.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -80,6 +80,7 @@ const TOOLS = [
   { name: "slow", description: "Sleeps for ms then returns", inputSchema: { type: "object", properties: { ms: { type: "number" } } } },
   { name: "state", description: "Reports the order of calls", inputSchema: { type: "object", properties: {} } },
   { name: "file.read", description: "A tool whose name contains a dot", inputSchema: { type: "object", properties: { path: { type: "string" } } } },
+  { name: "args", description: "Echo the arguments back as JSON", inputSchema: { type: "object", properties: {} } },
 ];
 
 function startMockDevice(deviceId: string, token: string): Promise<WebSocket> {
@@ -135,6 +136,8 @@ function startMockDevice(deviceId: string, token: string): Promise<WebSocket> {
               return rpcOk({ content: [{ type: "text", text: JSON.stringify(callLogs[deviceId]!) }] });
             case "file.read":
               return rpcOk({ content: [{ type: "text", text: `read:${String(args.path ?? "")}` }] });
+            case "args":
+              return rpcOk({ content: [{ type: "text", text: JSON.stringify(args) }] });
             default:
               return rpcErr(-32602, `unknown tool: ${name}`);
           }
@@ -183,7 +186,8 @@ async function startGateway(): Promise<{ kill: () => void }> {
 // ---- run -------------------------------------------------------------------
 
 console.log("Building the host binary...");
-const build = Bun.spawnSync(["bun", "build", "--compile", "--minify", "--outfile", BIN, join(ROOT, "src", "index.ts")], {
+// Same flags as scripts/build.ts: the suite must test what ships.
+const build = Bun.spawnSync(["bun", "build", "--compile", "--minify", "--bytecode", "--outfile", BIN, join(ROOT, "src", "index.ts")], {
   cwd: ROOT,
   stdout: "pipe",
   stderr: "pipe",
@@ -280,7 +284,11 @@ try {
   check("tools list shows tools", list2.code === 0 && list2.out.includes("echo") && list2.out.includes("boom"), list2.out);
 
   const toolsJson = JSON.parse((await cli(["tools", "list", "alpha", "--json"])).out) as { count: number; tools: { name: string }[] };
-  check("tools list --json count", toolsJson.count === 5 && toolsJson.tools.some((t) => t.name === "file.read"));
+  check(
+    "tools list --json count",
+    toolsJson.count === TOOLS.length && toolsJson.tools.some((t) => t.name === "file.read") && toolsJson.tools.some((t) => t.name === "args"),
+    `count=${toolsJson.count} expected=${TOOLS.length}`,
+  );
 
   const view = await cli(["tools", "view", "alpha.echo"]);
   check("tools view shows schema and example", view.code === 0 && view.out.includes("Text to echo") && view.out.includes("mcp tools call alpha.echo"), view.out);
@@ -408,6 +416,162 @@ try {
   check("disconnect removes the entry", disconnect.code === 0 && !readFileSync(CONFIG, "utf8").includes("ghost"));
   const disconnectAgain = await cli(["devices", "disconnect", "ghost"]);
   check("disconnect is idempotent", disconnectAgain.code === 0 && disconnectAgain.out.includes("not configured"));
+
+  // ---- cross-platform input forms ------------------------------------------
+  // Windows has no 'cat' and cmd.exe has no single-quote syntax, so file and
+  // key/value input must work without any shell help.
+  const callDir = mkdtempSync(join(tmpdir(), "mcp-calls-"));
+  const writeSpec = (name: string, content: string): string => {
+    const path = join(callDir, name);
+    writeFileSync(path, content);
+    return path;
+  };
+  const singleFile = writeSpec("call.json", JSON.stringify({ name: "alpha.echo", arguments: { text: "from-file" } }));
+  const batchFile = writeSpec(
+    "calls.json",
+    JSON.stringify([
+      { id: 7, name: "alpha.echo", arguments: { text: "file-1" } },
+      { id: 8, name: "alpha.v2.echo", arguments: { text: "file-2" } },
+    ]),
+  );
+  const extraFileA = writeSpec("a.json", JSON.stringify({ name: "alpha.echo", arguments: { text: "merge-a" } }));
+  const extraFileB = writeSpec("b.json", JSON.stringify({ name: "alpha.echo", arguments: { text: "merge-b" } }));
+
+  const byFile = await cli(["tools", "call", "--file", singleFile]);
+  check("--file reads a single call", byFile.code === 0 && byFile.out.includes("echo:from-file"), `code=${byFile.code} err=${byFile.err}`);
+
+  const byShortFlag = await cli(["tools", "call", "-f", singleFile]);
+  check("-f short form", byShortFlag.code === 0 && byShortFlag.out.includes("echo:from-file"), byShortFlag.err);
+
+  const byBatchFile = await cli(["tools", "call", "--file", batchFile]);
+  check(
+    "--file reads an array and keeps its ids/order",
+    byBatchFile.code === 0 && byBatchFile.out.includes("[7]") && byBatchFile.out.includes("[8]") &&
+      byBatchFile.out.indexOf("file-1") < byBatchFile.out.indexOf("file-2"),
+    byBatchFile.out,
+  );
+
+  const mergedFiles = await cli(["tools", "call", "--file", extraFileA, "--file", extraFileB]);
+  check(
+    "repeated --file merges both specifications",
+    mergedFiles.code === 0 && mergedFiles.out.includes("merge-a") && mergedFiles.out.includes("merge-b") &&
+      mergedFiles.out.includes("[1]") && mergedFiles.out.includes("[2]"),
+    mergedFiles.out,
+  );
+
+  const fileFromStdin = await cli(["tools", "call", "--file", "-"], { stdin: readFileSync(singleFile, "utf8") });
+  check("--file - reads stdin", fileFromStdin.code === 0 && fileFromStdin.out.includes("echo:from-file"), fileFromStdin.err);
+
+  const atFile = await cli(["tools", "call", "@" + singleFile]);
+  check("@file positional", atFile.code === 0 && atFile.out.includes("echo:from-file"), atFile.err);
+
+  const atFiles = await cli(["tools", "call", "@" + extraFileA, "@" + extraFileB]);
+  check("@a @b merges", atFiles.code === 0 && atFiles.out.includes("merge-a") && atFiles.out.includes("merge-b"), atFiles.out);
+
+  const mixed = await cli(["tools", "call", "@" + singleFile, "alpha.echo", '{"text":"x"}']);
+  check("@file mixed with inline exits 2", mixed.code === 2 && mixed.err.includes("cannot be mixed"), mixed.err);
+
+  const fileAndPositional = await cli(["tools", "call", "--file", singleFile, "alpha.echo", "{}"]);
+  check("--file with positionals exits 2", fileAndPositional.code === 2 && fileAndPositional.err.includes("cannot be combined"), fileAndPositional.err);
+
+  const missingFile = await cli(["tools", "call", "--file", join(callDir, "nope.json")]);
+  check("missing --file exits 2 with the path", missingFile.code === 2 && missingFile.err.includes("nope.json"), missingFile.err);
+
+  const bomFile = writeSpec("bom.json", "\uFEFF" + JSON.stringify({ name: "alpha.echo", arguments: { text: "bom" } }));
+  const bom = await cli(["tools", "call", "--file", bomFile]);
+  check("UTF-8 BOM is tolerated (Windows editors add one)", bom.code === 0 && bom.out.includes("echo:bom"), `code=${bom.code} err=${bom.err}`);
+
+  const crlfFile = writeSpec("crlf.json", JSON.stringify({ name: "alpha.echo", arguments: { text: "crlf" } }).replace(/\}/g, "}\r\n"));
+  const crlf = await cli(["tools", "call", "--file", crlfFile]);
+  check("CRLF line endings are tolerated", crlf.code === 0 && crlf.out.includes("echo:crlf"), `code=${crlf.code} err=${crlf.err}`);
+
+  const emptyFile = writeSpec("empty.json", "   \n");
+  const empty = await cli(["tools", "call", "--file", emptyFile]);
+  check("empty specification exits 2", empty.code === 2 && empty.err.includes("empty"), empty.err);
+
+  const explicitStdin = await cli(["tools", "call", "--stdin"], { stdin: readFileSync(singleFile, "utf8") });
+  check("--stdin reads the specification", explicitStdin.code === 0 && explicitStdin.out.includes("echo:from-file"), explicitStdin.err);
+
+  // ---- quote-free arguments (--arg) -----------------------------------------
+  const argScalars = await cli(["tools", "call", "alpha.args", "--arg", "n=5", "--arg", "b=true", "--arg", "s=hello", "--arg", "nil=null", "--arg", "arr=[1,2]"]);
+  check(
+    "--arg builds and types arguments without JSON quoting",
+    argScalars.code === 0 && argScalars.out.trim() === '{"n":5,"b":true,"s":"hello","nil":null,"arr":[1,2]}',
+    argScalars.out.trim(),
+  );
+
+  const argNumbers = await cli(["tools", "call", "alpha.args", "--arg", "n=007", "--arg", "s=#submit"]);
+  check(
+    "--arg keeps non-JSON values as strings",
+    argNumbers.code === 0 && argNumbers.out.trim() === '{"n":7,"s":"#submit"}',
+    argNumbers.out.trim(),
+  );
+
+  const argTwoCalls = await cli(["tools", "call", "alpha.echo", "{}", "alpha.v2.echo", "{}", "--arg", "a=1"]);
+  check("--arg with two references exits 2", argTwoCalls.code === 2 && argTwoCalls.err.includes("exactly one"), argTwoCalls.err);
+
+  // Two bare labels are a label/arguments pair, so the second one must be JSON.
+  const twoBareLabels = await cli(["tools", "call", "alpha.echo", "alpha.echo", "--arg", "a=1"]);
+  check("two bare labels exit 2 explaining they are a label/JSON pair", twoBareLabels.code === 2 && twoBareLabels.err.includes("not valid JSON"), twoBareLabels.err);
+
+  const argWithJson = await cli(["tools", "call", "alpha.echo", '{"text":"x"}', "--arg", "a=1"]);
+  check("--arg with inline JSON exits 2", argWithJson.code === 2 && argWithJson.err.includes("cannot be combined"), argWithJson.err);
+
+  const argNoEquals = await cli(["tools", "call", "alpha.echo", "--arg", "broken"]);
+  check("--arg without '=' exits 2", argNoEquals.code === 2 && argNoEquals.err.includes("invalid --arg") && argNoEquals.err.includes("name>=<value>"), argNoEquals.err);
+
+  const argNoLabel = await cli(["tools", "call", "--arg", "a=1"]);
+  check("--arg without a reference exits 2", argNoLabel.code === 2 && argNoLabel.err.includes("requires a tool reference"), argNoLabel.err);
+
+  const argWithFile = await cli(["tools", "call", "@" + singleFile, "--arg", "a=1"]);
+  check("--arg with @file exits 2", argWithFile.code === 2 && argWithFile.err.includes("cannot be combined"), argWithFile.err);
+
+  // ---- failure isolation ----------------------------------------------------
+  const parallelFailure = await cli([
+    "tools", "call", "--parallel",
+    "alpha.slow", '{"ms":400}',
+    "alpha.boom", "{}",
+    "alpha.slow", '{"ms":400}',
+  ]);
+  check(
+    "parallel: a failing call does not cancel its siblings",
+    parallelFailure.code === 1 &&
+      (parallelFailure.out.match(/slept:400/g) ?? []).length === 2 &&
+      parallelFailure.out.includes("boom failed on purpose"),
+    `code=${parallelFailure.code} out=${parallelFailure.out}`,
+  );
+
+  const parallelTransportFailure = await cli([
+    "tools", "call", "--parallel", "--timeout", "400",
+    "alpha.echo", '{"text":"before"}',
+    "alpha.slow", '{"ms":5000}',
+    "alpha.echo", '{"text":"after"}',
+  ]);
+  check(
+    "parallel: a timeout does not cancel its siblings",
+    parallelTransportFailure.code === 1 &&
+      parallelTransportFailure.out.includes("before") &&
+      parallelTransportFailure.out.includes("after") &&
+      parallelTransportFailure.out.includes("timed out"),
+    `code=${parallelTransportFailure.code} out=${parallelTransportFailure.out}`,
+  );
+
+  rmSync(callDir, { recursive: true, force: true });
+
+  // ---- a larger parallel batch (exercises the worker pool end to end) ----
+  const BIG = 24;
+  const bigArgs = ["tools", "call", "--parallel", "--concurrency", "4"];
+  for (let i = 0; i < BIG; i++) bigArgs.push("alpha.echo", JSON.stringify({ text: `n${i}` }));
+  const big = await cli(bigArgs);
+  const bigResults = (big.out.match(/echo:n\d+/g) ?? []).length;
+  const bigOrdered = Array.from({ length: BIG }, (_, i) => big.out.indexOf(`echo:n${i}`)).every(
+    (position, index, all) => position > -1 && (index === 0 || position > all[index - 1]!),
+  );
+  check(
+    `${BIG} parallel calls all succeed in order`,
+    big.code === 0 && bigResults === BIG && bigOrdered,
+    `code=${big.code} results=${bigResults}/${BIG} ordered=${bigOrdered}`,
+  );
 
   // ---- the JS bundle must behave identically ----
   const bundleVersion = await cli(["--version"], { via: "bundle" });

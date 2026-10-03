@@ -99,26 +99,43 @@ ${bold("view")}
   command with the required arguments scaffolded.
 
 ${bold("call")}
-  Arguments are JSON. Three input forms:
-    1. inline      mcp tools call dev.tool '{"a":1}'
-    2. paired      mcp tools call dev1.t1 '{}' dev2.t2 '{"b":2}'
-    3. stdin       cat call.json  | mcp tools call
-                   cat calls.json | mcp tools call
+  Five input forms, so every platform has one that needs no shell tricks.
+  cmd.exe has no 'cat' and no single-quote syntax, hence --file and --arg:
 
-  stdin object:  { "name": "<device>.<tool>", "arguments": { ... } }
-  stdin array:   [ { "id": 1, "name": "<device>.<tool>", "arguments": { ... } }, ... ]
+    1. inline     mcp tools call dev.tool '{"a":1}'
+    2. key/value  mcp tools call dev.tool --arg a=1 --arg b=text
+    3. paired     mcp tools call dev1.t1 '{}' dev2.t2 '{"b":2}'
+    4. file       mcp tools call --file calls.json       (-f, or '-' for stdin)
+                  mcp tools call @calls.json
+    5. stdin      mcp tools call --stdin
+                  type calls.json | mcp tools call
+
+  Specification file or stdin - one object, or an array of them:
+    { "name": "<device>.<tool>", "arguments": { ... } }
+    [ { "id": 1, "name": "<device>.<tool>", "arguments": { ... } }, ... ]
 
   Options:
+    -f, --file <path>   Read the specification from a file ('-' = stdin);
+                        repeatable, and files may each hold an array
+    --stdin             Read the specification from stdin
+    --arg <name=value>  Set one argument without JSON quoting; repeatable.
+                        Values parse as JSON scalars, so n=5 is a number and
+                        s=text is a string
     --json              Output raw MCP results as JSON
     --parallel          Run multiple calls concurrently (default: sequential)
+    --concurrency <n>   Max calls in flight with --parallel (default 8)
     --handshake <mode>  auto | always | never (default auto) - when to send the
                         MCP initialize handshake before the first request
     --timeout <ms>      Per-call timeout
     --device <device>   Force the device id when the label is ambiguous
     --tool <tool>       Force the tool name when the label is ambiguous
 
-  A single reference without arguments calls the tool with {}. A tool result
-  with isError is printed and makes the command exit 1.
+  A single reference without arguments calls the tool with {}.
+
+  Failures are per call: one failing call never stops the others, every result
+  is still reported, and the command exits 1 if any call failed or returned
+  isError. A call that fails on its own keeps its specific exit code (3 auth,
+  4 offline, 5 timeout).
 `;
 
 export function rootHelp(): string {

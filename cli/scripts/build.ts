@@ -34,6 +34,19 @@ const args = new Set(process.argv.slice(2));
 const hostOnly = args.has("--host-only");
 const bundleOnly = args.has("--bundle-only");
 
+// Version precedence: --version <value> flag, MCP_CLI_VERSION env, package.json.
+const versionFlagIndex = process.argv.indexOf("--version");
+const pkg = (await Bun.file(`${ROOT}package.json`).json()) as { version?: string };
+const VERSION = versionFlagIndex !== -1 ? process.argv[versionFlagIndex + 1] : (process.env.MCP_CLI_VERSION ?? pkg.version ?? "0.0.0");
+if (!VERSION || !/^\d+\.\d+\.\d+/.test(VERSION)) {
+  console.error(`invalid version "${VERSION}"`);
+  process.exit(1);
+}
+// `process.env.MCP_CLI_VERSION` is substituted with the literal at build time,
+// so the artifact reports the version it was built from - not the environment.
+const DEFINE = `--define=process.env.MCP_CLI_VERSION="${VERSION}"`;
+console.log(`version ${VERSION}`);
+
 mkdirSync(DIST, { recursive: true });
 
 // The JS bundle is the lightweight option: ~100 KB, needs Bun at runtime.
@@ -50,6 +63,7 @@ if (!args.has("--no-bundle")) {
     minify: true,
     outdir: DIST,
     naming: "mcp.js",
+    define: { "process.env.MCP_CLI_VERSION": JSON.stringify(VERSION) },
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);
@@ -75,7 +89,7 @@ if (selected.length === 0) {
   // Fall back to the compiler's own default target when the host pair is unusual.
   const out = `${DIST}/mcp`;
   rmSync(out, { force: true });
-  await $`bun build --compile --minify --outfile ${out} ${ENTRY}`;
+  await $`bun build --compile --minify --bytecode ${DEFINE} --outfile ${out} ${ENTRY}`;
   console.log(`compile ${out}  ${(statSync(out).size / 1024 / 1024).toFixed(1)} MB`);
   process.exit(0);
 }
@@ -84,7 +98,10 @@ for (const { target, out } of selected) {
   const path = `${DIST}/${out}`;
   rmSync(path, { force: true });
   try {
-    await $`bun build --compile --minify --target=${target} --outfile ${path} ${ENTRY}`.quiet();
+    // --bytecode precompiles the module graph, which measurably cuts cold
+    // start (~30-40% on an M1). It requires the entry to be free of top-level
+    // await; src/index.ts uses a floating async IIFE for exactly this reason.
+    await $`bun build --compile --minify --bytecode ${DEFINE} --target=${target} --outfile ${path} ${ENTRY}`.quiet();
     console.log(`compile ${path}  ${(statSync(path).size / 1024 / 1024).toFixed(1)} MB  (${target})`);
     // Also expose the host build under its bare name, so a local run yields a
     // binary literally called `mcp` (the name it is installed as).

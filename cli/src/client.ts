@@ -15,6 +15,34 @@ import type { Target } from "./target.ts";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
 
+/** Total attempts for a call, including the first one. */
+export const MAX_ATTEMPTS = 3;
+
+/**
+ * Is this failure safe to retry?
+ *
+ * Only failures that provably happened *before* the request reached the tool:
+ * a rate limit or a full pending queue are rejected at the gateway, and a 502
+ * means the tunnel send itself failed. A timeout is NOT retryable - the tool
+ * may still be running - and neither is a dropped connection, for the same
+ * reason. Retrying those would duplicate side effects.
+ */
+export function isSafeToRetry(status: number, body: string): boolean {
+  if (status === 429) return true; // rate limited, never forwarded
+  if (status === 502) return true; // tunnel send failed
+  if (status === 503) return /device busy/i.test(body); // pending queue full, never forwarded
+  return false;
+}
+
+/** Exponential backoff with jitter, capped so a retry never stalls a batch. */
+export function backoffFor(attempt: number): number {
+  return Math.min(1000, 200 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 100);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * MCP servers SHOULD reject requests before `initialize`. Current code-mcp
  * devices do not enforce that, so paying a second round trip on every command
@@ -37,6 +65,7 @@ export interface CallTrace {
 export class GatewayClient {
   readonly target: Target;
   private lastMs = 0;
+  private lastAttemptCount = 0;
   private handshaken = false;
 
   constructor(target: Target) {
@@ -45,6 +74,15 @@ export class GatewayClient {
 
   get lastRoundTripMs(): number {
     return this.lastMs;
+  }
+
+  /** Attempts used by the most recent call (1 = no retry was needed). */
+  get lastAttempts(): number {
+    return this.lastAttemptCount;
+  }
+
+  set lastAttempts(value: number) {
+    this.lastAttemptCount = value;
   }
 
   private endpoint(): string {
@@ -75,32 +113,48 @@ export class GatewayClient {
       ...(params === undefined ? {} : { params }),
     });
 
+    // One signal for the whole call, not per attempt: --timeout is the budget
+    // the user asked for, so retries must fit inside it rather than multiply it.
+    const signal = AbortSignal.timeout(timeoutMs);
+    const deadline = performance.now() + timeoutMs;
+    this.lastAttempts = 0;
+
     const started = performance.now();
-    let response: Response;
-    try {
-      response = await fetch(this.endpoint(), {
-        method: "POST",
-        headers: this.headers(),
-        body,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch (err) {
+    for (let attempt = 1; ; attempt++) {
+      this.lastAttempts = attempt;
+      let response: Response;
+      try {
+        response = await fetch(this.endpoint(), { method: "POST", headers: this.headers(), body, signal });
+      } catch (err) {
+        this.lastMs = Math.round(performance.now() - started);
+        // Never retried: a dropped connection may have reached the device, and
+        // re-sending a side-effecting tool call would duplicate it.
+        throw this.transportError(err, timeoutMs);
+      }
       this.lastMs = Math.round(performance.now() - started);
-      throw this.transportError(err, timeoutMs);
+
+      if (response.status === 204) return undefined; // notification acknowledged
+      const text = await response.text();
+
+      if (!response.ok) {
+        const error = this.httpError(response.status, text);
+        if (attempt >= MAX_ATTEMPTS || !isSafeToRetry(response.status, text)) throw error;
+        const backoffMs = backoffFor(attempt);
+        if (performance.now() + backoffMs >= deadline) throw error;
+        await sleep(backoffMs);
+        continue;
+      }
+      return this.parseBody(response.status, text);
     }
-    this.lastMs = Math.round(performance.now() - started);
+  }
 
-    if (response.status === 204) return undefined; // notification acknowledged
-    const text = await response.text();
-
-    if (!response.ok) throw this.httpError(response.status, text);
-
+  private parseBody(status: number, text: string): unknown {
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
       throw new CliError(
-        `gateway returned a non-JSON response (HTTP ${response.status})`,
+        `gateway returned a non-JSON response (HTTP ${status})`,
         text.length > 0 ? `Body: ${text.slice(0, 200)}` : undefined,
       );
     }

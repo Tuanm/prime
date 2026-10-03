@@ -4,7 +4,7 @@ A small, fast command line client for [code-mcp-gateway](../README.md). It talks
 to devices through the gateway's MCP relay and lets you list, inspect and call
 their MCP tools from a terminal or a script.
 
-- **Fast**: ~15 ms cold start, ~15 MB resident, one HTTP round trip per command.
+- **Fast**: ~11 ms cold start, ~15 MB resident, one HTTP round trip per command.
 - **Light**: no runtime dependencies, no MCP SDK, no YAML library.
 - **Cross-platform**: one self-contained binary per OS/arch.
 - **Scriptable**: typed exit codes, JSON output, stdin batching.
@@ -100,7 +100,9 @@ staging   offline  -         https://staging.example.dev
 
 ## Calling tools
 
-Arguments are JSON. There are three input forms.
+Five input forms, so every platform has one that needs no shell tricks. There
+is no `cat` in `cmd.exe` and no single-quote syntax either, which is why
+`--file` and `--arg` exist.
 
 **1. Inline** - one reference and its arguments:
 
@@ -110,7 +112,19 @@ mcp tools call my-laptop.snapshot '{}'
 mcp tools call my-laptop.snapshot          # no arguments => {}
 ```
 
-**2. Paired** - several tools in one command, executed in order:
+**2. Key/value** - no JSON quoting at all, which is the form that behaves
+identically in cmd.exe, PowerShell and bash:
+
+```bash
+mcp tools call my-laptop.click --arg selector=#submit
+mcp tools call my-device.bash --arg cwd=C:/work --arg command="echo hi"
+```
+
+Values parse as JSON scalars when they look like one, so `n=5` is a number,
+`b=true` a boolean, `nil=null` null and `arr=[1,2]` an array; anything
+else stays a string. Repeat `--arg` once per argument.
+
+**3. Paired** - several tools in one command, executed in order:
 
 ```bash
 mcp tools call laptop.snapshot '{}' phone.screenshot '{"full":true}'
@@ -118,14 +132,26 @@ mcp tools call laptop.snapshot '{}' phone.screenshot '{"full":true}'
 
 Calls run **sequentially by default** so side-effecting tools (clicks, typing)
 keep their order. `--parallel` runs them concurrently when they are
-independent.
+independent, with at most `--concurrency` (default 8) in flight - firing every
+call at once would trip the gateway's per-IP rate limit and its per-device
+pending cap, turning a large batch into a pile of failures.
 
-**3. stdin** - a single call object, or an array of them:
+**4. File** - the portable replacement for `cat x.json | mcp tools call`:
 
 ```bash
-echo '{"name":"my-laptop.snapshot","arguments":{}}' | mcp tools call
+mcp tools call --file calls.json       # or -f
+mcp tools call @calls.json             # same thing, positional
+mcp tools call -f a.json -f b.json     # repeatable; the files' calls merge in order
+mcp tools call --file -                # "-" means stdin
+```
 
-cat call.json | mcp tools call
+**5. stdin** - explicitly, or automatically when stdin is not a terminal:
+
+```bash
+type calls.json | mcp tools call         # cmd.exe
+Get-Content calls.json | mcp tools call  # PowerShell
+cat calls.json | mcp tools call          # bash
+mcp tools call --stdin < calls.json
 ```
 
 ```json
@@ -147,6 +173,39 @@ prints the raw MCP result for a single call and an array of
 A tool that reports failure (`isError`) is printed and exits 1. In a batch, one
 failing call does not abort the others - every outcome is reported and the exit
 code is 1.
+
+A specification file (or stdin) holds one call object, or an array of them.
+Calls without an `id` are numbered automatically, continuing across multiple
+files. A UTF-8 BOM and CRLF line endings are both tolerated, because Windows
+editors emit them.
+
+### Results and failures
+
+Output follows the input: a single call prints the tool's text content on stdout;
+a batch labels each result with its `id` in the specified order. `--json`
+prints the raw MCP result for a single call and an array of
+`{ id, name, ok, result | error }` for a batch.
+
+**Failures are per call and never cascade.** If three calls are requested and the
+middle one fails, the other two still run, still return their results, and are
+still printed:
+
+```text
+--- [1] my-laptop.snapshot
+...the snapshot...
+
+--- [2] my-laptop.click (isError)
+Element not found: #submit
+
+--- [3] my-laptop.evaluate
+42
+```
+
+The command then exits **1**, because the overall result was a failure. This holds
+in sequential and `--parallel` mode alike - a failing or timing-out call never
+cancels its siblings, and each call keeps its own timeout. A failing call that is
+the *only* call keeps its specific exit code instead (3 auth, 4 offline,
+5 timeout), so single-call scripts can still branch on the failure class.
 
 ### Device and tool references
 
@@ -218,23 +277,60 @@ on stdout, so a script can read both the reason and the code.
 
 ## Performance
 
-Measured on an M1 Mac, 20 runs each, with every run's exit code checked
-(`/usr/bin/true` costs 2.7 ms on the same harness, so the CLI's own startup is
-~13 ms):
+### Cold start
 
-| Metric | Compiled binary | `bun dist/mcp.js` |
-| --- | --- | --- |
-| Cold start, min / median | 15.9 / 17.0 ms | 16.2 / 17.7 ms |
-| Peak resident memory | 14.2 MB | 14.7 MB |
-| Artifact size | 59-82 MB | 32.5 KB |
+Measured on an M1 Mac with the three candidates **interleaved**, 60 runs each,
+every run's exit code checked (a plain `/usr/bin/true` costs ~3 ms on the same
+harness, so the CLI's own startup is a few ms less than the figures below):
 
-Startup is the same either way - both boot a Bun runtime and then evaluate the
-same code. The bundle's advantage is purely **distribution size**: 32 KB versus
-59-82 MB, at the cost of requiring Bun on the target machine.
+| Build | min | median | p90 | Size |
+| --- | --- | --- | --- | --- |
+| compiled + `--bytecode` | **11.2 ms** | 13.2 ms | 16.1 ms | 60.9 MB |
+| compiled, no bytecode | 16.7 ms | 19.9 ms | 22.2 ms | 59.4 MB |
+| `bun dist/mcp.js` | 18.4 ms | 20.6 ms | 22.2 ms | 36.4 KB |
 
-Against the deployed gateway one `tools call` costs ~420-450 ms end to end
-(Cloudflare edge + device round trip), which is network, not CLI startup. HTTP
-round trips per command: **1**.
+**`--bytecode` is worth 33% of cold start** for ~1.5 MB of binary, which is why
+the build uses it. It requires the entry module to avoid top-level `await` -
+`src/index.ts` uses a floating async IIFE for exactly that reason.
+
+The compiled binary is now faster than the bundle; the bundle's advantage is
+purely distribution size (36 KB vs 60-82 MB) when Bun is already installed.
+Peak resident memory is ~15 MB either way.
+
+### Multi-call throughput
+
+Eight calls to a tool that takes 200 ms each, through a local gateway:
+
+| Calls | Sequential | `--parallel` | Speedup | Sequential per call |
+| --- | --- | --- | --- | --- |
+| 1 | 234 ms | 233 ms | 1.00x | 218 ms |
+| 2 | 452 ms | 248 ms | 1.82x | 218 ms |
+| 4 | 890 ms | 261 ms | 3.40x | 218 ms |
+| 8 | 1747 ms | 280 ms | 6.23x | 216 ms |
+
+Sequential per-call overhead beyond the tool's own 200 ms is ~18 ms, which
+includes process start, TLS reuse and the gateway round trip. `--parallel`
+costs the same for 8 calls as for 1 because they are dispatched concurrently.
+
+Failure isolation was measured in both modes with the pattern
+`[ok, FAIL, ok]`: exit code 1, both successful results present, failure
+reported - and the same for a mid-batch timeout.
+
+Against the deployed gateway (code-mcp.tuanm.workers.dev, device on a home
+connection) a single `tools call` costs ~0.4-1.2 s end to end depending on
+network conditions - Cloudflare edge plus the device round trip, not CLI
+startup. HTTP round trips per command: **1**.
+
+`--parallel` scales on the real gateway too, with a device that sleeps 2 s per
+call:
+
+| Calls | Sequential | `--parallel` | Speedup |
+| --- | --- | --- | --- |
+| 1 | 2599 ms | 2528 ms | 1.03x |
+| 2 | 4955 ms | 2650 ms | 1.87x |
+| 4 | 10416 ms | 2554 ms | **4.08x** |
+
+Four parallel calls finish in the same wall time as one.
 
 Design choices behind those numbers:
 
@@ -249,6 +345,50 @@ Design choices behind those numbers:
   one client per device, not per call.
 - **Concurrent probes for `devices list`**, with a short probe timeout so a stuck
   device cannot stall a listing.
+- **Bytecode-compiled binaries** (`--bytecode`), which remove most of the module
+  graph's parse/compile cost at startup.
+- **Per-call isolation in batches**, so a call that rejects for any reason -
+  including a bug in the error path itself - cannot discard its siblings'
+  results.
+- **Bounded concurrency** (`--concurrency`, default 8) instead of firing every
+  call at once, which would trip the gateway's per-IP rate limit and its
+  per-device pending cap.
+- **Retries only where they are provably safe** - see below.
+
+## Reliability
+
+A retry is only safe when the request provably never reached the tool, so the
+CLI retries a deliberately narrow set of failures, up to 3 attempts with
+exponential backoff and jitter:
+
+| Failure | Retried | Why |
+| --- | --- | --- |
+| 429 rate limited | yes | rejected at the gateway, never forwarded |
+| 502 device send failed | yes | the tunnel send itself failed |
+| 503 device busy | yes | the pending queue was full, never forwarded |
+| 503 device offline | no | nothing to wait for |
+| 504 / timeout | **no** | the tool may still be running |
+| dropped connection | **no** | the request may have been delivered |
+
+The last two matter: retrying them could run a side-effecting tool twice, so the
+CLI would rather report a failure you can retry yourself. A retry never extends
+`--timeout` - the timeout is the budget for the whole call, retries included.
+
+## Releasing
+
+`.github/workflows/release-cli.yml` builds every platform on a single Linux
+runner (Bun cross-compiles) and publishes a GitHub Release:
+
+```bash
+git tag cli-v0.2.0
+git push origin cli-v0.2.0
+```
+
+The tag supplies the version baked into the binaries, so `mcp --version` in a
+release reports the release it came from. A manual `workflow_dispatch` run builds
+the same artifacts and uploads them as workflow artifacts without publishing a
+release. Each release carries the five platform binaries, the JS bundle, and a
+`SHA256SUMS` file.
 
 ## Development
 

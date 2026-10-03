@@ -1,0 +1,166 @@
+name: Release CLI
+
+# Cuts a GitHub Release containing the mcp binaries for every supported
+# platform, plus the portable JS bundle and a checksum file.
+#
+#   git tag cli-v0.2.0 && git push origin cli-v0.2.0
+#
+# The tag drives the version baked into the binaries; a manual run builds the
+# same artifacts and uploads them as workflow artifacts without publishing a
+# release.
+
+on:
+  push:
+    tags:
+      - "cli-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (X.Y.Z). Defaults to the tag, else cli/package.json."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cli-${{ github.ref }
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build mcp for all platforms
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # A tag like cli-v0.2.0 publishes version 0.2.0; the binaries report it.
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{INPUT_VERSION}" ]; then
+            VERSION="${{INPUT_VERSION}"
+          elif [ "${{REF_TYPE}" = "tag" ]; then
+            VERSION="${{REF_NAME#cli-v}"
+          else
+            VERSION="$(node -p "require('./cli/package.json').version")"
+          fi
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "invalid version: $VERSION" >&2; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building mcp $VERSION"
+
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: cli
+        run: bun run typecheck
+
+      # Fast, hermetic checks. The full end-to-end suite (which boots wrangler)
+      # runs in ci.yml on every push.
+      - name: Unit tests
+        working-directory: cli
+        run: bun test
+
+      - name: Build every target
+        working-directory: cli
+        run: bun run build --version "${{ steps.version.outputs.version }}"
+
+      - name: Package artifacts
+        working-directory: cli/dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -f mcp-e2e
+          # Release names carry the version; the raw build names do not.
+          for file in mcp-*; do
+            case "$file" in
+              *.exe) mv "$file" "mcp-$VERSION-windows-x64.exe" ;;
+              mcp-darwin-arm64)   mv "$file" "mcp-$VERSION-darwin-arm64" ;;
+              mcp-darwin-x64)     mv "$file" "mcp-$VERSION-darwin-x64" ;;
+              mcp-linux-x64)      mv "$file" "mcp-$VERSION-linux-x64" ;;
+              mcp-linux-arm64)    mv "$file" "mcp-$VERSION-linux-arm64" ;;
+            esac
+          done
+          mv mcp.js "mcp-$VERSION.js"
+          rm -f mcp
+          # Checksums, so a download can be verified before it is made executable.
+          sha256sum mcp-* > SHA256SUMS
+          ls -la
+          cat SHA256SUMS
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-${{ steps.version.outputs.version }}
+          path: |
+            cli/dist/mcp-*
+            cli/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        working-directory: cli/dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A quoted heredoc: nothing inside is expanded, so backticks and
+          # angle brackets in the markdown survive verbatim. Writing the notes
+          # to a file beats a multi-line --notes argument, which is one quoting
+          # mistake away from mangling the release body.
+          cat > RELEASE_NOTES.md <<'NOTES'
+          Standalone `mcp` CLI for code-mcp-gateway.
+
+          ## Install
+
+          Download the file for your platform, make it executable and put it on your PATH:
+
+          ```bash
+          chmod +x mcp-<version>-darwin-arm64
+          sudo mv mcp-<version>-darwin-arm64 /usr/local/bin/mcp
+          mcp --version
+          ```
+
+          | Platform | Artifact |
+          | --- | --- |
+          | macOS (Apple silicon) | `mcp-<version>-darwin-arm64` |
+          | macOS (Intel) | `mcp-<version>-darwin-x64` |
+          | Linux (x64 / arm64) | `mcp-<version>-linux-x64` / `mcp-<version>-linux-arm64` |
+          | Windows (x64) | `mcp-<version>-windows-x64.exe` |
+
+          The binaries are self-contained (the Bun runtime is embedded), so no runtime
+          installation is needed. They are large for that reason. If Bun >= 1.2 is already
+          installed, `mcp-<version>.js` is a 37 KB alternative that runs with
+          `bun mcp-<version>.js`.
+
+          Verify a download against `SHA256SUMS`:
+
+          ```bash
+          shasum -a 256 -c SHA256SUMS --ignore-missing
+          ```
+
+          Run `mcp --help` for commands, or see
+          [cli/README.md](https://github.com/${{ github.repository }}/blob/main/cli/README.md)
+          for configuration, exit codes and the cross-platform input forms.
+          NOTES
+          gh release create "$TAG" --title "mcp $VERSION" --notes-file RELEASE_NOTES.md mcp-* SHA256SUMS

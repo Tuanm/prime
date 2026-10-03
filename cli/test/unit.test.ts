@@ -4,12 +4,14 @@
 // config round-trips, secret permissions, label resolution, argument parsing,
 // target precedence, and tool-result rendering.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { parseArgs, flag } from "../src/args.ts";
+import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/client.ts";
+import { pool } from "../src/pool.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
@@ -163,6 +165,131 @@ describe("tool result rendering", () => {
 
   test("handles null", () => {
     expect(renderToolResult(null).text).toBe("");
+  });
+});
+
+describe("retry policy", () => {
+  const target = { deviceId: "dev", gateway: "https://gw.test", deviceToken: "tok", timeoutMs: 5000 };
+  const realFetch = globalThis.fetch;
+
+  /** Replace fetch with a stub; returns the recorded requests. */
+  function stubFetch(handler: (attempt: number) => Response | Promise<Response>): { url: string }[] {
+    const seen: { url: string }[] = [];
+    globalThis.fetch = (async (url: string | URL) => {
+      seen.push({ url: String(url) });
+      return handler(seen.length);
+    }) as unknown as typeof fetch;
+    return seen;
+  }
+
+  const okBody = '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}';
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("retries a rate limit and then succeeds", async () => {
+    const seen = stubFetch((attempt) =>
+      attempt < MAX_ATTEMPTS ? new Response('{"error":"rate limited"}', { status: 429 }) : new Response(okBody, { status: 200 }),
+    );
+    const client = new GatewayClient(target);
+    expect(await client.rpc("ping")).toEqual({ ok: true });
+    expect(seen.length).toBe(MAX_ATTEMPTS);
+    expect(client.lastAttempts).toBe(MAX_ATTEMPTS);
+  });
+
+  test("retries a full pending queue (device busy)", async () => {
+    const seen = stubFetch((attempt) =>
+      attempt === 1 ? new Response('{"error":"device busy"}', { status: 503 }) : new Response(okBody, { status: 200 }),
+    );
+    await new GatewayClient(target).rpc("ping");
+    expect(seen.length).toBe(2);
+  });
+
+  test("does not retry an offline device", async () => {
+    const seen = stubFetch(() => new Response('{"error":"device offline"}', { status: 503 }));
+    await expect(new GatewayClient(target).rpc("ping")).rejects.toThrow(/offline/i);
+    expect(seen.length).toBe(1);
+  });
+
+  test("does not retry a server error", async () => {
+    const seen = stubFetch(() => new Response("boom", { status: 500 }));
+    await expect(new GatewayClient(target).rpc("ping")).rejects.toThrow();
+    expect(seen.length).toBe(1);
+  });
+
+  test("does not retry a dropped connection (a tool may have run)", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new Error("socket closed");
+    }) as unknown as typeof fetch;
+    await expect(new GatewayClient(target).rpc("ping")).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
+  test("gives up after the attempt limit", async () => {
+    const seen = stubFetch(() => new Response('{"error":"rate limited"}', { status: 429 }));
+    await expect(new GatewayClient(target).rpc("ping")).rejects.toThrow(/rate limited/);
+    expect(seen.length).toBe(MAX_ATTEMPTS);
+  });
+
+  test("classifies retryable statuses", () => {
+    expect(isSafeToRetry(429, "")).toBe(true);
+    expect(isSafeToRetry(502, "")).toBe(true);
+    expect(isSafeToRetry(503, '{"error":"device busy"}')).toBe(true);
+    expect(isSafeToRetry(503, '{"error":"device offline"}')).toBe(false);
+    expect(isSafeToRetry(401, "")).toBe(false);
+    expect(isSafeToRetry(504, "")).toBe(false);
+    expect(isSafeToRetry(200, "")).toBe(false);
+  });
+
+  test("backoff grows and is capped", () => {
+    expect(backoffFor(1)).toBeGreaterThanOrEqual(200);
+    expect(backoffFor(2)).toBeGreaterThanOrEqual(400);
+    expect(backoffFor(99)).toBeLessThanOrEqual(1100);
+  });
+});
+
+describe("bounded concurrency", () => {
+  test("preserves input order while running concurrently", async () => {
+    const items = [40, 5, 25, 1];
+    const results = await pool(items, 4, async (ms) => {
+      await Bun.sleep(ms);
+      return ms;
+    });
+    expect(results).toEqual(items);
+  });
+
+  test("never exceeds the configured limit", async () => {
+    let active = 0;
+    let peak = 0;
+    await pool(Array.from({ length: 20 }, (_, i) => i), 4, async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await Bun.sleep(5);
+      active--;
+      return null;
+    });
+    expect(peak).toBeLessThanOrEqual(4);
+  });
+
+  test("uses all workers when there is work for them", async () => {
+    let peak = 0;
+    let active = 0;
+    await pool(Array.from({ length: 8 }, (_, i) => i), 8, async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await Bun.sleep(10);
+      active--;
+      return null;
+    });
+    expect(peak).toBe(8);
+  });
+
+  test("handles empty input and a limit larger than the work", async () => {
+    expect(await pool([], 4, async () => 1)).toEqual([]);
+    expect(await pool([1, 2], 100, async (n) => n * 2)).toEqual([2, 4]);
   });
 });
 

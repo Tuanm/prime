@@ -8,6 +8,8 @@ import { UsageError } from "./errors.ts";
 
 export type FlagType = "string" | "number" | "boolean";
 
+export type FlagValue = string | number | boolean;
+
 export interface FlagSpec {
   name: string;
   type: FlagType;
@@ -15,15 +17,22 @@ export interface FlagSpec {
   /** Value placeholder shown in help, e.g. "<url>". */
   placeholder?: string;
   description: string;
+  /** Collect every occurrence into an array instead of keeping the last one. */
+  repeatable?: boolean;
 }
 
 export interface ParsedArgs {
   positionals: string[];
-  flags: Map<string, string | number | boolean>;
+  flags: Map<string, FlagValue | FlagValue[]>;
   help: boolean;
 }
 
-export function flag(name: string, type: FlagType, description: string, extra: { short?: string; placeholder?: string } = {}): FlagSpec {
+export function flag(
+  name: string,
+  type: FlagType,
+  description: string,
+  extra: { short?: string; placeholder?: string; repeatable?: boolean } = {},
+): FlagSpec {
   return { name, type, description, ...extra };
 }
 
@@ -46,9 +55,18 @@ export function parseArgs(argv: string[], specs: FlagSpec[]): ParsedArgs {
   }
 
   const positionals: string[] = [];
-  const flags = new Map<string, string | number | boolean>();
+  const flags = new Map<string, FlagValue | FlagValue[]>();
   let help = false;
   let sawDoubleDash = false;
+
+  const store = (spec: FlagSpec, value: FlagValue): void => {
+    if (!spec.repeatable) {
+      flags.set(spec.name, value);
+      return;
+    }
+    const previous = flags.get(spec.name);
+    flags.set(spec.name, Array.isArray(previous) ? [...previous, value] : [value]);
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -89,9 +107,9 @@ export function parseArgs(argv: string[], specs: FlagSpec[]): ParsedArgs {
 
     if (spec.type === "boolean") {
       if (rawValue !== undefined) {
-        flags.set(spec.name, !/^(false|0|no)$/i.test(rawValue));
+        store(spec, !/^(false|0|no)$/i.test(rawValue));
       } else {
-        flags.set(spec.name, true);
+        store(spec, true);
       }
     } else {
       let value = rawValue;
@@ -106,9 +124,9 @@ export function parseArgs(argv: string[], specs: FlagSpec[]): ParsedArgs {
       if (spec.type === "number") {
         const parsed = Number(value);
         if (!Number.isFinite(parsed)) throw new UsageError(`option ${display} expects a number, got "${value}"`);
-        flags.set(spec.name, parsed);
+        store(spec, parsed);
       } else {
-        flags.set(spec.name, value);
+        store(spec, value);
       }
     }
 
@@ -130,4 +148,11 @@ export function num(parsed: ParsedArgs, name: string): number | undefined {
 
 export function bool(parsed: ParsedArgs, name: string): boolean {
   return parsed.flags.get(name) === true;
+}
+
+/** Every occurrence of a repeatable flag, in order. */
+export function strList(parsed: ParsedArgs, name: string): string[] {
+  const value = parsed.flags.get(name);
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string");
+  return typeof value === "string" ? [value] : [];
 }

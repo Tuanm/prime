@@ -16,7 +16,9 @@ import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
 
-const VERSION = "0.1.0";
+// Replaced at build time by scripts/build.ts (--define). The fallback keeps
+// `bun run src/index.ts` working during development.
+const VERSION = process.env.MCP_CLI_VERSION ?? "0.2.0-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -45,7 +47,11 @@ const TOOL_FLAGS: FlagSpec[] = [
 
 const CALL_FLAGS: FlagSpec[] = [
   ...TOOL_FLAGS,
+  flag("file", "string", "Read the call specification from a JSON file ('-' = stdin); repeatable", { short: "f", placeholder: "<path>", repeatable: true }),
+  flag("stdin", "boolean", "Read the call specification from stdin"),
+  flag("arg", "string", "Set one argument as name=value, no JSON quoting needed; repeatable", { placeholder: "<name=value>", repeatable: true }),
   flag("parallel", "boolean", "Run multiple calls concurrently (default: sequential)"),
+  flag("concurrency", "number", "Max calls in flight with --parallel (default 8)", { placeholder: "<n>" }),
   flag("device", "string", "Force the device id for an ambiguous label", { placeholder: "<id>" }),
   flag("tool", "string", "Force the tool name for an ambiguous label", { placeholder: "<name>" }),
 ];
@@ -169,8 +175,15 @@ for (const stream of [process.stdout, process.stderr]) {
 const argv = process.argv.slice(2);
 initColor(argv.includes("--no-color") ? false : undefined);
 
-try {
-  await main(argv);
-} catch (err) {
-  reportError(err, argv.includes("--json"));
-}
+// Deliberately not top-level `await`: `bun build --compile --bytecode` rejects a
+// module with top-level await, and bytecode cuts cold start by ~30-40%. A
+// floating async IIFE keeps the same semantics - the pending request (or the
+// microtask chain itself) keeps the process alive, and `process.exitCode` set
+// in reportError is honoured on exit.
+void (async () => {
+  try {
+    await main(argv);
+  } catch (err) {
+    reportError(err, argv.includes("--json"));
+  }
+})();
