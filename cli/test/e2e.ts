@@ -46,9 +46,15 @@ interface RunResult {
   ms: number;
 }
 
-async function cli(args: string[], opts: { stdin?: string; env?: Record<string, string> } = {}): Promise<RunResult> {
+const BUNDLE = join(ROOT, "dist", "mcp.js");
+
+async function cli(
+  args: string[],
+  opts: { stdin?: string; env?: Record<string, string>; via?: "binary" | "bundle" } = {},
+): Promise<RunResult> {
   const started = performance.now();
-  const proc = Bun.spawn([BIN, ...args], {
+  const command = opts.via === "bundle" ? ["bun", BUNDLE, ...args] : [BIN, ...args];
+  const proc = Bun.spawn(command, {
     env: { ...process.env, CODE_MCP_GATEWAY_CONFIG: CONFIG, NO_COLOR: "1", ...(opts.env ?? {}) },
     stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
     stdout: "pipe",
@@ -187,6 +193,18 @@ if (build.exitCode !== 0) {
   process.exit(1);
 }
 console.log(`binary: ${(statSync(BIN).size / 1024 / 1024).toFixed(1)} MB`);
+
+// The JS bundle is a second, independently built artifact. Building it must
+// prove it runs, not merely that it bytes-out: a duplicate shebang makes
+// `bun dist/mcp.js` exit 1 before executing anything, which a timing-only or
+// size-only check happily misses.
+console.log("Building the JS bundle...");
+const bundleBuild = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only"], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+check(
+  "bundle builds and self-checks",
+  bundleBuild.exitCode === 0 && bundleBuild.stdout.toString().includes("runs: mcp "),
+  `exit=${bundleBuild.exitCode} ${bundleBuild.stdout.toString().trim()} ${bundleBuild.stderr.toString().trim().slice(0, 200)}`,
+);
 
 console.log(`Starting wrangler on ${PORT}...`);
 const gateway = await startGateway();
@@ -390,6 +408,16 @@ try {
   check("disconnect removes the entry", disconnect.code === 0 && !readFileSync(CONFIG, "utf8").includes("ghost"));
   const disconnectAgain = await cli(["devices", "disconnect", "ghost"]);
   check("disconnect is idempotent", disconnectAgain.code === 0 && disconnectAgain.out.includes("not configured"));
+
+  // ---- the JS bundle must behave identically ----
+  const bundleVersion = await cli(["--version"], { via: "bundle" });
+  check("bundle --version", bundleVersion.code === 0 && bundleVersion.out.trim().startsWith("mcp "), `code=${bundleVersion.code} err=${bundleVersion.err}`);
+
+  const bundleCall = await cli(["tools", "call", "alpha.echo", '{"text":"bundle"}'], { via: "bundle" });
+  check("bundle performs a real call through the gateway", bundleCall.code === 0 && bundleCall.out.includes("echo:bundle"), `code=${bundleCall.code} out=${bundleCall.out} err=${bundleCall.err}`);
+
+  const bundleStdin = await cli(["tools", "call"], { via: "bundle", stdin: JSON.stringify({ name: "alpha.v2.echo", arguments: { text: "bundle-stdin" } }) });
+  check("bundle handles stdin calls", bundleStdin.code === 0 && bundleStdin.out.includes("echo:bundle-stdin"), `code=${bundleStdin.code} err=${bundleStdin.err}`);
 
   // ---- performance ---------------------------------------------------------
   const timings: number[] = [];

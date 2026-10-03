@@ -208,26 +208,33 @@ A deployment may use either, both, or neither.
 | 4 | Device offline (503) |
 | 5 | Timeout |
 
+Note on 3 versus 4: a gateway configured with **per-device tokens** answers 401
+for a device id it does not know, deliberately, so nobody can enumerate valid
+ids. That means an *unregistered* id exits 3, and only a *registered but
+currently disconnected* device exits 4.
+
 With `--json`, failures are printed as `{ "error": { "message", "hint", "exit_code" } }`
 on stdout, so a script can read both the reason and the code.
 
 ## Performance
 
-Measured on an M1 Mac (30 runs each; `/usr/bin/true` costs 1.7 ms on the same
-harness, so the compiled binary's own startup is ~13 ms):
+Measured on an M1 Mac, 20 runs each, with every run's exit code checked
+(`/usr/bin/true` costs 2.7 ms on the same harness, so the CLI's own startup is
+~13 ms):
 
 | Metric | Compiled binary | `bun dist/mcp.js` |
 | --- | --- | --- |
-| Cold start, min / median | 14.8 / 16.1 ms | 8.1 / 10.1 ms |
-| Peak resident memory | 14.9 MB | 9.6 MB |
+| Cold start, min / median | 15.9 / 17.0 ms | 16.2 / 17.7 ms |
+| Peak resident memory | 14.2 MB | 14.7 MB |
 | Artifact size | 59-82 MB | 32.5 KB |
 
-One `tools call` end-to-end against a local gateway: ~26-35 ms (dominated by the
-gateway round trip, not the CLI). HTTP round trips per command: **1**.
+Startup is the same either way - both boot a Bun runtime and then evaluate the
+same code. The bundle's advantage is purely **distribution size**: 32 KB versus
+59-82 MB, at the cost of requiring Bun on the target machine.
 
-The bundle starting *faster* than the compiled binary is expected: it loads a
-32 KB script instead of mapping a 59 MB executable, and it reuses the installed
-Bun runtime instead of unpacking an embedded one.
+Against the deployed gateway one `tools call` costs ~420-450 ms end to end
+(Cloudflare edge + device round trip), which is network, not CLI startup. HTTP
+round trips per command: **1**.
 
 Design choices behind those numbers:
 

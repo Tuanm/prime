@@ -39,19 +39,30 @@ mkdirSync(DIST, { recursive: true });
 // The JS bundle is the lightweight option: ~100 KB, needs Bun at runtime.
 if (!args.has("--no-bundle")) {
   const out = `${DIST}/mcp.js`;
+  // No `banner`: src/index.ts already starts with a shebang and Bun preserves
+  // it, so adding one here produces a second "#!/usr/bin/env bun" on line 3 -
+  // which is a syntax error, not a comment. `bun dist/mcp.js` then exits 1
+  // without running anything (and still "starts fast", which is how the bug
+  // survived a timing-only check).
   const result = await Bun.build({
     entrypoints: [ENTRY],
     target: "bun",
     minify: true,
     outdir: DIST,
     naming: "mcp.js",
-    banner: "#!/usr/bin/env bun",
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);
     process.exit(1);
   }
-  console.log(`bundle  ${out}  ${(statSync(out).size / 1024).toFixed(1)} KB`);
+  // Guard: a bundle that does not actually run must fail the build, not ship.
+  const smoke = Bun.spawnSync(["bun", out, "--version"], { stdout: "pipe", stderr: "pipe" });
+  const printed = smoke.stdout.toString().trim();
+  if (smoke.exitCode !== 0 || !printed.startsWith("mcp ")) {
+    console.error(`FAILED bundle smoke test: exit=${smoke.exitCode} stdout=${JSON.stringify(printed)} stderr=${smoke.stderr.toString().trim().slice(0, 200)}`);
+    process.exit(1);
+  }
+  console.log(`bundle  ${out}  ${(statSync(out).size / 1024).toFixed(1)} KB  (runs: ${printed})`);
 }
 
 if (bundleOnly) process.exit(0);
