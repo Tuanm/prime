@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { parseArgs, flag } from "../src/args.ts";
 import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/client.ts";
 import { pool } from "../src/pool.ts";
-import { isValidVersion, versionProblem } from "../src/version.ts";
+import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
+import { assetNameFor, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
@@ -291,6 +292,63 @@ describe("bounded concurrency", () => {
   test("handles empty input and a limit larger than the work", async () => {
     expect(await pool([], 4, async () => 1)).toEqual([]);
     expect(await pool([1, 2], 100, async (n) => n * 2)).toEqual([2, 4]);
+  });
+});
+
+describe("update helpers", () => {
+  test("compareVersions follows SemVer, with build metadata as a tiebreak", () => {
+    expect(compareVersions("26.10.3", "26.10.4")).toBe(-1);
+    expect(compareVersions("26.10.4", "26.10.3")).toBe(1);
+    expect(compareVersions("26.10.3", "26.10.3")).toBe(0);
+    expect(compareVersions("26.9.30", "26.10.1")).toBe(-1);
+    // A release outranks its own prerelease.
+    expect(compareVersions("26.10.3-rc.1", "26.10.3")).toBe(-1);
+    // SemVer ignores build metadata; we do not, so a same-day rerelease is seen.
+    expect(compareVersions("26.10.3+1", "26.10.3")).toBe(1);
+    expect(compareVersions("26.10.3+2", "26.10.3+10")).toBe(-1);
+  });
+
+  test("versionFromTag only accepts CLI release tags", () => {
+    expect(versionFromTag("cli-v26.10.3")).toBe("26.10.3");
+    expect(versionFromTag("cli-v26.10.3+1")).toBe("26.10.3+1");
+    expect(versionFromTag("worker-v1.0.0")).toBeUndefined();
+    expect(versionFromTag("cli-v26.10.03")).toBeUndefined(); // zero padded
+    expect(versionFromTag("v26.10.3")).toBeUndefined();
+  });
+
+  test("assetNameFor matches the release's naming", () => {
+    expect(assetNameFor("26.10.4", "binary", "darwin", "arm64")).toBe("mcp-26.10.4-darwin-arm64");
+    expect(assetNameFor("26.10.4", "binary", "linux", "x64")).toBe("mcp-26.10.4-linux-x64");
+    expect(assetNameFor("26.10.4", "binary", "win32", "x64")).toBe("mcp-26.10.4-windows-x64.exe");
+    expect(assetNameFor("26.10.4", "bundle", "darwin", "arm64")).toBe("mcp-26.10.4.js");
+    expect(() => assetNameFor("26.10.4", "binary", "aix", "ppc")).toThrow(/no prebuilt binary/);
+  });
+
+  const release = (version: string, prerelease = false): Release => ({
+    tag: `cli-v${version}`,
+    version,
+    prerelease,
+    htmlUrl: "",
+    assets: [],
+  });
+
+  test("selectLatest picks the highest version, ignoring prereleases", () => {
+    expect(selectLatest([release("26.10.2"), release("26.10.4"), release("26.9.9")])!.version).toBe("26.10.4");
+    expect(selectLatest([release("26.10.4"), release("26.11.1", true)])!.version).toBe("26.10.4");
+    // ...unless a prerelease is all there is.
+    expect(selectLatest([release("26.11.1", true)])!.version).toBe("26.11.1");
+    expect(selectLatest([])).toBeUndefined();
+    // Build metadata still ranks, so the newest same-day rerelease wins.
+    expect(selectLatest([release("26.10.3"), release("26.10.3+1")])!.version).toBe("26.10.3+1");
+  });
+
+  test("parseChecksums reads the sha256sum format", () => {
+    const sums = parseChecksums(
+      "aa".repeat(32) + "  mcp-26.10.4-darwin-arm64\n" + "bb".repeat(32) + " *mcp-26.10.4.js\n" + "not a line\n",
+    );
+    expect(sums.get("mcp-26.10.4-darwin-arm64")).toBe("aa".repeat(32));
+    expect(sums.get("mcp-26.10.4.js")).toBe("bb".repeat(32)); // "*" binary marker handled
+    expect(sums.size).toBe(2);
   });
 });
 

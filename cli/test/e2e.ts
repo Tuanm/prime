@@ -6,7 +6,7 @@
 // documented input form.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -582,6 +582,141 @@ try {
 
   const bundleStdin = await cli(["tools", "call"], { via: "bundle", stdin: JSON.stringify({ name: "alpha.v2.echo", arguments: { text: "bundle-stdin" } }) });
   check("bundle handles stdin calls", bundleStdin.code === 0 && bundleStdin.out.includes("echo:bundle-stdin"), `code=${bundleStdin.code} err=${bundleStdin.err}`);
+
+  // ---- self-update, against a local fake release server --------------------
+  // Deliberately independent of src/update.ts: the asset name and the digest are
+  // recomputed here, so a bug in the implementation cannot pass its own test.
+  const UPDATE_PORT = 8899;
+  const UPDATE_BASE = `http://127.0.0.1:${UPDATE_PORT}`;
+  const FAKE_VERSION = "26.10.4";
+  const fakeOs = process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : "windows";
+  const fakeArch = process.arch === "arm64" ? "arm64" : "x64";
+  const fakeAsset = `mcp-${FAKE_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`;
+  const fakeBundle = `mcp-${FAKE_VERSION}.js`;
+  const fakeBinaryBytes = new TextEncoder().encode("#!/bin/sh\necho fake-26.10.4\n");
+  const fakeBundleBytes = new TextEncoder().encode("console.log('fake 26.10.4');\n");
+  const digest = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  let corruptChecksums = false;
+
+  const updateServer = Bun.serve({
+    port: UPDATE_PORT,
+    hostname: "127.0.0.1",
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith("/releases")) {
+        return Response.json([
+          {
+            tag_name: `cli-v${FAKE_VERSION}`,
+            draft: false,
+            prerelease: false,
+            html_url: `${UPDATE_BASE}/releases/tag/cli-v${FAKE_VERSION}`,
+            assets: [
+              { name: fakeAsset, browser_download_url: `${UPDATE_BASE}/asset`, size: fakeBinaryBytes.length },
+              { name: fakeBundle, browser_download_url: `${UPDATE_BASE}/bundle`, size: fakeBundleBytes.length },
+              { name: "SHA256SUMS", browser_download_url: `${UPDATE_BASE}/sums`, size: 0 },
+            ],
+          },
+          // An older release must be ignored in favour of the newest.
+          { tag_name: "cli-v26.10.2", draft: false, prerelease: false, html_url: "", assets: [] },
+          // Matches the version the test binary reports, so "--release-version
+          // <current>" has a real release to resolve to.
+          {
+            tag_name: "cli-v26.10.3-dev",
+            draft: false,
+            prerelease: true,
+            html_url: "",
+            assets: [
+              { name: `mcp-26.10.3-dev-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`, browser_download_url: `${UPDATE_BASE}/asset`, size: fakeBinaryBytes.length },
+              { name: "mcp-26.10.3-dev.js", browser_download_url: `${UPDATE_BASE}/bundle`, size: fakeBundleBytes.length },
+              { name: "SHA256SUMS", browser_download_url: `${UPDATE_BASE}/sums-old`, size: 0 },
+            ],
+          },
+          // A draft and a non-CLI tag must both be ignored.
+          { tag_name: "cli-v99.1.1", draft: true, prerelease: false, html_url: "", assets: [] },
+          { tag_name: "worker-v1.0.0", draft: false, prerelease: false, html_url: "", assets: [] },
+        ]);
+      }
+      if (path === "/asset") return new Response(fakeBinaryBytes);
+      if (path === "/bundle") return new Response(fakeBundleBytes);
+      if (path === "/sums-old") {
+        return new Response(`${digest(fakeBinaryBytes)}  mcp-26.10.3-dev-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}\n${digest(fakeBundleBytes)}  mcp-26.10.3-dev.js\n`);
+      }
+      if (path === "/sums") {
+        const binaryHash = corruptChecksums ? "0".repeat(64) : digest(fakeBinaryBytes);
+        return new Response(`${binaryHash}  ${fakeAsset}\n${digest(fakeBundleBytes)}  ${fakeBundle}\n`);
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+
+  const updateEnv = { MCP_CLI_API_BASE: UPDATE_BASE };
+  const installDir = mkdtempSync(join(tmpdir(), "mcp-update-"));
+
+  const checkRun = await cli(["update", "--check", "--json"], { env: updateEnv });
+  const checkJson = JSON.parse(checkRun.out) as { latest: string; update_available: boolean };
+  check(
+    "update --check reports the newest release (ignoring drafts and other tags)",
+    checkRun.code === 0 && checkJson.latest === FAKE_VERSION && checkJson.update_available === true,
+    checkRun.out.trim(),
+  );
+
+  const installTarget = join(installDir, "mcp");
+  const installRun = await cli(["update", "--to", installTarget, "--json"], { env: updateEnv });
+  const installJson = JSON.parse(installRun.out) as { updated: boolean; installed_version: string; asset: string };
+  check(
+    "update installs the platform asset and reports it",
+    installRun.code === 0 && installJson.updated === true && installJson.installed_version === FAKE_VERSION &&
+      installJson.asset === fakeAsset,
+    installRun.out.trim(),
+  );
+  check(
+    "the installed file is the released artifact, and executable",
+    digest(new Uint8Array(readFileSync(installTarget))) === digest(fakeBinaryBytes) &&
+      (statSync(installTarget).mode & 0o777) === 0o755,
+    `mode=${(statSync(installTarget).mode & 0o777).toString(8)}`,
+  );
+
+  const upToDate = await cli(["update", "--release-version", "26.10.3-dev", "--to", installTarget, "--json"], { env: updateEnv });
+  check(
+    "--release-version equal to the running version is a no-op",
+    upToDate.code === 0 && (JSON.parse(upToDate.out) as { updated: boolean }).updated === false,
+    upToDate.out.trim(),
+  );
+
+  const forced = await cli(["update", "--force", "--release-version", "26.10.3-dev", "--to", join(installDir, "forced"), "--json"], { env: updateEnv });
+  check("--force reinstalls the same version", forced.code === 0 && (JSON.parse(forced.out) as { updated: boolean }).updated === true, forced.out.trim());
+
+  corruptChecksums = true;
+  const neverWritten = join(installDir, "never-written");
+  const corrupted = await cli(["update", "--to", neverWritten], { env: updateEnv });
+  check(
+    "a checksum mismatch refuses to install and writes nothing",
+    corrupted.code === 1 && corrupted.err.includes("checksum mismatch") && !existsSync(neverWritten),
+    `code=${corrupted.code} exists=${existsSync(neverWritten)} err=${corrupted.err.trim()}`,
+  );
+  corruptChecksums = false;
+
+  const readOnlyDir = join(installDir, "readonly");
+  mkdirSync(readOnlyDir);
+  chmodSync(readOnlyDir, 0o500);
+  const notWritable = await cli(["update", "--to", join(readOnlyDir, "mcp")], { env: updateEnv });
+  chmodSync(readOnlyDir, 0o700);
+  check(
+    "an unwritable destination is refused with a sudo hint",
+    notWritable.code === 1 && notWritable.err.includes("not writable") && notWritable.err.includes("sudo"),
+    `code=${notWritable.code} err=${notWritable.err.trim()}`,
+  );
+
+  const bundleTarget = join(installDir, "mcp.js");
+  const bundleUpdate = await cli(["update", "--to", bundleTarget, "--json"], { env: updateEnv });
+  check(
+    "--to a .js path installs the bundle asset",
+    bundleUpdate.code === 0 && readFileSync(bundleTarget, "utf8").includes("fake 26.10.4"),
+    bundleUpdate.out.trim(),
+  );
+
+  updateServer.stop(true);
+  rmSync(installDir, { recursive: true, force: true });
 
   // ---- performance ---------------------------------------------------------
   const timings: number[] = [];

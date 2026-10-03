@@ -22,6 +22,80 @@ export function isValidVersion(version: string): boolean {
   return SEMVER_RE.test(version);
 }
 
+interface ParsedVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: (string | number)[];
+  build: string[];
+}
+
+function parseVersion(version: string): ParsedVersion | undefined {
+  const match = SEMVER_RE.exec(version);
+  if (!match) return undefined;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: (match[4] ?? "")
+      .split(".")
+      .filter((part) => part.length > 0)
+      .map((part) => (/^\d+$/.test(part) ? Number(part) : part)),
+    build: (match[5] ?? "").split(".").filter((part) => part.length > 0),
+  };
+}
+
+/**
+ * SemVer precedence, with one deliberate extension.
+ *
+ * SemVer says build metadata is ignored for ordering, so 26.10.3+1 and 26.10.3
+ * would compare equal - which would make a same-day rerelease invisible to
+ * `mcp update`. That is exactly how this project does a second release in one
+ * day, so build metadata is used as a *tiebreak* after the SemVer rules apply.
+ * Anything still equal is reported as equal.
+ */
+export function compareVersions(a: string, b: string): number {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  if (!pa || !pb) return a === b ? 0 : a < b ? -1 : 1;
+
+  for (const key of ["major", "minor", "patch"] as const) {
+    if (pa[key] !== pb[key]) return pa[key] < pb[key] ? -1 : 1;
+  }
+
+  // A release outranks its own prereleases: 26.10.3 > 26.10.3-rc.1.
+  if (pa.prerelease.length === 0 && pb.prerelease.length > 0) return 1;
+  if (pa.prerelease.length > 0 && pb.prerelease.length === 0) return -1;
+  for (let i = 0; i < Math.max(pa.prerelease.length, pb.prerelease.length); i++) {
+    const left = pa.prerelease[i];
+    const right = pb.prerelease[i];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left === right) continue;
+    if (typeof left === "number" && typeof right === "number") return left < right ? -1 : 1;
+    if (typeof left === "number") return -1; // numeric identifiers rank lower
+    if (typeof right === "number") return 1;
+    return left < right ? -1 : 1;
+  }
+
+  return compareBuild(pa.build, pb.build);
+}
+
+function compareBuild(a: string[], b: string[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const left = a[i];
+    const right = b[i];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left === right) continue;
+    const leftNum = /^\d+$/.test(left) ? Number(left) : undefined;
+    const rightNum = /^\d+$/.test(right) ? Number(right) : undefined;
+    if (leftNum !== undefined && rightNum !== undefined) return leftNum < rightNum ? -1 : 1;
+    return left < right ? -1 : 1;
+  }
+  return 0;
+}
+
 /** A human explanation for a rejected version, or undefined when it is fine. */
 export function versionProblem(version: string): string | undefined {
   if (isValidVersion(version)) return undefined;

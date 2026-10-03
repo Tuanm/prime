@@ -21,11 +21,13 @@ COMMANDS
   tools list <device-id>                  List a device's MCP tools
   tools view <device-id>.<tool-id>        Show one tool's schema
   tools call <device-id>.<tool-id> [json] Call one or more tools
+  update                                  Update the CLI to the newest release
   help [command]                          Show help
 
 ALIASES
   mcp                     Same as 'mcp --help'
   mcp call                Same as 'mcp tools call'
+  mcp upgrade             Same as 'mcp update'
 
 EXAMPLES
   mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
@@ -138,6 +140,46 @@ ${bold("call")}
   4 offline, 5 timeout).
 `;
 
+const UPDATE = `mcp update - install the newest release   (alias: mcp upgrade)
+
+USAGE
+  mcp update [--check] [--force] [--release-version <v>] [--to <path>] [--json]
+
+Checks the GitHub releases for a newer 'cli-v<version>' tag and, if there is
+one, downloads the asset for this platform, verifies it against the release's
+SHA256SUMS, and swaps it in.
+
+  current   26.10.3
+  latest    26.10.4
+  installed 26.10.4 -> /Users/you/.local/bin/mcp
+
+OPTIONS
+  --check                    Report whether an update exists; install nothing
+  --force                    Reinstall even when the version is already current
+  --release-version <v>      Install one specific version instead of the newest
+  --to <path>                Install to this path instead of replacing the
+                             running binary (useful for a prefix you own)
+  --json                     Machine-readable result
+
+NOTES
+  The running binary is replaced atomically, so an interrupted update cannot
+  leave a half-written executable. Replacing the running process is fine on
+  macOS and Linux; on Windows a running .exe cannot be replaced, so the update
+  is staged as <path>.new and the exact move command is printed.
+
+  The checksum comes from the same release as the artifact, so it proves the
+  download is intact and unmodified in transit - not that the release itself is
+  trustworthy.
+
+  If the install directory is not writable, re-run with the privileges that own
+  it (for example: sudo mcp update), or use --to for a directory you own.
+
+ENVIRONMENT
+  GITHUB_TOKEN        Raises the GitHub API rate limit (optional)
+  MCP_CLI_REPO        Override the repository, default Tuanm/code-mcp-gateway
+  MCP_CLI_API_BASE    Override the API base, default https://api.github.com
+`;
+
 export function rootHelp(): string {
   return ROOT;
 }
@@ -147,6 +189,7 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "devices") return DEVICES;
   if (topic === "tools") return TOOLS;
   if (topic === "call") return TOOLS;
+  if (topic === "update" || topic === "upgrade") return UPDATE;
   if (topic === "help") return `${ROOT}\n${dim("Usage: mcp help [devices|tools|call]")}`;
   void sub;
   return undefined;
@@ -161,6 +204,7 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "list") return "Usage: mcp devices list";
     return "Usage: mcp devices <connect|disconnect|status|list> [args]";
   }
+  if (topic === "update" || topic === "upgrade") return "Usage: mcp update [--check] [--force] [--to <path>]";
   if (topic === "tools" || topic === "call") {
     if (sub === "list") return "Usage: mcp tools list <device-id>";
     if (sub === "view") return "Usage: mcp tools view <device-id>.<tool-id>";

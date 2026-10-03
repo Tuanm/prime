@@ -8,13 +8,14 @@
 //
 // Aliases: `mcp` (bare) shows help; `mcp call ...` === `mcp tools call ...`.
 
-import { flag, parseArgs, type FlagSpec } from "./args.ts";
+import { bool, flag, parseArgs, str, type FlagSpec } from "./args.ts";
 import { type Ctx, makeCtx } from "./context.ts";
 import { devicesConnect, devicesDisconnect, devicesList, devicesStatus } from "./devices.ts";
 import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
+import { renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
@@ -58,6 +59,13 @@ const CALL_FLAGS: FlagSpec[] = [
 
 const VIEW_FLAGS: FlagSpec[] = [...TOOL_FLAGS, flag("device", "string", "Force the device id", { placeholder: "<id>" }), flag("tool", "string", "Force the tool name", { placeholder: "<name>" })];
 
+const UPDATE_FLAGS: FlagSpec[] = [
+  flag("check", "boolean", "Only report whether a newer release exists"),
+  flag("force", "boolean", "Reinstall even when the version is already current"),
+  flag("to", "string", "Install to this path instead of replacing the running binary", { placeholder: "<path>" }),
+  flag("release-version", "string", "Install this specific version instead of the newest", { placeholder: "<version>" }),
+];
+
 // ---- help ------------------------------------------------------------------
 
 function showHelp(text: string | undefined, topic: string, sub?: string): void {
@@ -82,8 +90,9 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  // `mcp call ...` is an alias for `mcp tools call ...`.
+  // Aliases: `mcp call ...` === `mcp tools call ...`, `mcp upgrade` === `mcp update`.
   if (argv[0] === "call") argv = ["tools", "call", ...argv.slice(1)];
+  if (argv[0] === "upgrade") argv = ["update", ...argv.slice(1)];
 
   const topic = argv[0]!;
   const rest = argv.slice(1);
@@ -97,7 +106,7 @@ async function main(argv: string[]): Promise<void> {
   const sub = rest[0];
   const wantHelp = rest.includes("--help") || rest.includes("-h") || sub === undefined;
 
-  if (topic === "devices" || topic === "tools") {
+  if (topic === "devices" || topic === "tools" || topic === "update") {
     if (wantHelp) {
       showHelp(helpFor(topic, sub), topic, sub);
       return;
@@ -131,6 +140,17 @@ async function main(argv: string[]): Promise<void> {
         default:
           throw new UsageError(`unknown tools command "${sub}"`, `Valid: list, view, call. ${usageLine("tools")}`);
       }
+    case "update": {
+      const outcome = await runUpdate(VERSION, {
+        check: bool(ctx.parsed, "check"),
+        force: bool(ctx.parsed, "force"),
+        version: str(ctx.parsed, "release-version"),
+        to: str(ctx.parsed, "to"),
+      });
+      if (ctx.json) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
+      else process.stdout.write(`${renderUpdate(outcome)}\n`);
+      return;
+    }
     default:
       throw new UsageError(`unknown command "${topic}"`, TOPIC_HINT);
   }
@@ -149,6 +169,7 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "call") return CALL_FLAGS;
     return [];
   }
+  if (topic === "update") return UPDATE_FLAGS;
   return [];
 }
 

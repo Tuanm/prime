@@ -59,6 +59,7 @@ mcp tools view <device-id>.<tool-id>
 mcp tools call <device-id>.<tool-id> [<json>] [options]
 mcp tools call <device-id>.<tool-id> <json> <device-id>.<tool-id> <json> ...
 ... | mcp tools call
+mcp update [--check]
 mcp help [devices|tools]
 ```
 
@@ -66,6 +67,7 @@ Aliases, as specified:
 
 - `mcp` on its own is `mcp --help`.
 - `mcp call ...` is `mcp tools call ...`.
+- `mcp upgrade` is `mcp update`.
 
 Every subcommand supports `--help`, and global flags are available everywhere:
 `--json`, `--no-color`, `--config <path>`, `--verbose`, `--quiet`.
@@ -373,6 +375,46 @@ exponential backoff and jitter:
 The last two matter: retrying them could run a side-effecting tool twice, so the
 CLI would rather report a failure you can retry yourself. A retry never extends
 `--timeout` - the timeout is the budget for the whole call, retries included.
+
+## Updating
+
+The CLI ships as a self-contained binary with no package manager behind it, so
+it updates itself:
+
+```bash
+mcp update              # install the newest release (alias: mcp upgrade)
+mcp update --check      # only report whether one exists
+mcp update --json       # machine-readable result
+```
+
+```text
+  current   26.10.3
+  latest    26.10.4
+  installed 26.10.4 -> /Users/you/.local/bin/mcp
+```
+
+It lists the repo's releases, keeps the `cli-v*` tags, picks the highest by
+SemVer, downloads the asset for this platform, checks it against the release's
+`SHA256SUMS`, and replaces the file atomically - so an interrupted update cannot
+leave a half-written executable. A release without `SHA256SUMS` is refused
+rather than installed unverified; note that this proves the download is intact
+and is what the release published, **not** that the release itself is
+trustworthy.
+
+| Situation | Behaviour |
+| --- | --- |
+| Already newest | Reports "already up to date", changes nothing |
+| `--check` | Never writes, and works from a source checkout |
+| Not writable (e.g. `/usr/local/bin`) | Explains and suggests `sudo mcp update` or `--to <path>` |
+| Windows, binary in use | Stages `<path>.new` and prints the move command |
+| Source checkout (`.ts`) | Refuses, so your working tree is never overwritten |
+| `--to install/mcp.js` | Installs the JS bundle instead of a native binary |
+
+Other flags: `--force` reinstalls the current version, and
+`--release-version <v>` installs one specific version.
+
+One caveat: a release built before this command existed cannot update itself.
+Install that one release by hand (below), and `mcp update` takes over from there.
 
 ## Releasing
 
