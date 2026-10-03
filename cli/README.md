@@ -380,12 +380,28 @@ CLI would rather report a failure you can retry yourself. A retry never extends
 runner (Bun cross-compiles) and publishes a GitHub Release:
 
 ```bash
-git tag cli-v0.2.0
-git push origin cli-v0.2.0
+git tag cli-v26.10.3
+git push origin cli-v26.10.3
 ```
 
 The tag supplies the version baked into the binaries, so `mcp --version` in a
-release reports the release it came from. A manual `workflow_dispatch` run builds
+release reports the release it came from.
+
+### Versioning
+
+Versions are dates: **26.10.3** is 2026-10-03. For a 60 MB binary with no
+auto-update, `mcp --version` telling you *how stale* the download is matters more
+than a compatibility signal.
+
+The one subtlety is that the version also lands in `package.json` and a Release
+tag, and both are parsed as SemVer - which **forbids leading zeros**. So the day
+is not padded: `26.10.3`, never `26.10.03`. (`npm pack` accepts the padded form,
+so this fails late and confusingly.) A second release on the same day uses build
+metadata: `cli-v26.10.3+1`.
+
+`cli/src/version.ts` is the single source of truth, enforced by both the build
+(`bun run build --version <v>` rejects a bad value with a hint) and the release
+workflow. Use plain SemVer instead if the CLI ever gains consumers who pin it. A manual `workflow_dispatch` run builds
 the same artifacts and uploads them as workflow artifacts without publishing a
 release. Each release carries the five platform binaries, the JS bundle, and a
 `SHA256SUMS` file.

@@ -18,7 +18,7 @@ import { toolsCall, toolsList, toolsView } from "./tools.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "0.2.0-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.10.3-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 

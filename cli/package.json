@@ -1,6 +1,6 @@
 {
   "name": "code-mcp-gateway-cli",
-  "version": "0.2.0",
+  "version": "26.10.3",
   "private": true,
   "description": "mcp - command line client for code-mcp-gateway devices and MCP tools",
   "type": "module",

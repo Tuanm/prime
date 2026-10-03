@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { parseArgs, flag } from "../src/args.ts";
 import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/client.ts";
 import { pool } from "../src/pool.ts";
+import { isValidVersion, versionProblem } from "../src/version.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
@@ -290,6 +291,34 @@ describe("bounded concurrency", () => {
   test("handles empty input and a limit larger than the work", async () => {
     expect(await pool([], 4, async () => 1)).toEqual([]);
     expect(await pool([1, 2], 100, async (n) => n * 2)).toEqual([2, 4]);
+  });
+});
+
+describe("versions", () => {
+  test("accepts date versions and semver", () => {
+    for (const v of ["26.10.3", "0.2.0", "2026.10.3", "26.10.3+1", "26.10.3-rc.1", "26.10.3-rc.1+build.5"]) {
+      expect(isValidVersion(v)).toBe(true);
+    }
+  });
+
+  test("rejects zero-padded dates, which npm pack would have accepted", () => {
+    // The trap: "26.10.03" looks right, packs fine, and is invalid SemVer.
+    expect(isValidVersion("26.10.03")).toBe(false);
+    expect(isValidVersion("2026.10.03")).toBe(false);
+    expect(versionProblem("26.10.03")).toContain("Use 26.10.3");
+    expect(versionProblem("2026.10.03")).toContain("Use 2026.10.3");
+  });
+
+  test("rejects versions that are not versions", () => {
+    for (const v of ["", "1.0", "v26.10.3", "26.10", "26.10.3.4", "latest", "26.10.3-"]) {
+      expect(isValidVersion(v)).toBe(false);
+    }
+    // The "v" belongs on the git tag, not in the version value.
+    expect(versionProblem("v26.10.3")).toContain("not a version");
+  });
+
+  test("no problem is reported for a valid version", () => {
+    expect(versionProblem("26.10.3")).toBeUndefined();
   });
 });
 

@@ -3,7 +3,11 @@ name: Release CLI
 # Cuts a GitHub Release containing the mcp binaries for every supported
 # platform, plus the portable JS bundle and a checksum file.
 #
-#   git tag cli-v0.2.0 && git push origin cli-v0.2.0
+#   git tag cli-v26.10.3 && git push origin cli-v26.10.3
+#
+# Versions are dates (26.10.3 = 2026-10-03), which tells a user how stale their
+# download is. They must still be valid SemVer, so the day is not zero-padded.
+# A second release on the same day uses build metadata: cli-v26.10.3+1.
 #
 # The tag drives the version baked into the binaries; a manual run builds the
 # same artifacts and uploads them as workflow artifacts without publishing a
@@ -40,7 +44,7 @@ jobs:
         with:
           bun-version: latest
 
-      # A tag like cli-v0.2.0 publishes version 0.2.0; the binaries report it.
+      # A tag like cli-v26.10.3 publishes version 26.10.3; the binaries report it.
       - name: Resolve version
         id: version
         env:
@@ -56,10 +60,13 @@ jobs:
           else
             VERSION="$(node -p "require('./cli/package.json').version")"
           fi
-          case "$VERSION" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "invalid version: $VERSION" >&2; exit 1 ;;
-          esac
+          # Same rule as cli/src/version.ts, checked coarsely here and
+          # strictly in the build itself: a date version must stay valid SemVer,
+          # which means no zero padding (26.10.3, not 26.10.03).
+          if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "invalid version: $VERSION - use a date like 26.10.3 (no zero padding), optionally 26.10.3+1" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building mcp $VERSION"
 

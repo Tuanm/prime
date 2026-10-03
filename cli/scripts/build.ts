@@ -10,6 +10,7 @@
 
 import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { $ } from "bun";
+import { versionProblem as versionProblemFor } from "../src/version.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const ENTRY = `${ROOT}src/index.ts`;
@@ -38,8 +39,13 @@ const bundleOnly = args.has("--bundle-only");
 const versionFlagIndex = process.argv.indexOf("--version");
 const pkg = (await Bun.file(`${ROOT}package.json`).json()) as { version?: string };
 const VERSION = versionFlagIndex !== -1 ? process.argv[versionFlagIndex + 1] : (process.env.MCP_CLI_VERSION ?? pkg.version ?? "0.0.0");
-if (!VERSION || !/^\d+\.\d+\.\d+/.test(VERSION)) {
-  console.error(`invalid version "${VERSION}"`);
+if (!VERSION) {
+  console.error("no version given and package.json has none");
+  process.exit(1);
+}
+const versionProblem = versionProblemFor(VERSION);
+if (versionProblem) {
+  console.error(versionProblem);
   process.exit(1);
 }
 // `process.env.MCP_CLI_VERSION` is substituted with the literal at build time,
