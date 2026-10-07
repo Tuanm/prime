@@ -241,10 +241,32 @@ cannot hold a slot forever.
 The five-file cap counts live files only, so expiry frees a slot as soon as the
 file is reaped.
 
-> **Files need R2.** Enable R2 on the account and create the bucket once:
-> `wrangler r2 bucket create code-mcp-files`. Without the `BUCKET`
-> binding, `/api/files` answers `503 file storage is not configured` and
-> every other route is unaffected.
+### Enabling file storage
+
+R2 is not enabled by default on a Cloudflare account, and it is two separate
+one-time steps - the first of which no API or CLI can perform:
+
+1. **Dashboard -> R2 -> enable it** (accept the terms). Until that is done every
+   R2 API call fails with `code 10042: Please enable R2 through the Cloudflare
+   Dashboard`.
+2. **Refresh the CLI credentials** so the token carries the R2 scope:
+
+   ```bash
+   npx wrangler login
+   npx wrangler whoami   # "r2 (write)" must appear under Token Permissions
+   ```
+
+Then create the bucket and deploy:
+
+```bash
+npx wrangler r2 bucket create code-mcp-files
+npx wrangler deploy
+```
+
+Without the `BUCKET` binding, `/api/files` answers
+`503 file storage is not configured` (and `/files` renders a matching page)
+while every other route keeps working - so the worker can be deployed before R2
+exists without breaking anything else.
 
 ## Local development
 

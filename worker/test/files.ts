@@ -48,30 +48,27 @@ function basic(deviceId: string, token: string): Record<string, string> {
 const DEMO = basic("demo", "demo");
 const OTHER = basic("other", "other");
 
-async function startWorker(): Promise<() => void> {
+async function startWorker(port: number, vars: string[] = []): Promise<() => void> {
   const proc = spawn(
     "node",
     [
       WRANGLER, "dev", "--local",
       "-c", ROOT + "/wrangler.dev.toml",
-      "--port", String(PORT), "--ip", "127.0.0.1",
-      "--persist-to", ROOT + `/.wrangler/state-${PORT}`,
-      "--var", `FILES_MAX_UPLOAD_BYTES:${MAX_UPLOAD}`,
-      "--var", `FILES_MAX_TOTAL_BYTES:${MAX_TOTAL}`,
-      "--var", `FILES_MAX_PER_DEVICE:${MAX_FILES}`,
-      "--var", `FILES_MAX_EXPIRY_MS:${MAX_EXPIRY_MS}`,
+      "--port", String(port), "--ip", "127.0.0.1",
+      "--persist-to", ROOT + `/.wrangler/state-${port}`,
+      ...vars.flatMap((v) => ["--var", v]),
     ],
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] },
   );
   for (let i = 0; i < 240; i++) {
     try {
-      const r = await fetch(BASE + "/admin/api/devices");
+      const r = await fetch(`http://127.0.0.1:${port}/admin/api/devices`);
       if (r.status < 500) return () => proc.kill();
     } catch {}
     await Bun.sleep(250);
   }
   proc.kill();
-  throw new Error("wrangler did not become ready");
+  throw new Error(`wrangler did not become ready on ${port}`);
 }
 
 interface UploadResult {
@@ -255,6 +252,22 @@ async function main(): Promise<void> {
   check("one file too many -> 409", overFiles.status === 409, JSON.stringify(overFiles.body));
   checkIncludes("409 explains the limit", JSON.stringify(overFiles.body), "file limit reached");
 
+  // ---- the quota check is atomic under concurrency ----
+  // The check-then-insert lives in one Durable Object operation, so a burst must
+  // not be able to exceed the cap. Fired together, `MAX_FILES + 3` uploads have
+  // to produce exactly MAX_FILES successes.
+  for (const id of await listIds()) await fetch(`${BASE}/api/files/${id}`, { method: "DELETE", headers: DEMO });
+  const burst = await Promise.all(
+    Array.from({ length: MAX_FILES + 3 }, (_, i) => upload(small, `name=race${i}.bin&expiry_days=0.00005`)),
+  );
+  const accepted = burst.filter((r) => r.status === 201).length;
+  const refused = burst.filter((r) => r.status === 409).length;
+  check(
+    `${MAX_FILES + 3} concurrent uploads stop exactly at the ${MAX_FILES}-file cap`,
+    accepted === MAX_FILES && refused === 3,
+    `201s=${accepted} 409s=${refused} other=${burst.length - accepted - refused}`,
+  );
+
   // ---- total-bytes cap ----
   for (const id of await listIds()) await fetch(`${BASE}/api/files/${id}`, { method: "DELETE", headers: DEMO });
   const nineHundred = bytes(900);
@@ -274,9 +287,79 @@ async function main(): Promise<void> {
   check("download after expiry -> 404", (await fetch(`${BASE}/api/files/${expiringId}`, { headers: DEMO })).status === 404);
   check("page after expiry -> 404", (await fetch(`${BASE}/files/${expiringId}`)).status === 404);
   check("the slot is reusable after expiry", (await upload(small, "name=after.bin&expires_in=1")).status === 201);
+
+  // ---- multipart boundaries ----
+  // The tiny limits above cannot exercise a body larger than one R2 part, so a
+  // second instance runs with the real defaults. The body is pushed in odd-sized
+  // chunks so they straddle the 5 MiB part boundaries, which is exactly the
+  // copying loop in putChunked that a single-part upload never reaches.
+  const BIG_PORT = 8822;
+  const BIG_BASE = `http://127.0.0.1:${BIG_PORT}`;
+  const stopBig = await startWorker(BIG_PORT);
+  try {
+    await fetch(BIG_BASE + "/admin/api/devices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "demo", token: "demo" }),
+    });
+
+    const PART = 5 * 1024 * 1024;
+    const total = PART * 2 + 12345; // two full parts and a short tail
+    const payload = new Uint8Array(total);
+    for (let i = 0; i < total; i++) payload[i] = (i * 31 + 7) & 0xff;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        let offset = 0;
+        while (offset < total) {
+          const size = Math.min(700_000, total - offset);
+          controller.enqueue(payload.subarray(offset, offset + size));
+          offset += size;
+        }
+        controller.close();
+      },
+    });
+
+    const bigUpload = await fetch(`${BIG_BASE}/api/files?name=multipart.bin&expiry_days=1`, {
+      method: "POST",
+      headers: DEMO,
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    const bigJson: any = await bigUpload.json().catch(() => ({}));
+    check("chunked upload spanning three parts -> 201", bigUpload.status === 201, JSON.stringify(bigJson).slice(0, 200));
+    check("reported size is the full body", bigJson.file?.size === total, `${bigJson.file?.size} vs ${total}`);
+
+    const bigDown = await fetch(`${BIG_BASE}/api/files/${bigJson.file?.id}`, { headers: DEMO });
+    const received = new Uint8Array(await bigDown.arrayBuffer());
+    let identical = received.length === total;
+    if (identical) {
+      for (let i = 0; i < total; i++) {
+        if (received[i] !== payload[i]) {
+          identical = false;
+          break;
+        }
+      }
+    }
+    check(`all parts reassemble byte-identically (${(total / 1048576).toFixed(1)} MiB)`, identical, `${received.length} bytes`);
+
+    // A Range request against the same object exercises the cached owner lookup.
+    const midRange = await fetch(`${BIG_BASE}/api/files/${bigJson.file?.id}`, {
+      headers: { ...DEMO, range: `bytes=${PART}-4294967295` },
+    });
+    check("range across a part boundary -> 206", midRange.status === 206, String(midRange.status));
+  } finally {
+    stopBig();
+  }
 }
 
-const stop = await startWorker();
+// Tiny limits so the quotas are reachable with a few hundred bytes.
+const stop = await startWorker(PORT, [
+  `FILES_MAX_UPLOAD_BYTES:${MAX_UPLOAD}`,
+  `FILES_MAX_TOTAL_BYTES:${MAX_TOTAL}`,
+  `FILES_MAX_PER_DEVICE:${MAX_FILES}`,
+  `FILES_MAX_EXPIRY_MS:${MAX_EXPIRY_MS}`,
+]);
 try {
   await main();
 } catch (err) {
