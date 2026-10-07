@@ -7,6 +7,14 @@ import { UI_CSS } from "./ui-css";
 import type { FileLimits } from "./config";
 
 const FILES_CSS = `
+      /* The admin page's 540px column is sized for one input per row. A file row
+         carries four columns plus a menu, and a locked file adds a key prompt on
+         top of that, so these pages need a little more room or the filename
+         collapses to an ellipsis. Everything else - colours, borders, type,
+         components - is the admin page's stylesheet, unchanged. */
+      body {
+        width: 720px;
+      }
       /* File rows: name | expiry | protected key | menu. */
       .cols {
         flex: 1;
@@ -65,6 +73,22 @@ const FILES_CSS = `
         flex: 1;
         min-width: 0;
       }
+      /* The key prompt sits in the same row as the columns, so it must not
+         compete for width: the filename has to stay readable. */
+      .kform {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: none;
+      }
+      .kform input {
+        width: 140px;
+        font-family: inherit;
+        font-size: 11px;
+        border: 1px solid #111;
+        background: #fff;
+        padding: 3px 5px;
+      }
       .dl {
         width: 28px;
         height: 28px;
@@ -93,6 +117,32 @@ const FILES_CSS = `
       }
       .meta b {
         color: #111;
+      }
+
+      /* Last in the sheet on purpose: these override rules of equal specificity
+         above, and a media query does not win on its own - only source order
+         does. The width override also has to beat the admin page's own mobile
+         query, which is emitted before this file. */
+      @media (max-width: 760px) {
+        body {
+          width: auto;
+          margin: 24px 14px;
+        }
+        /* Four fixed columns cannot fit a phone, so the name takes its own line
+           and the expiry and key move beneath it. */
+        .cols {
+          flex-wrap: wrap;
+          row-gap: 2px;
+        }
+        .fname {
+          flex: 1 0 100%;
+          min-width: 0;
+        }
+        .fexp,
+        .fkey {
+          width: auto;
+          flex: 0 0 auto;
+        }
       }
 `;
 
@@ -414,8 +464,8 @@ export function renderDownloadPage(input: {
       // key never reaches the address bar, history or a Referer.
       scripts.push("      window.__DL__ = " + safeJson({ id: file.id, name: file.name, key: "" }) + ";");
       control =
-        '<form class="opts" id="keyForm" style="margin:0">' +
-        '<input id="k" type="password" placeholder="protection key" autocomplete="off" autofocus />' +
+        '<form class="kform" id="keyForm">' +
+        '<input id="k" type="password" placeholder="key" autocomplete="off" aria-label="protection key" autofocus />' +
         '<button class="plus" type="submit" title="Unlock">&#8594;</button>' +
         "</form>";
     } else if (file.protected) {

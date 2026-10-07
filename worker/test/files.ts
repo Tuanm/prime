@@ -221,6 +221,17 @@ async function main(): Promise<void> {
   checkIncludes("page names the device", pageHtml, "file management &middot; demo");
   checkIncludes("page embeds the file list", pageHtml, "hello.txt");
   checkIncludes("page has the upload control", pageHtml, 'id="picker"');
+  // A file row carries four columns plus a menu, so the page needs more width
+  // than the admin page's 540px or the filename collapses to an ellipsis.
+  checkIncludes("files pages are wider than the admin page", pageHtml, "width: 720px");
+  // CSS source order decides between rules of equal specificity: a media query
+  // placed before the rules it overrides silently does nothing. That bug shipped
+  // once and only showed up in a screenshot, so pin the ordering down here.
+  check(
+    "narrow-screen overrides come after the rules they override",
+    pageHtml.indexOf("@media (max-width: 760px)") > pageHtml.indexOf(".fname {"),
+    "the mobile block must be last in the stylesheet",
+  );
   const downloadPage = await fetch(`${BASE}/files/${helloId}`);
   const downloadHtml = await downloadPage.text();
   check("GET /files/{id} -> 200", downloadPage.status === 200);
