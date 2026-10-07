@@ -179,11 +179,16 @@ async function main(): Promise<void> {
   // Must be well past the configured ceiling, not merely at it: at the ceiling is
   // allowed, and a file that sneaks in here would fill the 3-file quota for
   // everything that follows.
+  const filesBeforeRefusals = (await listIds()).length;
   const tooLong = await upload(small, "name=long.bin&expiry_days=30");
   check("expiry beyond the cap -> 400", tooLong.status === 400, String(tooLong.status));
   checkIncludes("the refusal names the ceiling", JSON.stringify(tooLong.body), "expiry exceeds");
   check("expiry in the past -> 400", (await upload(small, "name=past.bin&expiry_days=0")).status === 400);
-  check("no file was created by the refusals", (await listIds()).length === 3, JSON.stringify(await listIds()));
+  check(
+    "neither refusal created a file",
+    (await listIds()).length === filesBeforeRefusals,
+    `${filesBeforeRefusals} -> ${(await listIds()).length}`,
+  );
 
   // ---- download ----
   const download = await fetch(`${BASE}/api/files/${helloId}`, { headers: DEMO });
