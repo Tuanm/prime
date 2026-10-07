@@ -13,6 +13,9 @@ export class FakeEl {
   textContent = "";
   value = "";
   type = "";
+  placeholder = "";
+  tabIndex = 0;
+  readOnly = false;
   disabled = false;
   files: unknown[] = [];
   clicked = 0;
@@ -62,6 +65,13 @@ export class FakeEl {
     for (const fn of this.listeners[ev] ?? []) fn(arg ?? { stopPropagation() {} });
   }
   remove(): void {}
+  select(): void {}
+  focus(): void {
+    this.fire("focus");
+  }
+  blur(): void {
+    this.fire("blur");
+  }
   querySelectorAll(): FakeEl[] {
     return [];
   }
@@ -87,6 +97,8 @@ export interface PageHarness {
     /** The live fake XHR, so a test can set status/responseText before onload. */
     xhr: unknown;
   }[];
+  /** fetch() calls the page made, e.g. PATCHing a protection key. */
+  fetches: { url: string; method: string; body: unknown }[];
   errors: string[];
   /** Fire the picker's change event with these files. */
   pick(...files: { name: string; size: number; type?: string }[]): void;
@@ -101,14 +113,24 @@ export function runPage(html: string, init: Record<string, any> = {}): PageHarne
   const els: Record<string, FakeEl> = {};
   for (const id of ids) els[id] = new FakeEl("div", nodes);
 
+  // Just enough of a selector engine for what the page uses.
+  const matches = (node: FakeEl, selector: string): boolean => {
+    const attr = /^\[data-qid="([^"]*)"\]$/.exec(selector);
+    if (attr) return node.dataset.qid === attr[1];
+    if (selector.startsWith(".")) {
+      return selector
+        .slice(1)
+        .split(".")
+        .every((cls) => node.classList.contains(cls));
+    }
+    return false;
+  };
+
   const document = {
     getElementById: (id: string) => els[id] ?? null,
     createElement: (tag: string) => new FakeEl(tag, nodes),
-    querySelector: (sel: string) => {
-      const m = /data-qid="([^"]*)"/.exec(sel);
-      if (!m) return null;
-      return nodes.find((n) => n.dataset.qid === m[1]) ?? null;
-    },
+    querySelector: (sel: string) => nodes.find((n) => matches(n, sel)) ?? null,
+    querySelectorAll: (sel: string) => nodes.filter((n) => matches(n, sel)),
     body: new FakeEl("body", nodes),
     // The page closes its menus on a document click.
     addEventListener: () => {},
@@ -143,6 +165,16 @@ export function runPage(html: string, init: Record<string, any> = {}): PageHarne
     }
   }
 
+  const fetches: PageHarness["fetches"] = [];
+  const fakeFetch = (url: string, init?: { method?: string; body?: unknown }) => {
+    fetches.push({ url, method: init?.method ?? "GET", body: init?.body ?? null });
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ files: [], usage: { bytes: 0, count: 0 }, budget: null }),
+    });
+  };
+
   const errors: string[] = [];
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
   for (const code of scripts) {
@@ -152,7 +184,7 @@ export function runPage(html: string, init: Record<string, any> = {}): PageHarne
         document,
         { clipboard: undefined },
         FakeXHR,
-        () => Promise.resolve({ json: () => Promise.resolve({ files: [], usage: { bytes: 0, count: 0 }, budget: null }) }),
+        fakeFetch,
       );
     } catch (err) {
       errors.push(err instanceof Error ? err.message : String(err));
@@ -163,6 +195,7 @@ export function runPage(html: string, init: Record<string, any> = {}): PageHarne
     els,
     window,
     requests,
+    fetches,
     errors,
     pick(...files) {
       els.picker.files = files.map((f) => ({ name: f.name, size: f.size, type: f.type ?? "" }));

@@ -212,6 +212,34 @@ async function main(): Promise<void> {
   const wrongPage = await fetch(`${BASE}/files/${secretId}?key=nope`);
   checkIncludes("wrong page key re-prompts", await wrongPage.text(), 'id="keyForm"');
 
+  // ---- changing a key after the fact ----
+  const patch = (body: unknown, headers = DEMO) =>
+    fetch(`${BASE}/api/files/${secretId}`, {
+      method: "PATCH",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const rotated = await patch({ key: "rotated" });
+  const rotatedBody: any = await rotated.json();
+  check("PATCH rotates the key -> 200", rotated.status === 200, JSON.stringify(rotatedBody).slice(0, 120));
+  check("the old key no longer works", (await fetch(`${BASE}/api/files/${secretId}`, { headers: { "X-File-Key": "sesame" } })).status === 401);
+  check("the new key works", (await fetch(`${BASE}/api/files/${secretId}`, { headers: { "X-File-Key": "rotated" } })).status === 200);
+
+  const clearedKey = await patch({ key: "" });
+  const clearedBody: any = await clearedKey.json();
+  check("PATCH clears the key -> 200", clearedKey.status === 200, JSON.stringify(clearedBody).slice(0, 120));
+  check("a cleared file downloads without a key", (await fetch(`${BASE}/api/files/${secretId}`)).status === 200);
+  check("a cleared file is no longer protected", clearedBody.file?.protected === false, JSON.stringify(clearedBody.file?.protected));
+
+  const foreign = await patch({ key: "mine" }, OTHER);
+  check("another device cannot change the key", foreign.status === 404, String(foreign.status));
+  const badKey = await patch({ key: "x".repeat(300) });
+  check("an over-long key -> 400", badKey.status === 400, String(badKey.status));
+
+  // Put it back so the later page assertions still see a protected file.
+  await patch({ key: "sesame" });
+
   // ---- device isolation ----
   check("another device sees none of these files", (await listIds(OTHER)).length === 0);
   check("another device cannot delete them", (await fetch(`${BASE}/api/files/${helloId}`, { method: "DELETE", headers: OTHER })).status === 200);
@@ -258,12 +286,17 @@ async function main(): Promise<void> {
   check("choosing a file queues a card", Boolean(box), "no queued row with a qid");
   checkIncludes("the queued card shows its size", box?.descendants().map((c) => c.textContent).join(" ") ?? "", "1000 B");
 
+  const menuEl = box!.descendants().find((n) => n.classList.contains("menu"));
+  box!.descendants().find((n) => n.classList.contains("menu-btn"))!.click();
+  check("clicking the menu button opens the menu", menuEl!.classList.contains("open"), menuEl!.className);
+
   let threw: string | null = null;
   try {
     ui.menuClick(box!, "Upload");
   } catch (err) {
     threw = err instanceof Error ? err.message : String(err);
   }
+  check("choosing a menu entry closes the menu", !menuEl!.classList.contains("open"), menuEl!.className);
   check("clicking Upload does not throw", threw === null, threw ?? "");
   const request = ui.requests[0];
   check("it posts to the files API", Boolean(request) && request!.method === "POST" && request!.url.startsWith("/api/files?name=queued.bin"), JSON.stringify(request?.url));
@@ -273,6 +306,36 @@ async function main(): Promise<void> {
   request!.upload.onprogress?.({ lengthComputable: true, loaded: 500, total: 1000 });
   checkIncludes("progress paints the card", box!.style.background ?? "", "50%");
   checkIncludes("progress is reported in words", ui.els.status!.textContent, "50%");
+
+  // Clicking a menu entry must close the menu (it stayed open before).
+  const uploadMenu = box!.descendants().find((n) => n.classList.contains("menu"));
+  check("the row has a menu", Boolean(uploadMenu));
+
+  // ---- editing a protection key in place ----
+  const keyBoxes = ui.els
+    .list!.descendants()
+    .filter((n) => n.tag === "input" && n.classList.contains("fkey"));
+  check("file rows have an editable key box", keyBoxes.length >= 1, String(keyBoxes.length));
+  check("a queued row's key box is read-only", box!.descendants().some((n) => n.classList.contains("fkey") && n.readOnly));
+
+  const maskedKey = keyBoxes.find((n) => n.value.includes("\u2022"));
+  check("a protected file shows a mask, not the key", Boolean(maskedKey), JSON.stringify(keyBoxes.map((b) => b.value)));
+
+  ui.fetches.length = 0;
+  maskedKey!.blur();
+  check("blurring an untouched mask saves nothing", ui.fetches.length === 0, JSON.stringify(ui.fetches.map((f) => f.method)));
+
+  maskedKey!.value = "fresh-key";
+  maskedKey!.blur();
+  const keyPatch = ui.fetches.find((f) => f.method === "PATCH");
+  check("editing the key sends a PATCH", Boolean(keyPatch), JSON.stringify(ui.fetches.map((f) => f.method)));
+  checkIncludes("the PATCH carries the new key", String(keyPatch?.body ?? ""), "fresh-key");
+
+  ui.fetches.length = 0;
+  maskedKey!.value = "";
+  maskedKey!.blur();
+  const cleared = ui.fetches.find((f) => f.method === "PATCH");
+  check("clearing the box removes the protection", cleared?.body === '{"key":""}', String(cleared?.body));
 
   // A failure must tint the card rather than only writing a line.
   const failing = runPage(pageHtml);

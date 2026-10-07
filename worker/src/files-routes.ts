@@ -273,7 +273,30 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
       if (body.removed === true) await unindexFile(env, apiId);
       return jsonOk({ ok: true, removed: body.removed === true });
     }
-    return jsonError(405, "method not allowed", { allow: "GET, DELETE" });
+    // Changing the protection key after the fact, so a file can be protected (or
+    // unprotected) without re-uploading it. Routed through the owner's DO, like
+    // DELETE, so only the owning device can do it.
+    if (request.method === "PATCH") {
+      const auth = await authorizeDevice(env, request);
+      if (auth instanceof Response) return auth;
+      let body: Record<string, unknown>;
+      try {
+        body = (await request.json()) as Record<string, unknown>;
+      } catch {
+        return jsonError(400, "invalid json");
+      }
+      const raw = body.key === undefined || body.key === null ? "" : String(body.key);
+      if (raw.length > 256) return jsonError(400, "key too long");
+      const stub = filesStub(env, auth.deviceId);
+      const { status, body: updated } = await doJson(stub, "/set-key", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: apiId, key: raw }),
+      });
+      if (status !== 200) return jsonError(status, updated.error ?? "update failed");
+      return jsonOk({ ok: true, file: fileView(updated.file as FileRecord, origin) });
+    }
+    return jsonError(405, "method not allowed", { allow: "GET, PATCH, DELETE" });
   }
 
   // ---- HTML pages --------------------------------------------------------

@@ -72,6 +72,7 @@ export class FilesDO extends DurableObject<Env> {
     if (request.method === "POST" && path === "/complete") return this.complete(request);
     if (request.method === "POST" && path === "/abort") return this.abort(request);
     if (request.method === "POST" && path === "/delete") return this.remove(request);
+    if (request.method === "POST" && path === "/set-key") return this.setKey(request);
     if (request.method === "GET" && path === "/list") return this.list();
     if (request.method === "GET" && path === "/get") {
       const id = url.searchParams.get("id") ?? "";
@@ -222,6 +223,31 @@ export class FilesDO extends DurableObject<Env> {
 
   private async remove(request: Request): Promise<Response> {
     return this.abort(request);
+  }
+
+  /**
+   * Set or clear a file's protection key.
+   *
+   * Reached through the owner's own DO, so ownership is structural rather than a
+   * check that could be forgotten. An empty key removes the protection.
+   */
+  private async setKey(request: Request): Promise<Response> {
+    let body: Record<string, unknown>;
+    try {
+      body = (await request.json()) as Record<string, unknown>;
+    } catch {
+      return Response.json({ error: "invalid json" }, { status: 400 });
+    }
+    const id = String(body.id ?? "");
+    if (!validFileId(id)) return Response.json({ error: "invalid file id" }, { status: 400 });
+    const record = this.files.get(id);
+    if (!record) return Response.json({ error: "not found" }, { status: 404 });
+    const raw = body.key === undefined || body.key === null ? "" : String(body.key);
+    if (raw.length > 256) return Response.json({ error: "key too long" }, { status: 400 });
+    if (raw) record.key = raw;
+    else delete record.key;
+    await this.persist();
+    return Response.json({ ok: true, file: record });
   }
 
   private async list(): Promise<Response> {

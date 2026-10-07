@@ -45,6 +45,8 @@ const FILES_CSS = `
         font-size: 12px;
         color: #666;
       }
+      /* Editable in place: the shared stylesheet already gives inputs inside a
+         .box a dotted underline, so it reads as text until you click it. */
       .fkey {
         width: 110px;
         flex: none;
@@ -53,6 +55,16 @@ const FILES_CSS = `
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        cursor: text;
+      }
+      .fkey::placeholder {
+        color: #bbb;
+      }
+      .fkey:focus {
+        color: #111;
+      }
+      .fkey.static {
+        cursor: default;
       }
       .fexp.soon {
         color: #b91c1c;
@@ -114,9 +126,13 @@ const FILES_CSS = `
         background: #f5f5f5;
       }
       .dl svg {
-        width: 14px;
-        height: 14px;
-        fill: currentColor;
+        width: 15px;
+        height: 15px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
       .meta {
         font-size: 12px;
@@ -155,8 +171,10 @@ const FILES_CSS = `
 `;
 
 
+// Outlined rather than filled: at 14px a solid path turns into a smudge.
 const DOWNLOAD_ICON =
-  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.6l3.3-3.3 1.4 1.4L12 17.4l-4.7-4.7 1.4-1.4L12 13.6V3h0zM5 19h14v2H5z"/></svg>';
+  '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+  '<path d="M12 3v12" /><path d="M7 10l5 5 5-5" /><path d="M5 20h14" /></svg>';
 
 /** Escape for HTML text and attribute contexts. */
 export function esc(value: unknown): string {
@@ -227,7 +245,7 @@ function browserScript(): string {
     "          if (f.status !== 'ready') return 'dot pending';",
     "          return 'dot ' + (f.expires_in_ms <= 3 * 86400000 ? 'off' : 'on');",
     "        }",
-    "        function row(dot, name, size, expiry, key, menuItems, cell, qid) {",
+    "        function row(dot, name, size, expiry, key, menuItems, cell, qid, onKey) {",
     "          var li = document.createElement('li');",
     "          li.className = 'row';",
     "          var d = document.createElement('span');",
@@ -242,7 +260,29 @@ function browserScript(): string {
     "          var n = document.createElement('div'); n.className = 'fname'; n.textContent = name;",
     "          var s = document.createElement('div'); s.className = 'fsize'; s.textContent = size;",
     "          var e = document.createElement('div'); e.className = expiry.soon ? 'fexp soon' : 'fexp'; e.textContent = expiry.text;",
-    "          var k = document.createElement('div'); k.className = 'fkey'; k.textContent = key;",
+    // Clicking the key edits it, the way the admin page's token field works: the
+    // box shows a mask, focusing selects it, and blurring commits the change.
+    "          var k = document.createElement('input');",
+    "          k.className = 'fkey';",
+    "          k.type = 'text';",
+    "          k.value = key;",
+    "          k.placeholder = 'key';",
+    "          k.autocomplete = 'off';",
+    "          if (onKey) {",
+    "            var initial = key;",
+    "            var commit = function () {",
+    "              var v = k.value.trim();",
+    "              if (v === initial || v === MASK) { k.value = initial; return; }",
+    "              onKey(v);",
+    "            };",
+    "            k.title = 'protection key - click to edit';",
+    "            k.addEventListener('focus', function () { k.select(); });",
+    "            k.addEventListener('blur', commit);",
+    "            k.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') { ev.preventDefault(); k.blur(); } });",
+    "          } else {",
+    "            k.readOnly = true;",
+    "            k.tabIndex = -1;",
+    "          }",
     "          cols.appendChild(n); cols.appendChild(s); cols.appendChild(e); cols.appendChild(k);",
     "          box.appendChild(cols);",
     "          if (cell) box.appendChild(cell);",
@@ -255,7 +295,7 @@ function browserScript(): string {
     "            b.type = 'button'; b.textContent = item.label;",
     "            if (item.danger) b.className = 'danger';",
     "            if (item.disabled) b.disabled = true;",
-    "            b.addEventListener('click', function (ev) { ev.stopPropagation(); item.run(); });",
+    "            b.addEventListener('click', function (ev) { ev.stopPropagation(); closeMenus(); item.run(); });",
     "            menu.appendChild(b);",
     "          });",
     "          btn.addEventListener('click', function (ev) {",
@@ -281,25 +321,27 @@ function browserScript(): string {
     "              dotClass(f), f.name,",
     "              f.size ? fmtBytes(f.size) : '-',",
     "              { text: f.status === 'ready' ? human(f.expires_in_ms) : 'not uploaded', soon: f.status === 'ready' && f.expires_in_ms <= 3 * 86400000 },",
-    "              f.protected ? MASK : '-',",
+    "              f.protected ? MASK : '',",
     "              [",
     "                { label: 'Save', run: function () { saveFile(f); } },",
     "                { label: 'Copy link', run: function () { copy(f.page_url); } },",
     "                { label: 'Delete', danger: true, run: function () { remove(f.id); } }",
-    "              ]",
+    "              ],",
+    "              null, null,",
+    "              function (v) { setKey(f.id, v); }",
     "            ));",
     "          });",
     "          queued.forEach(function (q) {",
-    "            listEl.appendChild(box = row(",
+    "            listEl.appendChild(row(",
     "              'dot pending', q.file.name,",
     "              q.file.size ? fmtBytes(q.file.size) : '-',",
     "              { text: 'not uploaded', soon: false },",
-    "              '-',",
+    "              '',",
     "              [",
     "                { label: 'Upload', run: function () { send(q); } },",
     "                { label: 'Delete', danger: true, run: function () { queued.splice(queued.indexOf(q), 1); render(); } }",
     "              ],",
-    "              null, q.qid",
+    "              null, q.qid, null",
     "            ));",
     "          });",
     "          if (files.length === 0 && queued.length === 0) {",
@@ -366,6 +408,18 @@ function browserScript(): string {
     "          xhr.onerror = function () { paintFail(); setStatus('upload failed', true); };",
     "          setStatus('uploading ' + q.file.name + ' ...');",
     "          xhr.send(q.file);",
+    "        }",
+    // Protect a file after the fact, or clear its protection with an empty box.
+    "        function setKey(id, value) {",
+    "          setStatus('saving key ...');",
+    "          fetch('/api/files/' + id, {",
+    "            method: 'PATCH',",
+    "            headers: { 'content-type': 'application/json' },",
+    "            body: JSON.stringify({ key: value })",
+    "          })",
+    "            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status)); return j; }); })",
+    "            .then(function (j) { setStatus(j.file && j.file.protected ? 'key saved' : 'protection removed'); refresh(); })",
+    "            .catch(function (e) { setStatus('key update failed: ' + e.message, true); refresh(); });",
     "        }",
     "        function remove(id) {",
     "          if (!confirm('Delete this file permanently?')) return;",
@@ -511,7 +565,7 @@ export function renderDownloadPage(input: {
     rows.push('            <div class="fname">' + esc(file.name) + "</div>");
     rows.push('            <div class="fsize">' + esc(fmtBytes(file.size)) + "</div>");
     rows.push('            <div class="fexp' + (soon ? " soon" : "") + '">' + esc(expiryLabel(file)) + "</div>");
-    rows.push('            <div class="fkey">' + esc(file.protected ? "(protected)" : "-") + "</div>");
+    rows.push('            <div class="fkey static">' + esc(file.protected ? "(protected)" : "-") + "</div>");
     rows.push("          </div>");
     rows.push("          " + control);
     rows.push("        </div>");
