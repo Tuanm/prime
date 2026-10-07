@@ -170,10 +170,22 @@ export function parseExpiry(
  */
 export const FILE_KEY_HEADER = "X-File-Key";
 
+/**
+ * The same view with the raw key stripped.
+ *
+ * Pages embed their data, so a view that still carried the key would put the
+ * secret in the HTML of a page whose whole job is to keep it out of the URL.
+ * Nothing on a page needs to read the key back - the prompt collects it, and the
+ * owner's own credentials authorise them.
+ */
+function pageView(view: FileView): FileView {
+  const stripped = { ...view };
+  delete stripped.key;
+  return stripped;
+}
+
 function fileView(record: FileRecord, origin: string): FileView {
   const downloadPath = `/api/files/${record.id}`;
-  // The page link is the shareable, human-facing one, so it can carry the key.
-  const pageQuery = record.key ? `?key=${encodeURIComponent(record.key)}` : "";
   return {
     id: record.id,
     name: record.name,
@@ -185,9 +197,11 @@ function fileView(record: FileRecord, origin: string): FileView {
     status: record.status,
     protected: Boolean(record.key),
     ...(record.key ? { key: record.key, key_header: FILE_KEY_HEADER } : {}),
-    // No key in the API URL - send it as the FILE_KEY_HEADER instead.
+    // Neither URL ever carries the key. The API one takes it as FILE_KEY_HEADER;
+    // the page one takes it in the prompt. A link is for sharing - the key is
+    // meant to travel separately, by whatever private channel the owner chooses.
     download_url: `${origin}${downloadPath}`,
-    page_url: `${origin}/files/${record.id}${pageQuery}`,
+    page_url: `${origin}/files/${record.id}`,
   };
 }
 
@@ -306,7 +320,7 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
     if (auth instanceof Response) return auth;
     const stub = filesStub(env, auth.deviceId);
     const { body } = await doJson(stub, "/list");
-    const files = ((body.files ?? []) as FileRecord[]).map((record) => fileView(record, origin));
+    const files = ((body.files ?? []) as FileRecord[]).map((record) => pageView(fileView(record, origin)));
     return html(
       renderFilesPage({
         deviceId: auth.deviceId,
@@ -547,18 +561,15 @@ async function downloadFile(
   const headerKey = request.headers.get(FILE_KEY_HEADER.toLowerCase()) ?? "";
 
   if (asPage) {
-    // A browser navigation cannot set a header, so the page takes the key from
-    // its own URL and hands it to the download control, which does use the
-    // header. A missing or wrong key renders a prompt rather than an error.
-    const pageKey = url.searchParams.get("key") ?? "";
-    const authorised = !record.key || ownerOk || timingSafeEq(pageKey, record.key);
+    // The page never takes a key from its URL: a link is shareable, the key is
+    // not, so the owner sends it separately and the visitor types it into the
+    // prompt. Anyone but the owner gets that prompt, always.
+    const authorised = !record.key || ownerOk;
     return html(
       renderDownloadPage({
-        file: fileView(record, origin),
-        key: record.key ? (ownerOk || !pageKey ? undefined : pageKey) : undefined,
+        file: pageView(fileView(record, origin)),
         protectedFile: Boolean(record.key),
         authorised,
-        wrongKey: Boolean(record.key) && Boolean(pageKey) && !authorised,
       }),
     );
   }

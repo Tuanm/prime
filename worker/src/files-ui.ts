@@ -537,10 +537,8 @@ export function renderFilesPage(input: {
  */
 export function renderDownloadPage(input: {
   file: FileView | null;
-  key?: string;
   protectedFile?: boolean;
   authorised?: boolean;
-  wrongKey?: boolean;
 }): string {
   const file = input.file;
   const locked = Boolean(file && input.protectedFile && !input.authorised);
@@ -564,13 +562,10 @@ export function renderDownloadPage(input: {
         '<button class="plus" type="submit" title="Unlock">&#8594;</button>' +
         "</form>";
     } else if (file.protected) {
-      // Authorised: hand the key to the page script, which sends it as a header.
+      // Authorised means the owner, whose own credentials are enough - so the
+      // page still never needs the key.
       control = '<button class="dl" id="dlBtn" type="button" title="Download">' + DOWNLOAD_ICON + "</button>";
-      scripts.push(
-        "      window.__DL__ = " +
-          safeJson({ id: file.id, name: file.name, key: input.key ?? file.key ?? "" }) +
-          ";",
-      );
+      scripts.push("      window.__DL__ = " + safeJson({ id: file.id, name: file.name }) + ";");
     } else {
       // Unprotected: a plain link, so the browser streams it natively.
       control = '<a class="dl" href="/api/files/' + esc(file.id) + '" title="Download" download>' + DOWNLOAD_ICON + "</a>";
@@ -604,7 +599,6 @@ export function renderDownloadPage(input: {
 
   if (file && (locked || input.protectedFile)) {
     scripts.push("      window.__PROTECTED__ = " + (locked ? "true" : "false") + ";");
-    scripts.push("      window.__WRONG__ = " + (input.wrongKey ? "true" : "false") + ";");
   }
 
   const body = [
@@ -638,9 +632,13 @@ function downloadScript(): string {
     "      (function () {",
     "        var statusEl = document.getElementById('status');",
     "        function say(msg, isErr) { if (statusEl) { statusEl.textContent = msg; statusEl.style.color = isErr ? '#b91c1c' : '#666'; } }",
+    // The owner needs no key (their credentials authorise them); a visitor
+    // unlocking a protected file supplies one and it travels as a header.
     "        function save(id, name, key) {",
     "          say('downloading ...');",
-    "          fetch('/api/files/' + id, { headers: { 'X-File-Key': key } })",
+    "          var headers = {};",
+    "          if (key) headers['X-File-Key'] = key;",
+    "          fetch('/api/files/' + id, { headers: headers })",
     "            .then(function (r) { if (!r.ok) throw new Error(r.status === 401 ? 'wrong key' : ('HTTP ' + r.status)); return r.blob(); })",
     "            .then(function (blob) {",
     "              var url = URL.createObjectURL(blob);",
@@ -653,10 +651,9 @@ function downloadScript(): string {
     "            .catch(function (e) { say('download failed: ' + e.message, true); });",
     "        }",
     "        var btn = document.getElementById('dlBtn');",
-    "        if (btn && window.__DL__) btn.addEventListener('click', function () { save(window.__DL__.id, window.__DL__.name, window.__DL__.key); });",
+    "        if (btn && window.__DL__) btn.addEventListener('click', function () { save(window.__DL__.id, window.__DL__.name); });",
     "        var form = document.getElementById('keyForm');",
     "        if (form && window.__DL__) {",
-    "          if (window.__WRONG__) say('wrong key - try again', true);",
     "          form.addEventListener('submit', function (ev) {",
     "            ev.preventDefault();",
     "            var key = document.getElementById('k').value;",

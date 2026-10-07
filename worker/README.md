@@ -154,7 +154,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `PATCH` | `/api/files/{id}` | device basic | Set or clear a file's protection key (`{"key":"..."}`; empty clears it) |
 | `DELETE` | `/api/files/{id}` | device basic | Delete a file immediately |
 | `GET` | `/files` | device basic | File management page |
-| `GET` | `/files/{id}` | `?key=` unlocks a protected file in the page | File download page |
+| `GET` | `/files/{id}` | public; a protected file prompts for its key | File download page |
 | `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 
@@ -212,18 +212,23 @@ takes it **only** as the `X-File-Key` request header and ignores `?key=`
 entirely - a request that puts the key in the URL is rejected exactly as if no
 key had been sent.
 
-The human-facing page cannot set a header (a browser navigation sets none), so
-`/files/{id}?key=...` is still accepted as a shareable link. It never puts the
-key back into a URL: the page hands it to its download control, which sends
-`X-File-Key` and saves the result from a blob. Opening the page without a key
-shows a prompt instead of a download button, and the key typed there goes
-straight into the header.
+**A link never carries the key either.** `page_url` - what "Copy link" copies -
+is a plain `/files/{id}`, and a `?key=` on a page is ignored exactly like a wrong
+one. A link is for sharing; the key is for sending separately, through whatever
+private channel the owner prefers.
 
-To support that, every page and download response carries
-`Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`: an uploaded
-file is attacker-supplied bytes and must never be sniffed into something
-renderable, and a page URL that may contain a key must never travel onward as a
-referrer.
+Opening a protected file's page therefore always asks for the key. The visitor
+types it into the prompt, and the page sends it as `X-File-Key` and saves the
+result from a blob - so the key never reaches the address bar, the history, or a
+`Referer`. The owner, whose own credentials authorise them, gets the download
+control instead and never needs the key.
+
+No page embeds the key in its HTML either: the views handed to `/files` and
+`/files/{id}` have it stripped, so even the owner's page source does not contain
+the secret. Every page and download response carries `Referrer-Policy:
+no-referrer` and `X-Content-Type-Options: nosniff`: an uploaded file is
+attacker-supplied bytes and must never be sniffed into something renderable, and
+a page URL must never travel onward as a referrer.
 
 | Limit | Default | Var |
 | --- | --- | --- |

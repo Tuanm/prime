@@ -20,7 +20,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const MAX_UPLOAD = 1000;
 const MAX_TOTAL = 2500;
 const MAX_FILES = 3;
-const MAX_EXPIRY_MS = 5000;
+const MAX_EXPIRY_MS = 86400000; // fixtures live a day, so a slow run cannot expire them mid-suite
 
 let pass = 0;
 let fail = 0;
@@ -65,7 +65,22 @@ async function startWorker(port: number, vars: string[] = []): Promise<() => voi
     ],
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] },
   );
-  for (let i = 0; i < 240; i++) {
+
+  // A cold wrangler takes seconds on an idle machine and much longer on a busy
+  // one, so wait generously and keep the tail of its output: a timeout that says
+  // only "not ready" wastes the whole run.
+  const log: string[] = [];
+  const keep = (chunk: Buffer) => {
+    log.push(chunk.toString());
+    while (log.length > 60) log.shift();
+  };
+  proc.stdout?.on("data", keep);
+  proc.stderr?.on("data", keep);
+
+  const startedAt = Date.now();
+  // Five minutes: a loaded machine (a browser with dozens of renderers is enough)
+  // can stretch a cold start from ~6s to well over a minute.
+  for (let i = 0; i < 1200; i++) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/admin/api/devices`);
       if (r.status < 500) return () => proc.kill();
@@ -73,7 +88,10 @@ async function startWorker(port: number, vars: string[] = []): Promise<() => voi
     await Bun.sleep(250);
   }
   proc.kill();
-  throw new Error(`wrangler did not become ready on ${port}`);
+  const waited = Math.round((Date.now() - startedAt) / 1000);
+  throw new Error(
+    `wrangler did not become ready on ${port} after ${waited}s\n--- its output ---\n${log.join("").slice(-1200)}`,
+  );
 }
 
 interface UploadResult {
@@ -123,7 +141,7 @@ async function main(): Promise<void> {
   check("valid credentials -> 200", (await fetch(BASE + "/api/files", { headers: DEMO })).status === 200);
 
   // ---- upload ----
-  const created = await upload(small, "name=hello.txt&expiry_days=0.00005");
+  const created = await upload(small, "name=hello.txt&expiry_days=1");
   check("upload -> 201", created.status === 201, JSON.stringify(created.body));
   const helloId: string = created.body.file?.id;
   checkIncludes("response carries a download url", JSON.stringify(created.body), `/api/files/${helloId}`);
@@ -138,12 +156,12 @@ async function main(): Promise<void> {
       controller.close();
     },
   });
-  const chunked = await upload(chunkedStream, "name=chunked.txt&expiry_days=0.00005", DEMO, { duplex: "half" } as RequestInit);
+  const chunked = await upload(chunkedStream, "name=chunked.txt&expiry_days=1", DEMO, { duplex: "half" } as RequestInit);
   check("chunked upload -> 201", chunked.status === 201, JSON.stringify(chunked.body));
   const chunkedId: string = chunked.body.file?.id;
 
   // ---- size cap ----
-  const oversized = await upload(tooBig, "name=big.bin&expiry_days=0.00005");
+  const oversized = await upload(tooBig, "name=big.bin&expiry_days=1");
   check("over the size cap -> 413", oversized.status === 413, JSON.stringify(oversized.body));
   checkIncludes("413 reports the limit", JSON.stringify(oversized.body), "limit_bytes");
   const streamedTooBig = new ReadableStream<Uint8Array>({
@@ -154,7 +172,7 @@ async function main(): Promise<void> {
   });
   check(
     "over-cap chunked upload -> 413",
-    (await upload(streamedTooBig, "name=big2.bin&expiry_days=0.00005", DEMO, { duplex: "half" } as RequestInit)).status === 413,
+    (await upload(streamedTooBig, "name=big2.bin&expiry_days=1", DEMO, { duplex: "half" } as RequestInit)).status === 413,
   );
 
   // ---- expiry cap ----
@@ -174,13 +192,18 @@ async function main(): Promise<void> {
   check("chunked content round-trips", (await (await fetch(`${BASE}/api/files/${chunkedId}`, { headers: DEMO })).arrayBuffer()).byteLength === 100);
 
   // ---- protected files: the key travels in a header, never in the URL ----
-  const protectedUpload = await upload(small, "name=secret.txt&expiry_days=0.00005&key=sesame");
+  const protectedUpload = await upload(small, "name=secret.txt&expiry_days=1&key=sesame");
   const secretId: string = protectedUpload.body.file?.id;
   check("protected upload -> 201", protectedUpload.status === 201);
   check(
     "the API download url carries no key",
     !String(protectedUpload.body.file?.download_url ?? "").includes("sesame"),
     String(protectedUpload.body.file?.download_url),
+  );
+  check(
+    "the shareable page url carries no key either",
+    !String(protectedUpload.body.file?.page_url ?? "").includes("sesame"),
+    String(protectedUpload.body.file?.page_url),
   );
   check("no key -> 401", (await fetch(`${BASE}/api/files/${secretId}`)).status === 401);
   check(
@@ -205,12 +228,20 @@ async function main(): Promise<void> {
   check("locked page renders -> 200", lockedPage.status === 200);
   checkIncludes("locked page asks for the key", lockedHtml, 'id="keyForm"');
   check("locked page does not leak the key", !lockedHtml.includes("sesame"));
-  const unlockedPage = await fetch(`${BASE}/files/${secretId}?key=sesame`);
-  const unlockedHtml = await unlockedPage.text();
-  checkIncludes("unlocked page offers a download control", unlockedHtml, 'id="dlBtn"');
-  checkIncludes("unlocked page sends the key as a header", unlockedHtml, "X-File-Key");
-  const wrongPage = await fetch(`${BASE}/files/${secretId}?key=nope`);
-  checkIncludes("wrong page key re-prompts", await wrongPage.text(), 'id="keyForm"');
+  // A key in the URL must not unlock anything: the link is shareable, the key is
+  // not, so a URL key is ignored exactly like a wrong one.
+  const urlKeyPage = await fetch(`${BASE}/files/${secretId}?key=sesame`);
+  const urlKeyHtml = await urlKeyPage.text();
+  checkIncludes("a key in the URL does not unlock the page", urlKeyHtml, 'id="keyForm"');
+  check("a key in the URL is not echoed into the page", !urlKeyHtml.includes("sesame"));
+
+  // The owner, whose credentials authorise them, does get the download control -
+  // and still without the key appearing anywhere in the page.
+  const ownerPage = await fetch(`${BASE}/files/${secretId}`, { headers: DEMO });
+  const ownerHtml = await ownerPage.text();
+  checkIncludes("the owner's page offers a download control", ownerHtml, 'id="dlBtn"');
+  check("the owner's page carries no key either", !ownerHtml.includes("sesame"));
+  checkIncludes("the download script can send a key header", ownerHtml, "X-File-Key");
 
   // ---- changing a key after the fact ----
   const patch = (body: unknown, headers = DEMO) =>
@@ -405,10 +436,10 @@ async function main(): Promise<void> {
   // ---- per-device file cap ----
   for (const id of await listIds()) await fetch(`${BASE}/api/files/${id}`, { method: "DELETE", headers: DEMO });
   for (let i = 0; i < MAX_FILES; i++) {
-    const r = await upload(small, `name=cap${i}.bin&expiry_days=0.00005`);
+    const r = await upload(small, `name=cap${i}.bin&expiry_days=1`);
     check(`cap file ${i + 1} accepted`, r.status === 201, JSON.stringify(r.body));
   }
-  const overFiles = await upload(small, "name=cap-extra.bin&expiry_days=0.00005");
+  const overFiles = await upload(small, "name=cap-extra.bin&expiry_days=1");
   check("one file too many -> 409", overFiles.status === 409, JSON.stringify(overFiles.body));
   checkIncludes("409 explains the limit", JSON.stringify(overFiles.body), "file limit reached");
 
@@ -418,7 +449,7 @@ async function main(): Promise<void> {
   // to produce exactly MAX_FILES successes.
   for (const id of await listIds()) await fetch(`${BASE}/api/files/${id}`, { method: "DELETE", headers: DEMO });
   const burst = await Promise.all(
-    Array.from({ length: MAX_FILES + 3 }, (_, i) => upload(small, `name=race${i}.bin&expiry_days=0.00005`)),
+    Array.from({ length: MAX_FILES + 3 }, (_, i) => upload(small, `name=race${i}.bin&expiry_days=1`)),
   );
   const accepted = burst.filter((r) => r.status === 201).length;
   const refused = burst.filter((r) => r.status === 409).length;
@@ -431,12 +462,17 @@ async function main(): Promise<void> {
   // ---- total-bytes cap ----
   for (const id of await listIds()) await fetch(`${BASE}/api/files/${id}`, { method: "DELETE", headers: DEMO });
   const nineHundred = bytes(900);
-  check("900 B accepted", (await upload(nineHundred, "name=t1.bin&expiry_days=0.00005")).status === 201);
-  check("second 900 B accepted", (await upload(nineHundred, "name=t2.bin&expiry_days=0.00005")).status === 201);
-  const overTotal = await upload(nineHundred, "name=t3.bin&expiry_days=0.00005");
+  check("900 B accepted", (await upload(nineHundred, "name=t1.bin&expiry_days=1")).status === 201);
+  check("second 900 B accepted", (await upload(nineHundred, "name=t2.bin&expiry_days=1")).status === 201);
+  const overTotal = await upload(nineHundred, "name=t3.bin&expiry_days=1");
   check("third would pass the total cap -> 413", overTotal.status === 413, JSON.stringify(overTotal.body));
 
   // ---- expiry reaping ----
+  // The configured ceiling is real: a longer lifetime is refused, not clamped.
+  const tooLong = await upload(small, "name=forever.bin&expiry_days=30");
+  check("expiry beyond the maximum -> 400", tooLong.status === 400, String(tooLong.status));
+  checkIncludes("the refusal names the ceiling", JSON.stringify(tooLong.body), "expiry exceeds");
+
   for (const id of await listIds()) await fetch(`${BASE}/api/files/${id}`, { method: "DELETE", headers: DEMO });
   const expiring = await upload(small, "name=gone.bin&expires_in=1");
   const expiringId: string = expiring.body.file?.id;
