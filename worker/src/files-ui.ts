@@ -536,8 +536,10 @@ function browserScript(): string {
     "            .then(function (j) { setStatus(j.file && j.file.protected ? 'key saved' : 'protection removed'); refresh(); })",
     "            .catch(function (e) { setStatus('key update failed: ' + e.message, true); refresh(); });",
     "        }",
+    // No confirm dialog: choosing Delete from the menu is the confirmation, and
+    // the menu is two deliberate clicks already.
     "        function remove(id) {",
-    "          if (!confirm('Delete this file permanently?')) return;",
+    "          setStatus('deleting ...');",
     "          fetch('/api/files/' + id, { method: 'DELETE' })",
     "            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status)); return j; }); })",
     "            .then(function () { files = files.filter(function (f) { return f.id !== id; }); setStatus('deleted'); render(); refresh(); })",

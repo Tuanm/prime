@@ -396,6 +396,18 @@ async function main(): Promise<void> {
   dz.els.addBtn!.click();
   check("+ again puts the card away", findZone() === undefined);
 
+  // Delete acts immediately. The harness has no confirm(), so a dialog would
+  // throw here rather than pass quietly.
+  const del = runPage(pageHtml);
+  const delButton = del.els.list!.descendants().find((n) => n.tag === "button" && n.textContent === "Delete");
+  check("a file row offers Delete", Boolean(delButton));
+  delButton!.click();
+  check(
+    "Delete issues the request without asking first",
+    del.fetches.some((f) => f.method === "DELETE"),
+    JSON.stringify(del.fetches.map((f) => f.method)),
+  );
+
   // ---- editing a protection key in place ----
   const keyBoxes = ui.els
     .list!.descendants()
