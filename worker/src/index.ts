@@ -32,6 +32,49 @@ export { FilesDO } from "./files-do";
 
 const unauthorized = () => Response.json({ error: "unauthorized" }, { status: 401 });
 
+/**
+ * Read a relayed body in full, bounded by the body cap.
+ *
+ * The device DO buffers the whole body anyway (it calls request.text()), so
+ * forwarding a live stream buys nothing and costs something: when the DO refuses
+ * before reading it - device offline, device busy, over the cap - the stream is
+ * left dangling, and workerd then reads it after the response has been sent. That
+ * logs an uncaught "Can't read from request stream after response has been sent"
+ * for every refused request and, occasionally, drops the connection as a 500
+ * where the caller was owed a 503.
+ *
+ * Reading it here settles the stream. It never buffers more than the cap plus one
+ * chunk, so a lying Content-Length or a chunked body cannot force a large
+ * allocation.
+ */
+async function readBounded(request: Request, max: number): Promise<ArrayBuffer | Response> {
+  if (!request.body) return new ArrayBuffer(0);
+  const tooLarge = () => Response.json({ error: "payload too large" }, { status: 413 });
+  if (Number(request.headers.get("content-length") || 0) > max) return tooLarge();
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => {});
+      return tooLarge();
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
+}
+
 // Per-isolate rate limiter. Configured once on first fetch (module scope is
 // shared across requests within an isolate; a fresh isolate re-creates it).
 let rateLimiter: RateLimiter | null = null;
@@ -370,7 +413,9 @@ export default {
       // Preserve auth params for the DO's own device-auth check.
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
-      const upstream = new Request(doUrl, { method: "POST", headers, body: request.body });
+      const body = await readBounded(request, cfg.maxBodyBytes);
+      if (body instanceof Response) return body;
+      const upstream = new Request(doUrl, { method: "POST", headers, body });
       return stub.fetch(upstream);
     }
 
@@ -420,7 +465,9 @@ export default {
       if (xdt) headers.set("x-device-token", xdt);
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
-      return stub.fetch(new Request(doUrl, { method: "POST", headers, body: request.body }));
+      const body = await readBounded(request, cfg.maxBodyBytes);
+      if (body instanceof Response) return body;
+      return stub.fetch(new Request(doUrl, { method: "POST", headers, body }));
     }
 
     // WS upgrade: /ws/{deviceId} (preferred) or /ws?deviceId= (legacy)
