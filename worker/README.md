@@ -241,6 +241,31 @@ cannot hold a slot forever.
 The five-file cap counts live files only, so expiry frees a slot as soon as the
 file is reaped.
 
+### The pages
+
+The management page lists every live file **earliest-expiry first**, so whatever
+is about to disappear leads the list. Each row shows the name, its size, when it
+expires, and whether it is protected:
+
+```
+● quarterly-report.pdf   2.3 MiB   in 6 days   -
+○ customer-list.csv     18.0 KiB   in 36 h     ••••••
+● screenshot.png        500.0 KiB  not uploaded -
+```
+
+The dot is green while there is more than three days left, a red outline inside
+three days, and grey for a reservation that has not finished uploading. The
+protection key is **masked** - it is a secret, and the owner never needs to read
+it back: "Copy link" puts it into a shareable page URL, and "Save" downloads
+through the device's own credentials, which the gateway accepts in place of a
+key for the owner.
+
+The page deliberately has just the list and a `+` button. There is no expiry
+control, because expiry is an ordering rather than a filter, and no key input - a
+key field would look like a filter too. Both remain per-call REST API options
+(`key=`, and `expiry_days=` / `expires_in=` / `expiry_ms=` for anything shorter
+than the seven-day maximum that page uploads use).
+
 ### Enabling file storage
 
 R2 is not enabled by default on a Cloudflare account, and it is two separate

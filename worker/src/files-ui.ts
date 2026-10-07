@@ -31,6 +31,14 @@ const FILES_CSS = `
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      /* Size sits before the expiry so a row reads name | size | expiry | key. */
+      .fsize {
+        width: 78px;
+        flex: none;
+        font-size: 12px;
+        color: #666;
+        text-align: right;
+      }
       .fexp {
         width: 132px;
         flex: none;
@@ -192,13 +200,13 @@ function browserScript(): string {
     "        var statusEl = document.getElementById('status');",
     "        var addBtn = document.getElementById('addBtn');",
     "        var picker = document.getElementById('picker');",
-    "        var daysEl = document.getElementById('days');",
-    "        var keyEl = document.getElementById('key');",
+    // Never render a protection key: it is a secret, and the owner has no need to
+    // read it back - "Copy link" carries it into a shareable URL instead.
+    "        var MASK = '\u2022\u2022\u2022\u2022\u2022\u2022';",
     "        var queued = [];",
     "        var files = window.__FILES__ || [];",
     "        var usageEl = document.getElementById('usage');",
     "        function setStatus(msg, isErr) { statusEl.textContent = msg || ''; statusEl.style.color = isErr ? '#b91c1c' : '#666'; }",
-    "        function opts() { return { days: daysEl.value, key: keyEl.value }; }",
     "        function human(ms) {",
     "          if (ms <= 0) return 'expired';",
     "          var m = Math.floor(ms / 60000);",
@@ -211,7 +219,7 @@ function browserScript(): string {
     "          if (f.status !== 'ready') return 'dot pending';",
     "          return 'dot ' + (f.expires_in_ms <= 3 * 86400000 ? 'off' : 'on');",
     "        }",
-    "        function row(dot, name, expiry, key, menuItems, cell) {",
+    "        function row(dot, name, size, expiry, key, menuItems, cell) {",
     "          var li = document.createElement('li');",
     "          li.className = 'row';",
     "          var d = document.createElement('span');",
@@ -222,9 +230,10 @@ function browserScript(): string {
     "          var cols = document.createElement('div');",
     "          cols.className = 'cols';",
     "          var n = document.createElement('div'); n.className = 'fname'; n.textContent = name;",
+    "          var s = document.createElement('div'); s.className = 'fsize'; s.textContent = size;",
     "          var e = document.createElement('div'); e.className = expiry.soon ? 'fexp soon' : 'fexp'; e.textContent = expiry.text;",
     "          var k = document.createElement('div'); k.className = 'fkey'; k.textContent = key;",
-    "          cols.appendChild(n); cols.appendChild(e); cols.appendChild(k);",
+    "          cols.appendChild(n); cols.appendChild(s); cols.appendChild(e); cols.appendChild(k);",
     "          box.appendChild(cols);",
     "          if (cell) box.appendChild(cell);",
     "          var wrap = document.createElement('div'); wrap.className = 'menu-wrap';",
@@ -260,8 +269,9 @@ function browserScript(): string {
   
     "            listEl.appendChild(row(",
     "              dotClass(f), f.name,",
+    "              f.size ? fmtBytes(f.size) : '-',",
     "              { text: f.status === 'ready' ? human(f.expires_in_ms) : 'not uploaded', soon: f.status === 'ready' && f.expires_in_ms <= 3 * 86400000 },",
-    "              f.protected ? f.key : '-',",
+    "              f.protected ? MASK : '-',",
     "              [",
     "                { label: 'Save', run: function () { saveFile(f); } },",
     "                { label: 'Copy link', run: function () { copy(f.page_url); } },",
@@ -272,8 +282,9 @@ function browserScript(): string {
     "          queued.forEach(function (q) {",
     "            listEl.appendChild(row(",
     "              'dot pending', q.file.name,",
+    "              q.file.size ? fmtBytes(q.file.size) : '-',",
     "              { text: 'not uploaded', soon: false },",
-    "              keyEl.value ? keyEl.value : '-',",
+    "              '-',",
     "              [",
     "                { label: 'Upload', run: function () { send(q); } },",
     "                { label: 'Delete', danger: true, run: function () { queued.splice(queued.indexOf(q), 1); render(); } }",
@@ -293,22 +304,12 @@ function browserScript(): string {
     "          if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB';",
     "          return n + ' B';",
     "        }",
-    // Protected files carry their key in a request header, never in the URL, so
-    // they are fetched and saved as a blob; unprotected ones can just navigate
-    // and let the browser stream them.
+    // A plain navigation: the browser replays the device Basic credentials, which
+    // the gateway accepts in place of a key for the owner, and streams the body
+    // natively (no blob in memory). So the page never needs the key itself.
     "        function saveFile(f) {",
-    "          if (!f.protected) { window.location = f.download_url; return; }",
     "          setStatus('downloading ' + f.name + ' ...');",
-    "          fetch(f.download_url, { headers: { 'X-File-Key': f.key } })",
-    "            .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })",
-    "            .then(function (b) {",
-    "              var u = URL.createObjectURL(b);",
-    "              var a = document.createElement('a'); a.href = u; a.download = f.name;",
-    "              document.body.appendChild(a); a.click(); a.remove();",
-    "              setTimeout(function () { URL.revokeObjectURL(u); }, 10000);",
-    "              setStatus('saved ' + f.name);",
-    "            })",
-    "            .catch(function (e) { setStatus('download failed: ' + e.message, true); });",
+    "          window.location = f.download_url;",
     "        }",
     "        function copy(text) {",
     "          if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { setStatus('link copied'); }, function () { setStatus(text); });",
@@ -318,8 +319,9 @@ function browserScript(): string {
     // also sets Content-Length for a File body, which keeps the upload on the
     // streamed (non-multipart) path.
     "        function send(q) {",
-    "          var o = opts();",
-    "          var url = '/api/files?name=' + encodeURIComponent(q.file.name) + '&expiry_days=' + encodeURIComponent(o.days);",
+    // Uploads from this page are unprotected and take the maximum lifetime - both
+    // remain REST-API options (key=, expiry_days=), not page controls.
+    "          var url = '/api/files?name=' + encodeURIComponent(q.file.name);",
     "          if (o.key) url += '&key=' + encodeURIComponent(o.key);",
     "          var xhr = new XMLHttpRequest();",
     "          xhr.open('POST', url);",
@@ -396,17 +398,6 @@ export function renderFilesPage(input: {
     '    <div class="row-head">',
     "      <h2>Files</h2>",
     '      <button class="plus" id="addBtn" type="button" title="Choose files">+</button>',
-    "    </div>",
-    '    <div class="opts">',
-    '      <label for="days">expiry</label>',
-    '      <select id="days">',
-    '        <option value="0.0416667">1 hour</option>',
-    '        <option value="1">1 day</option>',
-    '        <option value="3">3 days</option>',
-    '        <option value="7" selected>7 days</option>',
-    "      </select>",
-    '      <label for="key">key</label>',
-    '      <input id="key" type="text" placeholder="optional protection key" autocomplete="off" />',
     "    </div>",
     '    <ul id="list"></ul>',
     '    <div class="status" id="status"></div>',
@@ -487,6 +478,7 @@ export function renderDownloadPage(input: {
     rows.push('        <div class="box">');
     rows.push('          <div class="cols">');
     rows.push('            <div class="fname">' + esc(file.name) + "</div>");
+    rows.push('            <div class="fsize">' + esc(fmtBytes(file.size)) + "</div>");
     rows.push('            <div class="fexp' + (soon ? " soon" : "") + '">' + esc(expiryLabel(file)) + "</div>");
     rows.push('            <div class="fkey">' + esc(file.protected ? "(protected)" : "-") + "</div>");
     rows.push("          </div>");

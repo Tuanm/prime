@@ -227,9 +227,11 @@ export class FilesDO extends DurableObject<Env> {
   private async list(): Promise<Response> {
     await this.reap();
     const now = Date.now();
+    // Earliest expiry first: the file about to disappear is the one worth acting
+    // on, so the list leads with it rather than with the newest upload.
     const files = [...this.files.values()]
       .filter((r) => now < r.expiresAt)
-      .sort((a, b) => b.createdAt - a.createdAt);
+      .sort((a, b) => a.expiresAt - b.expiresAt || a.createdAt - b.createdAt);
     return Response.json({ files, usage: this.usage() });
   }
 

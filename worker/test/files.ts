@@ -221,6 +221,14 @@ async function main(): Promise<void> {
   checkIncludes("page names the device", pageHtml, "file management &middot; demo");
   checkIncludes("page embeds the file list", pageHtml, "hello.txt");
   checkIncludes("page has the upload control", pageHtml, 'id="picker"');
+  // The page is just the list and the + button: expiry is an ordering, not a
+  // filter, and both key and expiry stay REST-API options.
+  check("page has no expiry control", !pageHtml.includes('id="days"'));
+  check("page has no protection-key input", !pageHtml.includes('id="key"') && !pageHtml.includes("optional protection key"));
+  checkIncludes("rows show the file size", pageHtml, "fsize");
+  // The owner can still share or download a protected file, but the key itself is
+  // never rendered back at them.
+  checkIncludes("protected keys are masked in the list", pageHtml, "\u2022\u2022\u2022\u2022\u2022\u2022");
   // A file row carries four columns plus a menu, so the page needs more width
   // than the admin page's 540px or the filename collapses to an ellipsis.
   checkIncludes("files pages are wider than the admin page", pageHtml, "width: 720px");
@@ -353,6 +361,33 @@ async function main(): Promise<void> {
       }
     }
     check(`all parts reassemble byte-identically (${(total / 1048576).toFixed(1)} MiB)`, identical, `${received.length} bytes`);
+
+    // ---- the list is ordered by expiry, earliest first ----
+    // Uploaded out of order on purpose: the list must lead with whatever expires
+    // soonest, not with the newest upload.
+    for (const [name, days] of [["sort-3d.bin", 3], ["sort-7d.bin", 7], ["sort-1d.bin", 1]] as const) {
+      const r = await fetch(`${BIG_BASE}/api/files?name=${name}&expiry_days=${days}`, { method: "POST", headers: DEMO, body: small });
+      check(`${name} uploaded`, r.status === 201, String(r.status));
+    }
+    const listed = ((await (await fetch(`${BIG_BASE}/api/files`, { headers: DEMO })).json()) as any).files as {
+      name: string;
+      expires_at: string;
+    }[];
+    const expiries = listed.map((f) => Date.parse(f.expires_at));
+    // The whole list must be non-decreasing by expiry, whatever else is in it...
+    check(
+      "the list is ordered by expiry",
+      JSON.stringify(expiries) === JSON.stringify([...expiries].sort((a, b) => a - b)),
+      JSON.stringify(listed.map((f) => `${f.name}@${f.expires_at}`)),
+    );
+    // ...and specifically that the three just uploaded lead in that order.
+    const names = listed.map((f) => f.name);
+    const relative = ["sort-1d.bin", "sort-3d.bin", "sort-7d.bin"].map((n) => names.indexOf(n));
+    check(
+      "an earlier expiry outranks a later upload",
+      relative.every((position, i) => position >= 0 && (i === 0 || position > relative[i - 1]!)),
+      JSON.stringify(names),
+    );
 
     // A Range request against the same object exercises the cached owner lookup.
     const midRange = await fetch(`${BIG_BASE}/api/files/${bigJson.file?.id}`, {
