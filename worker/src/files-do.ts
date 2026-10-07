@@ -256,6 +256,25 @@ export class FilesDO extends DurableObject<Env> {
     try {
       await this.env.BUCKET?.delete(this.objectKey(record));
     } catch {}
+    // Only a ready file was ever admitted against the monthly R2 budget, so only
+    // a ready file hands its bytes back. A delete is itself a Class A operation.
+    if (record.status === "ready" && record.size > 0) {
+      await this.releaseBudget(record.size);
+    }
+  }
+
+  /** Give bytes back to the account-wide R2 budget after a delete or expiry. */
+  private async releaseBudget(bytes: number): Promise<void> {
+    try {
+      const reg = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global"));
+      await reg.fetch("https://registry/budget/release", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bytes, classA: 1 }),
+      });
+    } catch {
+      // Failing open here only under-counts usage; the next admit re-checks.
+    }
   }
 
   /**

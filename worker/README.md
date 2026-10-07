@@ -266,6 +266,50 @@ key field would look like a filter too. Both remain per-call REST API options
 (`key=`, and `expiry_days=` / `expires_in=` / `expiry_ms=` for anything shorter
 than the seven-day maximum that page uploads use).
 
+### Monthly R2 budget
+
+File storage is capped by a **monthly spend ceiling**, so an unattended gateway
+cannot run up a bill. The ceiling is `R2_BUDGET_USD_MONTH` (default `$5`).
+
+```toml
+[vars]
+R2_BUDGET_USD_MONTH = "5"
+```
+
+The gateway prices usage with Cloudflare's published Standard-class rates -
+`$0.015` per GB-month, `$4.50` per million Class A operations, `$0.36` per
+million Class B - and deducts the monthly free allowances (10 GB, 1M Class A,
+10M Class B). Those constants live in `src/config.ts`; update them if the
+pricing changes.
+
+An upload is refused with `507` when it would push the projected month past
+the ceiling. Storage is really billed per GB-month while a file here lives at
+most seven days, so the projection charges a full month for every byte admitted:
+pessimistic on purpose, because that is what makes the ceiling a guarantee rather
+than an estimate. The equivalent storage ceiling is about `343 GB` at the
+default budget, and it is reported as `max_bytes`.
+
+Bytes are reserved before the body is read - so an oversized upload fails before
+any of it is transferred - and settled against the real size afterwards. Deletes
+and expiries hand their bytes back, and the byte count deliberately carries
+across a month boundary rather than resetting to zero while the data is still
+stored and still billed. Operation counters do reset each month.
+
+`GET /api/files` returns the running total, and the management page shows it:
+
+```json
+"budget": {
+  "month": "2026-10", "bytes": 1048576, "max_bytes": 343333333333,
+  "budget_usd": 5, "cost_usd": 0.0000, "remaining_usd": 5,
+  "class_a_ops": 3, "class_b_ops": 1,
+  "breakdown": { "storage_usd": 0, "class_a_usd": 0, "class_b_usd": 0 }
+}
+```
+
+If the registry is briefly unreachable the check fails **open**: a blip must not
+stop every upload. The per-device caps still bound what a single device can
+store, and the accounting corrects itself on the next admission.
+
 ### Enabling file storage
 
 R2 is not enabled by default on a Cloudflare account, and it is two separate

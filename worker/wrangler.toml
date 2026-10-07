@@ -102,6 +102,9 @@ FILES_MAX_UPLOAD_BYTES = "209715200" # 200 MiB per file
 FILES_MAX_EXPIRY_MS = "604800000" # 7 days
 FILES_MAX_PER_DEVICE = "5"
 FILES_MAX_TOTAL_BYTES = "524288000" # 500 MiB per device
+# Hard ceiling on what the gateway may spend on R2 in a calendar month. Uploads
+# that would push the projection past it are refused with 507.
+R2_BUDGET_USD_MONTH = "5"
 
 # Virtual devices: comma-separated deviceIds handled in-process (no tunnel).
 # Each id must also have a token in the VIRTUAL_DEVICE_TOKENS secret.

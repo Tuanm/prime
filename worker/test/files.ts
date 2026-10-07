@@ -8,6 +8,8 @@
 //   bun test/files.ts
 
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
+import { runPage } from "./page-script";
 
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
@@ -49,6 +51,9 @@ const DEMO = basic("demo", "demo");
 const OTHER = basic("other", "other");
 
 async function startWorker(port: number, vars: string[] = []): Promise<() => void> {
+  // Fresh state per instance, so a previous run's files cannot fill a quota and
+  // turn this one red.
+  rmSync(ROOT + `/.wrangler/state-${port}`, { recursive: true, force: true });
   const proc = spawn(
     "node",
     [
@@ -240,6 +245,45 @@ async function main(): Promise<void> {
     pageHtml.indexOf("@media (max-width: 760px)") > pageHtml.indexOf(".fname {"),
     "the mobile block must be last in the stylesheet",
   );
+
+  // ---- the page's own JavaScript, actually executed ----
+  // The page code is assembled inside strings, so tsc cannot see a reference to
+  // something that no longer exists - and two such bugs shipped before this
+  // existed. Running it in a fake DOM turns them into failures here.
+  const ui = runPage(pageHtml);
+  check("the page script runs without throwing", ui.errors.length === 0, ui.errors.join(" | "));
+
+  ui.pick({ name: "queued.bin", size: 1000, type: "application/octet-stream" });
+  const box = ui.els.list!.descendants().find((n) => n.dataset.qid);
+  check("choosing a file queues a card", Boolean(box), "no queued row with a qid");
+  checkIncludes("the queued card shows its size", box?.descendants().map((c) => c.textContent).join(" ") ?? "", "1000 B");
+
+  let threw: string | null = null;
+  try {
+    ui.menuClick(box!, "Upload");
+  } catch (err) {
+    threw = err instanceof Error ? err.message : String(err);
+  }
+  check("clicking Upload does not throw", threw === null, threw ?? "");
+  const request = ui.requests[0];
+  check("it posts to the files API", Boolean(request) && request!.method === "POST" && request!.url.startsWith("/api/files?name=queued.bin"), JSON.stringify(request?.url));
+  check("it uploads the chosen file", request?.body instanceof Object && (request?.body as { name?: string }).name === "queued.bin");
+
+  // Halfway through, the card itself should be half filled.
+  request!.upload.onprogress?.({ lengthComputable: true, loaded: 500, total: 1000 });
+  checkIncludes("progress paints the card", box!.style.background ?? "", "50%");
+  checkIncludes("progress is reported in words", ui.els.status!.textContent, "50%");
+
+  // A failure must tint the card rather than only writing a line.
+  const failing = runPage(pageHtml);
+  failing.pick({ name: "bad.bin", size: 1000 });
+  failing.menuClick(failing.els.list!.descendants().find((n) => n.dataset.qid)!, "Upload");
+  const badRequest = failing.requests[0]!;
+  (badRequest.xhr as { status: number }).status = 413;
+  (badRequest.xhr as { responseText: string }).responseText = JSON.stringify({ error: "file too large" });
+  badRequest.onload?.();
+  checkIncludes("a failed upload tints its card", failing.els.list!.descendants().find((n) => n.dataset.qid)?.style.background ?? "", "#fee2e2");
+  checkIncludes("a failed upload explains itself", failing.els.status!.textContent, "file too large");
   const downloadPage = await fetch(`${BASE}/files/${helloId}`);
   const downloadHtml = await downloadPage.text();
   check("GET /files/{id} -> 200", downloadPage.status === 200);
@@ -396,6 +440,52 @@ async function main(): Promise<void> {
     check("range across a part boundary -> 206", midRange.status === 206, String(midRange.status));
   } finally {
     stopBig();
+  }
+
+  // ---- the monthly R2 budget ----
+  // The free allowance is excluded here so that a few hundred bytes can reach
+  // the cap; otherwise the first 10 GB are free and nothing small is ever
+  // refused.
+  const BUDGET_PORT = 8833;
+  const BUDGET_BASE = `http://127.0.0.1:${BUDGET_PORT}`;
+  const stopBudget = await startWorker(BUDGET_PORT, [
+    "R2_BUDGET_USD_MONTH:0.0000001",
+    "R2_FREE_STORAGE_GB:0",
+  ]);
+  try {
+    await fetch(BUDGET_BASE + "/admin/api/devices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "demo", token: "demo" }),
+    });
+    const status: any = await (await fetch(`${BUDGET_BASE}/api/files`, { headers: DEMO })).json();
+    check("the budget is reported with the list", status.budget?.budget_usd === 0.0000001, JSON.stringify(status.budget));
+    checkIncludes("the budget reports its byte ceiling", JSON.stringify(status.budget), "max_bytes");
+
+    // The cap is derived from the budget: with a $0.0000001 ceiling and no free
+    // allowance that is a few kilobytes, so 20 KiB cannot fit.
+    const tooBig = new Uint8Array(20_000);
+    const refused = await fetch(`${BUDGET_BASE}/api/files?name=too-big.bin&expiry_days=1`, {
+      method: "POST",
+      headers: { ...DEMO, "content-length": String(tooBig.byteLength) },
+      body: tooBig,
+    });
+    check("an upload past the budget -> 507", refused.status === 507, String(refused.status));
+    checkIncludes("the refusal names the budget", await refused.text(), "budget");
+
+    const fits = await fetch(`${BUDGET_BASE}/api/files?name=fits.bin&expiry_days=1`, {
+      method: "POST",
+      headers: { ...DEMO, "content-length": String(small.byteLength) },
+      body: small,
+    });
+    check("an upload inside the remaining budget still works", fits.status === 201, String(fits.status));
+
+    // And the page still renders, showing the cap rather than failing.
+    const budgetPage = await fetch(`${BUDGET_BASE}/files`, { headers: DEMO });
+    check("the page still renders at the cap", budgetPage.status === 200, String(budgetPage.status));
+    checkIncludes("the page shows the budget", await budgetPage.text(), 'id="budget"');
+  } finally {
+    stopBudget();
   }
 }
 

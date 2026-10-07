@@ -3,7 +3,7 @@
 // exactly; only the file-specific bits (the grey pending dot, the column
 // layout, the download icon) are added here.
 
-import { UI_CSS } from "./ui-css";
+import { FAVICON, UI_CSS } from "./ui-css";
 import type { FileLimits } from "./config";
 
 const FILES_CSS = `
@@ -154,8 +154,6 @@ const FILES_CSS = `
       }
 `;
 
-const FAVICON =
-  "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='%23111111'%3E%3Cpath%20d='M6%202h7l5%205v15a1%201%200%2001-1%201H6a1%201%200%2001-1-1V3a1%201%200%20011-1zm7%201.5V7h3.5L13%203.5z'/%3E%3C/svg%3E";
 
 const DOWNLOAD_ICON =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.6l3.3-3.3 1.4 1.4L12 17.4l-4.7-4.7 1.4-1.4L12 13.6V3h0zM5 19h14v2H5z"/></svg>';
@@ -203,9 +201,19 @@ function browserScript(): string {
     // Never render a protection key: it is a secret, and the owner has no need to
     // read it back - "Copy link" carries it into a shareable URL instead.
     "        var MASK = '\u2022\u2022\u2022\u2022\u2022\u2022';",
+    // Card tints: blue while bytes are moving, red if the upload failed.
+    "        var FILL = '#dbeafe';",
+    "        var FAIL = '#fee2e2';",
+    "        var nextQid = 1;",
     "        var queued = [];",
     "        var files = window.__FILES__ || [];",
     "        var usageEl = document.getElementById('usage');",
+    "        var budgetEl = document.getElementById('budget');",
+    // What the account is spending on R2 this month, against the configured cap.
+    "        function showBudget(b) {",
+    "          if (!budgetEl || !b) return;",
+    "          budgetEl.textContent = 'R2 this month: $' + Number(b.cost_usd).toFixed(4) + ' of $' + Number(b.budget_usd).toFixed(2) + ' (' + fmtBytes(Number(b.max_bytes)) + ' budgeted storage)';",
+    "        }",
     "        function setStatus(msg, isErr) { statusEl.textContent = msg || ''; statusEl.style.color = isErr ? '#b91c1c' : '#666'; }",
     "        function human(ms) {",
     "          if (ms <= 0) return 'expired';",
@@ -219,7 +227,7 @@ function browserScript(): string {
     "          if (f.status !== 'ready') return 'dot pending';",
     "          return 'dot ' + (f.expires_in_ms <= 3 * 86400000 ? 'off' : 'on');",
     "        }",
-    "        function row(dot, name, size, expiry, key, menuItems, cell) {",
+    "        function row(dot, name, size, expiry, key, menuItems, cell, qid) {",
     "          var li = document.createElement('li');",
     "          li.className = 'row';",
     "          var d = document.createElement('span');",
@@ -227,6 +235,8 @@ function browserScript(): string {
     "          li.appendChild(d);",
     "          var box = document.createElement('div');",
     "          box.className = 'box';",
+    "          if (qid) box.dataset.qid = qid;",
+    "          else box.style.background = '#fff';",
     "          var cols = document.createElement('div');",
     "          cols.className = 'cols';",
     "          var n = document.createElement('div'); n.className = 'fname'; n.textContent = name;",
@@ -280,7 +290,7 @@ function browserScript(): string {
     "            ));",
     "          });",
     "          queued.forEach(function (q) {",
-    "            listEl.appendChild(row(",
+    "            listEl.appendChild(box = row(",
     "              'dot pending', q.file.name,",
     "              q.file.size ? fmtBytes(q.file.size) : '-',",
     "              { text: 'not uploaded', soon: false },",
@@ -288,7 +298,8 @@ function browserScript(): string {
     "              [",
     "                { label: 'Upload', run: function () { send(q); } },",
     "                { label: 'Delete', danger: true, run: function () { queued.splice(queued.indexOf(q), 1); render(); } }",
-    "              ]",
+    "              ],",
+    "              null, q.qid",
     "            ));",
     "          });",
     "          if (files.length === 0 && queued.length === 0) {",
@@ -322,23 +333,37 @@ function browserScript(): string {
     // Uploads from this page are unprotected and take the maximum lifetime - both
     // remain REST-API options (key=, expiry_days=), not page controls.
     "          var url = '/api/files?name=' + encodeURIComponent(q.file.name);",
-    "          if (o.key) url += '&key=' + encodeURIComponent(o.key);",
     "          var xhr = new XMLHttpRequest();",
     "          xhr.open('POST', url);",
     "          xhr.setRequestHeader('content-type', q.file.type || 'application/octet-stream');",
+    // Paint the card itself, so a big upload is legible at a glance rather than
+    // only in the status line. The element is found by data attribute because
+    // render() rebuilds the list.
+    "          function paint(pct) {",
+    "            var box = document.querySelector('[data-qid=\"' + q.qid + '\"]');",
+    "            if (box) box.style.background = 'linear-gradient(90deg, ' + FILL + ' ' + pct + '%, #fff ' + pct + '%)';",
+    "          }",
+    "          function paintFail() {",
+    "            var box = document.querySelector('[data-qid=\"' + q.qid + '\"]');",
+    "            if (box) box.style.background = FAIL;",
+    "          }",
+    "          paint(0);",
     "          xhr.upload.onprogress = function (e) {",
-    "            if (e.lengthComputable) setStatus('uploading ' + q.file.name + ' - ' + Math.round((e.loaded / e.total) * 100) + '% of ' + fmtBytes(e.total));",
+    "            if (!e.lengthComputable) return;",
+    "            var pct = Math.round((e.loaded / e.total) * 100);",
+    "            paint(pct);",
+    "            setStatus('uploading ' + q.file.name + ' - ' + pct + '% of ' + fmtBytes(e.total));",
     "          };",
     "          xhr.onload = function () {",
     "            var j = {};",
     "            try { j = JSON.parse(xhr.responseText); } catch (err) {}",
-    "            if (xhr.status !== 201) { setStatus('upload failed: ' + (j.error || ('HTTP ' + xhr.status)), true); return; }",
+    "            if (xhr.status !== 201) { paintFail(); setStatus('upload failed: ' + (j.error || ('HTTP ' + xhr.status)), true); return; }",
     "            queued.splice(queued.indexOf(q), 1);",
     "            files.unshift(j.file);",
     "            setStatus('uploaded ' + j.file.name);",
     "            render(); refresh();",
     "          };",
-    "          xhr.onerror = function () { setStatus('upload failed', true); };",
+    "          xhr.onerror = function () { paintFail(); setStatus('upload failed', true); };",
     "          setStatus('uploading ' + q.file.name + ' ...');",
     "          xhr.send(q.file);",
     "        }",
@@ -353,15 +378,17 @@ function browserScript(): string {
     "          fetch('/api/files').then(function (r) { return r.json(); }).then(function (j) {",
     "            files = j.files || [];",
     "            window.__USAGE__ = j.usage || { bytes: 0, count: 0 };",
+    "            showBudget(j.budget);",
     "            render();",
     "          }).catch(function () {});",
     "        }",
     "        addBtn.addEventListener('click', function () { picker.click(); });",
     "        picker.addEventListener('change', function () {",
-    "          Array.prototype.forEach.call(picker.files, function (f) { queued.push({ file: f }); });",
+    "          Array.prototype.forEach.call(picker.files, function (f) { queued.push({ file: f, qid: nextQid++ }); });",
     "          picker.value = '';",
     "          render();",
     "        });",
+    "        showBudget(window.__BUDGET__);",
     "        render();",
     "      })();",
   ].join("\n");
@@ -385,12 +412,14 @@ export interface FileView {
 
 /** GET /files - the management page (device basic auth required). */
 export function renderFilesPage(input: {
+  budget?: Record<string, unknown> | null;
   deviceId: string;
   files: FileView[];
   usage: { count: number; bytes: number };
   limits: FileLimits;
 }): string {
   const { deviceId, files, usage, limits } = input;
+  const budget = input.budget ?? null;
   const body = [
     "  <body>",
     "    <h1>Files</h1>",
@@ -402,10 +431,12 @@ export function renderFilesPage(input: {
     '    <ul id="list"></ul>',
     '    <div class="status" id="status"></div>',
     '    <div class="status" id="usage"></div>',
+    '    <div class="status" id="budget"></div>',
     '    <input id="picker" type="file" multiple style="display:none" />',
     "    <script>",
     "      window.__FILES__ = " + safeJson(files) + ";",
     "      window.__USAGE__ = " + safeJson(usage) + ";",
+      "      window.__BUDGET__ = " + safeJson(budget) + ";",
     "      window.__LIMITS__ = " +
       safeJson({
         max_files: limits.maxPerDevice,

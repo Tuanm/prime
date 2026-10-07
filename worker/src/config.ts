@@ -24,6 +24,86 @@ export function fileLimits(env: Env): FileLimits {
   };
 }
 
+/**
+ * The R2 billing model, and the monthly budget that caps it.
+ *
+ * R2 has no base fee: you pay for stored bytes and for operations. The numbers
+ * below are Cloudflare's published Standard-class prices and monthly free
+ * allowances (https://developers.cloudflare.com/r2/pricing/) - update them if
+ * Cloudflare changes them. GB means 10^9 bytes, which is the conservative
+ * reading: it makes a given byte count look larger, so the cap binds sooner.
+ *
+ * The budget is enforced by refusing an upload that would push the *projected*
+ * month past the cap. Storage is really charged per GB-month while a file here
+ * lives at most seven days, so charging a full month for every byte admitted is
+ * deliberately pessimistic - that is what makes "under the budget" a guarantee
+ * rather than an estimate.
+ */
+export interface R2Budget {
+  budgetUsd: number;
+  storageUsdPerGbMonth: number;
+  classAUsdPerMillion: number;
+  classBUsdPerMillion: number;
+  freeStorageGb: number;
+  freeClassA: number;
+  freeClassB: number;
+}
+
+export const R2_PRICING = {
+  storageUsdPerGbMonth: 0.015,
+  classAUsdPerMillion: 4.5,
+  classBUsdPerMillion: 0.36,
+  freeStorageGb: 10,
+  freeClassA: 1_000_000,
+  freeClassB: 10_000_000,
+};
+
+export const R2_BUDGET_DEFAULT_USD = 5;
+
+export function r2Budget(env: Env): R2Budget {
+  return {
+    budgetUsd: decimal(env, "R2_BUDGET_USD_MONTH", R2_BUDGET_DEFAULT_USD),
+    ...R2_PRICING,
+    // Overridable so the free allowance can be excluded deliberately (a test
+    // needs a cap that a few hundred bytes can actually reach).
+    freeStorageGb: decimal(env, "R2_FREE_STORAGE_GB", R2_PRICING.freeStorageGb),
+  };
+}
+
+export interface R2Usage {
+  bytes: number;
+  classA: number;
+  classB: number;
+}
+
+export interface R2Cost {
+  storageUsd: number;
+  classAUsd: number;
+  classBUsd: number;
+  totalUsd: number;
+}
+
+/** What a month at this usage would cost, free allowances deducted first. */
+export function r2Cost(usage: R2Usage, budget: R2Budget): R2Cost {
+  const storageUsd =
+    Math.max(0, usage.bytes / 1e9 - budget.freeStorageGb) * budget.storageUsdPerGbMonth;
+  const classAUsd =
+    (Math.max(0, usage.classA - budget.freeClassA) / 1e6) * budget.classAUsdPerMillion;
+  const classBUsd =
+    (Math.max(0, usage.classB - budget.freeClassB) / 1e6) * budget.classBUsdPerMillion;
+  return { storageUsd, classAUsd, classBUsd, totalUsd: storageUsd + classAUsd + classBUsd };
+}
+
+/** Bytes whose full-month storage alone would consume the budget. */
+export function r2MaxBytes(budget: R2Budget): number {
+  return Math.floor((budget.freeStorageGb + budget.budgetUsd / budget.storageUsdPerGbMonth) * 1e9);
+}
+
+/** Money to four decimals - cents are too coarse for file-sized costs. */
+export function r2Round(usd: number): number {
+  return Math.round(usd * 10000) / 10000;
+}
+
 /** A file id: 32 lowercase hex chars - the same shape as a download ticket. */
 export const FILE_ID_RE = /^[a-f0-9]{32}$/;
 
@@ -84,6 +164,8 @@ export interface Env {
   FILES_MAX_UPLOAD_BYTES?: string; // per-file upload cap (default 200 MiB)
   FILES_MAX_EXPIRY_MS?: string; // longest lifetime (default 7 days)
   FILES_MAX_PER_DEVICE?: string; // files a device may hold at once (default 5)
+  R2_BUDGET_USD_MONTH?: string; // hard monthly R2 spend ceiling (default $5)
+  R2_FREE_STORAGE_GB?: string; // assumed free storage allowance (default 10)
   FILES_MAX_TOTAL_BYTES?: string; // per-device bytes, expired-but-undeleted included (default 500 MiB)
   // The coding sandbox container (CodingSandbox DO) - shell/fs/jobs tools.
   CODING_SANDBOX: DurableObjectNamespace;
@@ -99,6 +181,17 @@ function num(env: Env, key: string, def: number): number {
   const raw = (env as unknown as Record<string, string | undefined>)[key];
   if (raw == null || raw === "") return def;
   const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
+/**
+ * Like num(), but for values that are legitimately fractional - dollars and
+ * gigabytes. parseInt would turn a $2.50 budget into $2.
+ */
+function decimal(env: Env, key: string, def: number): number {
+  const raw = (env as unknown as Record<string, string | undefined>)[key];
+  if (raw == null || raw === "") return def;
+  const n = Number.parseFloat(raw);
   return Number.isFinite(n) && n >= 0 ? n : def;
 }
 

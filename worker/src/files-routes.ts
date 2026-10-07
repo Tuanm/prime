@@ -243,6 +243,7 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
       return jsonOk({
         files: (body.files as FileRecord[]).map((record) => fileView(record, origin)),
         usage: body.usage,
+        budget: await budgetStatus(env),
         limits: {
           max_upload_bytes: limits.maxUploadBytes,
           max_expiry_ms: limits.maxExpiryMs,
@@ -283,7 +284,15 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
     const stub = filesStub(env, auth.deviceId);
     const { body } = await doJson(stub, "/list");
     const files = ((body.files ?? []) as FileRecord[]).map((record) => fileView(record, origin));
-    return html(renderFilesPage({ deviceId: auth.deviceId, files, usage: body.usage as FileUsage, limits }));
+    return html(
+      renderFilesPage({
+        deviceId: auth.deviceId,
+        files,
+        usage: body.usage as FileUsage,
+        limits,
+        budget: await budgetStatus(env),
+      }),
+    );
   }
 
   const pageId = url.pathname.slice("/files/".length);
@@ -319,6 +328,12 @@ async function uploadFile(
   }
   if (!request.body || declared === 0) return jsonError(400, "empty request body");
 
+  // Reserve the declared size against the account's monthly R2 budget before a
+  // single byte is stored, then reconcile with the real size once it is written.
+  const admitted = Number.isFinite(declared) ? declared : 0;
+  const overBudget = await budgetAdmit(env, admitted, 1);
+  if (overBudget) return overBudget;
+
   const key = url.searchParams.get("key") ?? undefined;
   const stub = filesStub(env, deviceId);
   const reserved = await doJson(stub, "/reserve", {
@@ -334,6 +349,7 @@ async function uploadFile(
     }),
   });
   if (reserved.status !== 201) {
+    await budgetRelease(env, admitted);
     return jsonError(reserved.status, reserved.body.error ?? "upload rejected", reserved.body);
   }
   const record = reserved.body.file as FileRecord;
@@ -356,10 +372,33 @@ async function uploadFile(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: record.id }),
     });
+    await budgetRelease(env, admitted);
     if (err instanceof UploadTooLarge) {
       return jsonError(413, "file too large", { limit_bytes: limits.maxUploadBytes, size: err.size });
     }
     return jsonError(500, "upload failed", { detail: err instanceof Error ? err.message : String(err) });
+  }
+
+  // The body may have been shorter or longer than declared, so settle the
+  // difference before the file counts as stored.
+  if (written > admitted) {
+    const over = await budgetAdmit(env, written - admitted, 0);
+    if (over) {
+      // Nothing may be stored that the budget did not admit, so undo all of it.
+      try {
+        await env.BUCKET!.delete(objectKey);
+      } catch {}
+      await doJson(stub, "/abort", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: record.id }),
+      });
+      await unindexFile(env, record.id);
+      await budgetRelease(env, admitted);
+      return over;
+    }
+  } else if (written < admitted) {
+    await budgetRelease(env, admitted - written);
   }
 
   const completed = await doJson(stub, "/complete", {
@@ -518,6 +557,8 @@ async function downloadFile(
   );
   if (!object) return jsonError(404, "not found");
 
+  budgetReads(env, 1);
+
   const headers = new Headers();
   headers.set("content-type", record.contentType || "application/octet-stream");
   headers.set("cache-control", "private, no-store");
@@ -591,6 +632,67 @@ async function lookupRecord(env: Env, id: string): Promise<{ record: FileRecord 
 }
 
 /** Record id -> device in the global index so downloads can resolve it. */
+/**
+ * Reserve R2 usage against the account's monthly budget.
+ *
+ * Returns a 507 Response when this upload would push the month past the cap, or
+ * null to proceed. A registry hiccup lets the upload through: the per-device
+ * caps still bound it, and failing closed would break uploads for everyone if
+ * one Durable Object blinks.
+ */
+async function budgetAdmit(env: Env, bytes: number, classA: number): Promise<Response | null> {
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    const res = await reg.fetch("https://registry/budget/admit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bytes, classA }),
+    });
+    if (res.ok) return null;
+    const body = await res.json().catch(() => ({}));
+    return Response.json(body, { status: res.status });
+  } catch {
+    return null;
+  }
+}
+
+/** Give reserved bytes back when an upload does not become a stored file. */
+async function budgetRelease(env: Env, bytes: number): Promise<void> {
+  if (bytes <= 0) return;
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    await reg.fetch("https://registry/budget/release", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bytes }),
+    });
+  } catch {}
+}
+
+/** Record read operations. Not awaited: it must not slow a download down. */
+function budgetReads(env: Env, classB: number): void {
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    void reg.fetch("https://registry/budget/ops", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ classB }),
+    });
+  } catch {}
+}
+
+/** The month's R2 spend so far, for the API response and the page. */
+async function budgetStatus(env: Env): Promise<Record<string, unknown> | null> {
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    const res = await reg.fetch("https://registry/budget");
+    if (!res.ok) return null;
+    return (await res.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 async function indexFile(env: Env, record: FileRecord): Promise<void> {
   try {
     const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
