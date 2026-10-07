@@ -238,6 +238,9 @@ async function main(): Promise<void> {
   const lockedHtml = await lockedPage.text();
   check("locked page renders -> 200", lockedPage.status === 200);
   checkIncludes("locked page asks for the key", lockedHtml, 'id="keyForm"');
+  // The control that fetches the file is drawn as the download icon, not a bare
+  // arrow - it does the same job as the button an unprotected file gets.
+  checkIncludes("the unlock control is the download button", lockedHtml, 'class="dl" type="submit"');
   check("locked page does not leak the key", !lockedHtml.includes("sesame"));
   // A key in the URL must not unlock anything: the link is shareable, the key is
   // not, so a URL key is ignored exactly like a wrong one.

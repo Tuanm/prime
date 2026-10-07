@@ -597,10 +597,13 @@ export function renderDownloadPage(input: {
       // No key known: ask for it. The submission downloads with a header, so the
       // key never reaches the address bar, history or a Referer.
       scripts.push("      window.__DL__ = " + safeJson({ id: file.id, name: file.name, key: "" }) + ";");
+      // The submit is styled as the download control it is: same glyph and frame
+      // as the button an unprotected or owner-opened file gets, rather than a
+      // bare arrow that reads as "next".
       control =
         '<form class="kform" id="keyForm">' +
         '<input id="k" type="password" placeholder="key" autocomplete="off" aria-label="protection key" autofocus />' +
-        '<button class="plus" type="submit" title="Unlock">&#8594;</button>' +
+        '<button class="dl" type="submit" title="Unlock and download">' + DOWNLOAD_ICON + "</button>" +
         "</form>";
     } else if (file.protected) {
       // Authorised means the owner, whose own credentials are enough - so the
