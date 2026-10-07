@@ -176,8 +176,14 @@ async function main(): Promise<void> {
   );
 
   // ---- expiry cap ----
-  check("expiry beyond the cap -> 400", (await upload(small, "name=long.bin&expiry_days=1")).status === 400);
+  // Must be well past the configured ceiling, not merely at it: at the ceiling is
+  // allowed, and a file that sneaks in here would fill the 3-file quota for
+  // everything that follows.
+  const tooLong = await upload(small, "name=long.bin&expiry_days=30");
+  check("expiry beyond the cap -> 400", tooLong.status === 400, String(tooLong.status));
+  checkIncludes("the refusal names the ceiling", JSON.stringify(tooLong.body), "expiry exceeds");
   check("expiry in the past -> 400", (await upload(small, "name=past.bin&expiry_days=0")).status === 400);
+  check("no file was created by the refusals", (await listIds()).length === 3, JSON.stringify(await listIds()));
 
   // ---- download ----
   const download = await fetch(`${BASE}/api/files/${helloId}`, { headers: DEMO });
@@ -468,11 +474,6 @@ async function main(): Promise<void> {
   check("third would pass the total cap -> 413", overTotal.status === 413, JSON.stringify(overTotal.body));
 
   // ---- expiry reaping ----
-  // The configured ceiling is real: a longer lifetime is refused, not clamped.
-  const tooLong = await upload(small, "name=forever.bin&expiry_days=30");
-  check("expiry beyond the maximum -> 400", tooLong.status === 400, String(tooLong.status));
-  checkIncludes("the refusal names the ceiling", JSON.stringify(tooLong.body), "expiry exceeds");
-
   for (const id of await listIds()) await fetch(`${BASE}/api/files/${id}`, { method: "DELETE", headers: DEMO });
   const expiring = await upload(small, "name=gone.bin&expires_in=1");
   const expiringId: string = expiring.body.file?.id;
