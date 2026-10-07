@@ -254,6 +254,15 @@ async function main(): Promise<void> {
   check("the owner's page carries no key either", !ownerHtml.includes("sesame"));
   checkIncludes("the download script can send a key header", ownerHtml, "X-File-Key");
 
+  // The download page leads with a padlock instead of a status dot, and no longer
+  // spells out "(protected)" in a column of its own.
+  checkIncludes("a protected file shows a padlock", urlKeyHtml, 'title="protected"');
+  check("the (protected) label is gone", !urlKeyHtml.includes("(protected)"));
+  check("the download page has no key column", !urlKeyHtml.includes('class="fkey'));
+  // Its prompt reads like the management page's key box: no box, just an underline.
+  const kformRule = /.kform input \{([^}]*)\}/.exec(urlKeyHtml)?.[1] ?? "";
+  check("the prompt input has no border box", !kformRule.includes("border: 1px"), kformRule.trim().slice(0, 80));
+
   // ---- changing a key after the fact ----
   const patch = (body: unknown, headers = DEMO) =>
     fetch(`${BASE}/api/files/${secretId}`, {
@@ -428,6 +437,7 @@ async function main(): Promise<void> {
   check("GET /files/{id} -> 200", downloadPage.status === 200);
   checkIncludes("download page shows the name", downloadHtml, "hello.txt");
   checkIncludes("download page links the bytes", downloadHtml, `/api/files/${helloId}`);
+  checkIncludes("an unprotected file shows an open padlock", downloadHtml, 'title="no key needed"');
   checkIncludes("pages carry a no-referrer policy", page.headers.get("referrer-policy") ?? "", "no-referrer");
   checkIncludes("downloads are sniff-proof", download.headers.get("x-content-type-options") ?? "", "nosniff");
   checkIncludes("pages are sniff-proof", page.headers.get("x-content-type-options") ?? "", "nosniff");

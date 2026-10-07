@@ -73,6 +73,34 @@ const FILES_CSS = `
       .dot.pending {
         background: #ccc;
       }
+      /* The download page's leading icon. Same 10px footprint as the dot so the
+         row's box lines up exactly as it does on the management page. */
+      .lock {
+        width: 10px;
+        height: 12px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .lock svg {
+        width: 13px;
+        height: 13px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .lock.on {
+        color: #16a34a;
+      }
+      .lock.off {
+        color: #b91c1c;
+      }
+      .lock.pending {
+        color: #ccc;
+      }
       .opts {
         display: flex;
         align-items: center;
@@ -101,13 +129,11 @@ const FILES_CSS = `
         gap: 6px;
         flex: none;
       }
+      /* Only the width: the shared stylesheet already gives inputs inside a .box
+         the borderless, dotted-underline treatment used on the management page. */
       .kform input {
-        width: 140px;
-        font-family: inherit;
-        font-size: 11px;
-        border: 1px solid #111;
-        background: #fff;
-        padding: 3px 5px;
+        width: 130px;
+        font-size: 12px;
       }
       .dl {
         width: 28px;
@@ -170,6 +196,18 @@ const FILES_CSS = `
       }
 `;
 
+
+// The download page leads with a padlock rather than a status dot, because its
+// job is to say whether a key is needed. Outlined, like the download glyph.
+const LOCK_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+  '<rect x="4" y="10.5" width="16" height="10" rx="2" />' +
+  '<path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg>';
+
+const UNLOCK_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+  '<rect x="4" y="10.5" width="16" height="10" rx="2" />' +
+  '<path d="M8 10.5V7a4 4 0 0 1 7.5-2" /></svg>';
 
 // Outlined rather than filled: at 14px a solid path turns into a smudge.
 const DOWNLOAD_ICON =
@@ -549,7 +587,10 @@ export function renderDownloadPage(input: {
     rows.push('    <div class="empty">This file is not available. It may have expired or been deleted.</div>');
   } else {
     const soon = file.expires_in_ms <= 3 * 86400000;
-    const dot = file.status !== "ready" ? "dot pending" : soon ? "dot off" : "dot on";
+    // The icon says whether a key is needed; its colour still carries the expiry
+    // urgency the status dot used to (green with time, red inside three days).
+    const urgency = file.status !== "ready" ? "pending" : soon ? "off" : "on";
+    const icon = file.protected ? LOCK_ICON : UNLOCK_ICON;
 
     let control: string;
     if (locked) {
@@ -573,13 +614,14 @@ export function renderDownloadPage(input: {
 
     rows.push('    <ul id="list">');
     rows.push('      <li class="row">');
-    rows.push('        <span class="' + dot + '"></span>');
+    rows.push('        <span class="lock ' + urgency + '" title="' + (file.protected ? "protected" : "no key needed") + '">' + icon + "</span>");
     rows.push('        <div class="box">');
     rows.push('          <div class="cols">');
     rows.push('            <div class="fname">' + esc(file.name) + "</div>");
     rows.push('            <div class="fsize">' + esc(fmtBytes(file.size)) + "</div>");
     rows.push('            <div class="fexp' + (soon ? " soon" : "") + '">' + esc(expiryLabel(file)) + "</div>");
-    rows.push('            <div class="fkey static">' + esc(file.protected ? "(protected)" : "-") + "</div>");
+    // No key column here: the padlock says whether one is needed, and the prompt
+    // takes its place when it is.
     rows.push("          </div>");
     rows.push("          " + control);
     rows.push("        </div>");
