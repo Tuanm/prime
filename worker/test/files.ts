@@ -9,7 +9,7 @@
 
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
-import { runPage } from "./page-script";
+import { runPage, type FakeEl } from "./page-script";
 
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
@@ -318,24 +318,58 @@ async function main(): Promise<void> {
   check("file rows have an editable key box", keyBoxes.length >= 1, String(keyBoxes.length));
   check("a queued row's key box is read-only", box!.descendants().some((n) => n.classList.contains("fkey") && n.readOnly));
 
+  // Two separate words on purpose: the admin page already uses Save for "commit
+  // my edits", so the file action must not borrow it.
+  const menuLabels = ui.els.list!.descendants().filter((n) => n.tag === "button").map((n) => n.textContent);
+  check(
+    "a file row offers Download and Save as separate actions",
+    menuLabels.includes("Download") && menuLabels.includes("Save"),
+    JSON.stringify(menuLabels),
+  );
+
+  // Choosing Download streams that file from the API.
+  ui.window.location = "";
+  ui.els.list!.descendants().find((n) => n.tag === "button" && n.textContent === "Download")!.click();
+  checkIncludes("Download streams the file", String(ui.window.location ?? ""), "/api/files/");
+
   const maskedKey = keyBoxes.find((n) => n.value.includes("\u2022"));
   check("a protected file shows a mask, not the key", Boolean(maskedKey), JSON.stringify(keyBoxes.map((b) => b.value)));
 
-  ui.fetches.length = 0;
-  maskedKey!.blur();
-  check("blurring an untouched mask saves nothing", ui.fetches.length === 0, JSON.stringify(ui.fetches.map((f) => f.method)));
+  // The Save in the same row as the key box under test.
+  const rowOf = (el: FakeEl) => ui.els.list!.descendants().find((n) => n.classList.contains("row") && n.descendants().includes(el));
+  const saveOf = (el: FakeEl) => rowOf(el)?.descendants().find((n) => n.tag === "button" && n.textContent === "Save");
 
+  check("Save starts disabled", saveOf(maskedKey!)?.disabled === true, String(saveOf(maskedKey!)?.disabled));
+
+  ui.fetches.length = 0;
   maskedKey!.value = "fresh-key";
+  maskedKey!.fire("input");
+  check("editing the key enables Save", saveOf(maskedKey!)?.disabled === false, String(saveOf(maskedKey!)?.disabled));
+
   maskedKey!.blur();
+  check("blurring alone saves nothing", ui.fetches.length === 0, JSON.stringify(ui.fetches.map((f) => f.method)));
+
+  saveOf(maskedKey!)!.click();
   const keyPatch = ui.fetches.find((f) => f.method === "PATCH");
-  check("editing the key sends a PATCH", Boolean(keyPatch), JSON.stringify(ui.fetches.map((f) => f.method)));
+  check("clicking Save sends the PATCH", Boolean(keyPatch), JSON.stringify(ui.fetches.map((f) => f.method)));
   checkIncludes("the PATCH carries the new key", String(keyPatch?.body ?? ""), "fresh-key");
 
+  // Clearing the box is a change too.
   ui.fetches.length = 0;
   maskedKey!.value = "";
-  maskedKey!.blur();
+  maskedKey!.fire("input");
+  check("clearing the box enables Save", saveOf(maskedKey!)?.disabled === false, String(saveOf(maskedKey!)?.disabled));
+  saveOf(maskedKey!)!.click();
   const cleared = ui.fetches.find((f) => f.method === "PATCH");
   check("clearing the box removes the protection", cleared?.body === '{"key":""}', String(cleared?.body));
+
+  // An untouched mask is not a change, so Save stays inert.
+  ui.fetches.length = 0;
+  maskedKey!.value = "\u2022\u2022\u2022\u2022\u2022\u2022";
+  maskedKey!.fire("input");
+  check("an untouched mask leaves Save disabled", saveOf(maskedKey!)?.disabled === true, String(saveOf(maskedKey!)?.disabled));
+  saveOf(maskedKey!)!.click();
+  check("a disabled Save sends nothing", ui.fetches.length === 0, JSON.stringify(ui.fetches.map((f) => f.method)));
 
   // A failure must tint the card rather than only writing a line.
   const failing = runPage(pageHtml);

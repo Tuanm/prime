@@ -259,9 +259,13 @@ three days, and grey for a reservation that has not finished uploading.
 
 The protection key is **masked**, but its cell is an input you can click to edit -
 the same interaction as the admin page's token field. Focusing selects the mask,
-so typing replaces it; blurring commits, with a value protecting the file and an
-empty box removing the protection. The key is never rendered back in the clear:
-"Copy link" puts it into a shareable page URL instead, and "Save" downloads
+so typing replaces it, and nothing is written until you choose **Save**, which stays
+disabled until the value actually differs (recomputed each time the menu opens, as
+on the admin page). A value protects the file; an empty box removes the protection.
+The menu keeps **Download** and **Save** as separate words for separate actions,
+because Save already means "commit my edits" elsewhere in the product. The key is
+never rendered back in the clear:
+"Copy link" puts it into a shareable page URL instead, and "Download" streams it
 through the device's own credentials, which the gateway accepts in place of a
 key for the owner.
 
