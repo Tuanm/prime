@@ -280,6 +280,11 @@ key field would look like a filter too. Both remain per-call REST API options
 (`key=`, and `expiry_days=` / `expires_in=` / `expiry_ms=` for anything shorter
 than the seven-day maximum that page uploads use).
 
+`+` adds a dashed card to the end of the list, the same size and left edge as a
+file card. Click it to open the file picker, or drop files onto it; either way
+each file becomes its own not-yet-uploaded card, which is then uploaded from that
+card's menu. Pressing `+` again puts the card away.
+
 ### Monthly R2 budget
 
 File storage is capped by a **monthly spend ceiling**, so an unattended gateway

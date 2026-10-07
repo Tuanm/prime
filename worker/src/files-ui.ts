@@ -101,6 +101,34 @@ const FILES_CSS = `
       .lock.pending {
         color: #ccc;
       }
+      /* The card the + button adds. It keeps a file row's geometry - the same
+         spacer the status dot occupies, then a card - so the list keeps its
+         rhythm, and it is both a click target and a drop target. */
+      .dot-spacer {
+        width: 10px;
+        flex: none;
+      }
+      .dropzone {
+        flex: 1;
+        /* A file card's height is its 28px menu button plus 8px padding and a 1px
+           border on each side; matching it keeps the two card types identical. */
+        min-height: 46px;
+        border: 1px dashed #bbb;
+        background: #fff;
+        color: #999;
+        font-size: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-sizing: border-box;
+      }
+      .dropzone:hover,
+      .dropzone.over {
+        border-color: #111;
+        color: #111;
+        background: #fafafa;
+      }
       .opts {
         display: flex;
         align-items: center;
@@ -261,6 +289,7 @@ function browserScript(): string {
     "        var FILL = '#dbeafe';",
     "        var FAIL = '#fee2e2';",
     "        var nextQid = 1;",
+    "        var showDropzone = false;",
     "        var queued = [];",
     "        var files = window.__FILES__ || [];",
     "        var usageEl = document.getElementById('usage');",
@@ -365,6 +394,34 @@ function browserScript(): string {
     "          Array.prototype.forEach.call(document.querySelectorAll('.menu.open'), function (m) { m.classList.remove('open'); });",
     "        }",
     "        document.addEventListener('click', closeMenus);",
+    // The + card: click it to choose files, or drop them onto it. Either way the
+    // files land as not-yet-uploaded cards, each with its own Upload action.
+    "        function dropzoneRow() {",
+    "          var li = document.createElement('li');",
+    "          li.className = 'row';",
+    "          var spacer = document.createElement('span');",
+    "          spacer.className = 'dot-spacer';",
+    "          li.appendChild(spacer);",
+    "          var box = document.createElement('div');",
+    "          box.className = 'box dropzone';",
+    "          box.textContent = 'Drop files here, or click to choose';",
+    "          box.addEventListener('click', function () { picker.click(); });",
+    "          box.addEventListener('dragover', function (ev) {",
+    "            ev.preventDefault();",
+    "            box.classList.add('over');",
+    "          });",
+    "          box.addEventListener('dragleave', function () { box.classList.remove('over'); });",
+    "          box.addEventListener('drop', function (ev) {",
+    "            ev.preventDefault();",
+    "            box.classList.remove('over');",
+    "            var dropped = ev.dataTransfer && ev.dataTransfer.files ? ev.dataTransfer.files : [];",
+    "            if (!dropped.length) return;",
+    "            Array.prototype.forEach.call(dropped, function (f) { queued.push({ file: f, qid: nextQid++ }); });",
+    "            render();",
+    "          });",
+    "          li.appendChild(box);",
+    "          return li;",
+    "        }",
     "        function render() {",
     "          listEl.innerHTML = '';",
     "          files.forEach(function (f) {",
@@ -401,10 +458,11 @@ function browserScript(): string {
     "              null, q.qid, null",
     "            ));",
     "          });",
-    "          if (files.length === 0 && queued.length === 0) {",
+          "          if (showDropzone) listEl.appendChild(dropzoneRow());",
+    "          if (files.length === 0 && queued.length === 0 && !showDropzone) {",
     "            var empty = document.createElement('div');",
     "            empty.className = 'empty';",
-    "            empty.textContent = 'No files. Use + to choose one, then Upload.';",
+    "            empty.textContent = 'No files yet. Use + to add one.';",
     "            listEl.appendChild(empty);",
     "          }",
     "          if (usageEl) usageEl.textContent = files.length + '/' + window.__LIMITS__.max_files + ' files, ' + fmtBytes(window.__USAGE__.bytes) + ' of ' + fmtBytes(window.__LIMITS__.max_total_bytes);",
@@ -493,7 +551,10 @@ function browserScript(): string {
     "            render();",
     "          }).catch(function () {});",
     "        }",
-    "        addBtn.addEventListener('click', function () { picker.click(); });",
+    "        addBtn.addEventListener('click', function () {",
+    "          showDropzone = !showDropzone;",
+    "          render();",
+    "        });",
     "        picker.addEventListener('change', function () {",
     "          Array.prototype.forEach.call(picker.files, function (f) { queued.push({ file: f, qid: nextQid++ }); });",
     "          picker.value = '';",
@@ -537,7 +598,7 @@ export function renderFilesPage(input: {
     '    <div class="sub">file management &middot; ' + esc(deviceId) + "</div>",
     '    <div class="row-head">',
     "      <h2>Files</h2>",
-    '      <button class="plus" id="addBtn" type="button" title="Choose files">+</button>',
+    '      <button class="plus" id="addBtn" type="button" title="Add files">+</button>',
     "    </div>",
     '    <ul id="list"></ul>',
     '    <div class="status" id="status"></div>',

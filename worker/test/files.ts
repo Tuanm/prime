@@ -365,6 +365,37 @@ async function main(): Promise<void> {
   const uploadMenu = box!.descendants().find((n) => n.classList.contains("menu"));
   check("the row has a menu", Boolean(uploadMenu));
 
+  // ---- the + card: click to choose, or drop files onto it ----
+  // A fresh run so this does not disturb the harness above.
+  const dz = runPage(pageHtml);
+  const findZone = () => dz.els.list!.descendants().find((n) => n.classList.contains("dropzone"));
+  check("no + card is shown until asked for", findZone() === undefined);
+
+  dz.els.addBtn!.click();
+  const zone = findZone();
+  check("+ adds the drop card", Boolean(zone), "no .dropzone after clicking +");
+  check("the card invites a click or a drop", (zone?.textContent ?? "").length > 0, zone?.textContent);
+
+  zone!.click();
+  check("clicking the card opens the file picker", dz.els.picker!.clicked > 0, String(dz.els.picker!.clicked));
+
+  // Dropping is the other way in: each dropped file becomes its own card.
+  zone!.fire("dragover", { preventDefault() {}, dataTransfer: { files: [] } });
+  check("dragging over highlights the card", zone!.classList.contains("over"), zone!.className);
+  zone!.fire("drop", {
+    preventDefault() {},
+    dataTransfer: { files: [{ name: "dropped-a.bin", size: 10 }, { name: "dropped-b.bin", size: 20 }] },
+  });
+  const queuedNames = dz.els.list!.descendants().filter((n) => n.dataset.qid).map(
+    (row) => row.descendants().find((c) => c.classList.contains("fname"))?.textContent ?? "",
+  );
+  check("dropping files queues a card each", queuedNames.length === 2, JSON.stringify(queuedNames));
+  checkIncludes("the queued cards are named", JSON.stringify(queuedNames), "dropped-a.bin");
+  check("the card stays for more files", Boolean(findZone()));
+
+  dz.els.addBtn!.click();
+  check("+ again puts the card away", findZone() === undefined);
+
   // ---- editing a protection key in place ----
   const keyBoxes = ui.els
     .list!.descendants()

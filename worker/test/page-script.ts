@@ -20,6 +20,8 @@ export class FakeEl {
   files: unknown[] = [];
   clicked = 0;
   style: Record<string, string> = {};
+  detached = false;
+  private html = "";
   dataset: Record<string, string> = new Proxy({} as Record<string, string>, {
     set: (target, key, value) => {
       target[key as string] = String(value);
@@ -34,6 +36,21 @@ export class FakeEl {
     private readonly nodes: FakeEl[],
   ) {
     nodes.push(this);
+  }
+
+  /** Setting innerHTML replaces the children, as it does in a real element. */
+  get innerHTML(): string {
+    return this.html;
+  }
+  set innerHTML(value: string) {
+    this.html = value;
+    for (const child of this.children) child.markDetached();
+    this.children.length = 0;
+  }
+
+  markDetached(): void {
+    this.detached = true;
+    for (const child of this.children) child.markDetached();
   }
 
   get classList() {
@@ -115,6 +132,7 @@ export function runPage(html: string, init: Record<string, any> = {}): PageHarne
 
   // Just enough of a selector engine for what the page uses.
   const matches = (node: FakeEl, selector: string): boolean => {
+    if (node.detached) return false;
     const attr = /^\[data-qid="([^"]*)"\]$/.exec(selector);
     if (attr) return node.dataset.qid === attr[1];
     if (selector.startsWith(".")) {
