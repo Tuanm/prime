@@ -151,6 +151,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `POST` | `/api/files?name=&expiry_days=&key=` | device basic | Upload a temporary file (raw body, streamed into R2) |
 | `GET` | `/api/files` | device basic | List this device's files + usage |
 | `GET` | `/api/files/{id}` | device basic, or the `X-File-Key` header for a protected file | Download (supports `Range`) |
+| `PATCH` | `/api/files/{id}` | device basic | Set or clear a file's protection key (`{"key":"..."}`; empty clears it) |
 | `DELETE` | `/api/files/{id}` | device basic | Delete a file immediately |
 | `GET` | `/files` | device basic | File management page |
 | `GET` | `/files/{id}` | `?key=` unlocks a protected file in the page | File download page |
@@ -254,9 +255,13 @@ expires, and whether it is protected:
 ```
 
 The dot is green while there is more than three days left, a red outline inside
-three days, and grey for a reservation that has not finished uploading. The
-protection key is **masked** - it is a secret, and the owner never needs to read
-it back: "Copy link" puts it into a shareable page URL, and "Save" downloads
+three days, and grey for a reservation that has not finished uploading.
+
+The protection key is **masked**, but its cell is an input you can click to edit -
+the same interaction as the admin page's token field. Focusing selects the mask,
+so typing replaces it; blurring commits, with a value protecting the file and an
+empty box removing the protection. The key is never rendered back in the clear:
+"Copy link" puts it into a shareable page URL instead, and "Save" downloads
 through the device's own credentials, which the gateway accepts in place of a
 key for the owner.
 
