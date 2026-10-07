@@ -23,10 +23,12 @@ import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { ADMIN_HTML } from "./admin-ui";
 import { handleCloudMcp } from "./cloud-device";
+import { handleFiles } from "./files-routes";
 
 export { DeviceDO } from "./device-do";
 export { RegistryDO } from "./registry-do";
 export { CodingSandbox } from "./coding-sandbox";
+export { FilesDO } from "./files-do";
 
 const unauthorized = () => Response.json({ error: "unauthorized" }, { status: 401 });
 
@@ -180,6 +182,19 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
     const url = new URL(request.url);
+
+    // ---- Temporary files (REST API + pages) ----
+    // Handled before the device routing because /files and /api/files are
+    // self-contained: they authenticate with device Basic auth, not the gateway
+    // token, and never touch a tunnel.
+    const filesResponse = await handleFiles({
+      request,
+      env,
+      url,
+      cfg,
+      limiter: getLimiter(cfg),
+    });
+    if (filesResponse) return filesResponse;
 
     // ---- Admin UI ----
     // The page itself is gated by Cloudflare Access at the edge (policies:

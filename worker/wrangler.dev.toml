@@ -11,7 +11,14 @@ bindings = [
   { name = "DEVICES", class_name = "DeviceDO" },
   { name = "REGISTRY", class_name = "RegistryDO" },
   { name = "CODING_SANDBOX", class_name = "CodingSandbox" },
+  { name = "FILES", class_name = "FilesDO" },
 ]
+
+# Local R2: miniflare simulates the bucket on disk, so the whole file pipeline
+# can be exercised without R2 enabled on the account.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "code-mcp-files"
 
 [[migrations]]
 tag = "v1"
@@ -20,6 +27,10 @@ new_sqlite_classes = ["DeviceDO", "RegistryDO"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["CodingSandbox"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["FilesDO"]
 
 [[kv_namespaces]]
 binding = "KV"

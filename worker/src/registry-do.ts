@@ -11,10 +11,16 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
-import { validDeviceId, virtualDeviceIds } from "./config";
+import { FILE_ID_RE, validDeviceId, virtualDeviceIds } from "./config";
 
 const ONLINE_TTL_DEFAULT_MS = 150_000; // longer than keepalive timeout; swept on read
 const TOKEN_MAX = 256; // token length cap (sanity bound)
+
+/** fileId -> owning deviceId, for /files/{id} downloads that carry only an id. */
+interface FileIndexEntry {
+  deviceId: string;
+  expiresAt: number;
+}
 
 interface DeviceRec {
   seenAt: number;
@@ -25,6 +31,7 @@ export class RegistryDO extends DurableObject<Env> {
   private tokens = new Map<string, string>(); // deviceId -> token (authoritative)
   private virtual = new Set<string>(); // in-process devices: always online, never swept
   private disabled = new Set<string>(); // deactivated devices: rejected at /mcp + /ws
+  private fileIndex = new Map<string, FileIndexEntry>(); // global: fileId -> device
   private onlineTtlMs = ONLINE_TTL_DEFAULT_MS;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -79,6 +86,11 @@ export class RegistryDO extends DurableObject<Env> {
         for (const id of savedDisabled) {
           if (validDeviceId(id)) this.disabled.add(id);
         }
+        const savedIndex = (await this.ctx.storage.get<Record<string, FileIndexEntry>>("file_index")) || {};
+        const now = Date.now();
+        for (const [fileId, entry] of Object.entries(savedIndex)) {
+          if (entry && validDeviceId(entry.deviceId) && entry.expiresAt > now) this.fileIndex.set(fileId, entry);
+        }
       } catch {}
     });
   }
@@ -115,6 +127,60 @@ export class RegistryDO extends DurableObject<Env> {
 
     if (request.method === "GET" && path === "/disabled") {
       return Response.json({ disabled: [...this.disabled] });
+    }
+
+    // ---- file index ----
+    // A download URL carries only a file id, but the metadata lives in the
+    // per-device FilesDO, so this global map resolves id -> device. Entries
+    // expire with their file, so a lookup after expiry returns 404 and drops
+    // the entry rather than leaking it forever.
+
+    if (request.method === "POST" && path === "/file-index") {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: "invalid json" }, { status: 400 });
+      }
+      const { fileId, deviceId, expiresAt } = (body || {}) as {
+        fileId?: unknown;
+        deviceId?: unknown;
+        expiresAt?: unknown;
+      };
+      const id = String(fileId || "");
+      const owner = String(deviceId || "");
+      const expires = Number(expiresAt);
+      if (!FILE_ID_RE.test(id)) return Response.json({ error: "invalid fileId" }, { status: 400 });
+      if (!validDeviceId(owner)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      if (!Number.isFinite(expires)) return Response.json({ error: "invalid expiresAt" }, { status: 400 });
+      this.fileIndex.set(id, { deviceId: owner, expiresAt: expires });
+      await this.persistFileIndex();
+      return Response.json({ ok: true });
+    }
+
+    if (request.method === "POST" && path === "/file-unindex") {
+      let id = url.searchParams.get("id") || "";
+      if (!id) {
+        try {
+          id = String(((await request.json()) as { fileId?: unknown }).fileId || "");
+        } catch {}
+      }
+      const removed = this.fileIndex.delete(id);
+      if (removed) await this.persistFileIndex();
+      return Response.json({ ok: true, removed });
+    }
+
+    if (request.method === "GET" && path === "/file-lookup") {
+      const id = url.searchParams.get("id") || "";
+      if (!FILE_ID_RE.test(id)) return Response.json({ error: "invalid fileId" }, { status: 400 });
+      const entry = this.fileIndex.get(id);
+      if (!entry) return Response.json({ error: "not found" }, { status: 404 });
+      if (entry.expiresAt <= Date.now()) {
+        this.fileIndex.delete(id);
+        await this.persistFileIndex();
+        return Response.json({ error: "expired" }, { status: 404 });
+      }
+      return Response.json({ deviceId: entry.deviceId });
     }
 
     // Deactivate/activate a device (persisted). Disabled devices are rejected
@@ -234,6 +300,12 @@ export class RegistryDO extends DurableObject<Env> {
   private async persistDisabled(): Promise<void> {
     try {
       await this.ctx.storage.put("disabled", [...this.disabled]);
+    } catch {}
+  }
+
+  private async persistFileIndex(): Promise<void> {
+    try {
+      await this.ctx.storage.put("file_index", Object.fromEntries(this.fileIndex));
     } catch {}
   }
 }

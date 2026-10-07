@@ -1,0 +1,568 @@
+// Temporary file storage: REST API under /api/files and the HTML pages under
+// /files. Routed here from src/index.ts so the entry point stays readable.
+//
+// Contents live in R2; metadata and quotas live in a per-device FilesDO. Uploads
+// are streamed straight from the request body into R2 - a 200 MiB file is never
+// buffered in the isolate (which has a 128 MB memory limit).
+//
+// Auth is HTTP Basic with (deviceId, token), where both come from the device
+// registry the admin UI writes. That is the same credential the device uses at
+// /ws, so there is no second secret to distribute.
+
+import type { Env, GatewayConfig } from "./config";
+import { fileLimits, validDeviceId, validFileId } from "./config";
+import type { FileRecord, FileUsage } from "./files-do";
+import { renderDownloadPage, renderFilesPage, type FileView } from "./files-ui";
+import { clientIp, type RateLimiter } from "./rate-limit";
+import { timingSafeEq } from "./config";
+
+const NO_STORE = { "cache-control": "no-store" } as const;
+
+/** 401 with a browser-friendly challenge so the page can prompt for Basic auth. */
+function unauthorized(realm = "Prime files"): Response {
+  return new Response(JSON.stringify({ error: "unauthorized" }), {
+    status: 401,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "www-authenticate": `Basic realm="${realm}", charset="UTF-8"`,
+      ...NO_STORE,
+    },
+  });
+}
+
+function jsonError(status: number, error: string, extra: Record<string, unknown> = {}): Response {
+  return new Response(JSON.stringify({ error, ...extra }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...NO_STORE },
+  });
+}
+
+function jsonOk(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...NO_STORE },
+  });
+}
+
+/** Decode `Authorization: Basic base64(deviceId:token)`. */
+export function parseBasicAuth(request: Request): { deviceId: string; token: string } | undefined {
+  const header = request.headers.get("authorization");
+  if (!header) return undefined;
+  const match = /^Basic\s+(.+)$/i.exec(header.trim());
+  if (!match) return undefined;
+  let decoded: string;
+  try {
+    decoded = atob(match[1]!.trim());
+  } catch {
+    return undefined;
+  }
+  const colon = decoded.indexOf(":");
+  if (colon <= 0) return undefined;
+  return { deviceId: decoded.slice(0, colon), token: decoded.slice(colon + 1) };
+}
+
+export interface DeviceAuth {
+  deviceId: string;
+}
+
+/**
+ * Authenticate a request as a registered device.
+ *
+ * Accepts Basic auth (what the pages use, and what the browser replays
+ * automatically on same-origin fetches) or an explicit
+ * `X-Device-Id` + `X-Device-Token` header pair for scripts.
+ */
+export async function authorizeDevice(env: Env, request: Request): Promise<DeviceAuth | Response> {
+  const basic = parseBasicAuth(request);
+  const headerId = request.headers.get("x-device-id");
+  const headerToken = request.headers.get("x-device-token");
+
+  const deviceId = basic?.deviceId ?? headerId ?? "";
+  const token = basic?.token ?? headerToken ?? "";
+  if (!validDeviceId(deviceId)) return unauthorized();
+  if (!token) return unauthorized();
+
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  let expected: string | undefined;
+  try {
+    const response = await reg.fetch("https://registry/map");
+    if (response.ok) {
+      const body = (await response.json()) as { map?: Record<string, string> };
+      expected = body.map?.[deviceId];
+    }
+  } catch {}
+  // No registry entry means the device is not registered via /admin: refuse
+  // rather than falling back to any shared token, so file access always
+  // requires a real per-device credential.
+  if (expected === undefined) return unauthorized();
+  if (!timingSafeEq(token, expected)) return unauthorized();
+
+  return { deviceId };
+}
+
+function filesStub(env: Env, deviceId: string): DurableObjectStub {
+  return env.FILES.get(env.FILES.idFromName(deviceId));
+}
+
+async function doJson(stub: DurableObjectStub, path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
+  const response = await stub.fetch("https://files" + path, init);
+  let body: any = {};
+  try {
+    body = await response.json();
+  } catch {}
+  return { status: response.status, body };
+}
+
+/** Parse the requested lifetime, defaulting to the maximum. */
+export function parseExpiry(
+  url: URL,
+  limits: { maxExpiryMs: number },
+  now: number,
+): number | { error: string; [extra: string]: unknown } {
+  const days = url.searchParams.get("expiry_days");
+  const seconds = url.searchParams.get("expires_in");
+  const ms = url.searchParams.get("expiry_ms");
+  let lifetime: number | undefined;
+
+  if (days !== null) {
+    const value = Number(days);
+    if (!Number.isFinite(value) || value <= 0) return { error: "expiry_days must be a positive number" };
+    lifetime = value * 24 * 60 * 60 * 1000;
+  } else if (seconds !== null) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return { error: "expires_in must be a positive number of seconds" };
+    lifetime = value * 1000;
+  } else if (ms !== null) {
+    const value = Number(ms);
+    if (!Number.isFinite(value) || value <= 0) return { error: "expiry_ms must be a positive number" };
+    lifetime = value;
+  } else {
+    lifetime = limits.maxExpiryMs; // default: the longest allowed
+  }
+
+  if (lifetime > limits.maxExpiryMs) return { error: "expiry exceeds the maximum", limit_ms: limits.maxExpiryMs };
+  return now + lifetime;
+}
+
+function fileView(record: FileRecord, origin: string): FileView {
+  const downloadPath = `/api/files/${record.id}`;
+  const query = record.key ? `?key=${encodeURIComponent(record.key)}` : "";
+  return {
+    id: record.id,
+    name: record.name,
+    size: record.size,
+    content_type: record.contentType,
+    created_at: new Date(record.createdAt).toISOString(),
+    expires_at: new Date(record.expiresAt).toISOString(),
+    expires_in_ms: Math.max(0, record.expiresAt - Date.now()),
+    status: record.status,
+    protected: Boolean(record.key),
+    ...(record.key ? { key: record.key } : {}),
+    download_url: `${origin}${downloadPath}${query}`,
+    page_url: `${origin}/files/${record.id}${query}`,
+  };
+}
+
+export interface FilesRouteContext {
+  request: Request;
+  env: Env;
+  url: URL;
+  cfg: GatewayConfig;
+  limiter: { allow(ip: string): boolean };
+}
+
+/**
+ * Handle a file request, or return null when the path is not ours.
+ */
+export async function handleFiles(ctx: FilesRouteContext): Promise<Response | null> {
+  const { request, env, url, cfg, limiter } = ctx;
+  const isApi = url.pathname === "/api/files" || url.pathname.startsWith("/api/files/");
+  const isPage = url.pathname === "/files" || url.pathname.startsWith("/files/");
+  if (!isApi && !isPage) return null;
+
+  // Storage is optional so the worker can deploy before R2 is enabled; say so
+  // clearly instead of throwing.
+  if (!env.BUCKET) {
+    return isApi
+      ? jsonError(503, "file storage is not configured", { hint: "Bind an R2 bucket as BUCKET (see worker/README.md)." })
+      : new Response(renderUnavailablePage(), {
+          status: 503,
+          headers: { "content-type": "text/html; charset=utf-8", ...NO_STORE },
+        });
+  }
+
+  if (isApi && !limiter.allow(clientIp(request))) {
+    return jsonError(429, "rate limited");
+  }
+
+  const limits = fileLimits(env);
+  const origin = url.origin;
+
+  // ---- REST API ----------------------------------------------------------
+
+  if (url.pathname === "/api/files") {
+    if (request.method === "POST") {
+      const auth = await authorizeDevice(env, request);
+      if (auth instanceof Response) return auth;
+      return uploadFile(request, env, url, auth.deviceId, limits, origin);
+    }
+    if (request.method === "GET") {
+      const auth = await authorizeDevice(env, request);
+      if (auth instanceof Response) return auth;
+      const stub = filesStub(env, auth.deviceId);
+      const { status, body } = await doJson(stub, "/list");
+      if (status !== 200) return jsonError(status, body.error ?? "list failed");
+      return jsonOk({
+        files: (body.files as FileRecord[]).map((record) => fileView(record, origin)),
+        usage: body.usage,
+        limits: {
+          max_upload_bytes: limits.maxUploadBytes,
+          max_expiry_ms: limits.maxExpiryMs,
+          max_files: limits.maxPerDevice,
+          max_total_bytes: limits.maxTotalBytes,
+        },
+      });
+    }
+    return jsonError(405, "method not allowed", { allow: "GET, POST" });
+  }
+
+  const apiId = url.pathname.startsWith("/api/files/") ? url.pathname.slice("/api/files/".length) : "";
+  if (apiId) {
+    if (!validFileId(apiId)) return jsonError(400, "invalid file id");
+    if (request.method === "GET") return downloadFile(request, env, url, apiId, origin, false);
+    if (request.method === "DELETE") {
+      const auth = await authorizeDevice(env, request);
+      if (auth instanceof Response) return auth;
+      const stub = filesStub(env, auth.deviceId);
+      // Only the owning device may delete: fetching through its own DO makes
+      // that structural rather than a check that could be forgotten.
+      const { body } = await doJson(stub, "/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: apiId }),
+      });
+      if (body.removed === true) await unindexFile(env, apiId);
+      return jsonOk({ ok: true, removed: body.removed === true });
+    }
+    return jsonError(405, "method not allowed", { allow: "GET, DELETE" });
+  }
+
+  // ---- HTML pages --------------------------------------------------------
+
+  if (url.pathname === "/files") {
+    const auth = await authorizeDevice(env, request);
+    if (auth instanceof Response) return auth;
+    const stub = filesStub(env, auth.deviceId);
+    const { body } = await doJson(stub, "/list");
+    const files = ((body.files ?? []) as FileRecord[]).map((record) => fileView(record, origin));
+    return html(renderFilesPage({ deviceId: auth.deviceId, files, usage: body.usage as FileUsage, limits }));
+  }
+
+  const pageId = url.pathname.slice("/files/".length);
+  if (pageId) {
+    if (!validFileId(pageId)) return new Response("not found", { status: 404, headers: NO_STORE });
+    return downloadFile(request, env, url, pageId, origin, true);
+  }
+
+  return null;
+}
+
+// ---- upload ---------------------------------------------------------------
+
+async function uploadFile(
+  request: Request,
+  env: Env,
+  url: URL,
+  deviceId: string,
+  limits: ReturnType<typeof fileLimits>,
+  origin: string,
+): Promise<Response> {
+  const name = url.searchParams.get("name") ?? url.searchParams.get("filename") ?? "";
+  if (!name.trim()) return jsonError(400, "missing ?name=<filename>");
+
+  const now = Date.now();
+  const expiry = parseExpiry(url, limits, now);
+  if (typeof expiry !== "number") return jsonError(400, expiry.error, expiry);
+
+  const declaredRaw = request.headers.get("content-length");
+  const declared = declaredRaw === null ? Number.NaN : Number(declaredRaw);
+  if (Number.isFinite(declared) && declared > limits.maxUploadBytes) {
+    return jsonError(413, "file too large", { limit_bytes: limits.maxUploadBytes, size: declared });
+  }
+  if (!request.body || declared === 0) return jsonError(400, "empty request body");
+
+  const key = url.searchParams.get("key") ?? undefined;
+  const stub = filesStub(env, deviceId);
+  const reserved = await doJson(stub, "/reserve", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      deviceId,
+      name,
+      size: Number.isFinite(declared) ? declared : 0,
+      contentType: request.headers.get("content-type") ?? "application/octet-stream",
+      expiresAt: expiry,
+      key,
+    }),
+  });
+  if (reserved.status !== 201) {
+    return jsonError(reserved.status, reserved.body.error ?? "upload rejected", reserved.body);
+  }
+  const record = reserved.body.file as FileRecord;
+  await indexFile(env, record);
+  const objectKey = `${record.deviceId}/${record.id}`;
+
+  const putOptions = {
+    httpMetadata: { contentType: record.contentType },
+    customMetadata: { deviceId, fileId: record.id, name: record.name },
+  };
+
+  let written = 0;
+  try {
+    written = Number.isFinite(declared)
+      ? await putKnownLength(env.BUCKET!, objectKey, request.body, putOptions)
+      : await putChunked(env.BUCKET!, objectKey, request.body, putOptions, limits.maxUploadBytes);
+  } catch (err) {
+    await doJson(stub, "/abort", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: record.id }),
+    });
+    if (err instanceof UploadTooLarge) {
+      return jsonError(413, "file too large", { limit_bytes: limits.maxUploadBytes, size: err.size });
+    }
+    return jsonError(500, "upload failed", { detail: err instanceof Error ? err.message : String(err) });
+  }
+
+  const completed = await doJson(stub, "/complete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: record.id, size: written }),
+  });
+  if (completed.status !== 200) {
+    return jsonError(completed.status, completed.body.error ?? "upload rejected", completed.body);
+  }
+
+  return jsonOk({ ok: true, file: fileView(completed.body.file as FileRecord, origin) }, 201);
+}
+
+class UploadTooLarge extends Error {
+  constructor(readonly size: number) {
+    super("upload exceeds the size limit");
+  }
+}
+
+/**
+ * Stream a body of known length straight into R2.
+ *
+ * `bucket.put` accepts a ReadableStream only when its length is known, and the
+ * incoming `request.body` is exactly that - so a 200 MiB upload is piped through
+ * without ever being buffered (the isolate only has 128 MB of memory, so
+ * buffering is not an option). Wrapping it in a TransformStream to count bytes -
+ * the obvious way to guard the size - destroys that known length and R2 rejects
+ * it, which is why the length check happens up front instead.
+ */
+async function putKnownLength(
+  bucket: R2Bucket,
+  key: string,
+  body: ReadableStream<Uint8Array>,
+  options: R2PutOptions,
+): Promise<number> {
+  const object = await bucket.put(key, body, options);
+  return object?.size ?? 0;
+}
+
+/** R2 requires every part but the last to be at least 5 MiB. */
+const PART_SIZE = 5 * 1024 * 1024;
+
+/**
+ * Stream a body of *unknown* length (chunked transfer encoding) via a multipart
+ * upload, buffering at most one part at a time and aborting as soon as the
+ * running total passes the cap.
+ */
+async function putChunked(
+  bucket: R2Bucket,
+  key: string,
+  body: ReadableStream<Uint8Array>,
+  options: R2PutOptions,
+  maxBytes: number,
+): Promise<number> {
+  const upload = await bucket.createMultipartUpload(key, options);
+  const parts: R2UploadedPart[] = [];
+  const reader = body.getReader();
+  let buffer = new Uint8Array(PART_SIZE);
+  let filled = 0;
+  let total = 0;
+  let partNumber = 1;
+
+  const flush = async (): Promise<void> => {
+    // R2 rejects an empty part, so only send when there is something to send.
+    if (filled === 0 && parts.length > 0) return;
+    parts.push(await upload.uploadPart(partNumber++, buffer.slice(0, filled)));
+    filled = 0;
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) throw new UploadTooLarge(total);
+      let offset = 0;
+      while (offset < value.byteLength) {
+        const room = PART_SIZE - filled;
+        const take = Math.min(room, value.byteLength - offset);
+        buffer.set(value.subarray(offset, offset + take), filled);
+        filled += take;
+        offset += take;
+        if (filled === PART_SIZE) await flush();
+      }
+    }
+    if (filled > 0 || parts.length === 0) await flush();
+    const object = await upload.complete(parts);
+    return object.size;
+  } catch (err) {
+    try {
+      await upload.abort();
+    } catch {}
+    throw err;
+  } finally {
+    buffer = new Uint8Array(0);
+  }
+}
+
+// ---- download -------------------------------------------------------------
+
+async function downloadFile(
+  request: Request,
+  env: Env,
+  url: URL,
+  id: string,
+  origin: string,
+  asPage: boolean,
+): Promise<Response> {
+  // The DO is per device, so find the record by asking each candidate? No: the
+  // id is globally unique, and the record carries its deviceId, so a light
+  // lookup DO resolves it (see below).
+  const lookup = await lookupRecord(env, id);
+  if (!lookup) return asPage ? notFoundPage() : jsonError(404, "not found");
+  const { record } = lookup;
+
+  if (record.status !== "ready") return asPage ? notFoundPage() : jsonError(409, "upload not complete");
+  if (Date.now() >= record.expiresAt) return asPage ? notFoundPage() : jsonError(410, "file expired");
+
+  // A protected file needs its key, unless the owner asks with device auth.
+  if (record.key) {
+    const provided = url.searchParams.get("key") ?? "";
+    const owner = await authorizeDevice(env, request);
+    const ownerOk = !(owner instanceof Response) && owner.deviceId === record.deviceId;
+    if (!ownerOk && !timingSafeEq(provided, record.key)) {
+      return asPage ? unauthorized("Protected file") : unauthorized("Protected file");
+    }
+  }
+
+  if (asPage) {
+    return html(
+      renderDownloadPage({
+        file: fileView(record, origin),
+        key: url.searchParams.get("key") ?? undefined,
+      }),
+    );
+  }
+
+  // Only ask R2 for a range when the client sent one: R2 (and miniflare) report
+  // a full-object range otherwise, which would turn every download into a 206.
+  const rangeHeader = request.headers.get("range");
+  const object = await env.BUCKET!.get(
+    `${record.deviceId}/${record.id}`,
+    rangeHeader ? { range: request.headers } : undefined,
+  );
+  if (!object) return jsonError(404, "not found");
+
+  const headers = new Headers();
+  headers.set("content-type", record.contentType || "application/octet-stream");
+  headers.set("cache-control", "private, no-store");
+  headers.set(
+    "content-disposition",
+    `attachment; filename="${record.name.replace(/[\r\n"\\]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(record.name)}`,
+  );
+  headers.set("accept-ranges", "bytes");
+  headers.set("etag", object.httpEtag);
+  if (rangeHeader && object.range) {
+    const range = object.range as { offset: number; length?: number };
+    const length = range.length ?? Math.max(0, object.size - range.offset);
+    headers.set("content-range", `bytes ${range.offset}-${range.offset + length - 1}/${record.size}`);
+    headers.set("content-length", String(length));
+    return new Response(object.body, { status: 206, headers });
+  }
+  headers.set("content-length", String(object.size));
+  return new Response(object.body, { status: 200, headers });
+}
+
+/**
+ * Find a record by file id without knowing its device.
+ *
+ * A download URL carries only the id, while the metadata lives in the per-device
+ * DO, so the global registry keeps an id -> device index. The index entry expires
+ * with its file, so a stale id resolves to nothing instead of lingering.
+ */
+async function lookupRecord(env: Env, id: string): Promise<{ record: FileRecord } | null> {
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const found = await doJson(reg, `/file-lookup?id=${encodeURIComponent(id)}`);
+  if (found.status !== 200 || !found.body.deviceId) return null;
+  const stub = filesStub(env, found.body.deviceId as string);
+  const record = await doJson(stub, `/get?id=${encodeURIComponent(id)}`);
+  if (record.status !== 200) return null;
+  return { record: record.body.file as FileRecord };
+}
+
+/** Record id -> device in the global index so downloads can resolve it. */
+async function indexFile(env: Env, record: FileRecord): Promise<void> {
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    await reg.fetch("https://registry/file-index", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fileId: record.id, deviceId: record.deviceId, expiresAt: record.expiresAt }),
+    });
+  } catch {}
+}
+
+async function unindexFile(env: Env, id: string): Promise<void> {
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    await reg.fetch("https://registry/file-unindex", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fileId: id }),
+    });
+  } catch {}
+}
+
+// ---- small helpers --------------------------------------------------------
+
+function html(body: string): Response {
+  return new Response(body, {
+    headers: { "content-type": "text/html; charset=utf-8", ...NO_STORE },
+  });
+}
+
+function notFoundPage(): Response {
+  return new Response(renderDownloadPage({ file: null }), {
+    status: 404,
+    headers: { "content-type": "text/html; charset=utf-8", ...NO_STORE },
+  });
+}
+
+function renderUnavailablePage(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Files</title></head>
+<body style="font-family:ui-monospace,Menlo,monospace;margin:48px">
+<h1 style="font-size:20px">Files</h1>
+<p style="color:#b91c1c">File storage is not configured on this gateway.</p>
+<p style="color:#666;font-size:12px">Bind an R2 bucket as BUCKET to enable uploads.</p>
+</body></html>`;
+}
+
+export { filesStub, doJson };
+export type { FileUsage };

@@ -25,7 +25,15 @@ bindings = [
   { name = "DEVICES", class_name = "DeviceDO" },
   { name = "REGISTRY", class_name = "RegistryDO" },
   { name = "CODING_SANDBOX", class_name = "CodingSandbox" },
+  { name = "FILES", class_name = "FilesDO" },
 ]
+
+# Temporary file contents (see src/files-do.ts + src/files-routes.ts). Uploads
+# stream straight into this bucket, so a 200 MiB file never sits in memory.
+# Create it once with: wrangler r2 bucket create code-mcp-files
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "code-mcp-files"
 
 [[migrations]]
 tag = "v1"
@@ -34,6 +42,10 @@ new_sqlite_classes = ["DeviceDO", "RegistryDO"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["CodingSandbox"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["FilesDO"]
 
 # Coding sandbox container: the dev image the cloud device's shell/fs/jobs
 # tools exec into. Built from ./Dockerfile (needs a local Docker daemon or
@@ -85,6 +97,12 @@ PING_INTERVAL_MS = "30000"
 PING_MAX_MISSES = "2"
 IDLE_TIMEOUT_MS = "120000"
 ENVIRONMENT = "production"
+# Temporary file limits (src/files-do.ts). Defaults shown; raise deliberately.
+FILES_MAX_UPLOAD_BYTES = "209715200" # 200 MiB per file
+FILES_MAX_EXPIRY_MS = "604800000" # 7 days
+FILES_MAX_PER_DEVICE = "5"
+FILES_MAX_TOTAL_BYTES = "524288000" # 500 MiB per device
+
 # Virtual devices: comma-separated deviceIds handled in-process (no tunnel).
 # Each id must also have a token in the VIRTUAL_DEVICE_TOKENS secret.
 VIRTUAL_DEVICE_IDS = "cloud"

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev --local",
     "deploy": "wrangler deploy",
-    "test": "bun test test/*.test.ts && bun test/run-smoke.ts",
+    "test": "bun test test/*.test.ts && bun test/run-smoke.ts && bun test/files.ts",
+    "test:files": "bun test/files.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

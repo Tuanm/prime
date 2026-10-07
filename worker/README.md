@@ -148,6 +148,12 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `POST` | `/mcp/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
 | `GET` | `/sse/{deviceId}` | gateway + device | Open a `text/event-stream`; first `endpoint` event tells the client the `/messages` POST URL (`/sse?deviceId=` legacy alias) |
 | `POST` | `/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
+| `POST` | `/api/files?name=&expiry_days=&key=` | device basic | Upload a temporary file (raw body, streamed into R2) |
+| `GET` | `/api/files` | device basic | List this device's files + usage |
+| `GET` | `/api/files/{id}` | device basic, or `?key=` for a protected file | Download (supports `Range`) |
+| `DELETE` | `/api/files/{id}` | device basic | Delete a file immediately |
+| `GET` | `/files` | device basic | File management page |
+| `GET` | `/files/{id}` | protected files need `?key=` | File download page |
 | `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 
@@ -156,14 +162,68 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 > `GET /devices` uses the admin token instead, so scripts can query it
 > without an Access session.
 
-## Local development
+## Temporary files
+
+Upload a file, share the link, let it expire. Contents live in an **R2** bucket
+(`BUCKET`, bucket `code-mcp-files`); metadata and quotas live in a
+per-device `FilesDO`; a global index in `RegistryDO` maps a file id back
+to its owner, so a download URL needs only the id.
+
+Auth is **HTTP Basic with the device's own credential** - the same
+`deviceId`/`token` pair registered at `/admin`. There is no second
+secret. The browser replays those credentials automatically on same-origin
+fetches, which is why the pages need no token handling of their own.
 
 ```bash
-cd worker
-npm run dev          # wrangler dev --local (miniflare/workerd on :8787)
-npm test             # 21 smoke scenarios on local wrangler instances
-npm run typecheck    # tsc --noEmit
+BASE=https://code-mcp.tuanm.workers.dev
+
+# upload (streamed; 201 returns the id and URLs)
+curl -u demo:demo --data-binary @report.pdf \
+  "$BASE/api/files?name=report.pdf&expiry_days=7"
+
+# a protected file: downloads then need ?key=
+curl -u demo:demo --data-binary @secret.pdf \
+  "$BASE/api/files?name=secret.pdf&expiry_days=1&key=hunter2"
+
+curl -u demo:demo "$BASE/api/files"                    # list + usage
+curl -u demo:demo -o out.pdf "$BASE/api/files/<id>"    # download
+curl -u demo:demo -X DELETE "$BASE/api/files/<id>"     # delete
+
+open "$BASE/files"                                     # management page
 ```
+
+`POST` accepts the raw bytes, not multipart, so the body streams straight
+into R2 without being buffered - the isolate only has 128 MB of memory, so
+buffering a 200 MiB upload is not possible. A body with a known
+`Content-Length` is piped directly; a chunked body (no length) goes through
+an R2 multipart upload, one 5 MiB part at a time. Both paths enforce the cap.
+
+Downloads support `Range` (206 with `Content-Range`), so a large file can
+resume.
+
+| Limit | Default | Var |
+| --- | --- | --- |
+| Per file | 200 MiB | `FILES_MAX_UPLOAD_BYTES` |
+| Lifetime | 7 days | `FILES_MAX_EXPIRY_MS` |
+| Files per device | 5 | `FILES_MAX_PER_DEVICE` |
+| Bytes per device | 500 MiB | `FILES_MAX_TOTAL_BYTES` |
+
+The byte cap counts **expired-but-undeleted** files too, as specified. Expiry is
+enforced twice: lazily on every list and read, and by a `FilesDO` alarm that
+wakes at the earliest deadline. An expired file is deleted from R2 and from the
+metadata, so it is neither listed nor stored. A reservation that never finishes
+uploading (the grey dot in the UI) is reaped after an hour, so a failed upload
+cannot hold a slot forever.
+
+The five-file cap counts live files only, so expiry frees a slot as soon as the
+file is reaped.
+
+> **Files need R2.** Enable R2 on the account and create the bucket once:
+> `wrangler r2 bucket create code-mcp-files`. Without the `BUCKET`
+> binding, `/api/files` answers `503 file storage is not configured` and
+> every other route is unaffected.
+
+## Local development
 
 Smoke coverage: gateway/device auth, duplicate-registration rejection, register-message takeover blocking, end-to-end JSON-RPC relay, cross-device response blocking, request timeout, body cap, pending budget, origin whitelist, keepalive ack, invalid deviceId, `/devices` listing + hidden-without-admin, per-device unknown-id 401, relay-token forwarding, long-call relay.
 

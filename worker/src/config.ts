@@ -1,6 +1,36 @@
 // Cloudflare Worker configuration, read from env vars (wrangler secrets/vars).
 // Mirrors the tunables of the Bun gateway so the two are operationally equivalent.
 
+export interface FileLimits {
+  maxUploadBytes: number; // per file
+  maxExpiryMs: number; // longest lifetime
+  maxPerDevice: number; // how many files one device may hold
+  maxTotalBytes: number; // per-device bytes, counting expired-but-undeleted
+}
+
+export const FILE_LIMIT_DEFAULTS: FileLimits = {
+  maxUploadBytes: 200 * 1024 * 1024, // 200 MiB
+  maxExpiryMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+  maxPerDevice: 5,
+  maxTotalBytes: 500 * 1024 * 1024, // 500 MiB
+};
+
+export function fileLimits(env: Env): FileLimits {
+  return {
+    maxUploadBytes: num(env, "FILES_MAX_UPLOAD_BYTES", FILE_LIMIT_DEFAULTS.maxUploadBytes),
+    maxExpiryMs: num(env, "FILES_MAX_EXPIRY_MS", FILE_LIMIT_DEFAULTS.maxExpiryMs),
+    maxPerDevice: num(env, "FILES_MAX_PER_DEVICE", FILE_LIMIT_DEFAULTS.maxPerDevice),
+    maxTotalBytes: num(env, "FILES_MAX_TOTAL_BYTES", FILE_LIMIT_DEFAULTS.maxTotalBytes),
+  };
+}
+
+/** A file id: 32 lowercase hex chars - the same shape as a download ticket. */
+export const FILE_ID_RE = /^[a-f0-9]{32}$/;
+
+export function validFileId(id: string): boolean {
+  return FILE_ID_RE.test(id);
+}
+
 export interface GatewayConfig {
   gatewayToken?: string; // client -> gateway auth for /mcp/*
   deviceToken?: string; // shared device -> gateway auth at WS connect (fallback)
@@ -50,10 +80,19 @@ export interface Env {
   // Optional Cloud-service bindings for the cloud device tools.
   DB?: D1Database;
   KV?: KVNamespace;
+  // Temporary file storage limits (see src/files-do.ts).
+  FILES_MAX_UPLOAD_BYTES?: string; // per-file upload cap (default 200 MiB)
+  FILES_MAX_EXPIRY_MS?: string; // longest lifetime (default 7 days)
+  FILES_MAX_PER_DEVICE?: string; // files a device may hold at once (default 5)
+  FILES_MAX_TOTAL_BYTES?: string; // per-device bytes, expired-but-undeleted included (default 500 MiB)
   // The coding sandbox container (CodingSandbox DO) - shell/fs/jobs tools.
   CODING_SANDBOX: DurableObjectNamespace;
   DEVICES: DurableObjectNamespace;
   REGISTRY: DurableObjectNamespace;
+  FILES: DurableObjectNamespace;
+  // Object storage for file contents. Optional at the type level so the worker
+  // can still be deployed - and /api/files answer 503 - before R2 is enabled.
+  BUCKET?: R2Bucket;
 }
 
 function num(env: Env, key: string, def: number): number {
