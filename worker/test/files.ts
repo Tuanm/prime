@@ -171,14 +171,44 @@ async function main(): Promise<void> {
   check("malformed id -> 400", (await fetch(`${BASE}/api/files/nope`, { headers: DEMO })).status === 400);
   check("chunked content round-trips", (await (await fetch(`${BASE}/api/files/${chunkedId}`, { headers: DEMO })).arrayBuffer()).byteLength === 100);
 
-  // ---- protected files ----
+  // ---- protected files: the key travels in a header, never in the URL ----
   const protectedUpload = await upload(small, "name=secret.txt&expiry_days=0.00005&key=sesame");
   const secretId: string = protectedUpload.body.file?.id;
   check("protected upload -> 201", protectedUpload.status === 201);
+  check(
+    "the API download url carries no key",
+    !String(protectedUpload.body.file?.download_url ?? "").includes("sesame"),
+    String(protectedUpload.body.file?.download_url),
+  );
   check("no key -> 401", (await fetch(`${BASE}/api/files/${secretId}`)).status === 401);
-  check("wrong key -> 401", (await fetch(`${BASE}/api/files/${secretId}?key=nope`)).status === 401);
-  check("right key -> 200", (await fetch(`${BASE}/api/files/${secretId}?key=sesame`)).status === 200);
+  check(
+    "a query-string key is NOT accepted by the API",
+    (await fetch(`${BASE}/api/files/${secretId}?key=sesame`)).status === 401,
+  );
+  check(
+    "wrong header key -> 401",
+    (await fetch(`${BASE}/api/files/${secretId}`, { headers: { "X-File-Key": "nope" } })).status === 401,
+  );
+  check(
+    "right header key -> 200",
+    (await fetch(`${BASE}/api/files/${secretId}`, { headers: { "x-file-key": "sesame" } })).status === 200,
+  );
+  check("the 401 explains the header", (await (await fetch(`${BASE}/api/files/${secretId}`)).text()).includes("X-File-Key"));
   check("owner bypasses the key", (await fetch(`${BASE}/api/files/${secretId}`, { headers: DEMO })).status === 200);
+
+  // The page still accepts ?key= (a browser navigation cannot set a header) and
+  // then hands it to the API as a header instead of putting it back in a URL.
+  const lockedPage = await fetch(`${BASE}/files/${secretId}`);
+  const lockedHtml = await lockedPage.text();
+  check("locked page renders -> 200", lockedPage.status === 200);
+  checkIncludes("locked page asks for the key", lockedHtml, 'id="keyForm"');
+  check("locked page does not leak the key", !lockedHtml.includes("sesame"));
+  const unlockedPage = await fetch(`${BASE}/files/${secretId}?key=sesame`);
+  const unlockedHtml = await unlockedPage.text();
+  checkIncludes("unlocked page offers a download control", unlockedHtml, 'id="dlBtn"');
+  checkIncludes("unlocked page sends the key as a header", unlockedHtml, "X-File-Key");
+  const wrongPage = await fetch(`${BASE}/files/${secretId}?key=nope`);
+  checkIncludes("wrong page key re-prompts", await wrongPage.text(), 'id="keyForm"');
 
   // ---- device isolation ----
   check("another device sees none of these files", (await listIds(OTHER)).length === 0);
@@ -199,9 +229,18 @@ async function main(): Promise<void> {
   check("GET /files/{id} -> 200", downloadPage.status === 200);
   checkIncludes("download page shows the name", downloadHtml, "hello.txt");
   checkIncludes("download page links the bytes", downloadHtml, `/api/files/${helloId}`);
+  checkIncludes("pages carry a no-referrer policy", page.headers.get("referrer-policy") ?? "", "no-referrer");
+  checkIncludes("downloads are sniff-proof", download.headers.get("x-content-type-options") ?? "", "nosniff");
+  checkIncludes("pages are sniff-proof", page.headers.get("x-content-type-options") ?? "", "nosniff");
   check("unknown page -> 404", (await fetch(`${BASE}/files/${"0".repeat(32)}`)).status === 404);
 
   // ---- delete ----
+  // helloId has been downloaded several times by now, so the worker's owner
+  // cache holds it: deletion must still win over that cache.
+  check(
+    "repeat downloads still resolve after caching",
+    (await fetch(`${BASE}/api/files/${helloId}`, { headers: DEMO })).status === 200,
+  );
   check("delete -> 200", (await fetch(`${BASE}/api/files/${helloId}`, { method: "DELETE", headers: DEMO })).status === 200);
   check("deleted file -> 404", (await fetch(`${BASE}/api/files/${helloId}`, { headers: DEMO })).status === 404);
   check("deleted page -> 404", (await fetch(`${BASE}/files/${helloId}`)).status === 404);

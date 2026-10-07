@@ -65,6 +65,29 @@ export interface DeviceAuth {
   deviceId: string;
 }
 
+// The registry is a Durable Object, so resolving the device map costs a
+// round trip. File requests are chatty (a page load plus one request per
+// action), so cache it briefly per isolate - the same 2s TTL the MCP relay uses.
+let mapCache: { at: number; map: Map<string, string> } | null = null;
+const MAP_CACHE_TTL_MS = 2_000;
+
+async function deviceMap(env: Env): Promise<Map<string, string>> {
+  if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.map;
+  const map = new Map<string, string>();
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    const response = await reg.fetch("https://registry/map");
+    if (response.ok) {
+      const body = (await response.json()) as { map?: Record<string, string> };
+      for (const [id, token] of Object.entries(body.map ?? {})) {
+        if (typeof token === "string" && token.length > 0) map.set(id, token);
+      }
+    }
+  } catch {}
+  mapCache = { at: Date.now(), map };
+  return map;
+}
+
 /**
  * Authenticate a request as a registered device.
  *
@@ -82,15 +105,7 @@ export async function authorizeDevice(env: Env, request: Request): Promise<Devic
   if (!validDeviceId(deviceId)) return unauthorized();
   if (!token) return unauthorized();
 
-  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  let expected: string | undefined;
-  try {
-    const response = await reg.fetch("https://registry/map");
-    if (response.ok) {
-      const body = (await response.json()) as { map?: Record<string, string> };
-      expected = body.map?.[deviceId];
-    }
-  } catch {}
+  const expected = (await deviceMap(env)).get(deviceId);
   // No registry entry means the device is not registered via /admin: refuse
   // rather than falling back to any shared token, so file access always
   // requires a real per-device credential.
@@ -144,9 +159,21 @@ export function parseExpiry(
   return now + lifetime;
 }
 
+/**
+ * Header that carries a protected file's key on `GET /api/files/{id}`.
+ *
+ * Deliberately a header and not a query parameter: a URL lands in access logs,
+ * browser history, and `Referer` headers, so a secret in one is a secret
+ * disclosed. The human-facing page still accepts `?key=` because a browser
+ * navigation cannot set a request header - and it then replays the key to the
+ * API as this header rather than putting it back in a URL.
+ */
+export const FILE_KEY_HEADER = "X-File-Key";
+
 function fileView(record: FileRecord, origin: string): FileView {
   const downloadPath = `/api/files/${record.id}`;
-  const query = record.key ? `?key=${encodeURIComponent(record.key)}` : "";
+  // The page link is the shareable, human-facing one, so it can carry the key.
+  const pageQuery = record.key ? `?key=${encodeURIComponent(record.key)}` : "";
   return {
     id: record.id,
     name: record.name,
@@ -157,9 +184,10 @@ function fileView(record: FileRecord, origin: string): FileView {
     expires_in_ms: Math.max(0, record.expiresAt - Date.now()),
     status: record.status,
     protected: Boolean(record.key),
-    ...(record.key ? { key: record.key } : {}),
-    download_url: `${origin}${downloadPath}${query}`,
-    page_url: `${origin}/files/${record.id}${query}`,
+    ...(record.key ? { key: record.key, key_header: FILE_KEY_HEADER } : {}),
+    // No key in the API URL - send it as the FILE_KEY_HEADER instead.
+    download_url: `${origin}${downloadPath}`,
+    page_url: `${origin}/files/${record.id}${pageQuery}`,
   };
 }
 
@@ -452,23 +480,33 @@ async function downloadFile(
   if (record.status !== "ready") return asPage ? notFoundPage() : jsonError(409, "upload not complete");
   if (Date.now() >= record.expiresAt) return asPage ? notFoundPage() : jsonError(410, "file expired");
 
-  // A protected file needs its key, unless the owner asks with device auth.
-  if (record.key) {
-    const provided = url.searchParams.get("key") ?? "";
-    const owner = await authorizeDevice(env, request);
-    const ownerOk = !(owner instanceof Response) && owner.deviceId === record.deviceId;
-    if (!ownerOk && !timingSafeEq(provided, record.key)) {
-      return asPage ? unauthorized("Protected file") : unauthorized("Protected file");
-    }
-  }
+  const owner = await authorizeDevice(env, request);
+  const ownerOk = !(owner instanceof Response) && owner.deviceId === record.deviceId;
+  const headerKey = request.headers.get(FILE_KEY_HEADER.toLowerCase()) ?? "";
 
   if (asPage) {
+    // A browser navigation cannot set a header, so the page takes the key from
+    // its own URL and hands it to the download control, which does use the
+    // header. A missing or wrong key renders a prompt rather than an error.
+    const pageKey = url.searchParams.get("key") ?? "";
+    const authorised = !record.key || ownerOk || timingSafeEq(pageKey, record.key);
     return html(
       renderDownloadPage({
         file: fileView(record, origin),
-        key: url.searchParams.get("key") ?? undefined,
+        key: record.key ? (ownerOk || !pageKey ? undefined : pageKey) : undefined,
+        protectedFile: Boolean(record.key),
+        authorised,
+        wrongKey: Boolean(record.key) && Boolean(pageKey) && !authorised,
       }),
     );
+  }
+
+  // The REST API accepts the key ONLY as a header, never from the query string.
+  if (record.key && !ownerOk && !timingSafeEq(headerKey, record.key)) {
+    return new Response(JSON.stringify({ error: "unauthorized", hint: `send the file key in the ${FILE_KEY_HEADER} header` }), {
+      status: 401,
+      headers: { "content-type": "application/json; charset=utf-8", ...NO_STORE },
+    });
   }
 
   // Only ask R2 for a range when the client sent one: R2 (and miniflare) report
@@ -483,6 +521,10 @@ async function downloadFile(
   const headers = new Headers();
   headers.set("content-type", record.contentType || "application/octet-stream");
   headers.set("cache-control", "private, no-store");
+  // An uploaded file is attacker-supplied bytes: never let a browser sniff it
+  // into something renderable, and never leak the page URL onward.
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("referrer-policy", "no-referrer");
   headers.set(
     "content-disposition",
     `attachment; filename="${record.name.replace(/[\r\n"\\]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(record.name)}`,
@@ -507,13 +549,44 @@ async function downloadFile(
  * DO, so the global registry keeps an id -> device index. The index entry expires
  * with its file, so a stale id resolves to nothing instead of lingering.
  */
+// A file's owner never changes, so the id -> device hop is cacheable. This
+// matters for resumed downloads, which issue one request per Range, and it
+// halves the Durable Object round trips per download (index + device).
+const ownerCache = new Map<string, { deviceId: string; at: number }>();
+const OWNER_CACHE_TTL_MS = 60_000;
+const OWNER_CACHE_MAX = 500;
+
+function rememberOwner(id: string, deviceId: string, now: number): void {
+  for (const [key, entry] of ownerCache) {
+    if (now - entry.at > OWNER_CACHE_TTL_MS) ownerCache.delete(key);
+  }
+  // Bounded: ids come from URLs, so an unbounded map would be a memory leak.
+  while (ownerCache.size >= OWNER_CACHE_MAX) {
+    const oldest = ownerCache.keys().next().value;
+    if (oldest === undefined) break;
+    ownerCache.delete(oldest);
+  }
+  ownerCache.set(id, { deviceId, at: now });
+}
+
 async function lookupRecord(env: Env, id: string): Promise<{ record: FileRecord } | null> {
-  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  const found = await doJson(reg, `/file-lookup?id=${encodeURIComponent(id)}`);
-  if (found.status !== 200 || !found.body.deviceId) return null;
-  const stub = filesStub(env, found.body.deviceId as string);
+  const now = Date.now();
+  let deviceId = ownerCache.get(id)?.deviceId;
+  if (deviceId === undefined) {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    const found = await doJson(reg, `/file-lookup?id=${encodeURIComponent(id)}`);
+    if (found.status !== 200 || !found.body.deviceId) return null;
+    deviceId = String(found.body.deviceId);
+    rememberOwner(id, deviceId, now);
+  }
+
+  const stub = filesStub(env, deviceId);
   const record = await doJson(stub, `/get?id=${encodeURIComponent(id)}`);
-  if (record.status !== 200) return null;
+  if (record.status !== 200) {
+    // Deleted or expired: forget the owner so a later lookup asks again.
+    ownerCache.delete(id);
+    return null;
+  }
   return { record: record.body.file as FileRecord };
 }
 
@@ -544,7 +617,13 @@ async function unindexFile(env: Env, id: string): Promise<void> {
 
 function html(body: string): Response {
   return new Response(body, {
-    headers: { "content-type": "text/html; charset=utf-8", ...NO_STORE },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      // The page URL can carry ?key=..., so it must not travel as a Referer.
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      ...NO_STORE,
+    },
   });
 }
 

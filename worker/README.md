@@ -150,10 +150,10 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `POST` | `/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
 | `POST` | `/api/files?name=&expiry_days=&key=` | device basic | Upload a temporary file (raw body, streamed into R2) |
 | `GET` | `/api/files` | device basic | List this device's files + usage |
-| `GET` | `/api/files/{id}` | device basic, or `?key=` for a protected file | Download (supports `Range`) |
+| `GET` | `/api/files/{id}` | device basic, or the `X-File-Key` header for a protected file | Download (supports `Range`) |
 | `DELETE` | `/api/files/{id}` | device basic | Delete a file immediately |
 | `GET` | `/files` | device basic | File management page |
-| `GET` | `/files/{id}` | protected files need `?key=` | File download page |
+| `GET` | `/files/{id}` | `?key=` unlocks a protected file in the page | File download page |
 | `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 
@@ -181,9 +181,11 @@ BASE=https://code-mcp.tuanm.workers.dev
 curl -u demo:demo --data-binary @report.pdf \
   "$BASE/api/files?name=report.pdf&expiry_days=7"
 
-# a protected file: downloads then need ?key=
+# a protected file: downloads then need the key as a REQUEST HEADER
 curl -u demo:demo --data-binary @secret.pdf \
   "$BASE/api/files?name=secret.pdf&expiry_days=1&key=hunter2"
+
+curl -H 'X-File-Key: hunter2' -o out.pdf "$BASE/api/files/<id>"
 
 curl -u demo:demo "$BASE/api/files"                    # list + usage
 curl -u demo:demo -o out.pdf "$BASE/api/files/<id>"    # download
@@ -200,6 +202,27 @@ an R2 multipart upload, one 5 MiB part at a time. Both paths enforce the cap.
 
 Downloads support `Range` (206 with `Content-Range`), so a large file can
 resume.
+
+### Why the key is a request header
+
+A protection key in a query string is a secret written to every access log, to
+the browser history, and to whatever the page sends as a `Referer`. So the API
+takes it **only** as the `X-File-Key` request header and ignores `?key=`
+entirely - a request that puts the key in the URL is rejected exactly as if no
+key had been sent.
+
+The human-facing page cannot set a header (a browser navigation sets none), so
+`/files/{id}?key=...` is still accepted as a shareable link. It never puts the
+key back into a URL: the page hands it to its download control, which sends
+`X-File-Key` and saves the result from a blob. Opening the page without a key
+shows a prompt instead of a download button, and the key typed there goes
+straight into the header.
+
+To support that, every page and download response carries
+`Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`: an uploaded
+file is attacker-supplied bytes and must never be sniffed into something
+renderable, and a page URL that may contain a key must never travel onward as a
+referrer.
 
 | Limit | Default | Var |
 | --- | --- | --- |

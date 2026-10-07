@@ -119,6 +119,9 @@ function head(title: string): string {
     "  <head>",
     '    <meta charset="utf-8" />',
     '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+    // The download page URL can carry ?key=..., so stop it leaking through the
+    // Referer header to the fonts CDN (or anywhere else).
+    '    <meta name="referrer" content="no-referrer" />',
     "    <title>" + esc(title) + "</title>",
     '    <link rel="icon" href="' + FAVICON + '" />',
     '    <link rel="preconnect" href="https://fonts.googleapis.com" />',
@@ -204,14 +207,14 @@ function browserScript(): string {
     "        function render() {",
     "          listEl.innerHTML = '';",
     "          files.forEach(function (f) {",
-    "            var saved = f.download_url;",
+  
     "            listEl.appendChild(row(",
     "              dotClass(f), f.name,",
     "              { text: f.status === 'ready' ? human(f.expires_in_ms) : 'not uploaded', soon: f.status === 'ready' && f.expires_in_ms <= 3 * 86400000 },",
     "              f.protected ? f.key : '-',",
     "              [",
-    "                { label: 'Save', run: function () { window.location = saved; } },",
-    "                { label: 'Copy link', run: function () { copy(f.download_url); } },",
+    "                { label: 'Save', run: function () { saveFile(f); } },",
+    "                { label: 'Copy link', run: function () { copy(f.page_url); } },",
     "                { label: 'Delete', danger: true, run: function () { remove(f.id); } }",
     "              ]",
     "            ));",
@@ -240,19 +243,52 @@ function browserScript(): string {
     "          if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB';",
     "          return n + ' B';",
     "        }",
+    // Protected files carry their key in a request header, never in the URL, so
+    // they are fetched and saved as a blob; unprotected ones can just navigate
+    // and let the browser stream them.
+    "        function saveFile(f) {",
+    "          if (!f.protected) { window.location = f.download_url; return; }",
+    "          setStatus('downloading ' + f.name + ' ...');",
+    "          fetch(f.download_url, { headers: { 'X-File-Key': f.key } })",
+    "            .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })",
+    "            .then(function (b) {",
+    "              var u = URL.createObjectURL(b);",
+    "              var a = document.createElement('a'); a.href = u; a.download = f.name;",
+    "              document.body.appendChild(a); a.click(); a.remove();",
+    "              setTimeout(function () { URL.revokeObjectURL(u); }, 10000);",
+    "              setStatus('saved ' + f.name);",
+    "            })",
+    "            .catch(function (e) { setStatus('download failed: ' + e.message, true); });",
+    "        }",
     "        function copy(text) {",
     "          if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { setStatus('link copied'); }, function () { setStatus(text); });",
     "          else setStatus(text);",
     "        }",
+    // XHR rather than fetch so a large upload can report progress; the browser
+    // also sets Content-Length for a File body, which keeps the upload on the
+    // streamed (non-multipart) path.
     "        function send(q) {",
     "          var o = opts();",
     "          var url = '/api/files?name=' + encodeURIComponent(q.file.name) + '&expiry_days=' + encodeURIComponent(o.days);",
     "          if (o.key) url += '&key=' + encodeURIComponent(o.key);",
+    "          var xhr = new XMLHttpRequest();",
+    "          xhr.open('POST', url);",
+    "          xhr.setRequestHeader('content-type', q.file.type || 'application/octet-stream');",
+    "          xhr.upload.onprogress = function (e) {",
+    "            if (e.lengthComputable) setStatus('uploading ' + q.file.name + ' - ' + Math.round((e.loaded / e.total) * 100) + '% of ' + fmtBytes(e.total));",
+    "          };",
+    "          xhr.onload = function () {",
+    "            var j = {};",
+    "            try { j = JSON.parse(xhr.responseText); } catch (err) {}",
+    "            if (xhr.status !== 201) { setStatus('upload failed: ' + (j.error || ('HTTP ' + xhr.status)), true); return; }",
+    "            queued.splice(queued.indexOf(q), 1);",
+    "            files.unshift(j.file);",
+    "            setStatus('uploaded ' + j.file.name);",
+    "            render(); refresh();",
+    "          };",
+    "          xhr.onerror = function () { setStatus('upload failed', true); };",
     "          setStatus('uploading ' + q.file.name + ' ...');",
-    "          fetch(url, { method: 'POST', body: q.file, headers: { 'content-type': q.file.type || 'application/octet-stream' } })",
-    "            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status)); return j; }); })",
-    "            .then(function (j) { queued.splice(queued.indexOf(q), 1); files.unshift(j.file); setStatus('uploaded ' + j.file.name); render(); refresh(); })",
-    "            .catch(function (e) { setStatus('upload failed: ' + e.message, true); });",
+    "          xhr.send(q.file);",
     "        }",
     "        function remove(id) {",
     "          if (!confirm('Delete this file permanently?')) return;",
@@ -347,16 +383,54 @@ export function renderFilesPage(input: {
   return head("Prime - Files") + "\n" + body;
 }
 
-/** GET /files/{id} - the download page. `file` is null when unknown/expired. */
-export function renderDownloadPage(input: { file: FileView | null; key?: string }): string {
+/**
+ * GET /files/{id} - the download page.
+ *
+ * Three states: unknown/expired, protected-but-locked (prompt for the key), and
+ * ready. The download itself always goes through the API with the key in a
+ * request header, so typing it into the prompt never puts it in a URL.
+ */
+export function renderDownloadPage(input: {
+  file: FileView | null;
+  key?: string;
+  protectedFile?: boolean;
+  authorised?: boolean;
+  wrongKey?: boolean;
+}): string {
   const file = input.file;
+  const locked = Boolean(file && input.protectedFile && !input.authorised);
+  const scripts: string[] = [];
   const rows: string[] = [];
+
   if (!file) {
     rows.push('    <div class="empty">This file is not available. It may have expired or been deleted.</div>');
   } else {
     const soon = file.expires_in_ms <= 3 * 86400000;
     const dot = file.status !== "ready" ? "dot pending" : soon ? "dot off" : "dot on";
-    const href = "/api/files/" + esc(file.id) + (input.key ? "?key=" + encodeURIComponent(input.key) : "");
+
+    let control: string;
+    if (locked) {
+      // No key known: ask for it. The submission downloads with a header, so the
+      // key never reaches the address bar, history or a Referer.
+      scripts.push("      window.__DL__ = " + safeJson({ id: file.id, name: file.name, key: "" }) + ";");
+      control =
+        '<form class="opts" id="keyForm" style="margin:0">' +
+        '<input id="k" type="password" placeholder="protection key" autocomplete="off" autofocus />' +
+        '<button class="plus" type="submit" title="Unlock">&#8594;</button>' +
+        "</form>";
+    } else if (file.protected) {
+      // Authorised: hand the key to the page script, which sends it as a header.
+      control = '<button class="dl" id="dlBtn" type="button" title="Download">' + DOWNLOAD_ICON + "</button>";
+      scripts.push(
+        "      window.__DL__ = " +
+          safeJson({ id: file.id, name: file.name, key: input.key ?? file.key ?? "" }) +
+          ";",
+      );
+    } else {
+      // Unprotected: a plain link, so the browser streams it natively.
+      control = '<a class="dl" href="/api/files/' + esc(file.id) + '" title="Download" download>' + DOWNLOAD_ICON + "</a>";
+    }
+
     rows.push('    <ul id="list">');
     rows.push('      <li class="row">');
     rows.push('        <span class="' + dot + '"></span>');
@@ -364,9 +438,9 @@ export function renderDownloadPage(input: { file: FileView | null; key?: string 
     rows.push('          <div class="cols">');
     rows.push('            <div class="fname">' + esc(file.name) + "</div>");
     rows.push('            <div class="fexp' + (soon ? " soon" : "") + '">' + esc(expiryLabel(file)) + "</div>");
-    rows.push('            <div class="fkey">' + esc(file.protected ? file.key : "-") + "</div>");
+    rows.push('            <div class="fkey">' + esc(file.protected ? "(protected)" : "-") + "</div>");
     rows.push("          </div>");
-    rows.push('          <a class="dl" href="' + href + '" title="Download" download>' + DOWNLOAD_ICON + "</a>");
+    rows.push("          " + control);
     rows.push("        </div>");
     rows.push("      </li>");
     rows.push("    </ul>");
@@ -379,6 +453,12 @@ export function renderDownloadPage(input: { file: FileView | null; key?: string 
         esc(new Date(file.expires_at).toUTCString()) +
         "</div>",
     );
+    rows.push('    <div class="status" id="status">' + (locked ? "This file is protected. Enter its key to download." : "") + "</div>");
+  }
+
+  if (file && (locked || input.protectedFile)) {
+    scripts.push("      window.__PROTECTED__ = " + (locked ? "true" : "false") + ";");
+    scripts.push("      window.__WRONG__ = " + (input.wrongKey ? "true" : "false") + ";");
   }
 
   const body = [
@@ -387,10 +467,58 @@ export function renderDownloadPage(input: { file: FileView | null; key?: string 
     '    <div class="sub">file download' + (file ? " &middot; " + esc(deviceLabel(file)) : "") + "</div>",
     '    <div class="row-head"><h2>Files</h2></div>',
     ...rows,
+    "    <script>",
+    ...scripts,
+    "    </script>",
+    "    <script>",
+    downloadScript(),
+    "    </script>",
     "  </body>",
     "</html>",
   ].join("\n");
   return head(file ? "Download " + file.name : "File not available") + "\n" + body;
+}
+
+/**
+ * Page script for the download page.
+ *
+ * Every protected download goes through fetch with the key in a request header
+ * and is saved from a blob. That keeps the secret out of the URL even when the
+ * visitor typed it into the prompt, and it is why the page needs its own control
+ * instead of a plain link.
+ */
+function downloadScript(): string {
+  return [
+    "      (function () {",
+    "        var statusEl = document.getElementById('status');",
+    "        function say(msg, isErr) { if (statusEl) { statusEl.textContent = msg; statusEl.style.color = isErr ? '#b91c1c' : '#666'; } }",
+    "        function save(id, name, key) {",
+    "          say('downloading ...');",
+    "          fetch('/api/files/' + id, { headers: { 'X-File-Key': key } })",
+    "            .then(function (r) { if (!r.ok) throw new Error(r.status === 401 ? 'wrong key' : ('HTTP ' + r.status)); return r.blob(); })",
+    "            .then(function (blob) {",
+    "              var url = URL.createObjectURL(blob);",
+    "              var a = document.createElement('a');",
+    "              a.href = url; a.download = name;",
+    "              document.body.appendChild(a); a.click(); a.remove();",
+    "              setTimeout(function () { URL.revokeObjectURL(url); }, 10000);",
+    "              say('saved ' + name);",
+    "            })",
+    "            .catch(function (e) { say('download failed: ' + e.message, true); });",
+    "        }",
+    "        var btn = document.getElementById('dlBtn');",
+    "        if (btn && window.__DL__) btn.addEventListener('click', function () { save(window.__DL__.id, window.__DL__.name, window.__DL__.key); });",
+    "        var form = document.getElementById('keyForm');",
+    "        if (form && window.__DL__) {",
+    "          if (window.__WRONG__) say('wrong key - try again', true);",
+    "          form.addEventListener('submit', function (ev) {",
+    "            ev.preventDefault();",
+    "            var key = document.getElementById('k').value;",
+    "            if (key) save(window.__DL__.id, window.__DL__.name, key);",
+    "          });",
+    "        }",
+    "      })();",
+  ].join("\n");
 }
 
 function deviceLabel(file: FileView): string {
