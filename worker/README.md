@@ -148,7 +148,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `POST` | `/mcp/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
 | `GET` | `/sse/{deviceId}` | gateway + device | Open a `text/event-stream`; first `endpoint` event tells the client the `/messages` POST URL (`/sse?deviceId=` legacy alias) |
 | `POST` | `/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
-| `POST` | `/api/files?name=&expiry_days=&key=` | device basic | Upload a temporary file (raw body, streamed into R2) |
+| `POST` | `/api/files?name=&expiry_days=` | device basic | Upload a temporary file (raw body, streamed into R2). Protect it at creation with an `X-File-Key` header (`?key=` also accepted; the header wins) |
 | `GET` | `/api/files` | device basic | List this device's files + usage |
 | `GET` | `/api/files/{id}` | device basic, or the `X-File-Key` header for a protected file | Download (supports `Range`) |
 | `PATCH` | `/api/files/{id}` | device basic | Set or clear a file's protection key (`{"key":"..."}`; empty clears it) |
@@ -182,9 +182,10 @@ BASE=https://code-mcp.tuanm.workers.dev
 curl -u demo:demo --data-binary @report.pdf \
   "$BASE/api/files?name=report.pdf&expiry_days=7"
 
-# a protected file: downloads then need the key as a REQUEST HEADER
-curl -u demo:demo --data-binary @secret.pdf \
-  "$BASE/api/files?name=secret.pdf&expiry_days=1&key=hunter2"
+# a protected file: set the key as a header so it never appears in a URL or an
+# access log; downloads then need it as a REQUEST HEADER too
+curl -u demo:demo -H 'X-File-Key: hunter2' --data-binary @secret.pdf \
+  "$BASE/api/files?name=secret.pdf&expiry_days=1"
 
 curl -H 'X-File-Key: hunter2' -o out.pdf "$BASE/api/files/<id>"
 

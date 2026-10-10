@@ -633,6 +633,27 @@ async function main(): Promise<void> {
       headers: { ...DEMO, range: `bytes=${PART}-4294967295` },
     });
     check("range across a part boundary -> 206", midRange.status === 206, String(midRange.status));
+
+    // ---- the protection key can be set at creation through a header ----
+    // One upload carrying both: the header must be the one that counts, so a
+    // client never has to put the secret in a URL.
+    const headerKeyed = await fetch(`${BIG_BASE}/api/files?name=header-key.txt&expiry_days=1&key=from-query`, {
+      method: "POST",
+      headers: { ...DEMO, "content-type": "text/plain", "x-file-key": "from-header" },
+      body: "header keyed",
+    });
+    const headerKeyedBody: any = await headerKeyed.json().catch(() => ({}));
+    const headerKeyedId: string = headerKeyedBody.file?.id;
+    check("an upload with an X-File-Key header -> 201", headerKeyed.status === 201, String(headerKeyed.status));
+    check("it is protected from the moment it exists", headerKeyedBody.file?.protected === true);
+    check(
+      "the header key unlocks it",
+      (await fetch(`${BIG_BASE}/api/files/${headerKeyedId}`, { headers: { "x-file-key": "from-header" } })).status === 200,
+    );
+    check(
+      "the header wins over a query key",
+      (await fetch(`${BIG_BASE}/api/files/${headerKeyedId}`, { headers: { "x-file-key": "from-query" } })).status === 401,
+    );
   } finally {
     stopBig();
   }

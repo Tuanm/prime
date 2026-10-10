@@ -371,7 +371,12 @@ async function uploadFile(
   const overBudget = await budgetAdmit(env, admitted, 1);
   if (overBudget) return overBudget;
 
-  const key = url.searchParams.get("key") ?? undefined;
+  // The protection key may arrive as the X-File-Key header, which is preferred: a
+  // query string is written to access logs. ?key= still works for existing
+  // clients. Setting it here, at creation, matters - protecting a file with a
+  // follow-up PATCH would leave a window in which it is publicly linkable.
+  const headerKey = request.headers.get(FILE_KEY_HEADER.toLowerCase());
+  const key = (headerKey !== null && headerKey !== "" ? headerKey : url.searchParams.get("key")) ?? undefined;
   const stub = filesStub(env, deviceId);
   const reserved = await doJson(stub, "/reserve", {
     method: "POST",
