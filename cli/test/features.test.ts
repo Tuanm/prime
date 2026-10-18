@@ -136,8 +136,14 @@ describe("bundled code-mcp", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const fromConfig = JSON.parse(own.stdout.toString().trim()) as { argv: string[] };
-    expect(fromConfig.argv).toEqual(["--port", "2222", "--token", "cfg-secret", "--enable-memory"]);
+    // On a machine where the code-mcp service is running, refusing is the
+    // specified behaviour (one code-mcp per machine) - that is the outcome then.
+    if (own.stdout.toString().trim() === "" && own.stderr.toString().includes("service is running")) {
+      expect(own.exitCode).toBe(2);
+    } else {
+      const fromConfig = JSON.parse(own.stdout.toString().trim()) as { argv: string[] };
+      expect(fromConfig.argv).toEqual(["--port", "2222", "--token", "cfg-secret", "--enable-memory"]);
+    }
   });
 
   test("selfCommand re-runs the script under bun", () => {
