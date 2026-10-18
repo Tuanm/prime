@@ -21,7 +21,7 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { renderUpdate, runUpdate } from "./update.ts";
+import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
@@ -244,6 +244,7 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 const argv = process.argv.slice(2);
+removeStaleWindowsBinary();
 initColor(argv.includes("--no-color") ? false : undefined);
 
 // Deliberately not top-level `await`: `bun build --compile --bytecode` (CommonJS
@@ -253,10 +254,23 @@ initColor(argv.includes("--no-color") ? false : undefined);
 // floating async IIFE keeps the same semantics - the pending request (or the
 // microtask chain itself) keeps the process alive, and `process.exitCode` set
 // in reportError is honoured on exit.
+let settled = false;
 void (async () => {
   try {
     await main(argv);
   } catch (err) {
     reportError(err, argv.includes("--json"));
+  } finally {
+    settled = true;
   }
 })();
+
+// If the event loop empties while a command is still awaiting something that
+// can never settle, Bun exits 0 with nothing printed - a silent "success" for a
+// command that never ran (seen with stdin on Windows). Make that loud instead.
+process.on("beforeExit", () => {
+  if (settled) return;
+  settled = true;
+  reportError(new Error("internal error: the command stopped before finishing (an input it was waiting for never arrived)"), argv.includes("--json"));
+  process.exitCode = 1;
+});

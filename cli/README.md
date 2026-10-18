@@ -37,7 +37,7 @@ installed as) plus one binary per platform:
 | `dist/mcp-darwin-arm64` | 59.4 MB | no |
 | `dist/mcp-darwin-x64` | 66.2 MB | no |
 | `dist/mcp-linux-x64` / `-linux-arm64` | 77.6 / 77.5 MB | no |
-| `dist/mcp-windows-x64.exe` | 82.1 MB | no |
+| `dist/mcp-windows-x64.exe` / `-windows-arm64.exe` | ~95 / ~84 MB | no |
 | `dist/mcp.js` | ~240 KB (includes code-mcp) | yes |
 
 The compiled binaries are large because `bun build --compile` embeds the
@@ -519,7 +519,7 @@ trustworthy.
 | Already newest | Reports "already up to date", changes nothing |
 | `--check` | Never writes, and works from a source checkout |
 | Not writable (e.g. `/usr/local/bin`) | Explains and suggests `sudo mcp update` or `--to <path>` |
-| Windows, binary in use | Stages `<path>.new` and prints the move command |
+| Windows, binary in use | Renames the running `.exe` to `<path>.old` (Windows allows a rename, not an overwrite), installs the new one in its place, and removes `.old` on the next run |
 | Source checkout (`.ts`) | Refuses, so your working tree is never overwritten |
 | `--to install/mcp.js` | Installs the JS bundle instead of a native binary |
 

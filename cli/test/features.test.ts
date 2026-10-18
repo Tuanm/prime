@@ -20,11 +20,14 @@ import {
   retryAfterMs,
 } from "../src/connect.ts";
 import { AggregateServer, TOOL_NAME_RE, isLoopback, namespaceTools, sanitizeName, type DeviceTool } from "../src/serve.ts";
-import { GATEWAY_TOKEN_ENV, codeMcpArgv, selfCommand } from "../src/code-mcp-host.ts";
+import { GATEWAY_TOKEN_ENV, PARENT_PID_ENV, codeMcpArgv, processAlive, selfCommand, watchParent } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
 import { GatewayClient } from "../src/client.ts";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not URL.pathname: on Windows the latter is "/D:/a/..." -
+// not a path any API accepts.
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ENTRY = join(ROOT, "src", "index.ts");
 
 // ---- bundled code-mcp ---------------------------------------------------------
@@ -77,6 +80,33 @@ describe("bundled code-mcp", () => {
     // An explicit flag (direct "mcp code-mcp" use) wins over the environment.
     expect(codeMcpArgv([...args, "--gateway-token", "mine"], { [GATEWAY_TOKEN_ENV]: "SECR3T" })).toEqual([...args, "--gateway-token", "mine"]);
     expect(codeMcpArgv([...args, "--gateway-token=mine"], { [GATEWAY_TOKEN_ENV]: "SECR3T" })).toEqual([...args, "--gateway-token=mine"]);
+  });
+
+  test("connect tells the child its parent, so an orphaned code-mcp stops", async () => {
+    const launch = codeMcpLaunch("https://gw.example", { deviceId: "anon-0123456789abcdef", token: "ABC123" }, 4321, []);
+    expect(launch.env[PARENT_PID_ENV]).toBe(String(process.pid));
+    expect(processAlive(process.pid)).toBe(true);
+
+    // A process that has exited: the watchdog must notice and stop.
+    const gone = Bun.spawn([process.execPath, "-e", "0"]);
+    await gone.exited;
+    expect(processAlive(gone.pid)).toBe(false);
+    let stopped = false;
+    const timer = watchParent(gone.pid, () => {
+      stopped = true;
+    });
+    await Bun.sleep(1_500);
+    clearInterval(timer);
+    expect(stopped).toBe(true);
+
+    // ...and a live parent keeps it running.
+    let wrongly = false;
+    const alive = watchParent(process.pid, () => {
+      wrongly = true;
+    });
+    await Bun.sleep(1_500);
+    clearInterval(alive);
+    expect(wrongly).toBe(false);
   });
 
   test("the injected token reaches code-mcp but not its environment", async () => {

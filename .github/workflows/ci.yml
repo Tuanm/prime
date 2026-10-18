@@ -80,3 +80,60 @@ jobs:
       - name: End-to-end tests
         working-directory: cli
         run: bun test/e2e.ts
+
+  # The same CLI suites on Windows, x64 and Arm: the release ships .exe builds
+  # for both, so they must actually run there - not just cross-compile.
+  cli-windows:
+    name: mcp CLI on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            node-arch: x64
+          # workerd (wrangler's local runtime, used by the end-to-end gateway)
+          # has no Windows Arm build, so Node runs as x64 under Windows'
+          # emulation there. Bun - and so the CLI under test - stays native Arm.
+          - os: windows-11-arm
+            node-arch: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.node-arch }}
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: cli
+        run: bun run typecheck
+
+      - name: Unit tests
+        working-directory: cli
+        run: bun test
+
+      - name: End-to-end tests
+        working-directory: cli
+        run: bun test/e2e.ts
+
+      # The release ships this platform's .exe from a cross-compile on Linux;
+      # build it natively too and make sure it starts and serves.
+      - name: Build and smoke-test the native binary
+        working-directory: cli
+        run: bun scripts/build.ts --host-only
