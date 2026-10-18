@@ -3,12 +3,20 @@
 //   bun scripts/build.ts              full cross-platform compile + JS bundle
 //   bun scripts/build.ts --host-only  just this machine's binary (fast, for tests)
 //   bun scripts/build.ts --bundle-only  just the portable JS bundle
+//   ... --no-sync                     do not refresh the bundled code-mcp first
+//
+// Every build first refreshes the vendored code-mcp device server
+// (src/code-mcp.ts, run by "mcp code-mcp" / "mcp connect") from the newest
+// upstream main via scripts/sync-code-mcp.ts. When no source is reachable
+// (offline, CI without network) the vendored copy is used as-is, after checking
+// it against src/code-mcp.source.json. CODE_MCP_SYNC=0 is the same as --no-sync.
 //
 // `bun build --compile` embeds the Bun runtime, so each artifact runs on a
 // machine with no Bun installed. Targets are listed explicitly because a
 // cross-compiled binary needs its own runtime downloaded once.
 
 import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { $ } from "bun";
 import { versionProblem as versionProblemFor } from "../src/version.ts";
 
@@ -53,6 +61,26 @@ if (versionProblem) {
 const DEFINE = `--define=process.env.MCP_CLI_VERSION="${VERSION}"`;
 console.log(`version ${VERSION}`);
 
+// ---- bundled code-mcp ------------------------------------------------------
+{
+  const noSync = args.has("--no-sync") || process.env.CODE_MCP_SYNC === "0";
+  const syncArgs = noSync ? ["--check"] : ["--allow-offline"];
+  const sync = Bun.spawnSync(["bun", `${ROOT}scripts/sync-code-mcp.ts`, ...syncArgs], { stdout: "inherit", stderr: "inherit" });
+  if (sync.exitCode !== 0) {
+    console.error("FAILED: the bundled code-mcp is unavailable or inconsistent (see above)");
+    process.exit(1);
+  }
+}
+
+/** The bundled code-mcp must be reachable in the artifact, not just in src/. */
+function codeMcpSmoke(command: string[]): string | undefined {
+  // Run from a directory without src/, so only the embedded copy can answer.
+  const smoke = Bun.spawnSync([...command, "code-mcp", "--help"], { cwd: tmpdir(), stdout: "pipe", stderr: "pipe" });
+  const out = smoke.stdout.toString();
+  if (smoke.exitCode === 0 && out.includes("--gateway-token")) return undefined;
+  return `exit=${smoke.exitCode} stdout=${JSON.stringify(out.slice(0, 120))} stderr=${smoke.stderr.toString().trim().slice(0, 200)}`;
+}
+
 mkdirSync(DIST, { recursive: true });
 
 // The JS bundle is the lightweight option: ~100 KB, needs Bun at runtime.
@@ -82,7 +110,12 @@ if (!args.has("--no-bundle")) {
     console.error(`FAILED bundle smoke test: exit=${smoke.exitCode} stdout=${JSON.stringify(printed)} stderr=${smoke.stderr.toString().trim().slice(0, 200)}`);
     process.exit(1);
   }
-  console.log(`bundle  ${out}  ${(statSync(out).size / 1024).toFixed(1)} KB  (runs: ${printed})`);
+  const codeMcp = codeMcpSmoke(["bun", out]);
+  if (codeMcp) {
+    console.error(`FAILED bundle code-mcp smoke test: ${codeMcp}`);
+    process.exit(1);
+  }
+  console.log(`bundle  ${out}  ${(statSync(out).size / 1024).toFixed(1)} KB  (runs: ${printed}; code-mcp bundled)`);
 }
 
 if (bundleOnly) process.exit(0);
@@ -95,7 +128,7 @@ if (selected.length === 0) {
   // Fall back to the compiler's own default target when the host pair is unusual.
   const out = `${DIST}/mcp`;
   rmSync(out, { force: true });
-  await $`bun build --compile --minify --bytecode ${DEFINE} --outfile ${out} ${ENTRY}`;
+  await $`bun build --compile --minify --bytecode --format=esm ${DEFINE} --outfile ${out} ${ENTRY}`;
   console.log(`compile ${out}  ${(statSync(out).size / 1024 / 1024).toFixed(1)} MB`);
   process.exit(0);
 }
@@ -104,14 +137,23 @@ for (const { target, out } of selected) {
   const path = `${DIST}/${out}`;
   rmSync(path, { force: true });
   try {
+    // --format=esm: the bundled code-mcp (src/code-mcp.ts) uses top-level
+    // await, which the default CommonJS bytecode output rejects; ESM bytecode
+    // accepts it and starts just as fast.
     // --bytecode precompiles the module graph, which measurably cuts cold
     // start (~30-40% on an M1). It requires the entry to be free of top-level
     // await; src/index.ts uses a floating async IIFE for exactly this reason.
-    await $`bun build --compile --minify --bytecode ${DEFINE} --target=${target} --outfile ${path} ${ENTRY}`.quiet();
+    await $`bun build --compile --minify --bytecode --format=esm ${DEFINE} --target=${target} --outfile ${path} ${ENTRY}`.quiet();
     console.log(`compile ${path}  ${(statSync(path).size / 1024 / 1024).toFixed(1)} MB  (${target})`);
     // Also expose the host build under its bare name, so a local run yields a
     // binary literally called `mcp` (the name it is installed as).
     if (target === hostTarget) {
+      const codeMcp = codeMcpSmoke([path]);
+      if (codeMcp) {
+        console.error(`FAILED ${target} code-mcp smoke test: ${codeMcp}`);
+        process.exitCode = 1;
+        continue;
+      }
       const bare = `${DIST}/mcp${process.platform === "win32" ? ".exe" : ""}`;
       copyFileSync(path, bare);
       chmodSync(bare, 0o755);

@@ -10,6 +10,8 @@ their MCP tools from a terminal or a script.
 - **Scriptable**: typed exit codes, JSON output, stdin batching.
 
 ```text
+mcp connect                                   # THIS machine as an anonymous device
+claude mcp add gateway -- mcp serve           # every device's tools in Claude Code
 mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
 mcp devices connect my-laptop                 # later: defaults already stored
 mcp devices list
@@ -36,12 +38,12 @@ installed as) plus one binary per platform:
 | `dist/mcp-darwin-x64` | 66.2 MB | no |
 | `dist/mcp-linux-x64` / `-linux-arm64` | 77.6 / 77.5 MB | no |
 | `dist/mcp-windows-x64.exe` | 82.1 MB | no |
-| `dist/mcp.js` | 32.5 KB | yes |
+| `dist/mcp.js` | ~240 KB (includes code-mcp) | yes |
 
 The compiled binaries are large because `bun build --compile` embeds the
 whole Bun runtime; that is the price of shipping one file that runs anywhere
 with no install step. If Bun (>= 1.2, for the built-in YAML parser) is already
-present, the 32 KB bundle is the leaner choice:
+present, the ~240 KB bundle (most of it the embedded code-mcp) is the leaner choice:
 
 ```bash
 install -m 755 dist/mcp.js ~/.local/bin/mcp
@@ -50,6 +52,8 @@ install -m 755 dist/mcp.js ~/.local/bin/mcp
 ## Commands
 
 ```text
+mcp connect [--gateway <url>] [--new] [--no-start] [-- <code-mcp flags>]
+mcp serve [<device-id>...] [--port <n> [--host <addr>]]
 mcp devices connect <device-id> [options]
 mcp devices disconnect <device-id>
 mcp devices status <device-id>
@@ -60,8 +64,13 @@ mcp tools call <device-id>.<tool-id> [<json>] [options]
 mcp tools call <device-id>.<tool-id> <json> <device-id>.<tool-id> <json> ...
 ... | mcp tools call
 mcp update [--check]
-mcp help [devices|tools]
+mcp help [connect|serve|devices|tools|code-mcp]
+mcp code-mcp [code-mcp flags]            # advanced: the bundled device server
 ```
+
+When no gateway is given or configured anywhere, every command uses the
+managed gateway `https://code-mcp.tuanm.workers.dev` (precedence: `--gateway` >
+`CODE_MCP_GATEWAY_URL` > device entry > `defaults.gateway` > that default).
 
 Aliases, as specified:
 
@@ -71,6 +80,96 @@ Aliases, as specified:
 
 Every subcommand supports `--help`, and global flags are available everywhere:
 `--json`, `--no-color`, `--config <path>`, `--verbose`, `--quiet`.
+
+### connect - this machine as an anonymous device
+
+```bash
+mcp connect                                # default gateway: code-mcp.tuanm.workers.dev
+mcp connect --gateway https://gw.example.dev
+mcp connect --new                          # force a fresh device
+mcp connect --no-start --json              # just print/save the credentials
+mcp connect -- --enable-memory             # extra flags for code-mcp
+```
+
+`mcp connect` asks the gateway for an anonymous device
+(`POST /api/devices/anonymous`), saves `{gateway, id, token}` in the config file
+(marked `anonymous: true`), prints the device id, the 6-character device code and
+the connect URL, and then runs the **bundled code-mcp** in the foreground as that
+device (`mcp code-mcp --gateway <origin> --id <id> --port <free port> --bind
+127.0.0.1`). Ctrl-C stops it; the command exits with code-mcp's status. The
+device code is handed over in the `MCP_CODE_MCP_GATEWAY_TOKEN` environment
+variable rather than on the command line, so `ps` never shows it; the child turns
+it into code-mcp's `--gateway-token` in-process and removes it from its
+environment, so code-mcp's own subprocesses never inherit it.
+
+```text
+✓ registered anonymous device anon-05ece6d0e71cfce9
+  device id    anon-05ece6d0e71cfce9
+  device code  O184FH
+  gateway      https://code-mcp.tuanm.workers.dev
+  connect url  https://code-mcp.tuanm.workers.dev/mcp/anon-05ece6d0e71cfce9?token=O184FH
+```
+
+- **Reuse.** The saved device for that gateway is reused on every later run - the
+  gateway caps the total number of devices (100), so repeated runs must not burn
+  new ones. `--new` registers a fresh one.
+- **Expiry.** The gateway deletes an anonymous device that never connected after
+  about an hour, and one offline for 7 days. A saved device the gateway rejects
+  (401) is replaced automatically, with a note. A device the operator disabled
+  (403) is reported (exit 3) rather than silently replaced.
+- **Errors.** 429 (too many devices created from your network) shows when to
+  retry; 503 means the gateway's device limit is reached; 403 means anonymous
+  devices are disabled there (exit 3); a gateway that requires a gateway token
+  answers 401 (pass `--gateway-token`, exit 3).
+- The device is an ordinary config entry, so `mcp tools list <id>`,
+  `mcp call <id>.bash ...` and `mcp serve` use it directly.
+- The connect URL and code grant shell access to this machine: keep them secret.
+  Anonymous devices get a lower request budget and cannot use file storage.
+
+### serve - every device as one MCP server
+
+```bash
+claude mcp add gateway -- mcp serve          # Claude Code (stdio)
+codex mcp add gateway -- mcp serve           # Codex (stdio)
+mcp serve laptop staging                     # only these devices
+mcp serve --port 7800                        # Streamable HTTP on http://127.0.0.1:7800/mcp
+```
+
+`mcp serve` aggregates the tools of every configured device (the same devices
+and credentials `mcp tools list` / `mcp call` use, or just the ids given) into
+**one** MCP server.
+
+- **stdio** (default): newline-delimited JSON-RPC 2.0 - `initialize`,
+  `tools/list`, `tools/call`, `ping`; notifications get no response. stdout
+  carries nothing but JSON-RPC; notes go to stderr.
+- **HTTP** (`--port`): `POST /mcp` with JSON responses (batches accepted, a
+  notification-only body gets 202); `GET` returns 405. It listens on
+  `127.0.0.1` unless `--host` says otherwise; a non-loopback `--host` also needs
+  `--allow-remote` and prints a warning, because the server has **no
+  authentication**. Browser origins other than localhost get 403.
+- **Names** are `<device>__<tool>`: characters outside `[a-zA-Z0-9_-]` become
+  `_` (`alpha.v2` + `file.read` → `alpha_v2__file_read`). Names that collide
+  after sanitizing, or exceed 64 characters, get a 6-hex hash of their own
+  (device, tool) pair, so they are stable regardless of which devices are online.
+  Descriptions are prefixed `[<device-id>]`; schemas and annotations are kept.
+- **Calls** are routed to the device and its result returned verbatim
+  (`isError` included). A device-side JSON-RPC error is passed through; a
+  transport failure (offline, timeout) becomes an `isError` result.
+- **Availability.** Offline devices are skipped with a stderr note. The list is
+  re-read on `tools/list` (cached 15 s) and, in stdio mode, every 60 s with a
+  `notifications/tools/list_changed`, so devices that come online later appear.
+  With no reachable device the server still starts with an empty list.
+
+### code-mcp - the bundled device server (advanced)
+
+The CLI embeds [code-mcp](https://github.com/Tuanm/code-mcp), the MCP server that
+exposes a machine's files and shell. `mcp connect` runs it for you;
+`mcp code-mcp [flags]` runs it directly with its own flags (`mcp code-mcp
+--help`), e.g. as a registered device:
+
+```bash
+mcp code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
+```
 
 ### devices connect
 
@@ -244,6 +343,20 @@ Per field, precedence is:
 
 ```text
 --flag  >  environment variable  >  device entry  >  defaults section
+```
+
+The gateway additionally falls back to `https://code-mcp.tuanm.workers.dev`
+when none of these sets one.
+
+Devices created by `mcp connect` are stored like any other, with their own
+gateway and `anonymous: true`:
+
+```yaml
+devices:
+  anon-05ece6d0e71cfce9:
+    gateway: "https://code-mcp.tuanm.workers.dev"
+    token: "O184FH"
+    anonymous: true
 ```
 
 | Environment variable | Meaning |
@@ -451,12 +564,39 @@ release. Each release carries the five platform binaries, the JS bundle, and a
 ## Development
 
 ```bash
-bun test          # unit tests (offline)
-bun test:e2e      # end-to-end: boots a local wrangler gateway + mock devices
-bun run typecheck
+bun run test          # unit + feature tests (offline; fake gateway in-process)
+bun test:e2e          # end-to-end: boots a local wrangler gateway + mock devices
+bun run typecheck     # tsc with tsconfig.typecheck.json
+bun run sync:code-mcp # refresh the bundled code-mcp
 ```
+
+### The bundled code-mcp
+
+`src/code-mcp.ts` is a byte-identical copy of `code-mcp.ts` from
+[Tuanm/code-mcp](https://github.com/Tuanm/code-mcp); `src/code-mcp.source.json`
+records the repo, commit and sha256 (a unit test checks they match). It is a copy,
+not a symlink, because CI and other clones do not have the sibling repository.
+
+- `bun run sync:code-mcp` refreshes it from the newest `main`: `--from <path>`
+  (a checkout or a file), else the sibling checkout `../../code-mcp` (its
+  committed local `main`; uncommitted edits are ignored), else GitHub. `--check`
+  only verifies the copy; `--ref <ref>` picks another ref.
+- `bun run build` syncs first; when no source is reachable it prints a note and
+  builds the vendored copy. `--no-sync` (or `CODE_MCP_SYNC=0`) skips the refresh
+  for a build that must match the committed source exactly.
+- code-mcp is a script with top-level side effects, so it is never imported
+  statically: only `mcp code-mcp` loads it, via `await import("#code-mcp")` (a
+  `package.json` subpath import, a static string so `bun build` embeds it). The
+  vendored file is excluded from `tsc` (mapped to `src/code-mcp.stub.d.ts`) because
+  it is not written for this package's strict settings. It uses top-level
+  `await`, which is why binaries are compiled with `--bytecode --format=esm`.
+- The build smoke-tests `code-mcp --help` on the bundle and the host binary from
+  a directory without `src/`, so a build that lost the embedded copy fails.
 
 The end-to-end suite compiles the host binary and drives it against a real local
 gateway, covering both credentials, the tunnel relay, every input form, exit
 codes, handshake modes, dotted device ids, sequential ordering, `--parallel`
-overlap, timeouts, and the offline path.
+overlap, timeouts, and the offline path - and the anonymous flow: `mcp connect`
+registering and reusing a device, running the embedded code-mcp (from a
+directory without `src/`), real code-mcp tools through the connect URL, and
+`mcp serve` over stdio and HTTP.

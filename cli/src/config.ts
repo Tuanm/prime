@@ -13,6 +13,10 @@
 //       gateway_token: "gw-..."
 //       token: "dev-..."
 //       connected_at: "2026-01-01T00:00:00.000Z"
+//     anon-0123456789abcdef:                 # created by 'mcp connect'
+//       gateway: "https://code-mcp.tuanm.workers.dev"
+//       token: "A1B2C3"                       # the anonymous device code
+//       anonymous: true
 //
 // The file holds secrets, so it is created 0600 inside a 0700 directory, and
 // writes are atomic (temp file + rename) so a crash cannot truncate it.
@@ -28,6 +32,8 @@ export interface DeviceEntry {
   token?: string;
   connected_at?: string;
   note?: string;
+  /** Created by 'mcp connect' via POST /api/devices/anonymous (reused per gateway). */
+  anonymous?: boolean;
 }
 
 export interface Defaults {
@@ -94,6 +100,7 @@ export function parseConfig(text: string, source: string): Config {
       token: asString(entry.token),
       connected_at: asString(entry.connected_at),
       note: asString(entry.note),
+      ...(entry.anonymous === true ? { anonymous: true } : {}),
     };
   }
   return config;
@@ -112,7 +119,8 @@ export function loadConfig(path: string): Config {
 }
 
 /** Quote a scalar so the emitter is correct for any string content. */
-function yamlScalar(value: string | number): string {
+function yamlScalar(value: string | number | boolean): string {
+  if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return Number.isFinite(value) ? String(value) : "0";
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\x00-\x1f\x7f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`)}"`;
 }
@@ -151,6 +159,7 @@ export function serializeConfig(config: Config): string {
         ["token", entry.token],
         ["connected_at", entry.connected_at],
         ["note", entry.note],
+        ["anonymous", entry.anonymous === true ? true : undefined],
       ] as const) {
         if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
       }

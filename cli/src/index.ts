@@ -2,13 +2,19 @@
 // mcp - command line client for code-mcp-gateway.
 //
 // Command surface:
+//   mcp connect [--gateway <url>]     this machine as an anonymous device (runs code-mcp)
+//   mcp serve [--port <n>]           all devices' tools as one MCP server
 //   mcp devices connect|disconnect|status|list
 //   mcp tools   list|view|call
+//   mcp code-mcp [flags]             (advanced) the bundled code-mcp device server
 //   mcp help [topic]
 //
 // Aliases: `mcp` (bare) shows help; `mcp call ...` === `mcp tools call ...`.
 
 import { bool, flag, parseArgs, str, type FlagSpec } from "./args.ts";
+import { runCodeMcp } from "./code-mcp-host.ts";
+import { connectCommand } from "./connect.ts";
+import { serveCommand } from "./serve.ts";
 import { type Ctx, makeCtx } from "./context.ts";
 import { devicesConnect, devicesDisconnect, devicesList, devicesStatus } from "./devices.ts";
 import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
@@ -59,6 +65,21 @@ const CALL_FLAGS: FlagSpec[] = [
 
 const VIEW_FLAGS: FlagSpec[] = [...TOOL_FLAGS, flag("device", "string", "Force the device id", { placeholder: "<id>" }), flag("tool", "string", "Force the tool name", { placeholder: "<name>" })];
 
+const ANON_CONNECT_FLAGS: FlagSpec[] = [
+  flag("gateway", "string", "Gateway origin (default: saved default, else https://code-mcp.tuanm.workers.dev)", { placeholder: "<url>" }),
+  flag("gateway-token", "string", "Gateway credential, only for gateways that require one", { placeholder: "<token>" }),
+  flag("new", "boolean", "Register a fresh anonymous device instead of reusing the saved one"),
+  flag("no-start", "boolean", "Register/reuse and print the credentials, but do not run code-mcp"),
+  flag("port", "number", "Local port for code-mcp's own HTTP listener (default: a free port)", { placeholder: "<n>" }),
+];
+
+const SERVE_FLAGS: FlagSpec[] = [
+  ...GATEWAY_FLAGS,
+  flag("port", "number", "Serve Streamable HTTP on this port instead of stdio", { placeholder: "<n>" }),
+  flag("host", "string", "Address for --port (default 127.0.0.1)", { placeholder: "<addr>" }),
+  flag("allow-remote", "boolean", "Permit a non-loopback --host (no authentication!)"),
+];
+
 const UPDATE_FLAGS: FlagSpec[] = [
   flag("check", "boolean", "Only report whether a newer release exists"),
   flag("force", "boolean", "Reinstall even when the version is already current"),
@@ -85,6 +106,12 @@ async function main(argv: string[]): Promise<void> {
     process.stdout.write(rootHelp().trimEnd() + "\n");
     return;
   }
+  // Hidden/advanced: run the bundled code-mcp device server. Every argument
+  // belongs to code-mcp (including --help), so mcp's parser must not see them.
+  if (argv[0] === "code-mcp") {
+    await runCodeMcp(argv.slice(1));
+    return;
+  }
   if (argv[0] === "--version" || argv[0] === "version") {
     process.stdout.write(`mcp ${VERSION}\n`);
     return;
@@ -105,6 +132,15 @@ async function main(argv: string[]): Promise<void> {
 
   const sub = rest[0];
   const wantHelp = rest.includes("--help") || rest.includes("-h") || sub === undefined;
+
+  if (topic === "connect" || topic === "serve") {
+    // Only mcp's own flags count: "mcp connect -- --help" is code-mcp's.
+    const own = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
+    if (own.includes("--help") || own.includes("-h")) {
+      showHelp(helpFor(topic, undefined), topic);
+      return;
+    }
+  }
 
   if (topic === "devices" || topic === "tools" || topic === "update") {
     if (wantHelp) {
@@ -140,6 +176,12 @@ async function main(argv: string[]): Promise<void> {
         default:
           throw new UsageError(`unknown tools command "${sub}"`, `Valid: list, view, call. ${usageLine("tools")}`);
       }
+    case "connect": {
+      const dashdash = argv.indexOf("--");
+      return connectCommand(ctx, dashdash === -1 ? [] : argv.slice(dashdash + 1));
+    }
+    case "serve":
+      return serveCommand(ctx, VERSION);
     case "update": {
       const outcome = await runUpdate(VERSION, {
         check: bool(ctx.parsed, "check"),
@@ -170,6 +212,8 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     return [];
   }
   if (topic === "update") return UPDATE_FLAGS;
+  if (topic === "connect") return ANON_CONNECT_FLAGS;
+  if (topic === "serve") return SERVE_FLAGS;
   return [];
 }
 
@@ -196,8 +240,10 @@ for (const stream of [process.stdout, process.stderr]) {
 const argv = process.argv.slice(2);
 initColor(argv.includes("--no-color") ? false : undefined);
 
-// Deliberately not top-level `await`: `bun build --compile --bytecode` rejects a
-// module with top-level await, and bytecode cuts cold start by ~30-40%. A
+// Deliberately not top-level `await`: `bun build --compile --bytecode` (CommonJS
+// output) rejects a module with top-level await - the build now uses ESM bytecode
+// because the bundled code-mcp needs it, but keeping the entry TLA-free costs
+// nothing, and bytecode cuts cold start by ~30-40%. A
 // floating async IIFE keeps the same semantics - the pending request (or the
 // microtask chain itself) keeps the process alive, and `process.exitCode` set
 // in reportError is honoured on exit.

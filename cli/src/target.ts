@@ -5,6 +5,7 @@
 //   2. environment variable
 //   3. per-device entry in the config file
 //   4. defaults section in the config file
+//   5. (gateway only) the managed default, https://code-mcp.tuanm.workers.dev
 //
 // The same order applies per field, so `--gateway` can be passed ad hoc while
 // the token still comes from the config file.
@@ -40,6 +41,9 @@ export interface TargetOverrides {
 }
 
 export const DEFAULT_TIMEOUT_MS = 300_000; // matches the gateway's TIMEOUT_MS default
+
+/** The managed gateway, used when nothing else is configured (same default as code-mcp's bare --gateway). */
+export const DEFAULT_GATEWAY = "https://code-mcp.tuanm.workers.dev";
 
 export function assertDeviceId(deviceId: string): string {
   if (!DEVICE_ID_RE.test(deviceId)) {
@@ -81,17 +85,19 @@ function pick(flag: string | undefined, env: string | undefined, ...fallbacks: (
   return undefined;
 }
 
+/**
+ * The gateway origin for a command: --gateway > environment > device entry >
+ * config defaults > the managed default gateway (code-mcp.tuanm.workers.dev).
+ */
+export function resolveGateway(config: Config, flagValue?: string, entryValue?: string): string {
+  return normalizeGateway(pick(flagValue, process.env[ENV.gateway], entryValue, config.defaults.gateway) ?? DEFAULT_GATEWAY);
+}
+
 export function resolveTarget(config: Config, deviceId: string, overrides: TargetOverrides = {}): Target {
   assertDeviceId(deviceId);
   const entry = config.devices[deviceId] ?? {};
 
-  const gateway = pick(overrides.gateway, process.env[ENV.gateway], entry.gateway, config.defaults.gateway);
-  if (!gateway) {
-    throw new UsageError(
-      `no gateway URL configured for "${deviceId}"`,
-      `Pass --gateway <url>, set ${ENV.gateway}, or run: mcp devices connect ${deviceId} --gateway <url> --token <device-token>`,
-    );
-  }
+  const gateway = resolveGateway(config, overrides.gateway, entry.gateway);
 
   const timeoutRaw = overrides.timeoutMs ?? Number(process.env[ENV.timeoutMs] ?? Number.NaN);
   const timeoutMs =
@@ -101,7 +107,7 @@ export function resolveTarget(config: Config, deviceId: string, overrides: Targe
 
   return {
     deviceId,
-    gateway: normalizeGateway(gateway),
+    gateway,
     gatewayToken: pick(overrides.gatewayToken, process.env[ENV.gatewayToken], entry.gateway_token, config.defaults.gateway_token),
     deviceToken: pick(overrides.deviceToken, process.env[ENV.deviceToken], entry.token, config.defaults.token),
     timeoutMs,

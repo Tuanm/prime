@@ -17,7 +17,7 @@ import { assetNameFor, parseChecksums, selectLatest, versionFromTag, type Releas
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
-import { normalizeGateway, resolveTarget, assertDeviceId } from "../src/target.ts";
+import { DEFAULT_GATEWAY, normalizeGateway, resolveGateway, resolveTarget, assertDeviceId } from "../src/target.ts";
 
 describe("config", () => {
   test("round-trips through YAML", () => {
@@ -114,8 +114,20 @@ describe("targets", () => {
     expect(overridden.deviceToken).toBe("flag-token");
   });
 
-  test("explains how to fix a missing gateway", () => {
-    expect(() => resolveTarget(emptyConfig(), "alpha")).toThrow(/no gateway URL configured/);
+  test("falls back to the managed default gateway when none is configured", () => {
+    const saved = process.env.CODE_MCP_GATEWAY_URL;
+    delete process.env.CODE_MCP_GATEWAY_URL;
+    try {
+      expect(resolveTarget(emptyConfig(), "alpha").gateway).toBe("https://code-mcp.tuanm.workers.dev");
+      expect(resolveGateway(emptyConfig())).toBe(DEFAULT_GATEWAY);
+      // A saved default beats the fallback, and the flag beats both.
+      const config = emptyConfig();
+      config.defaults.gateway = "https://saved.example.dev";
+      expect(resolveGateway(config)).toBe("https://saved.example.dev");
+      expect(resolveGateway(config, "http://127.0.0.1:9")).toBe("http://127.0.0.1:9");
+    } finally {
+      if (saved !== undefined) process.env.CODE_MCP_GATEWAY_URL = saved;
+    }
   });
 });
 
