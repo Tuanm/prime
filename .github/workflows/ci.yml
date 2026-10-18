@@ -128,10 +128,6 @@ jobs:
         working-directory: cli
         run: bun test
 
-      - name: "TEMP: time code-mcp's Windows helper compile"
-        working-directory: cli
-        run: bun scripts/probe-windows-owner.ts
-
       - name: End-to-end tests
         working-directory: cli
         run: bun test/e2e.ts
