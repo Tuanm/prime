@@ -30,6 +30,8 @@ function platformOrThrow(): Platform {
 
 export interface ServiceCommandOptions {
   json: boolean;
+  /** --config <path>: the config the service reads (default: the usual one). */
+  config?: string;
   out: (text: string) => void;
   note: (text: string) => void;
 }
@@ -71,7 +73,7 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
   const platform = platformOrThrow();
   const { options: passed, help } = parseCodeMcpArgs(args);
   if (help) throw new UsageError("'mcp service install' takes code-mcp options (see 'mcp code-mcp --help'), e.g. mcp service install --port 7777");
-  const configPath = resolve(defaultConfigPath());
+  const configPath = resolve(opts.config ?? defaultConfigPath());
   // Validate now, not inside a service log: a typo in the config fails here.
   const fromConfig = optionsFromConfig(loadConfig(configPath).codeMcp, configPath);
   const effective = mergeOptions(fromConfig, passed);
@@ -114,7 +116,7 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
 export async function serviceUninstall(args: string[], opts: ServiceCommandOptions): Promise<void> {
   if (args.length > 0) throw new UsageError("'mcp service uninstall' takes no arguments");
   const platform = platformOrThrow();
-  const configPath = resolve(defaultConfigPath());
+  const configPath = resolve(opts.config ?? defaultConfigPath());
   const had = uninstallService(platform, configPath);
   rmSync(overridesPath(configPath), { force: true });
   const after = serviceStatus(platform, configPath);
@@ -131,7 +133,7 @@ export async function serviceUninstall(args: string[], opts: ServiceCommandOptio
 export async function serviceStatusCommand(args: string[], opts: ServiceCommandOptions): Promise<void> {
   if (args.length > 0) throw new UsageError("'mcp service status' takes no arguments");
   const platform = platformOrThrow();
-  const configPath = resolve(defaultConfigPath());
+  const configPath = resolve(opts.config ?? defaultConfigPath());
   const status = serviceStatus(platform, configPath);
   let options: OptionMap | undefined;
   try {

@@ -123,10 +123,27 @@ async function main(argv: string[]): Promise<void> {
       showHelp(helpFor("service", undefined), "service");
       return;
     }
+    // mcp's own flags here: --json, and the global --config (the config file
+    // the service will read). Everything else belongs to code-mcp.
     const json = rest.includes("--json");
-    const args = rest.filter((a) => a !== "--json");
+    let config: string | undefined;
+    const args: string[] = [];
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i]!;
+      if (arg === "--json") continue;
+      if (arg === "--config") {
+        config = rest[++i];
+        if (!config) throw new UsageError("--config needs a path");
+        continue;
+      }
+      if (arg.startsWith("--config=")) {
+        config = arg.slice("--config=".length);
+        continue;
+      }
+      args.push(arg);
+    }
     const line = (t: string) => (t.endsWith("\n") ? t : t + "\n");
-    const opts = { json, out: (t: string) => void process.stdout.write(line(t)), note: (t: string) => void process.stderr.write(line(t)) };
+    const opts = { json, config, out: (t: string) => void process.stdout.write(line(t)), note: (t: string) => void process.stderr.write(line(t)) };
     if (sub === "install") return serviceInstall(args, opts);
     if (sub === "uninstall") return serviceUninstall(args, opts);
     if (sub === "status") return serviceStatusCommand(args, opts);
