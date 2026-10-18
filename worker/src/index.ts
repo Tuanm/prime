@@ -94,18 +94,18 @@ interface RegistrySnapshot {
 let mapCache: { at: number; snap: RegistrySnapshot } | null = null;
 const MAP_CACHE_TTL_MS = 2_000;
 
-// Anonymous devices get their own, lower per-client-IP budget on the relay
-// (ANON_RATE_LIMIT_MAX per RATE_LIMIT_WINDOW_MS), on top of the shared one.
-let anonLimiter: RateLimiter | null = null;
-let anonLimiterKey = "";
-function getAnonLimiter(cfg: GatewayConfig, max: number): RateLimiter {
-  const key = cfg.rateWindowMs + "/" + max;
-  if (!anonLimiter || anonLimiterKey !== key) {
-    if (anonLimiter) anonLimiter.stop();
-    anonLimiter = new RateLimiter(cfg.rateWindowMs, max);
-    anonLimiterKey = key;
-  }
-  return anonLimiter;
+// Relay requests that authenticated as an anonymous device. Their lower
+// budget (ANON_RATE_LIMIT_MAX per client IP per RATE_LIMIT_WINDOW_MS) is
+// enforced by the device's DeviceDO, which every one of its requests reaches -
+// so it holds globally, not per isolate. The forwarders mark the DO request.
+const anonymousRequests = new WeakSet<Request>();
+
+function markAnonymous(headers: Headers, request: Request, cfg: GatewayConfig, env: Env): void {
+  if (!anonymousRequests.has(request)) return;
+  headers.set("x-anon-rate-max", String(anonConfig(env).rateMax));
+  headers.set("x-anon-rate-window-ms", String(cfg.rateWindowMs));
+  const cip = clientIp(request);
+  headers.set("x-client-ip", cip && cip !== "unknown" ? cip : "unknown");
 }
 
 // Cached set of disabled (deactivated) deviceIds. Same TTL/caching model as the
@@ -231,15 +231,7 @@ async function authorizeDevice(deviceId: string, request: Request, url: URL, cfg
   return { denied: null, expected, anonymous };
 }
 
-/** The lower relay budget for anonymous devices (per client IP, per device). */
-function anonRateLimited(cfg: GatewayConfig, env: Env, request: Request, deviceId: string): Response | null {
-  const max = anonConfig(env).rateMax;
-  if (getAnonLimiter(cfg, max).allow(clientIp(request) + "|" + deviceId)) return null;
-  return Response.json(
-    { error: "rate limited", hint: "anonymous devices allow " + max + " requests per " + Math.round(cfg.rateWindowMs / 1000) + "s; register the device for more" },
-    { status: 429 },
-  );
-}
+
 
 function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
   if (!rateLimiter || limiterWindowMs !== cfg.rateWindowMs || limiterMax !== cfg.rateMax) {
@@ -275,10 +267,7 @@ async function authorizeRelay(
   }
   const auth = await authorizeDevice(deviceId, request, url, cfg, env);
   if (auth.denied) return auth.denied;
-  if (auth.anonymous) {
-    const limited = anonRateLimited(cfg, env, request, deviceId);
-    if (limited) return limited;
-  }
+  if (auth.anonymous) anonymousRequests.add(request);
   if (virtualDeviceIds(env).has(deviceId)) {
     // Virtual devices are in-process only (handleCloudMcp) - there is no tunnel
     // to stream over, so SSE cannot serve them (same as the WS upgrade).
@@ -495,6 +484,7 @@ export default {
       target.pathname = "/download/" + download[2];
       target.search = "";
       const headers = new Headers({ "x-device-id": download[1], "x-device-token": token });
+      markAnonymous(headers, request, cfg, env);
       return env.DEVICES.get(env.DEVICES.idFromName(download[1])).fetch(new Request(target, {
         method: "GET", headers, signal: request.signal,
       }));
@@ -536,10 +526,7 @@ export default {
       // authorizeDevice, after the credential check.
       const auth = await authorizeDevice(deviceId, request, url, cfg, env);
       if (auth.denied) return auth.denied;
-      if (auth.anonymous) {
-        const limited = anonRateLimited(cfg, env, request, deviceId);
-        if (limited) return limited;
-      }
+      if (auth.anonymous) anonymousRequests.add(request);
 
       // Virtual devices (in-process, no tunnel): handle the MCP request right
       // here. Auth above already validated the gateway token and the device
@@ -568,6 +555,7 @@ export default {
       // Preserve auth params for the DO's own device-auth check.
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
+      markAnonymous(headers, request, cfg, env);
       const body = await readBounded(request, cfg.maxBodyBytes);
       if (body instanceof Response) return body;
       const upstream = new Request(doUrl, { method: "POST", headers, body });
@@ -596,6 +584,7 @@ export default {
       if (cip && cip !== "unknown") headers.set("x-client-ip", cip);
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
+      markAnonymous(headers, request, cfg, env);
       return stub.fetch(new Request(doUrl, { method: "GET", headers }));
     }
 
@@ -620,6 +609,7 @@ export default {
       if (xdt) headers.set("x-device-token", xdt);
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
+      markAnonymous(headers, request, cfg, env);
       const body = await readBounded(request, cfg.maxBodyBytes);
       if (body instanceof Response) return body;
       return stub.fetch(new Request(doUrl, { method: "POST", headers, body }));

@@ -67,6 +67,10 @@ export class DeviceDO extends DurableObject<Env> {
   private deviceToken?: string;
   private perDeviceToken: string | null = null;
   private deviceId = "";
+  // Anonymous devices' relay budget, per client IP. Kept here because every
+  // relay request for a device reaches this one instance, so the count is
+  // global - a per-isolate limiter in the entry is spread across isolates.
+  private anonBuckets = new Map<string, { count: number; resetAt: number }>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -97,6 +101,21 @@ export class DeviceDO extends DurableObject<Env> {
     }
   }
 
+  private allowAnon(ip: string, max: number, windowMs: number): boolean {
+    const now = Date.now();
+    if (this.anonBuckets.size > 1_000) {
+      for (const [k, v] of this.anonBuckets) if (now > v.resetAt) this.anonBuckets.delete(k);
+    }
+    const bucket = this.anonBuckets.get(ip);
+    if (!bucket || now > bucket.resetAt) {
+      this.anonBuckets.set(ip, { count: 1, resetAt: now + windowMs });
+      return true;
+    }
+    if (bucket.count >= max) return false;
+    bucket.count++;
+    return true;
+  }
+
   // ---- fetch(): all requests for this deviceId route here ----------------
 
   async fetch(request: Request): Promise<Response> {
@@ -112,6 +131,22 @@ export class DeviceDO extends DurableObject<Env> {
     // WebSocket upgrade: /ws (device tunnel)
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       return this.handleUpgrade(request, url, authToken);
+    }
+
+    // The entry marks relay requests for an anonymous device with its limit
+    // (it builds these headers itself; a client cannot set them).
+    const anonMax = Number(request.headers.get("x-anon-rate-max") || 0);
+    if (anonMax > 0) {
+      const windowMs = Number(request.headers.get("x-anon-rate-window-ms") || 60_000) || 60_000;
+      if (!this.allowAnon(request.headers.get("x-client-ip") || "unknown", anonMax, windowMs)) {
+        return Response.json(
+          {
+            error: "rate limited",
+            hint: "anonymous devices allow " + anonMax + " requests per " + Math.round(windowMs / 1000) + "s; register the device for more",
+          },
+          { status: 429, headers: { "retry-after": String(Math.ceil(windowMs / 1000)) } },
+        );
+      }
     }
 
     const download = /^\/download\/([a-f0-9]{64})$/.exec(url.pathname);
