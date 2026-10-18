@@ -25,12 +25,16 @@ COMMANDS
   tools list <device-id>                  List a device's MCP tools
   tools view <device-id>.<tool-id>        Show one tool's schema
   tools call <device-id>.<tool-id> [json] Call one or more tools
+  service install [code-mcp options]      Run code-mcp as a user service (starts at
+                                          login, restarts on failure)
+  service uninstall                       Stop and remove that service
+  service status                          Is it installed / running?
   update                                  Update the CLI to the newest release
   help [command]                          Show help
 
 ADVANCED
-  code-mcp [code-mcp flags]               Run the bundled code-mcp device server
-                                          directly ('mcp help code-mcp')
+  code-mcp [code-mcp options]             Run the bundled code-mcp device server with
+                                          the config's code-mcp options ('mcp help code-mcp')
 
 ALIASES
   mcp                     Same as 'mcp --help'
@@ -240,7 +244,51 @@ device:
 
   mcp code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 
-Every argument is passed to code-mcp unchanged.
+OPTIONS FROM THE CONFIG
+  The code-mcp section of ~/.code-mcp-gateway/config.yaml holds code-mcp's
+  options (names without the dashes); options given here override them:
+
+    code-mcp:
+      port: "7777"
+      bind: "127.0.0.1"
+      id: "my-laptop"
+      token: "dev-secret"
+      gateway: "code-mcp.tuanm.workers.dev"
+      enable-memory: true
+
+  Values from the config never appear on a command line (ps).
+
+  Refuses to start while the code-mcp service is running ('mcp service').
+`;
+
+const SERVICE = `mcp service - run code-mcp as a user service
+
+USAGE
+  mcp service install [code-mcp options]   install (or reinstall) and start it
+  mcp service uninstall                    stop and remove it
+  mcp service status [--json]              is it installed / running?
+
+The service runs 'mcp code-mcp' with the code-mcp section of
+~/.code-mcp-gateway/config.yaml, overridden by the options given to
+'service install' (kept in service.yaml next to the config). Options are read
+at every start, so to apply a config change, run 'mcp service install' again.
+No credential is written into the service definition or onto a command line.
+
+  Linux    systemd user unit  ~/.config/systemd/user/code-mcp.service
+           logs: journalctl --user -u code-mcp
+  macOS    launchd agent      ~/Library/LaunchAgents/dev.code-mcp-gateway.code-mcp.plist
+           logs: ~/Library/Logs/code-mcp-gateway/code-mcp.log
+  Windows  Scheduled Task     \\code-mcp-gateway\\code-mcp (at logon; no admin needed)
+           logs: code-mcp.log next to the config
+
+It starts at login and is restarted if it crashes. On Linux it stops at logout
+unless lingering is on: loginctl enable-linger USER.
+
+EXAMPLES
+  mcp service install                         # config's code-mcp section as is
+  mcp service install --port 7788 --enable-memory
+  mcp service status
+  mcp service uninstall
 `;
 
 const UPDATE = `mcp update - install the newest release   (alias: mcp upgrade)
@@ -297,7 +345,8 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "connect") return CONNECT;
   if (topic === "serve") return SERVE;
   if (topic === "code-mcp") return CODE_MCP;
-  if (topic === "help") return `${ROOT}\n${dim("Usage: mcp help [connect|serve|devices|tools|call|update|code-mcp]")}`;
+  if (topic === "service") return SERVICE;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: mcp help [connect|serve|service|devices|tools|call|update|code-mcp]")}`;
   void sub;
   return undefined;
 }

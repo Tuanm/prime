@@ -16,8 +16,9 @@
     "build:host": "bun scripts/build.ts --host-only",
     "bundle": "bun scripts/build.ts --bundle-only",
     "sync:code-mcp": "bun scripts/sync-code-mcp.ts",
-    "test": "bun test test/unit.test.ts test/features.test.ts",
+    "test": "bun test test/unit.test.ts test/features.test.ts test/service.test.ts",
     "test:e2e": "bun test/e2e.ts",
+    "test:service": "bun test/service-e2e.ts",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
   },
   "devDependencies": {
