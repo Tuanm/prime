@@ -142,11 +142,17 @@ async function main(argv: string[]): Promise<void> {
     }
   }
 
-  if (topic === "devices" || topic === "tools" || topic === "update") {
+  if (topic === "devices" || topic === "tools") {
     if (wantHelp) {
       showHelp(helpFor(topic, sub), topic, sub);
       return;
     }
+  }
+  // update has no subcommands: a bare "mcp update" is the install itself (it
+  // used to print help, while its own hint says to run exactly that).
+  if (topic === "update" && (rest.includes("--help") || rest.includes("-h"))) {
+    showHelp(helpFor(topic, undefined), topic);
+    return;
   }
 
   const ctx: Ctx = makeCtx(parseArgs(argv, flagsFor(topic, sub)));
