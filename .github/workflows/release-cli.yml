@@ -157,7 +157,7 @@ jobs:
 
           The binaries are self-contained (the Bun runtime is embedded), so no runtime
           installation is needed. They are large for that reason. If Bun >= 1.2 is already
-          installed, `mcp-<version>.js` is a 37 KB alternative that runs with
+          installed, `mcp-<version>.js` is a ~240 KB alternative (code-mcp included) that runs with
           `bun mcp-<version>.js`.
 
           Verify a download against `SHA256SUMS`:
