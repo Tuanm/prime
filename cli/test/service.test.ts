@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
-import { effectiveCodeMcpArgv, splitHostFlags } from "../src/code-mcp-host.ts";
+import { effectiveCodeMcpArgv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
 import { rememberAnonymous } from "../src/connect.ts";
 import {
@@ -81,6 +81,27 @@ describe("mcp code-mcp argv", () => {
     // Not the service: the overrides file does not apply.
     expect(effectiveCodeMcpArgv([], { service: false }, config).argv).toEqual(["--port", "7777", "--bind", "127.0.0.1", "--token", "cfg-token"]);
     expect(loadOverrides(join(dir, "service.yaml"))).toEqual({ port: "8888", "enable-memory": true });
+  });
+});
+
+describe("default gateway for a device id", () => {
+  test("an id without a gateway goes to the configured default, else the managed one", () => {
+    // code-mcp dials a gateway only with --gateway: an id alone used to start a
+    // local-only server that never showed up on the gateway.
+    expect(withDefaultGateway({ id: "demo", token: "demo" }, undefined)).toEqual({ id: "demo", token: "demo", gateway: "https://code-mcp.tuanm.workers.dev" });
+    expect(withDefaultGateway({ id: "demo" }, "https://gw.example")).toEqual({ id: "demo", gateway: "https://gw.example" });
+    expect(withDefaultGateway({ id: "demo", gateway: "own.example" }, "https://gw.example").gateway).toBe("own.example");
+    // No id: a plain local server, as before.
+    expect(withDefaultGateway({ token: "t" }, undefined)).toEqual({ token: "t" });
+  });
+
+  test("'mcp code-mcp' applies it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const config = join(dir, "config.yaml");
+    const c = emptyConfig();
+    c.codeMcp = { id: "demo", token: "demo" };
+    saveConfig(config, c);
+    expect(effectiveCodeMcpArgv([], { service: false }, config).argv).toEqual(["--token", "demo", "--gateway", "https://code-mcp.tuanm.workers.dev", "--id", "demo"]);
   });
 });
 

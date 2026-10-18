@@ -19,6 +19,7 @@ import { dirname } from "node:path";
 import { type OptionMap, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "./code-mcp-options.ts";
 import { defaultConfigPath, loadConfig } from "./config.ts";
 import { UsageError } from "./errors.ts";
+import { DEFAULT_GATEWAY } from "./target.ts";
 import { type ServiceStatus, loadOverrides, overridesPath, pidFilePath, serviceStatus } from "./service.ts";
 
 /**
@@ -111,10 +112,22 @@ export function splitHostFlags(args: string[]): { host: HostFlags; rest: string[
 export function effectiveCodeMcpArgv(rest: string[], host: HostFlags, configPath: string): { argv: string[]; options: OptionMap; help: boolean } {
   const parsed = parseCodeMcpArgs(rest);
   if (parsed.help) return { argv: ["--help"], options: {}, help: true };
-  const fromConfig = optionsFromConfig(loadConfig(configPath).codeMcp, configPath);
+  const config = loadConfig(configPath);
+  const fromConfig = optionsFromConfig(config.codeMcp, configPath);
   const overrides = host.service ? loadOverrides(overridesPath(configPath)) : {};
-  const options = mergeOptions(fromConfig, overrides, parsed.options);
+  const options = withDefaultGateway(mergeOptions(fromConfig, overrides, parsed.options), config.defaults.gateway);
   return { argv: toCodeMcpArgv(options), options, help: false };
+}
+
+/**
+ * A device id only means something on a gateway: code-mcp dials one only when
+ * given --gateway, so "--id demo --token demo" alone silently ran a local-only
+ * server. With an id and no gateway, use the CLI's gateway - the config's
+ * default, else the managed one - like every other mcp command.
+ */
+export function withDefaultGateway(options: OptionMap, configuredDefault: string | undefined): OptionMap {
+  if (typeof options.id !== "string" || typeof options.gateway === "string") return options;
+  return { ...options, gateway: configuredDefault ?? DEFAULT_GATEWAY };
 }
 
 /** Send everything this process prints to a file (the Windows service has no console). */
