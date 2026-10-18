@@ -190,7 +190,9 @@ code-mcp:
   enable-memory: true
 ```
 
-With that, a bare `mcp code-mcp` starts the device. Values from the config are
+With that, a bare `mcp code-mcp` starts the device. A device `id` needs a
+gateway: when `id` is set and `gateway` is not, the CLI's gateway is used
+(`defaults.gateway`, else `https://code-mcp.tuanm.workers.dev`). Values from the config are
 handed to code-mcp inside the process, so a token there never shows up in `ps`.
 An unknown key or a wrongly typed value is an error naming the config file.
 `mcp code-mcp` refuses to start while the code-mcp **service** is running - one
@@ -207,8 +209,10 @@ mcp service uninstall
 
 `install` registers code-mcp with the OS so it starts at login and comes back
 after a crash, then waits until it has **stayed** up before reporting success
-(otherwise it prints the service's own log). Running it again reinstalls and
-restarts it with the current options.
+(otherwise it prints the service's own log). With a device `id`, it also
+waits for the device to be **online on the gateway**, and fails if the gateway
+rejects the id/token. Running it again reinstalls and restarts it with the
+current options.
 
 | OS | Definition | Logs | Restart after a crash |
 | --- | --- | --- | --- |
