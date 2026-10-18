@@ -123,5 +123,28 @@ public class PowerShellCommand {
                     self.assertNotIn("Preparing modules", result.stdout + result.stderr)
 
 
+class SpawnEnvTests(unittest.TestCase):
+    """The spawn allow-list keeps what Windows needs and still drops secrets."""
+
+    def test_windows_keeps_psmodulepath_and_system_vars(self):
+        env = {
+            "Path": r"C:\Windows\System32",
+            "PSModulePath": r"C:\Program Files\WindowsPowerShell\Modules",
+            "ProgramFiles(x86)": r"C:\Program Files (x86)",
+            "PROCESSOR_ARCHITECTURE": "AMD64",
+            "AWS_SECRET_ACCESS_KEY": "do-not-forward",
+            "OPENAI_API_KEY": "do-not-forward",
+        }
+        with patch.object(module.os, "name", "nt"), patch.dict(module.os.environ, env, clear=True):
+            child = module.build_child_env()
+        # Without PSModulePath, Windows PowerShell rebuilds its module cache on
+        # every start - 10-30 s per command.
+        self.assertEqual(child.get("PSModulePath"), env["PSModulePath"])
+        self.assertIn("ProgramFiles(x86)", child)
+        self.assertIn("PROCESSOR_ARCHITECTURE", child)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", child)
+        self.assertNotIn("OPENAI_API_KEY", child)
+
+
 if __name__ == "__main__":
     unittest.main()

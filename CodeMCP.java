@@ -76,7 +76,13 @@ public final class CodeMCP {
         "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
         "TMPDIR", "TEMP", "TMP",
         "SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-        "PROGRAMFILES", "PROGRAMDATA", "WINDIR", "COMSPEC", "PATHEXT"
+        "PROGRAMFILES", "PROGRAMDATA", "WINDIR", "COMSPEC", "PATHEXT",
+        // Non-secret Windows system variables. PSModulePath matters most: without it
+        // Windows PowerShell rebuilds its module cache on every start ("Preparing
+        // modules for first use"), which made each PowerShell command - and the job
+        // helper compile - take 10-30 s instead of well under one.
+        "PSModulePath", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432",
+        "ALLUSERSPROFILE", "PUBLIC", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "USERNAME", "COMPUTERNAME", "HOMEDRIVE", "HOMEPATH"
     );
 
     private static void scrubEnv(ProcessBuilder pb) {
