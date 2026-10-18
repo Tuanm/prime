@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 const src = readFileSync(join(import.meta.dir, "..", "src", "code-mcp.ts"), "utf8");
-const m = /const MCP_WINDOWS_JOB_SOURCE = \x60([\s\S]*?)\x60;/.exec(src);
+const m = /const MCP_WINDOWS_JOB_SOURCE = String\.raw\x60([\s\S]*?)\x60;/.exec(src);
 if (!m) { console.log("source not found"); process.exit(1); }
 for (const round of [1, 2]) {
   const dir = mkdtempSync(join(tmpdir(), "probe-owner-"));
