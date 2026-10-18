@@ -37,7 +37,7 @@ installed as) plus one binary per platform:
 | `dist/mcp-darwin-arm64` | 59.4 MB | no |
 | `dist/mcp-darwin-x64` | 66.2 MB | no |
 | `dist/mcp-linux-x64` / `-linux-arm64` | 77.6 / 77.5 MB | no |
-| `dist/mcp-windows-x64.exe` | 82.1 MB | no |
+| `dist/mcp-windows-x64.exe` / `-windows-arm64.exe` | ~95 / ~84 MB | no |
 | `dist/mcp.js` | ~240 KB (includes code-mcp) | yes |
 
 The compiled binaries are large because `bun build --compile` embeds the

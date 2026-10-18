@@ -19,8 +19,11 @@ import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { $ } from "bun";
 import { versionProblem as versionProblemFor } from "../src/version.ts";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not URL.pathname: on Windows the latter is "/D:/a/..." -
+// not a path any API accepts.
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ENTRY = `${ROOT}src/index.ts`;
 const DIST = `${ROOT}dist`;
 
@@ -37,6 +40,7 @@ const TARGETS: BuildTarget[] = [
   { target: "bun-linux-x64", out: "mcp-linux-x64" },
   { target: "bun-linux-arm64", out: "mcp-linux-arm64" },
   { target: "bun-windows-x64", out: "mcp-windows-x64.exe" },
+  { target: "bun-windows-arm64", out: "mcp-windows-arm64.exe" },
 ];
 
 const args = new Set(process.argv.slice(2));

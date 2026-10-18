@@ -89,7 +89,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, windows-11-arm]
+        include:
+          - os: windows-latest
+            node-arch: x64
+          # workerd (wrangler's local runtime, used by the end-to-end gateway)
+          # has no Windows Arm build, so Node runs as x64 under Windows'
+          # emulation there. Bun - and so the CLI under test - stays native Arm.
+          - os: windows-11-arm
+            node-arch: x64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -103,6 +110,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          architecture: ${{ matrix.node-arch }}
 
       - name: Install worker dependencies
         working-directory: worker
@@ -123,3 +131,9 @@ jobs:
       - name: End-to-end tests
         working-directory: cli
         run: bun test/e2e.ts
+
+      # The release ships this platform's .exe from a cross-compile on Linux;
+      # build it natively too and make sure it starts and serves.
+      - name: Build and smoke-test the native binary
+        working-directory: cli
+        run: bun scripts/build.ts --host-only
