@@ -14,12 +14,12 @@
 // to a declaration stub: the vendored file is kept byte-identical to upstream
 // and is not written to this package's strict compiler settings.
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { type OptionMap, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "./code-mcp-options.ts";
 import { defaultConfigPath, loadConfig } from "./config.ts";
 import { UsageError } from "./errors.ts";
-import { type ServiceStatus, loadOverrides, overridesPath, serviceStatus } from "./service.ts";
+import { type ServiceStatus, loadOverrides, overridesPath, pidFilePath, serviceStatus } from "./service.ts";
 
 /**
  * Environment variable carrying the device credential from "mcp connect" to the
@@ -137,9 +137,9 @@ function redirectOutput(path: string): void {
 }
 
 /** Status check that never blocks 'mcp code-mcp' on a broken service manager. */
-function serviceStatusSafe(): ServiceStatus | undefined {
+function serviceStatusSafe(configPath: string): ServiceStatus | undefined {
   try {
-    return serviceStatus();
+    return serviceStatus(undefined, configPath);
   } catch {
     return undefined;
   }
@@ -157,7 +157,7 @@ export async function runCodeMcp(args: string[]): Promise<void> {
   if (!help && !host.service) {
     // One code-mcp per machine and config: the service already owns the port
     // and the device id, and a second copy would fight it for both.
-    const status = serviceStatusSafe();
+    const status = serviceStatusSafe(configPath);
     if (status?.running) {
       throw new UsageError(
         `the code-mcp service is running (${status.where})`,
@@ -167,6 +167,16 @@ export async function runCodeMcp(args: string[]): Promise<void> {
   }
   if (host.service) {
     if (host.log) redirectOutput(host.log);
+    // Lets 'service status' (and 'mcp code-mcp') tell that the service is up.
+    const pidFile = pidFilePath(configPath);
+    try {
+      writeFileSync(pidFile, String(process.pid));
+      process.on("exit", () => {
+        try {
+          if (readFileSync(pidFile, "utf8").trim() === String(process.pid)) rmSync(pidFile, { force: true });
+        } catch {}
+      });
+    } catch {}
     // Windows: the task runs conhost, which runs this. Stopping the task ends
     // conhost only - follow it out rather than linger as an orphan.
     if (process.platform === "win32" && process.ppid > 0) watchParent(process.ppid, undefined, "the service's console host");

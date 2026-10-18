@@ -55,12 +55,12 @@ function recentLog(platform: Platform, logPath: string): string {
 }
 
 /** Wait until the service is running - and still running a moment later (no crash loop). */
-async function waitRunning(platform: Platform, timeoutMs = 20_000): Promise<boolean> {
+async function waitRunning(platform: Platform, configPath: string, timeoutMs = 30_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (serviceStatus(platform).running) {
+    if (serviceStatus(platform, configPath).running) {
       await Bun.sleep(2_500);
-      if (serviceStatus(platform).running) return true;
+      if (serviceStatus(platform, configPath).running) return true;
     }
     await Bun.sleep(500);
   }
@@ -83,8 +83,8 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
   const spec = serviceSpecFor(platform, configPath);
   saveOverrides(overridesPath(configPath), passed);
   const where = installService(platform, spec);
-  const running = await waitRunning(platform);
-  const status = serviceStatus(platform);
+  const running = await waitRunning(platform, configPath);
+  const status = serviceStatus(platform, configPath);
 
   if (!running) {
     const log = recentLog(platform, spec.logPath);
@@ -117,7 +117,7 @@ export async function serviceUninstall(args: string[], opts: ServiceCommandOptio
   const configPath = resolve(defaultConfigPath());
   const had = uninstallService(platform, configPath);
   rmSync(overridesPath(configPath), { force: true });
-  const after = serviceStatus(platform);
+  const after = serviceStatus(platform, configPath);
   if (after.running || after.installed) {
     throw new CliError("the code-mcp service could not be fully removed (" + (after.detail ?? "still present") + ")", "Check " + after.where);
   }
@@ -132,7 +132,7 @@ export async function serviceStatusCommand(args: string[], opts: ServiceCommandO
   if (args.length > 0) throw new UsageError("'mcp service status' takes no arguments");
   const platform = platformOrThrow();
   const configPath = resolve(defaultConfigPath());
-  const status = serviceStatus(platform);
+  const status = serviceStatus(platform, configPath);
   let options: OptionMap | undefined;
   try {
     options = mergeOptions(optionsFromConfig(loadConfig(configPath).codeMcp, configPath), loadOverrides(overridesPath(configPath)));

@@ -16,7 +16,7 @@ import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { selfCommand } from "./code-mcp-host.ts";
 import { type OptionMap, optionsFromConfig } from "./code-mcp-options.ts";
-import { yamlScalar } from "./config.ts";
+import { defaultConfigPath, yamlScalar } from "./config.ts";
 import { CliError } from "./errors.ts";
 
 export type Platform = "linux" | "darwin" | "win32";
@@ -121,7 +121,8 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     "[Service]",
     "Type=simple",
     "ExecStart=" + spec.command.map(systemdQuote).join(" "),
-    "WorkingDirectory=" + systemdQuote(spec.home),
+    // A bare path: WorkingDirectory= does not take quotes (only % is special).
+    "WorkingDirectory=" + spec.home.replace(/%/g, "%%"),
     envLine("PATH", spec.pathEnv),
     "Restart=on-failure",
     "RestartSec=5",
@@ -207,7 +208,12 @@ export function renderWindowsInstallScript(spec: ServiceSpec): string {
     "$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
     "$conhost = Join-Path $env:SystemRoot 'System32\\conhost.exe'",
     "$action = New-ScheduledTaskAction -Execute $conhost -Argument " + psQuote(argument) + " -WorkingDirectory " + psQuote(spec.home),
-    "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user",
+    "$atLogOn = New-ScheduledTaskTrigger -AtLogOn -User $user",
+    // Task Scheduler's restart-on-failure covers a task that fails to START,
+    // not one whose process dies later. A one-minute repetition (with
+    // IgnoreNew) brings a crashed service back without ever running two.
+    "$watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5) -RepetitionInterval (New-TimeSpan -Minutes 1)",
+    "$trigger = @($atLogOn, $watchdog)",
     "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable " +
       "-ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew",
     "$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited",
@@ -230,10 +236,25 @@ export function renderWindowsUninstallScript(configPath: string): string {
   ].join("\n");
 }
 
-export const WINDOWS_STATUS_SCRIPT = [
-  "$task = Get-ScheduledTask " + TASK_REF + " -ErrorAction SilentlyContinue",
-  "if ($task) { [string]$task.State } else { 'absent' }",
-].join("\n");
+/**
+ * The running service writes its pid here (removed on a clean exit). On Windows
+ * it is how "running" is decided: Task Scheduler's own state is slow to query
+ * through PowerShell and localized through schtasks.
+ */
+export function pidFilePath(configPath: string): string {
+  return join(dirname(configPath), "code-mcp.service.pid");
+}
+
+function pidAlive(path: string): boolean {
+  try {
+    const pid = Number(readFileSync(path, "utf8").trim());
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 // ---- running commands --------------------------------------------------------
 
@@ -266,7 +287,7 @@ function uid(): number {
 
 // ---- status / install / uninstall per platform -------------------------------
 
-export function serviceStatus(platform: Platform = process.platform as Platform): ServiceStatus {
+export function serviceStatus(platform: Platform = process.platform as Platform, configPath: string = defaultConfigPath()): ServiceStatus {
   if (platform === "linux") {
     const where = systemdUnitPath();
     if (!Bun.which("systemctl")) return { installed: existsSync(where), running: false, where, detail: "systemctl not found" };
@@ -281,8 +302,10 @@ export function serviceStatus(platform: Platform = process.platform as Platform)
   }
   if (platform === "win32") {
     const where = "Task Scheduler " + TASK_PATH + TASK_NAME;
-    const state = powershell(WINDOWS_STATUS_SCRIPT).out.trim();
-    return { installed: state !== "absent" && state !== "", running: state === "Running", where, detail: state || undefined };
+    // schtasks answers in well under a second, and its exit code is not localized.
+    const installed = run(["schtasks", "/query", "/tn", TASK_PATH + TASK_NAME], { timeoutMs: 30_000 }).code === 0;
+    const running = installed && pidAlive(pidFilePath(configPath));
+    return { installed, running, where, detail: installed ? (running ? "running" : "not running") : undefined };
   }
   throw new CliError("'mcp service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
 }
