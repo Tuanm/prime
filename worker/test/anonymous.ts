@@ -1,7 +1,7 @@
 // Anonymous devices: POST /api/devices/anonymous, their auth, limits, lifecycle
 // and the admin API that manages them by opaque ref.
 //
-// Two local wrangler instances:
+// Two local wrangler instances, started one after the other:
 //   main  (8840) - a registered device + tight limits: device cap 6, 3 creations
 //                  per IP, 5 relay requests per IP per anonymous device, lock
 //                  after 4 wrong codes
@@ -119,7 +119,9 @@ const main = startWorker(8840, [
   "ANON_AUTH_MAX_FAILURES:4",
   "ANON_AUTH_LOCK_MS:4000",
 ]);
-const open = startWorker(8841, [
+// Started only once the main instance is done: two cold wranglers at once
+// do not reliably both come up on a CI runner.
+const startOpen = () => startWorker(8841, [
   "ANON_UNUSED_TTL_MS:2000",
   "ANON_IDLE_TTL_MS:2000",
   "ONLINE_TTL_MS:150000",
@@ -275,7 +277,9 @@ try {
   void refs;
 
   // ---- open mode + garbage collection ----
-  openW = await open;
+  mainW.stop();
+  mainW = null;
+  openW = await startOpen();
   const O = openW.base;
   console.log("== open instance ==");
   check("open mode: an unregistered device connects without a code", (await upgradeStatus(O + "/ws/free-host", {})) === 101);
@@ -304,7 +308,6 @@ try {
   for (const s of sockets) try { s.close(); } catch {}
   mainW?.stop();
   openW?.stop();
-  if (!openW) (await open.catch(() => null))?.stop();
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");
