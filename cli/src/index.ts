@@ -7,12 +7,14 @@
 //   mcp devices connect|disconnect|status|list
 //   mcp tools   list|view|call
 //   mcp code-mcp [flags]             (advanced) the bundled code-mcp device server
+//   mcp service install|uninstall|status   code-mcp as a user service
 //   mcp help [topic]
 //
 // Aliases: `mcp` (bare) shows help; `mcp call ...` === `mcp tools call ...`.
 
 import { bool, flag, parseArgs, str, type FlagSpec } from "./args.ts";
 import { runCodeMcp } from "./code-mcp-host.ts";
+import { serviceInstall, serviceStatusCommand, serviceUninstall } from "./service-command.ts";
 import { connectCommand } from "./connect.ts";
 import { serveCommand } from "./serve.ts";
 import { type Ctx, makeCtx } from "./context.ts";
@@ -111,6 +113,24 @@ async function main(argv: string[]): Promise<void> {
   if (argv[0] === "code-mcp") {
     await runCodeMcp(argv.slice(1));
     return;
+  }
+  // 'service install' takes code-mcp's options, which mcp's own parser does not
+  // know - so it is routed before that parser, like code-mcp itself.
+  if (argv[0] === "service") {
+    const sub = argv[1];
+    const rest = argv.slice(2);
+    if (sub === undefined || sub === "--help" || sub === "-h" || rest.includes("--help") || rest.includes("-h")) {
+      showHelp(helpFor("service", undefined), "service");
+      return;
+    }
+    const json = rest.includes("--json");
+    const args = rest.filter((a) => a !== "--json");
+    const line = (t: string) => (t.endsWith("\n") ? t : t + "\n");
+    const opts = { json, out: (t: string) => void process.stdout.write(line(t)), note: (t: string) => void process.stderr.write(line(t)) };
+    if (sub === "install") return serviceInstall(args, opts);
+    if (sub === "uninstall") return serviceUninstall(args, opts);
+    if (sub === "status") return serviceStatusCommand(args, opts);
+    throw new UsageError(`unknown service command "${sub}"`, "Valid: install, uninstall, status.");
   }
   if (argv[0] === "--version" || argv[0] === "version") {
     process.stdout.write(`mcp ${VERSION}\n`);

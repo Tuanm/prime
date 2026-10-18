@@ -137,3 +137,40 @@ jobs:
       - name: Build and smoke-test the native binary
         working-directory: cli
         run: bun scripts/build.ts --host-only
+
+  # 'mcp service' against each OS's real service manager: a systemd user unit,
+  # a launchd agent, a Scheduled Task - installed, exercised, uninstalled.
+  cli-service:
+    name: mcp service on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest, windows-11-arm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: bun install --frozen-lockfile
+
+      # CI jobs have no login session, so no systemd user manager: start one.
+      - name: Start a systemd user session
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for i in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user is-system-running || true
+
+      - name: Install, exercise and uninstall the service
+        working-directory: cli
+        run: bun test/service-e2e.ts

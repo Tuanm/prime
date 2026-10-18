@@ -14,6 +14,13 @@
 // to a declaration stub: the vendored file is kept byte-identical to upstream
 // and is not written to this package's strict compiler settings.
 
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { type OptionMap, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "./code-mcp-options.ts";
+import { defaultConfigPath, loadConfig } from "./config.ts";
+import { UsageError } from "./errors.ts";
+import { type ServiceStatus, loadOverrides, overridesPath, serviceStatus } from "./service.ts";
+
 /**
  * Environment variable carrying the device credential from "mcp connect" to the
  * code-mcp child. A command-line flag would be visible to every local user via
@@ -51,12 +58,12 @@ export function processAlive(pid: number): boolean {
   }
 }
 
-/** Exit when the launching "mcp connect" disappears. Returns the timer (for tests). */
-export function watchParent(pid: number, exit: () => void = () => process.exit(0)): ReturnType<typeof setInterval> {
+/** Exit when the launching process disappears. Returns the timer (for tests). */
+export function watchParent(pid: number, exit: () => void = () => process.exit(0), who = "'mcp connect'"): ReturnType<typeof setInterval> {
   const timer = setInterval(() => {
     if (!processAlive(pid)) {
       clearInterval(timer);
-      console.error("[mcp] 'mcp connect' is gone; stopping code-mcp");
+      console.error(`[mcp] ${who} is gone; stopping code-mcp`);
       exit();
     }
   }, PARENT_POLL_MS);
@@ -64,8 +71,110 @@ export function watchParent(pid: number, exit: () => void = () => process.exit(0
   return timer;
 }
 
-/** Run code-mcp in this process with the given command-line arguments. */
+/**
+ * Set by 'mcp connect' on its child: run code-mcp with exactly the given
+ * arguments. The config's code-mcp section (and the running-service check) are
+ * for people running 'mcp code-mcp' themselves, not for connect's own device.
+ */
+export const RAW_ENV = "MCP_CODE_MCP_RAW";
+
+/** Flags of 'mcp code-mcp' itself; everything else belongs to code-mcp. */
+export interface HostFlags {
+  service: boolean;
+  config?: string;
+  log?: string;
+}
+
+export function splitHostFlags(args: string[]): { host: HostFlags; rest: string[] } {
+  const host: HostFlags = { service: false };
+  const rest: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--service") host.service = true;
+    else if (arg === "--config" || arg === "--log") {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("--")) throw new UsageError(`${arg} needs a path`);
+      host[arg === "--config" ? "config" : "log"] = value;
+      i++;
+    } else if (arg.startsWith("--config=")) host.config = arg.slice("--config=".length);
+    else if (arg.startsWith("--log=")) host.log = arg.slice("--log=".length);
+    else rest.push(arg);
+  }
+  return { host, rest };
+}
+
+/**
+ * The argv code-mcp gets from 'mcp code-mcp': the config's code-mcp section,
+ * then (for the service) the overrides from 'service install', then the
+ * command line - later layers win.
+ */
+export function effectiveCodeMcpArgv(rest: string[], host: HostFlags, configPath: string): { argv: string[]; options: OptionMap; help: boolean } {
+  const parsed = parseCodeMcpArgs(rest);
+  if (parsed.help) return { argv: ["--help"], options: {}, help: true };
+  const fromConfig = optionsFromConfig(loadConfig(configPath).codeMcp, configPath);
+  const overrides = host.service ? loadOverrides(overridesPath(configPath)) : {};
+  const options = mergeOptions(fromConfig, overrides, parsed.options);
+  return { argv: toCodeMcpArgv(options), options, help: false };
+}
+
+/** Send everything this process prints to a file (the Windows service has no console). */
+function redirectOutput(path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const write = (chunk: unknown) => {
+    try {
+      appendFileSync(path, typeof chunk === "string" || chunk instanceof Uint8Array ? chunk : String(chunk));
+    } catch {}
+    return true;
+  };
+  process.stdout.write = write as typeof process.stdout.write;
+  process.stderr.write = write as typeof process.stderr.write;
+  const line = (...parts: unknown[]) => write(parts.map((p) => (typeof p === "string" ? p : Bun.inspect(p))).join(" ") + "\n");
+  console.log = line;
+  console.info = line;
+  console.warn = line;
+  console.error = line;
+  write(`\n--- code-mcp service started ${new Date().toISOString()} (pid ${process.pid}) ---\n`);
+}
+
+/** Status check that never blocks 'mcp code-mcp' on a broken service manager. */
+function serviceStatusSafe(): ServiceStatus | undefined {
+  try {
+    return serviceStatus();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Run code-mcp in this process: config + (service) overrides + command line. */
 export async function runCodeMcp(args: string[]): Promise<void> {
+  if (process.env[RAW_ENV] === "1") {
+    delete process.env[RAW_ENV];
+    return runRaw(args);
+  }
+  const { host, rest } = splitHostFlags(args);
+  const configPath = host.config ?? defaultConfigPath();
+  const { argv, help } = effectiveCodeMcpArgv(rest, host, configPath);
+  if (!help && !host.service) {
+    // One code-mcp per machine and config: the service already owns the port
+    // and the device id, and a second copy would fight it for both.
+    const status = serviceStatusSafe();
+    if (status?.running) {
+      throw new UsageError(
+        `the code-mcp service is running (${status.where})`,
+        "It already serves these options. Stop it first with 'mcp service uninstall', or check it with 'mcp service status'.",
+      );
+    }
+  }
+  if (host.service) {
+    if (host.log) redirectOutput(host.log);
+    // Windows: the task runs conhost, which runs this. Stopping the task ends
+    // conhost only - follow it out rather than linger as an orphan.
+    if (process.platform === "win32" && process.ppid > 0) watchParent(process.ppid, undefined, "the service's console host");
+  }
+  return runRaw(argv);
+}
+
+async function runRaw(args: string[]): Promise<void> {
   const effective = codeMcpArgv(args);
   // Consumed: code-mcp's own child processes (bash, jobs, MCP servers) inherit
   // process.env, and must never receive the device credential.
