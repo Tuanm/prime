@@ -25,7 +25,7 @@ import { renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.10.3-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.10.18-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
