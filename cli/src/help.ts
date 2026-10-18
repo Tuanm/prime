@@ -14,6 +14,10 @@ USAGE
   mcp [command] [options]
 
 COMMANDS
+  connect [--gateway <url>] [--new]       Connect THIS machine as an anonymous device
+                                          (registers or reuses one, runs code-mcp)
+  serve [--port <n>]                      Serve every device's tools as one MCP server
+                                          (stdio by default; HTTP with --port)
   devices connect <device-id> [options]   Save credentials for a device and verify it
   devices disconnect <device-id>          Forget a device's local configuration
   devices status <device-id>              Probe one device
@@ -24,12 +28,18 @@ COMMANDS
   update                                  Update the CLI to the newest release
   help [command]                          Show help
 
+ADVANCED
+  code-mcp [code-mcp flags]               Run the bundled code-mcp device server
+                                          directly ('mcp help code-mcp')
+
 ALIASES
   mcp                     Same as 'mcp --help'
   mcp call                Same as 'mcp tools call'
   mcp upgrade             Same as 'mcp update'
 
 EXAMPLES
+  mcp connect                                    # this machine, on the default gateway
+  claude mcp add gateway -- mcp serve            # all devices as one MCP server
   mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
   mcp devices connect my-laptop                  # uses defaults from config
   mcp devices list
@@ -41,6 +51,7 @@ EXAMPLES
 
 CONFIG
   Precedence per field: --flag > environment > device entry > defaults section.
+  With no gateway configured anywhere, https://code-mcp.tuanm.workers.dev is used.
   Environment: CODE_MCP_GATEWAY_CONFIG, CODE_MCP_GATEWAY_URL,
   CODE_MCP_GATEWAY_TOKEN, CODE_MCP_GATEWAY_DEVICE_TOKEN,
   CODE_MCP_GATEWAY_TIMEOUT_MS.
@@ -140,6 +151,98 @@ ${bold("call")}
   4 offline, 5 timeout).
 `;
 
+const CONNECT = `mcp connect - connect THIS machine to the gateway as an anonymous device
+
+USAGE
+  mcp connect [--gateway <url>] [--new] [--no-start] [--json] [-- <code-mcp flags>]
+
+Creates an anonymous device on the gateway (POST /api/devices/anonymous), saves
+its id and device code in the config file, prints them with the connect URL,
+then runs the bundled code-mcp in the foreground as that device - your files
+and shell become MCP tools reachable through the gateway. Ctrl-C stops it.
+
+The device is saved per gateway and reused on every later run (the gateway
+caps the total number of devices), so 'mcp connect' always comes back as the
+same device. If the gateway no longer knows it (an unused anonymous device is
+deleted after about an hour, one offline for 7 days is deleted too), a new one
+is registered automatically and the note says so.
+
+The saved device is an ordinary config entry: 'mcp tools list <id>',
+'mcp call <id>.<tool>' and 'mcp serve' use it like any other device.
+
+OPTIONS
+  --gateway <url>          Gateway origin. Default: the saved default gateway,
+                           else https://code-mcp.tuanm.workers.dev
+  --gateway-token <token>  Gateway credential, for gateways that require one
+  --new                    Register a fresh device instead of reusing the saved one
+  --no-start               Only register/reuse and print; do not run code-mcp
+  --port <n>               Local port for code-mcp's HTTP listener (default: free)
+  --json                   Print the credentials as JSON (then run code-mcp)
+  -- <flags>               Extra code-mcp flags, e.g. -- --enable-memory
+
+  Keep the connect URL and device code secret: they grant shell access to this
+  machine. Anonymous devices have a lower request budget than registered ones
+  and cannot use file storage.
+
+ERRORS
+  429  too many devices created from your network - the retry time is shown
+  503  the gateway's device limit is reached
+  403  anonymous devices are disabled on this gateway (exit 3)
+`;
+
+const SERVE = `mcp serve - every device's tools as ONE MCP server
+
+USAGE
+  mcp serve [<device-id>...] [options]                stdio (default)
+  mcp serve [<device-id>...] --port <n> [--host <a>]  Streamable HTTP on /mcp
+
+Aggregates the tools of the configured devices (the same devices and
+credentials 'mcp tools list' / 'mcp call' use; or only the ids given) behind a
+single MCP server, for MCP clients:
+
+  claude mcp add gateway -- mcp serve
+  codex mcp add gateway -- mcp serve
+  mcp serve --port 7800        then point a client at http://127.0.0.1:7800/mcp
+
+Tool names are <device>__<tool> (characters outside [a-zA-Z0-9_-] become "_",
+collisions and over-long names get a short stable hash suffix), and each
+description starts with [<device-id>]. Calls are routed to the device and its
+result is returned verbatim.
+
+Offline devices are skipped (noted on stderr) and picked up again later: the
+tool list is re-read on tools/list (cached for 15 s), and in stdio mode every
+60 s with a tools/list_changed notification. With no reachable device the
+server still starts, with an empty tool list.
+
+In stdio mode stdout carries only JSON-RPC; all notes go to stderr.
+
+OPTIONS
+  --port <n>               Serve Streamable HTTP (POST /mcp; GET returns 405)
+  --host <addr>            Listen address for --port (default 127.0.0.1)
+  --allow-remote           Required for a non-loopback --host. The server has NO
+                           authentication: anyone who reaches it can run every
+                           device's tools, shell included
+  --gateway, --gateway-token, --token, --timeout
+                           Override the gateway/credentials for every device
+                           (default gateway: https://code-mcp.tuanm.workers.dev)
+`;
+
+const CODE_MCP = `mcp code-mcp - run the bundled code-mcp device server   (advanced)
+
+USAGE
+  mcp code-mcp [code-mcp flags]
+  mcp code-mcp --help          code-mcp's own flag reference
+
+The CLI embeds code-mcp (github.com/Tuanm/code-mcp), the MCP server that
+exposes this machine's files and shell as tools. 'mcp connect' runs it for
+you; use this command for anything else code-mcp supports, e.g. a registered
+device:
+
+  mcp code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
+
+Every argument is passed to code-mcp unchanged.
+`;
+
 const UPDATE = `mcp update - install the newest release   (alias: mcp upgrade)
 
 USAGE
@@ -190,7 +293,10 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "tools") return TOOLS;
   if (topic === "call") return TOOLS;
   if (topic === "update" || topic === "upgrade") return UPDATE;
-  if (topic === "help") return `${ROOT}\n${dim("Usage: mcp help [devices|tools|call]")}`;
+  if (topic === "connect") return CONNECT;
+  if (topic === "serve") return SERVE;
+  if (topic === "code-mcp") return CODE_MCP;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: mcp help [connect|serve|devices|tools|call|update|code-mcp]")}`;
   void sub;
   return undefined;
 }
@@ -205,6 +311,8 @@ export function usageLine(topic: string, sub?: string): string {
     return "Usage: mcp devices <connect|disconnect|status|list> [args]";
   }
   if (topic === "update" || topic === "upgrade") return "Usage: mcp update [--check] [--force] [--to <path>]";
+  if (topic === "connect") return "Usage: mcp connect [--gateway <url>] [--new] [-- <code-mcp flags>]";
+  if (topic === "serve") return "Usage: mcp serve [<device-id>...] [--port <n>] [--host <addr>]";
   if (topic === "tools" || topic === "call") {
     if (sub === "list") return "Usage: mcp tools list <device-id>";
     if (sub === "view") return "Usage: mcp tools view <device-id>.<tool-id>";

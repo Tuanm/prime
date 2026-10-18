@@ -8,13 +8,17 @@
   "bin": {
     "mcp": "./src/index.ts"
   },
+  "imports": {
+    "#code-mcp": "./src/code-mcp.ts"
+  },
   "scripts": {
     "build": "bun scripts/build.ts",
     "build:host": "bun scripts/build.ts --host-only",
     "bundle": "bun scripts/build.ts --bundle-only",
-    "test": "bun test test/unit.test.ts",
+    "sync:code-mcp": "bun scripts/sync-code-mcp.ts",
+    "test": "bun test test/unit.test.ts test/features.test.ts",
     "test:e2e": "bun test/e2e.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
   },
   "devDependencies": {
     "@types/bun": "^1.1.14",

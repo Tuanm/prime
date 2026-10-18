@@ -1,0 +1,9 @@
+{
+  // "bun run typecheck": everything except the vendored code-mcp script, which is
+  // mapped to a stub (see src/code-mcp-host.ts). Bun reads tsconfig.json only.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": { "#code-mcp": ["./src/code-mcp.stub.d.ts"] }
+  },
+  "exclude": ["src/code-mcp.ts"]
+}

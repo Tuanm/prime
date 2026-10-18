@@ -168,6 +168,9 @@ async function startGateway(): Promise<{ kill: () => void }> {
       "--var", `DEVICE_TOKEN:${DEVICE_TOKEN}`,
       "--var", "ADMIN_TOKEN:admin-e2e",
       "--var", "TIMEOUT_MS:30000",
+      // The suite sends well over the default 100 requests/minute from one IP;
+      // the client retries 429s, but anonymous registration (correctly) does not.
+      "--var", "RATE_LIMIT_MAX:100000",
       "--var", "KEEPALIVE_TIMEOUT_MS:20000",
     ],
     { cwd: join(REPO, "worker"), stdio: ["ignore", "pipe", "pipe"] },
@@ -187,7 +190,7 @@ async function startGateway(): Promise<{ kill: () => void }> {
 
 console.log("Building the host binary...");
 // Same flags as scripts/build.ts: the suite must test what ships.
-const build = Bun.spawnSync(["bun", "build", "--compile", "--minify", "--bytecode", "--outfile", BIN, join(ROOT, "src", "index.ts")], {
+const build = Bun.spawnSync(["bun", "build", "--compile", "--minify", "--bytecode", "--format=esm", "--outfile", BIN, join(ROOT, "src", "index.ts")], {
   cwd: ROOT,
   stdout: "pipe",
   stderr: "pipe",
@@ -717,6 +720,148 @@ try {
 
   updateServer.stop(true);
   rmSync(installDir, { recursive: true, force: true });
+
+  // ---- anonymous device: mcp connect + bundled code-mcp + mcp serve ---------
+  // The real flow, with the compiled binary: register an anonymous device, run
+  // the embedded code-mcp as that device, call its real tools through the
+  // gateway, then aggregate it with 'mcp serve' over stdio and HTTP.
+  const ANON_CONFIG = join(CONFIG_DIR, "anon.yaml");
+  const anonEnv = { CODE_MCP_GATEWAY_CONFIG: ANON_CONFIG };
+  const gwHeaders = { "content-type": "application/json", authorization: `Bearer ${GATEWAY_TOKEN}` };
+
+  const connectNoStart = await cli(["connect", "--gateway", BASE, "--gateway-token", GATEWAY_TOKEN, "--no-start", "--json"], { env: anonEnv });
+  const anon = JSON.parse(connectNoStart.out || "{}") as { device?: string; token?: string; connect_url?: string; reused?: boolean };
+  check(
+    "connect registers an anonymous device (POST /api/devices/anonymous)",
+    connectNoStart.code === 0 && /^anon-[0-9a-f]{16}$/.test(anon.device ?? "") && /^[0-9A-Z]{6}$/.test(anon.token ?? "") &&
+      anon.connect_url === `${BASE}/mcp/${anon.device}?token=${anon.token}` && anon.reused === false,
+    `code=${connectNoStart.code} out=${connectNoStart.out} err=${connectNoStart.err}`,
+  );
+
+  const connectAgain = await cli(["connect", "--gateway", BASE, "--gateway-token", GATEWAY_TOKEN, "--no-start", "--json"], { env: anonEnv });
+  const again = JSON.parse(connectAgain.out || "{}") as { device?: string; reused?: boolean };
+  check("connect reuses the saved anonymous device", connectAgain.code === 0 && again.device === anon.device && again.reused === true, connectAgain.out);
+
+  const noToken = await cli(["connect", "--gateway", BASE, "--no-start", "--new"], { env: { CODE_MCP_GATEWAY_CONFIG: join(CONFIG_DIR, "anon-notoken.yaml") } });
+  check("connect without the required gateway token exits 3", noToken.code === 3 && noToken.err.includes("--gateway-token"), `code=${noToken.code} err=${noToken.err}`);
+
+  // Foreground run: the binary re-executes itself as "mcp code-mcp ...".
+  const runner = Bun.spawn([BIN, "connect", "--gateway", BASE, "--gateway-token", GATEWAY_TOKEN], {
+    env: { ...process.env, ...anonEnv, NO_COLOR: "1" },
+    cwd: tmpdir(), // no src/ here: only the embedded code-mcp can run
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let runnerErr = "";
+  let runnerOut = "";
+  void (async () => {
+    for await (const chunk of runner.stderr) runnerErr += new TextDecoder().decode(chunk);
+  })();
+  void (async () => {
+    for await (const chunk of runner.stdout) runnerOut += new TextDecoder().decode(chunk);
+  })();
+  for (let i = 0; i < 120 && !runnerErr.includes("Connected to gateway"); i++) await Bun.sleep(250);
+  check(
+    "connect runs the bundled code-mcp as the anonymous device",
+    runnerErr.includes("Connected to gateway") && runnerErr.includes(String(anon.device)) && runnerOut.includes(String(anon.token)),
+    `out=${runnerOut.slice(0, 300)} err=${runnerErr.slice(0, 500)}`,
+  );
+
+  // The device code must not be visible to other local users via ps.
+  const psList = Bun.spawnSync(["ps", "-axww", "-o", "args="], { stdout: "pipe" }).stdout.toString();
+  const childLines = psList.split("\n").filter((l) => l.includes(`--id ${anon.device}`));
+  check(
+    "the code-mcp child's command line carries no device code",
+    childLines.length > 0 && childLines.every((l) => !l.includes(String(anon.token)) && !l.includes("--gateway-token")),
+    childLines.join(" | ").slice(0, 300),
+  );
+
+  try {
+    const rpc = async (body: unknown) => {
+      const r = await fetch(anon.connect_url!, { method: "POST", headers: gwHeaders, body: JSON.stringify(body) });
+      return { status: r.status, json: (await r.json().catch(() => ({}))) as { result?: any; error?: any } };
+    };
+    const anonList = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const anonToolNames = ((anonList.json.result?.tools ?? []) as { name: string }[]).map((t) => t.name);
+    check(
+      "the connect URL lists code-mcp's real tools",
+      anonList.status === 200 && anonToolNames.includes("ls") && anonToolNames.includes("read"),
+      `status=${anonList.status} tools=${anonToolNames.join(",")}`,
+    );
+    const shellTool = ["bash", "shell", "command", "powershell"].find((n) => anonToolNames.includes(n)) ?? "bash";
+    const echo = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: shellTool, arguments: { cwd: tmpdir(), command: "echo hi" } } });
+    check(
+      `a real code-mcp tool runs through the gateway (${shellTool} "echo hi")`,
+      echo.status === 200 && JSON.stringify(echo.json.result ?? {}).includes("hi") && echo.json.result?.isError !== true,
+      JSON.stringify(echo.json).slice(0, 300),
+    );
+
+    const anonCall = await cli(["call", `${anon.device}.ls`, JSON.stringify({ cwd: tmpdir(), path: "." })], { env: anonEnv });
+    check("'mcp call' reaches the anonymous device from the saved config", anonCall.code === 0, `code=${anonCall.code} err=${anonCall.err}`);
+
+    // mcp serve over stdio
+    const serveInput = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: `${anon.device}__${shellTool}`, arguments: { cwd: tmpdir(), command: "echo via-serve" } } },
+      { jsonrpc: "2.0", id: 4, method: "ping" },
+    ].map((m) => JSON.stringify(m)).join("\n") + "\n";
+    const served = await cli(["serve"], { env: anonEnv, stdin: serveInput });
+    const servedLines = served.out.split("\n").filter(Boolean);
+    let servedParsed: { id: number; result?: any }[] = [];
+    try {
+      servedParsed = servedLines.map((l) => JSON.parse(l));
+    } catch {}
+    const servedById = new Map(servedParsed.map((m) => [m.id, m]));
+    check(
+      "mcp serve (stdio) prints only JSON-RPC and answers each request",
+      served.code === 0 && servedParsed.length === 4 && servedParsed.length === servedLines.length && servedParsed.every((m) => (m as { jsonrpc?: string }).jsonrpc === "2.0"),
+      `code=${served.code} out=${served.out.slice(0, 300)} err=${served.err.slice(0, 300)}`,
+    );
+    check(
+      "mcp serve exposes <device>__<tool> names",
+      ((servedById.get(2)?.result?.tools ?? []) as { name: string }[]).some((t) => t.name === `${anon.device}__ls`),
+      JSON.stringify(servedById.get(2)).slice(0, 300),
+    );
+    check("mcp serve (stdio) routes a tool call to the device", JSON.stringify(servedById.get(3)?.result ?? {}).includes("via-serve"), JSON.stringify(servedById.get(3)).slice(0, 300));
+
+    // mcp serve over Streamable HTTP
+    const SERVE_PORT = 8857;
+    const httpServe = Bun.spawn([BIN, "serve", "--port", String(SERVE_PORT)], {
+      env: { ...process.env, ...anonEnv, NO_COLOR: "1" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      let up = false;
+      for (let i = 0; i < 80 && !up; i++) {
+        try {
+          up = (await fetch(`http://127.0.0.1:${SERVE_PORT}/mcp`)).status === 405;
+        } catch {
+          await Bun.sleep(125);
+        }
+      }
+      const httpCall = await fetch(`http://127.0.0.1:${SERVE_PORT}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: `${anon.device}__${shellTool}`, arguments: { cwd: tmpdir(), command: "echo via-http" } } }),
+      });
+      const httpBody = await httpCall.text();
+      check("mcp serve --port: GET is 405 and POST /mcp routes a tool call", up && httpCall.status === 200 && httpBody.includes("via-http"), `up=${up} status=${httpCall.status} body=${httpBody.slice(0, 300)}`);
+    } finally {
+      httpServe.kill();
+      await httpServe.exited;
+    }
+  } finally {
+    // Ctrl-C equivalent: the parent forwards it and exits with code-mcp.
+    runner.kill("SIGINT");
+    const exited = await Promise.race([runner.exited, Bun.sleep(10_000).then(() => "hung" as const)]);
+    check("connect stops on SIGINT", exited !== "hung", `err=${runnerErr.slice(-300)}`);
+    if (exited === "hung") runner.kill("SIGKILL");
+  }
 
   // ---- performance ---------------------------------------------------------
   const timings: number[] = [];
