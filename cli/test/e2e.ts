@@ -768,15 +768,14 @@ try {
     stdout: await new Response(bareProc.stdout).text(),
     stderr: await new Response(bareProc.stderr).text(),
   };
+  // On Windows the running .exe cannot be overwritten, only renamed: it is
+  // moved aside to .old and the new build takes its place.
   if (IS_WINDOWS) {
-    // Windows cannot replace a running .exe: the update is staged next to it
-    // and the exact move command is printed, the running file left intact.
     check(
-      "a bare 'mcp update' on Windows stages the new build and says how to finish",
-      bareUpdate.exitCode === 1 && bareUpdate.stderr.includes("move /Y") && existsSync(selfBin + ".new") &&
-        digest(new Uint8Array(readFileSync(selfBin + ".new"))) === digest(fakeBinaryBytes) &&
-        digest(new Uint8Array(readFileSync(selfBin))) === digest(new Uint8Array(readFileSync(BIN))),
-      `code=${bareUpdate.exitCode} err=${bareUpdate.stderr.slice(0, 200)}`,
+      "a bare 'mcp update' on Windows replaces the running .exe (old one moved aside)",
+      bareUpdate.exitCode === 0 && digest(new Uint8Array(readFileSync(selfBin))) === digest(fakeBinaryBytes) &&
+        existsSync(selfBin + ".old") && digest(new Uint8Array(readFileSync(selfBin + ".old"))) === digest(new Uint8Array(readFileSync(BIN))),
+      `code=${bareUpdate.exitCode} out=${bareUpdate.stdout.slice(0, 160)} err=${bareUpdate.stderr.slice(0, 200)}`,
     );
   } else check(
     "a bare 'mcp update' installs the newest release (it used to print help)",

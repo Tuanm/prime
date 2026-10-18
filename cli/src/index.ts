@@ -21,7 +21,7 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { renderUpdate, runUpdate } from "./update.ts";
+import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
@@ -244,6 +244,7 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 const argv = process.argv.slice(2);
+removeStaleWindowsBinary();
 initColor(argv.includes("--no-color") ? false : undefined);
 
 // Deliberately not top-level `await`: `bun build --compile --bytecode` (CommonJS
