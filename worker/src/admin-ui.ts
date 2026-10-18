@@ -32,7 +32,7 @@ ${UI_CSS}    </style>
     </div>
     <ul id="list"></ul>
 
-    <div class="row-head">
+    <div class="row-head section">
       <h2>Anonymous Devices</h2>
     </div>
     <ul id="anonList"></ul>
@@ -458,8 +458,10 @@ ${UI_CSS}    </style>
         var anonDevices = [];
         var anonSignature = "";
 
+        // A short UUID-style handle (no spaces). It comes from the opaque ref,
+        // not the device id, which this page never receives.
         function anonLabel(d) {
-          return "anonymous #" + d.ref.slice(0, 6);
+          return d.ref.slice(0, 8);
         }
 
         function renderAnon() {
