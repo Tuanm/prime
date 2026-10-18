@@ -519,7 +519,7 @@ trustworthy.
 | Already newest | Reports "already up to date", changes nothing |
 | `--check` | Never writes, and works from a source checkout |
 | Not writable (e.g. `/usr/local/bin`) | Explains and suggests `sudo mcp update` or `--to <path>` |
-| Windows, binary in use | Stages `<path>.new` and prints the move command |
+| Windows, binary in use | Renames the running `.exe` to `<path>.old` (Windows allows a rename, not an overwrite), installs the new one in its place, and removes `.old` on the next run |
 | Source checkout (`.ts`) | Refuses, so your working tree is never overwritten |
 | `--to install/mcp.js` | Installs the JS bundle instead of a native binary |
 

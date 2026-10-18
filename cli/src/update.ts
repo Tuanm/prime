@@ -225,6 +225,18 @@ async function download(url: string, what: string): Promise<Uint8Array> {
 
 // ---- install --------------------------------------------------------------
 
+/**
+ * After a Windows self-update the previous binary is left beside the new one as
+ * "<exe>.old" (it was running, so it could only be renamed). Remove it once it
+ * is no longer in use - the next run of the new binary. Best effort.
+ */
+export function removeStaleWindowsBinary(execPath: string = process.execPath): void {
+  if (process.platform !== "win32") return;
+  try {
+    rmSync(`${execPath}.old`, { force: true });
+  } catch {}
+}
+
 function installBytes(target: string, bytes: Uint8Array, mode: number): void {
   const dir = dirname(target);
   try {
@@ -236,21 +248,20 @@ function installBytes(target: string, bytes: Uint8Array, mode: number): void {
     );
   }
 
-  // Windows refuses to replace a running executable, so stage the new build next
-  // to it and say what to do rather than failing with EBUSY.
-  if (process.platform === "win32") {
-    const staged = `${target}.new`;
-    writeFileSync(staged, bytes);
-    throw new CliError(
-      `downloaded the update to ${staged}, but Windows cannot replace a running executable`,
-      `Close all mcp processes, then: move /Y "${staged}" "${target}"`,
-    );
-  }
-
   const tmp = `${target}.tmp-${process.pid}`;
   try {
     writeFileSync(tmp, bytes, { mode });
     chmodSync(tmp, mode);
+    // Windows will not overwrite or delete a running .exe, but it will rename
+    // one: move the running file aside and put the new build in its place. The
+    // leftover is removed on a later run (see removeStaleWindowsBinary).
+    if (process.platform === "win32" && existsSync(target)) {
+      const aside = `${target}.old`;
+      try {
+        rmSync(aside, { force: true });
+      } catch {}
+      renameSync(target, aside);
+    }
     renameSync(tmp, target); // atomic within the same filesystem
   } catch (err) {
     try {

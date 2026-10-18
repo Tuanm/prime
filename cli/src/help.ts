@@ -267,8 +267,9 @@ OPTIONS
 NOTES
   The running binary is replaced atomically, so an interrupted update cannot
   leave a half-written executable. Replacing the running process is fine on
-  macOS and Linux; on Windows a running .exe cannot be replaced, so the update
-  is staged as <path>.new and the exact move command is printed.
+  macOS and Linux. On Windows, where a running .exe can be renamed but not
+  overwritten, the old binary is moved aside to <path>.old and removed on the
+  next run.
 
   The checksum comes from the same release as the artifact, so it proves the
   download is intact and unmodified in transit - not that the release itself is
