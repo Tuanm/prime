@@ -350,6 +350,11 @@ export function installService(platform: Platform, spec: ServiceSpec): string {
   }
   if (platform === "win32") {
     mkdirSync(dirname(spec.logPath), { recursive: true });
+    // A reinstall must stop the running instance: re-registering only replaces
+    // the definition, and with IgnoreNew the new start is skipped while the old
+    // process (with the old options) keeps running.
+    powershell(renderWindowsUninstallScript(spec.configPath));
+    for (let i = 0; i < 40 && pidAlive(pidFilePath(spec.configPath)); i++) Bun.sleepSync(250);
     must(powershell(renderWindowsInstallScript(spec)), "registering the Scheduled Task");
     return "Task Scheduler " + TASK_PATH + TASK_NAME;
   }
