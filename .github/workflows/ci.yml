@@ -80,3 +80,46 @@ jobs:
       - name: End-to-end tests
         working-directory: cli
         run: bun test/e2e.ts
+
+  # The same CLI suites on Windows, x64 and Arm: the release ships .exe builds
+  # for both, so they must actually run there - not just cross-compile.
+  cli-windows:
+    name: mcp CLI on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: cli
+        run: bun run typecheck
+
+      - name: Unit tests
+        working-directory: cli
+        run: bun test
+
+      - name: End-to-end tests
+        working-directory: cli
+        run: bun test/e2e.ts
