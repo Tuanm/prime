@@ -188,7 +188,9 @@ export async function serviceStatusCommand(args: string[], opts: ServiceCommandO
   const status = serviceStatus(platform, configPath);
   let options: OptionMap | undefined;
   try {
-    options = mergeOptions(optionsFromConfig(loadConfig(configPath).codeMcp, configPath), loadOverrides(overridesPath(configPath)));
+    // The same options the service computes at start, default gateway included.
+    const config = loadConfig(configPath);
+    options = withDefaultGateway(mergeOptions(optionsFromConfig(config.codeMcp, configPath), loadOverrides(overridesPath(configPath))), config.defaults.gateway);
   } catch {}
   if (opts.json) {
     printJson({ ...status, platform, options: options ? describeOptions(options) : undefined, url: options ? localUrl(options) : undefined });
