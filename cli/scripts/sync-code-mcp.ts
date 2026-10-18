@@ -21,8 +21,10 @@
 
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not URL.pathname: on Windows the latter is "/D:/a/...".
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TARGET = join(ROOT, "src", "code-mcp.ts");
 const META = join(ROOT, "src", "code-mcp.source.json");
 const REPO = process.env.CODE_MCP_REPO ?? "Tuanm/code-mcp";

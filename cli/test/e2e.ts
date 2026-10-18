@@ -356,7 +356,15 @@ try {
   const batchOrder = positions.every((position, index) => position > -1 && (index === 0 || position > positions[index - 1]!));
   check("stdin array keeps id order", stdinBatch.code === 0 && batchOrder, stdinBatch.out);
 
-  const stdinBatchJson = JSON.parse((await cli(["tools", "call", "--json"], { stdin: JSON.stringify(batch) })).out) as { id: number; ok: boolean }[];
+  const stdinBatchRaw = await cli(["tools", "call", "--json"], { stdin: JSON.stringify(batch) });
+  const stdinBatchJson = (() => {
+    // Guarded: one broken run must report a FAIL, not abort the whole suite.
+    try {
+      return JSON.parse(stdinBatchRaw.out) as { id: number; ok: boolean }[];
+    } catch {
+      return [] as { id: number; ok: boolean }[];
+    }
+  })();
   check("stdin array --json returns ids and ok flags", stdinBatchJson.length === 3 && stdinBatchJson[0]!.id === 1 && stdinBatchJson.every((r) => r.ok));
 
   // stdin: malformed

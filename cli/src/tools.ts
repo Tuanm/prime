@@ -179,13 +179,20 @@ function resolveLabel(ctx: Ctx, label: string): { deviceId: string; toolName: st
   };
 }
 
-async function readStdin(): Promise<string> {
+/**
+ * All of stdin, through the Node-compatible stream: Bun.stdin.text() can leave a
+ * piped stdin unread on Windows (the promise never settles and the process
+ * just ends), so the portable path is the one used everywhere.
+ */
+export async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return "";
+  const chunks: Buffer[] = [];
   try {
-    return await Bun.stdin.text();
+    for await (const chunk of process.stdin) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer));
   } catch {
     return "";
   }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 /** Editors on Windows (and PowerShell redirects) often emit a UTF-8 BOM. */
