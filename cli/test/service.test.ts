@@ -1,0 +1,123 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
+import { effectiveCodeMcpArgv, splitHostFlags } from "../src/code-mcp-host.ts";
+import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
+import { rememberAnonymous } from "../src/connect.ts";
+import {
+  loadOverrides,
+  renderLaunchdPlist,
+  renderSystemdUnit,
+  renderWindowsInstallScript,
+  saveOverrides,
+  systemdQuote,
+  windowsQuote,
+  type ServiceSpec,
+} from "../src/service.ts";
+
+describe("code-mcp config section", () => {
+  test("is parsed: strings, numbers as text, booleans", () => {
+    const c = parseConfig('devices: {}\ncode-mcp:\n  port: 7777\n  bind: "127.0.0.1"\n  enable-memory: true\n  id: demo\n', "t");
+    expect(c.codeMcp).toEqual({ port: "7777", bind: "127.0.0.1", "enable-memory": true, id: "demo" });
+  });
+
+  test("survives every save - 'mcp connect' must not drop it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const path = join(dir, "config.yaml");
+    const config = emptyConfig();
+    config.codeMcp = { port: "7777", token: 'we"ird\\tok', "enable-memory": true };
+    saveConfig(path, config);
+    const loaded = loadConfig(path);
+    rememberAnonymous(loaded, "https://gw.example", { deviceId: "anon-0123456789abcdef", token: "ABC123" }, undefined, "2026-01-01T00:00:00.000Z");
+    saveConfig(path, loaded);
+    expect(loadConfig(path).codeMcp).toEqual(config.codeMcp);
+    expect(readFileSync(path, "utf8")).toContain("code-mcp:");
+  });
+
+  test("rejects a non-mapping section and non-scalar values", () => {
+    expect(() => parseConfig("code-mcp: [1, 2]\n", "t")).toThrow("must be a mapping");
+    expect(() => parseConfig("code-mcp:\n  port: [1]\n", "t")).toThrow("must be a string, number or true/false");
+  });
+});
+
+describe("code-mcp options", () => {
+  test("validates config keys and types", () => {
+    expect(() => optionsFromConfig({ prot: "1" }, "cfg")).toThrow('unknown code-mcp option "prot"');
+    expect(() => optionsFromConfig({ "enable-memory": "yes" }, "cfg")).toThrow("must be true or false");
+    expect(() => optionsFromConfig({ port: true }, "cfg")).toThrow("must be a non-empty string");
+  });
+
+  test("parses --k v, --k=v, booleans, and a bare --gateway like code-mcp", () => {
+    expect(parseCodeMcpArgs(["--port", "1", "--bind=0.0.0.0", "--enable-memory", "--public=false"]).options).toEqual({ port: "1", bind: "0.0.0.0", "enable-memory": true, public: false });
+    expect(parseCodeMcpArgs(["--gateway", "--id", "x"]).options).toEqual({ gateway: "code-mcp.tuanm.workers.dev", id: "x" });
+    expect(parseCodeMcpArgs(["--help"]).help).toBe(true);
+    expect(() => parseCodeMcpArgs(["--port"])).toThrow("needs a value");
+    expect(() => parseCodeMcpArgs(["--nope", "1"])).toThrow("unknown code-mcp option");
+    expect(() => parseCodeMcpArgs(["positional"])).toThrow("unexpected argument");
+  });
+
+  test("later layers win, false booleans are dropped, secrets are masked", () => {
+    const merged = mergeOptions({ port: "1", "enable-memory": true, token: "s3cret" }, { port: "2" }, { "enable-memory": false });
+    expect(toCodeMcpArgv(merged)).toEqual(["--port", "2", "--token", "s3cret"]);
+    expect(describeOptions(merged)).toBe("--port 2 --token ***");
+  });
+});
+
+describe("mcp code-mcp argv", () => {
+  test("host flags are split off; config + overrides + command line merge for the service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const config = join(dir, "config.yaml");
+    const c = emptyConfig();
+    c.codeMcp = { port: "7777", token: "cfg-token", bind: "127.0.0.1" };
+    saveConfig(config, c);
+    saveOverrides(join(dir, "service.yaml"), { port: "8888", "enable-memory": true });
+    expect((statSync(join(dir, "service.yaml")).mode & 0o777).toString(8)).toBe(process.platform === "win32" ? (statSync(join(dir, "service.yaml")).mode & 0o777).toString(8) : "600");
+
+    const { host, rest } = splitHostFlags(["--service", "--config", config, "--bind", "0.0.0.0", "--log=/x.log"]);
+    expect(host).toEqual({ service: true, config, log: "/x.log" });
+    expect(effectiveCodeMcpArgv(rest, host, config).argv).toEqual(["--port", "8888", "--bind", "0.0.0.0", "--token", "cfg-token", "--enable-memory"]);
+    // Not the service: the overrides file does not apply.
+    expect(effectiveCodeMcpArgv([], { service: false }, config).argv).toEqual(["--port", "7777", "--bind", "127.0.0.1", "--token", "cfg-token"]);
+    expect(loadOverrides(join(dir, "service.yaml"))).toEqual({ port: "8888", "enable-memory": true });
+  });
+});
+
+describe("service definitions", () => {
+  const spec: ServiceSpec = {
+    command: ["/opt/my tools/mcp", "code-mcp", "--service", "--config", "/home/u/.code-mcp-gateway/config.yaml"],
+    configPath: "/home/u/.code-mcp-gateway/config.yaml",
+    logPath: "/home/u/Library/Logs/code-mcp-gateway/code-mcp.log",
+    pathEnv: "/usr/local/bin:/usr/bin:/odd/100%/$HOME",
+    home: "/home/u",
+  };
+
+  test("systemd: quoted ExecStart, % and $ escaped there, PATH kept literal", () => {
+    const unit = renderSystemdUnit(spec);
+    expect(unit).toContain('ExecStart="/opt/my tools/mcp" "code-mcp" "--service" "--config" "/home/u/.code-mcp-gateway/config.yaml"');
+    expect(unit).toContain('Environment="PATH=/usr/local/bin:/usr/bin:/odd/100%%/$HOME"');
+    expect(unit).toContain("Restart=on-failure");
+    expect(unit).toContain("WantedBy=default.target");
+    expect(systemdQuote('a"b\\c%d$e')).toBe('"a\\"b\\\\c%%d$$e"');
+  });
+
+  test("launchd: escaped XML, restart on crash only", () => {
+    const plist = renderLaunchdPlist({ ...spec, command: ["/x/mcp", "code-mcp", "--config", "/a&b/<c>.yaml"] });
+    expect(plist).toContain("<string>/a&amp;b/&lt;c&gt;.yaml</string>");
+    expect(plist).toContain("<key>SuccessfulExit</key><false/>");
+    expect(plist).toContain("<key>RunAtLoad</key><true/>");
+  });
+
+  test("Windows: CommandLineToArgvW quoting and a headless, per-user, logon task", () => {
+    expect(windowsQuote("C:\\Program Files\\mcp.exe")).toBe('"C:\\Program Files\\mcp.exe"');
+    expect(windowsQuote("plain")).toBe("plain");
+    expect(windowsQuote('say "hi"')).toBe('"say \\"hi\\""');
+    expect(windowsQuote("C:\\dir with space\\")).toBe('"C:\\dir with space\\\\"');
+    const script = renderWindowsInstallScript({ ...spec, command: ["C:\\Users\\o'brien\\mcp.exe", "code-mcp", "--service"] });
+    expect(script).toContain("--headless C:\\Users\\o''brien\\mcp.exe code-mcp --service");
+    expect(script).toContain("-AtLogOn -User $user");
+    expect(script).toContain("-LogonType Interactive -RunLevel Limited");
+    expect(script).toContain("-RestartCount 999");
+  });
+});
