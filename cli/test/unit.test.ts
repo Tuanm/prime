@@ -13,7 +13,7 @@ import { parseArgs, flag } from "../src/args.ts";
 import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/client.ts";
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
-import { assetNameFor, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
+import { assetNameFor, currentInstall, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
@@ -309,6 +309,14 @@ describe("bounded concurrency", () => {
 });
 
 describe("update helpers", () => {
+  test("a compiled binary is recognised on every platform, Windows included", () => {
+    // The Windows form was once mistaken for a source checkout, so 'mcp update'
+    // refused to run from any Windows .exe.
+    expect(currentInstall("/$bunfs/root/mcp", "/usr/local/bin/mcp")).toEqual({ path: "/usr/local/bin/mcp", kind: "binary" });
+    expect(currentInstall("B:/~BUN/root/mcp.exe", "C:\\tools\\mcp.exe")).toEqual({ path: "C:\\tools\\mcp.exe", kind: "binary" });
+    expect(currentInstall("B:\\~BUN\\root\\mcp.exe", "C:\\tools\\mcp.exe").kind).toBe("binary");
+  });
+
   test("compareVersions follows SemVer, with build metadata as a tiebreak", () => {
     expect(compareVersions("26.10.3", "26.10.4")).toBe(-1);
     expect(compareVersions("26.10.4", "26.10.3")).toBe(1);
