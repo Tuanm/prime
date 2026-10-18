@@ -167,6 +167,16 @@ export interface Env {
   R2_BUDGET_USD_MONTH?: string; // hard monthly R2 spend ceiling (default $5)
   R2_FREE_STORAGE_GB?: string; // assumed free storage allowance (default 10)
   FILES_MAX_TOTAL_BYTES?: string; // per-device bytes, expired-but-undeleted included (default 500 MiB)
+  // Anonymous devices (POST /api/devices/anonymous, see src/anonymous.ts).
+  MAX_DEVICES?: string; // registered + anonymous devices, virtual excluded (default 100)
+  ANON_DEVICES?: string; // "off" disables anonymous registration (default on)
+  ANON_RATE_LIMIT_MAX?: string; // relay requests per client IP per window, per anonymous device (default 30)
+  ANON_CREATE_MAX?: string; // anonymous registrations per client IP per ANON_CREATE_WINDOW_MS (default 5)
+  ANON_CREATE_WINDOW_MS?: string; // default 1 hour
+  ANON_UNUSED_TTL_MS?: string; // delete an anonymous device that never connected after this long (default 1 hour)
+  ANON_IDLE_TTL_MS?: string; // delete an anonymous device offline this long (default 7 days)
+  ANON_AUTH_MAX_FAILURES?: string; // wrong-token attempts per anonymous device before it is locked (default 20)
+  ANON_AUTH_LOCK_MS?: string; // failure window and lock duration (default 10 minutes)
   // The coding sandbox container (CodingSandbox DO) - shell/fs/jobs tools.
   CODING_SANDBOX: DurableObjectNamespace;
   DEVICES: DurableObjectNamespace;
@@ -231,6 +241,39 @@ export function loadConfig(env: Env): GatewayConfig {
     env: env.ENVIRONMENT || "dev",
   };
 }
+
+export interface AnonConfig {
+  enabled: boolean;
+  maxDevices: number;
+  rateMax: number;
+  createMax: number;
+  createWindowMs: number;
+  unusedTtlMs: number;
+  idleTtlMs: number;
+  authMaxFailures: number;
+  authLockMs: number;
+}
+
+/** Anonymous-device policy. Every knob is a var so tests can shrink it. */
+export function anonConfig(env: Env): AnonConfig {
+  return {
+    enabled: (env.ANON_DEVICES || "").trim().toLowerCase() !== "off",
+    maxDevices: num(env, "MAX_DEVICES", 100),
+    rateMax: num(env, "ANON_RATE_LIMIT_MAX", 30),
+    createMax: num(env, "ANON_CREATE_MAX", 5),
+    createWindowMs: num(env, "ANON_CREATE_WINDOW_MS", 60 * 60_000),
+    unusedTtlMs: num(env, "ANON_UNUSED_TTL_MS", 60 * 60_000),
+    idleTtlMs: num(env, "ANON_IDLE_TTL_MS", 7 * 24 * 60 * 60_000),
+    authMaxFailures: num(env, "ANON_AUTH_MAX_FAILURES", 20),
+    authLockMs: num(env, "ANON_AUTH_LOCK_MS", 10 * 60_000),
+  };
+}
+
+/** Anonymous ids: "anon-" + 16 hex. Never produced by the admin UI's own ids. */
+export const ANON_ID_RE = /^anon-[a-f0-9]{16}$/;
+/** The device code: digits and upper-case letters. */
+export const ANON_TOKEN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+export const ANON_TOKEN_LENGTH = 6;
 
 // deviceId character allowlist + length cap. Prevents path-traversal-flavored
 // confusion in /mcp/{id} routing and bounds memory for spurious registrations.

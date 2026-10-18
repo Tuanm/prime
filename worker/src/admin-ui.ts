@@ -24,13 +24,18 @@ ${UI_CSS}    </style>
   </head>
   <body>
     <h1>Code MCP Gateway</h1>
-    <div class="sub">device registry &middot; admin</div>
+    <div class="sub">device registry &middot; admin<span id="count"></span></div>
 
     <div class="row-head">
       <h2>Devices</h2>
       <button class="plus" id="addBtn" type="button" title="Add device">+</button>
     </div>
     <ul id="list"></ul>
+
+    <div class="row-head">
+      <h2>Anonymous Devices</h2>
+    </div>
+    <ul id="anonList"></ul>
     <div class="status" id="status"></div>
 
     <script>
@@ -38,6 +43,8 @@ ${UI_CSS}    </style>
         var listEl = document.getElementById("list");
         var statusEl = document.getElementById("status");
         var addBtn = document.getElementById("addBtn");
+        var anonListEl = document.getElementById("anonList");
+        var countEl = document.getElementById("count");
         function maskToken(t) {
           if (!t) return "";
           if (t.length <= 5) return "***";
@@ -250,16 +257,12 @@ ${UI_CSS}    </style>
               setStatus("saved " + id);
               load();
             }
-            var upsert = api("/admin/api/devices", { method: "POST", body: JSON.stringify({ deviceId: id, token: tokVal }) });
-            if (!isNew && id !== dev.deviceId) {
-              // ID changed on an existing device: create the new pair and
-              // remove the old one (rename semantics).
-              upsert.then(function () {
-                return api("/admin/api/devices/" + encodeURIComponent(dev.deviceId), { method: "DELETE" });
-              }).then(done).catch(fail);
-            } else {
-              upsert.then(done).catch(fail);
-            }
+            // An id change on an existing device is a rename: the registry swaps
+            // the old entry for the new one in a single step, so it also works
+            // when the gateway is at its device limit.
+            var payload = { deviceId: id, token: tokVal };
+            if (!isNew && id !== dev.deviceId) payload.replaces = dev.deviceId;
+            api("/admin/api/devices", { method: "POST", body: JSON.stringify(payload) }).then(done).catch(fail);
           });
 
           delItem.addEventListener("click", function () {
@@ -347,13 +350,23 @@ ${UI_CSS}    </style>
 
         // List the device's tools, relayed through the gateway tunnel.
         function showToolsDialog(deviceId, token) {
-          var d = openDialog("Tools", deviceId);
-          fetch("/mcp/" + encodeURIComponent(deviceId), {
+          showTools(deviceId, fetch("/mcp/" + encodeURIComponent(deviceId), {
             method: "POST",
             headers: { "content-type": "application/json", "x-device-token": token },
             body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
             signal: AbortSignal.timeout(20000),
-          })
+          }));
+        }
+
+        // Anonymous devices: the gateway relays tools/list itself, so the
+        // device code never reaches this page.
+        function showAnonToolsDialog(ref, label) {
+          showTools(label, fetch("/admin/api/anonymous/" + ref + "/tools", { method: "POST", signal: AbortSignal.timeout(20000) }));
+        }
+
+        function showTools(title, request) {
+          var d = openDialog("Tools", esc(title));
+          request
             .then(function (r) { return r.json().catch(function () { return {}; }); })
             .then(function (j) {
               var tools = j && j.result && j.result.tools;
@@ -384,8 +397,12 @@ ${UI_CSS}    </style>
 
         // List the MCP clients currently relaying through this device.
         function showClientsDialog(deviceId) {
-          var d = openDialog("Clients", deviceId);
-          fetch("/admin/api/devices/" + encodeURIComponent(deviceId) + "/clients")
+          showClients(deviceId, "/admin/api/devices/" + encodeURIComponent(deviceId) + "/clients");
+        }
+
+        function showClients(title, path) {
+          var d = openDialog("Clients", esc(title));
+          fetch(path)
             .then(function (r) { return r.json().catch(function () { return {}; }); })
             .then(function (j) {
               var clients = j && j.clients;
@@ -417,11 +434,156 @@ ${UI_CSS}    </style>
             });
         }
 
+        function showCount(j) {
+          if (j && typeof j.count === "number" && typeof j.max_devices === "number") {
+            countEl.textContent = " \u00b7 " + j.count + " / " + j.max_devices + " devices";
+          }
+        }
+
         function load() {
+          loadAnon();
           return api("/admin/api/devices")
             .then(function (j) {
               devices = (j && j.devices) || [];
+              showCount(j);
               render();
+            })
+            .catch(function (e) { setStatus("load failed: " + e.message, true); });
+        }
+
+        // ---- anonymous devices ----
+        // Same row and menu as a registered device, but read-only: the id and
+        // the code are never sent to this page. Rows are addressed by an opaque
+        // ref the gateway resolves server-side.
+        var anonDevices = [];
+        var anonSignature = "";
+
+        function anonLabel(d) {
+          return "anonymous #" + d.ref.slice(0, 6);
+        }
+
+        function renderAnon() {
+          anonListEl.innerHTML = "";
+          if (!anonDevices.length) {
+            var empty = document.createElement("li");
+            empty.className = "empty";
+            empty.textContent = "No anonymous devices.";
+            anonListEl.appendChild(empty);
+            return;
+          }
+          anonDevices.forEach(renderAnonRow);
+        }
+
+        function renderAnonRow(dev) {
+          var li = document.createElement("li");
+          li.className = "row" + (dev.disabled ? " disabled" : "");
+          li.dataset.ref = dev.ref;
+          var dot = document.createElement("span");
+          dot.className = "dot " + (dev.online ? "on" : "off");
+          var box = document.createElement("div");
+          box.className = "box";
+          var label = anonLabel(dev);
+
+          var idInput = document.createElement("input");
+          idInput.className = "id-input";
+          idInput.readOnly = true;
+          idInput.value = label;
+          idInput.title =
+            "created " + ago(dev.createdAt) +
+            (dev.lastSeenAt ? " \u00b7 last seen " + ago(dev.lastSeenAt) : " \u00b7 never connected") +
+            (dev.locked ? " \u00b7 locked after failed attempts" : "");
+          var tokInput = document.createElement("input");
+          tokInput.className = "tok-input";
+          tokInput.readOnly = true;
+          tokInput.value = "\u2022\u2022\u2022\u2022\u2022\u2022";
+          tokInput.title = "the device code is not shown";
+
+          var menuWrap = document.createElement("span");
+          menuWrap.className = "menu-wrap";
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "menu-btn";
+          btn.textContent = "\u22ee";
+          var menu = document.createElement("span");
+          menu.className = "menu";
+          function item(text, danger) {
+            var b = document.createElement("button");
+            b.type = "button";
+            b.textContent = text;
+            if (danger) b.className = "danger";
+            menu.appendChild(b);
+            return b;
+          }
+          var toolsItem = item("Tools");
+          var clientsItem = item("Clients");
+          var stateItem = item(dev.disabled ? "Activate" : "Deactivate", !dev.disabled);
+          var delItem = item("Delete", true);
+          menuWrap.appendChild(btn);
+          menuWrap.appendChild(menu);
+          box.appendChild(idInput);
+          box.appendChild(tokInput);
+          box.appendChild(menuWrap);
+          li.appendChild(dot);
+          li.appendChild(box);
+          anonListEl.appendChild(li);
+
+          function closeMenus() {
+            var open = document.querySelectorAll(".menu.open");
+            for (var i = 0; i < open.length; i++) open[i].classList.remove("open");
+          }
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var wasOpen = menu.classList.contains("open");
+            closeMenus();
+            toolsItem.disabled = !dev.online || dev.disabled;
+            clientsItem.disabled = !dev.online;
+            if (!wasOpen) menu.classList.add("open");
+          });
+          toolsItem.addEventListener("click", function () {
+            closeMenus();
+            showAnonToolsDialog(dev.ref, label);
+          });
+          clientsItem.addEventListener("click", function () {
+            closeMenus();
+            showClients(label, "/admin/api/anonymous/" + dev.ref + "/clients");
+          });
+          stateItem.addEventListener("click", function () {
+            closeMenus();
+            var turningOff = !dev.disabled;
+            setStatus((turningOff ? "deactivating " : "activating ") + label + " ...");
+            api("/admin/api/anonymous/" + dev.ref + "/state", { method: "POST", body: JSON.stringify({ disabled: turningOff }) })
+              .then(function () {
+                setStatus((turningOff ? "deactivated " : "activated ") + label);
+                loadAnon(true);
+              })
+              .catch(function (e) { setStatus("state change failed: " + e.message, true); });
+          });
+          delItem.addEventListener("click", function () {
+            closeMenus();
+            setStatus("deleting " + label + " ...");
+            api("/admin/api/anonymous/" + dev.ref, { method: "DELETE" })
+              .then(function () {
+                setStatus("deleted " + label);
+                loadAnon(true);
+                load();
+              })
+              .catch(function (e) { setStatus("delete failed: " + e.message, true); });
+          });
+        }
+
+        // Anonymous rows hold no edits, so they can be rebuilt on every poll -
+        // but only when something changed and no menu of theirs is open.
+        function loadAnon(force) {
+          return api("/admin/api/anonymous")
+            .then(function (j) {
+              var list = (j && j.devices) || [];
+              showCount(j);
+              var sig = JSON.stringify(list.map(function (d) { return [d.ref, d.online, d.disabled, d.locked]; }));
+              if (!force && sig === anonSignature) return;
+              if (!force && anonListEl.querySelector(".menu.open")) return;
+              anonSignature = sig;
+              anonDevices = list;
+              renderAnon();
             })
             .catch(function (e) { setStatus("load failed: " + e.message, true); });
         }
@@ -464,6 +626,7 @@ ${UI_CSS}    </style>
 
         load();
         setInterval(refreshDots, 5000);
+        setInterval(loadAnon, 5000);
       })();
     </script>
   </body>

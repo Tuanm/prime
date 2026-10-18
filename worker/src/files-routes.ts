@@ -78,9 +78,13 @@ async function deviceMap(env: Env): Promise<Map<string, string>> {
     const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
     const response = await reg.fetch("https://registry/map");
     if (response.ok) {
-      const body = (await response.json()) as { map?: Record<string, string> };
+      const body = (await response.json()) as { map?: Record<string, string>; anonymous?: string[] };
+      // File storage is for admin-registered devices: an anonymous device costs
+      // nothing to create, so letting it hold files would make the R2 budget
+      // anyone's to spend.
+      const anonymous = new Set(body.anonymous ?? []);
       for (const [id, token] of Object.entries(body.map ?? {})) {
-        if (typeof token === "string" && token.length > 0) map.set(id, token);
+        if (typeof token === "string" && token.length > 0 && !anonymous.has(id)) map.set(id, token);
       }
     }
   } catch {}

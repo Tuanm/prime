@@ -117,6 +117,12 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `ALLOWED_ORIGINS` | unset | Comma-separated WS origin whitelist (403 otherwise) |
 | `SSE_IDLE_TIMEOUT_MS` | `120000` | Close an SSE session after this long with no activity (stream-spam guard) |
 | `MAX_SSE_SESSIONS` | `32` | Cap concurrent SSE streams per device (memory guard → `503` when full) |
+| `MAX_DEVICES` | `100` | Registered + anonymous devices (virtual excluded); beyond it registration is refused |
+| `ANON_DEVICES` | on | `off` disables anonymous registration (`403`) |
+| `ANON_RATE_LIMIT_MAX` | `30` | Relay requests per client IP per window for an **anonymous** device (registered: `RATE_LIMIT_MAX`) |
+| `ANON_CREATE_MAX` / `ANON_CREATE_WINDOW_MS` | `5` / `3600000` | Anonymous registrations per client IP |
+| `ANON_UNUSED_TTL_MS` / `ANON_IDLE_TTL_MS` | `3600000` / `604800000` | Delete an anonymous device never connected within 1 h / offline for 7 days |
+| `ANON_AUTH_MAX_FAILURES` / `ANON_AUTH_LOCK_MS` | `20` / `600000` | Wrong codes before an anonymous device is locked, and for how long |
 
 > **Long tool calls** — Durable Objects and incoming HTTP requests have
 > **unlimited wall time** while the caller stays connected; only CPU time is
@@ -137,6 +143,8 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | No stale tunnels | Keepalive alarm drops dead tunnels |
 | No brute force | Per-isolate rate limit on relay **and** WS upgrade + optional Cloudflare edge rule on `CF-Connecting-IP` (client-spoof-proof) |
 | No cross-device leakage | One DO = one device; a WS can only resolve its own pendings |
+| Anonymous devices stay contained | Generated `anon-` ids (reserved: the admin cannot create or overwrite one), lower relay rate limit, no file storage, and a global lock after `ANON_AUTH_MAX_FAILURES` wrong codes — a 6-character code is a small space, so guessing must be throttled across all isolates, which the RegistryDO does |
+| Admin never holds an anonymous credential | Anonymous devices are addressed by an opaque `ref`; Tools / Clients / state / delete are resolved server-side |
 
 ## API
 
@@ -144,7 +152,10 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | --- | --- | --- | --- |
 | `GET` | `/admin` | Cloudflare Access | Device registry UI (operator) |
 | `GET` / `POST` / `DELETE` | `/admin/api/devices(/{id})` | Cloudflare Access | List / register / remove devices |
-| `GET` | `/devices` | admin token | List online devices (machine endpoint) |
+| `GET` | `/devices` | admin token | List online devices (machine endpoint; anonymous ids excluded) |
+| `POST` | `/api/devices/anonymous` | gateway token if configured | Create an anonymous device → `201 {deviceId, token, connect_url, ws_url, rate_limit}`; `429` per-IP limit, `503` device limit |
+| `GET` | `/admin/api/anonymous` | Cloudflare Access | Anonymous devices by `ref` (no ids or codes), plus `count` / `max_devices` |
+| `POST` / `GET` / `DELETE` | `/admin/api/anonymous/{ref}(/tools\|/clients\|/state)` | Cloudflare Access | Tools / Clients / Activate-Deactivate / Delete an anonymous device |
 | `POST` | `/mcp/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
 | `GET` | `/sse/{deviceId}` | gateway + device | Open a `text/event-stream`; first `endpoint` event tells the client the `/messages` POST URL (`/sse?deviceId=` legacy alias) |
 | `POST` | `/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
@@ -162,6 +173,38 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 > Access**; the identity policy is configured in the Cloudflare dashboard.
 > `GET /devices` uses the admin token instead, so scripts can query it
 > without an Access session.
+
+## Anonymous devices
+
+A client with no registered device can ask for one:
+
+```bash
+curl -X POST https://code-mcp.tuanm.workers.dev/api/devices/anonymous
+# {"deviceId":"anon-3f9c0d1e2a4b5c6d","token":"7KQ2XM",
+#  "connect_url":"https://code-mcp.tuanm.workers.dev/mcp/anon-3f9c0d1e2a4b5c6d?token=7KQ2XM", ...}
+```
+
+The gateway picks an unused id and a 6-character code (digits and upper-case
+letters). The device then connects like any other (`/ws/{id}` with
+`X-Device-Token`), and MCP clients use `connect_url`. `mcp connect` (the CLI)
+does all of this and runs the bundled code-mcp as the device.
+
+- **Lower limits:** `ANON_RATE_LIMIT_MAX` (30/min per client IP) instead of
+  `RATE_LIMIT_MAX` (100); 5 registrations per IP per hour; no file storage.
+- **Device cap:** `MAX_DEVICES` (100) counts registered and anonymous devices
+  together. A full gateway answers `503` to anonymous registration and `409`
+  to a new admin registration (updates and renames still work).
+- **Cleanup:** an anonymous device that never connects is deleted after an hour,
+  one that stays offline for 7 days after that — abandoned devices do not hold
+  slots forever.
+- **Brute force:** after 20 wrong codes in 10 minutes the device is locked for
+  everyone (the right code included) for 10 minutes; registered devices are not
+  affected.
+- **Admin:** the *Anonymous Devices* section of `/admin` shows them with the
+  same menu (Tools, Clients, Activate/Deactivate, Delete) but never their id or
+  code — they are addressed by an opaque `ref` and resolved server-side.
+- Creating anonymous devices never switches an open gateway (no registered
+  devices) into per-device mode.
 
 ## Temporary files
 
