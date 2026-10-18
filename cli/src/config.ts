@@ -17,6 +17,12 @@
 //       gateway: "https://code-mcp.tuanm.workers.dev"
 //       token: "A1B2C3"                       # the anonymous device code
 //       anonymous: true
+//   code-mcp:                                # options for 'mcp code-mcp' and
+//     port: "7777"                           # 'mcp service install' - code-mcp's
+//     bind: "127.0.0.1"                      # own flags, without the dashes
+//     id: "demo"
+//     token: "demo"
+//     enable-memory: true
 //
 // The file holds secrets, so it is created 0600 inside a 0700 directory, and
 // writes are atomic (temp file + rename) so a crash cannot truncate it.
@@ -43,9 +49,14 @@ export interface Defaults {
   timeout_ms?: number;
 }
 
+/** code-mcp's own options (flag names without "--"); see code-mcp-options.ts. */
+export type CodeMcpSection = Record<string, string | boolean>;
+
 export interface Config {
   defaults: Defaults;
   devices: Record<string, DeviceEntry>;
+  /** The "code-mcp:" section. Kept verbatim (validated where it is used). */
+  codeMcp: CodeMcpSection;
 }
 
 export function defaultConfigPath(): string {
@@ -55,7 +66,7 @@ export function defaultConfigPath(): string {
 }
 
 export function emptyConfig(): Config {
-  return { defaults: {}, devices: {} };
+  return { defaults: {}, devices: {}, codeMcp: {} };
 }
 
 function asString(value: unknown): string | undefined {
@@ -103,6 +114,20 @@ export function parseConfig(text: string, source: string): Config {
       ...(entry.anonymous === true ? { anonymous: true } : {}),
     };
   }
+
+  // Scalars only: numbers are kept as their text ("7777"), booleans as flags.
+  const section = doc["code-mcp"];
+  if (section !== undefined && section !== null) {
+    if (typeof section !== "object" || Array.isArray(section)) {
+      throw new CliError(`invalid config in ${source}: "code-mcp" must be a mapping of code-mcp options`, 'e.g.\ncode-mcp:\n  port: "7777"');
+    }
+    for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
+      if (typeof value === "boolean" || typeof value === "string") config.codeMcp[key] = value;
+      else if (typeof value === "number" && Number.isFinite(value)) config.codeMcp[key] = String(value);
+      else if (value === null) continue; // "key:" with no value - treat as unset
+      else throw new CliError(`invalid config in ${source}: code-mcp.${key} must be a string, number or true/false`);
+    }
+  }
   return config;
 }
 
@@ -119,7 +144,7 @@ export function loadConfig(path: string): Config {
 }
 
 /** Quote a scalar so the emitter is correct for any string content. */
-function yamlScalar(value: string | number | boolean): string {
+export function yamlScalar(value: string | number | boolean): string {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return Number.isFinite(value) ? String(value) : "0";
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\x00-\x1f\x7f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`)}"`;
@@ -163,6 +188,16 @@ export function serializeConfig(config: Config): string {
       ] as const) {
         if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
       }
+    }
+  }
+
+  // Preserved on every save: 'mcp connect' and 'mcp devices connect' rewrite the
+  // file, and must never drop the user's code-mcp options.
+  const optionKeys = Object.keys(config.codeMcp);
+  if (optionKeys.length > 0) {
+    out += "\ncode-mcp:\n";
+    for (const key of optionKeys) {
+      out += `  ${/^[A-Za-z0-9._-]+$/.test(key) ? key : yamlScalar(key)}: ${yamlScalar(config.codeMcp[key]!)}\n`;
     }
   }
   return out;

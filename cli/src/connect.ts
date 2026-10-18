@@ -11,7 +11,7 @@
 
 import { createServer } from "node:net";
 import { bool, num, str } from "./args.ts";
-import { GATEWAY_TOKEN_ENV, PARENT_PID_ENV, selfCommand } from "./code-mcp-host.ts";
+import { GATEWAY_TOKEN_ENV, PARENT_PID_ENV, RAW_ENV, selfCommand } from "./code-mcp-host.ts";
 import { type Config, type DeviceEntry, saveConfig } from "./config.ts";
 import { type Ctx } from "./context.ts";
 import { AuthError, CliError, TimeoutError, UsageError } from "./errors.ts";
@@ -385,7 +385,9 @@ export function codeMcpLaunch(
     ],
     // The parent pid lets the child stop itself if this process is killed
     // outright (on Windows, killing a process never takes its children).
-    env: { ...process.env, [GATEWAY_TOKEN_ENV]: device.token, [PARENT_PID_ENV]: String(process.pid) },
+    // RAW: connect's device runs with exactly these arguments - not the config's
+    // code-mcp section, and not refused when the code-mcp service is running.
+    env: { ...process.env, [GATEWAY_TOKEN_ENV]: device.token, [PARENT_PID_ENV]: String(process.pid), [RAW_ENV]: "1" },
   };
 }
 

@@ -64,8 +64,11 @@ mcp tools call <device-id>.<tool-id> [<json>] [options]
 mcp tools call <device-id>.<tool-id> <json> <device-id>.<tool-id> <json> ...
 ... | mcp tools call
 mcp update [--check]
-mcp help [connect|serve|devices|tools|code-mcp]
-mcp code-mcp [code-mcp flags]            # advanced: the bundled device server
+mcp service install [code-mcp options]   # code-mcp as a user service
+mcp service uninstall
+mcp service status
+mcp help [connect|serve|service|devices|tools|code-mcp]
+mcp code-mcp [code-mcp options]          # the bundled device server, with the config's options
 ```
 
 When no gateway is given or configured anywhere, every command uses the
@@ -160,16 +163,69 @@ and credentials `mcp tools list` / `mcp call` use, or just the ids given) into
   `notifications/tools/list_changed`, so devices that come online later appear.
   With no reachable device the server still starts with an empty list.
 
-### code-mcp - the bundled device server (advanced)
+### code-mcp - the bundled device server
 
 The CLI embeds [code-mcp](https://github.com/Tuanm/code-mcp), the MCP server that
 exposes a machine's files and shell. `mcp connect` runs it for you;
-`mcp code-mcp [flags]` runs it directly with its own flags (`mcp code-mcp
---help`), e.g. as a registered device:
+`mcp code-mcp [options]` runs it directly (`mcp code-mcp --help` lists its
+options), e.g. as a registered device:
 
 ```bash
 mcp code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 ```
+
+Its options can live in the config, in a `code-mcp:` section (code-mcp's option
+names without the dashes); options on the command line override them:
+
+```yaml
+devices:
+  ...
+
+code-mcp:
+  port: "7777"
+  bind: "127.0.0.1"
+  id: "demo"
+  token: "demo"
+  gateway: "code-mcp.tuanm.workers.dev"
+  enable-memory: true
+```
+
+With that, a bare `mcp code-mcp` starts the device. Values from the config are
+handed to code-mcp inside the process, so a token there never shows up in `ps`.
+An unknown key or a wrongly typed value is an error naming the config file.
+`mcp code-mcp` refuses to start while the code-mcp **service** is running - one
+code-mcp per machine and config.
+
+### service - code-mcp as a user service
+
+```bash
+mcp service install                          # the config's code-mcp section as is
+mcp service install --port 7788 --enable-memory   # ...with overrides
+mcp service status [--json]
+mcp service uninstall
+```
+
+`install` registers code-mcp with the OS so it starts at login and comes back
+after a crash, then waits until it has **stayed** up before reporting success
+(otherwise it prints the service's own log). Running it again reinstalls and
+restarts it with the current options.
+
+| OS | Definition | Logs | Restart after a crash |
+| --- | --- | --- | --- |
+| Linux | systemd user unit `~/.config/systemd/user/code-mcp.service` | `journalctl --user -u code-mcp` | `Restart=on-failure` |
+| macOS | launchd agent `~/Library/LaunchAgents/dev.code-mcp-gateway.code-mcp.plist` | `~/Library/Logs/code-mcp-gateway/code-mcp.log` | `KeepAlive` (not after a clean stop) |
+| Windows | Scheduled Task `\code-mcp-gateway\code-mcp`, at logon, no admin rights, no window | `code-mcp.log` next to the config | a one-minute watchdog trigger |
+
+The service runs `mcp code-mcp --service --config <config>` and reads its
+options at every start: the config's `code-mcp:` section, overridden by the
+options given to `install` (stored in `service.yaml` next to the config, mode
+0600). No credential is written into the service definition or onto a command
+line. To apply a config change, run `mcp service install` again; `uninstall`
+stops it and removes the definition and `service.yaml`. `--config <path>`
+selects another config for all three commands.
+
+On Linux, a user service stops at logout unless lingering is enabled
+(`loginctl enable-linger $USER`); `install` says so when it is off.
 
 ### devices connect
 
