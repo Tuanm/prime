@@ -4,6 +4,7 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { describeOptions, mergeOptions, type OptionMap, optionsFromConfig, parseCodeMcpArgs } from "./code-mcp-options.ts";
+import { withDefaultGateway } from "./code-mcp-host.ts";
 import { defaultConfigPath, loadConfig } from "./config.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, red, yellow } from "./output.ts";
@@ -56,6 +57,39 @@ function recentLog(platform: Platform, logPath: string): string {
   return "";
 }
 
+type OnlineCheck = { state: "online" | "offline" | "rejected"; gateway: string; status?: number; detail: string };
+
+/**
+ * Ask the gateway whether the device is online: a ping through the relay
+ * answers 200 once the device's tunnel is up, 503 while it is not, and 401/403
+ * when the gateway does not accept these credentials.
+ */
+async function waitOnline(options: OptionMap, timeoutMs = 30_000): Promise<OnlineCheck> {
+  const raw = String(options.gateway);
+  const gateway = (/^[a-z]+:\/\//i.test(raw) ? raw : "https://" + raw).replace(/^ws(s?):/i, "http$1:").replace(/\/+$/, "");
+  const token = typeof options["gateway-token"] === "string" ? options["gateway-token"] : options.token;
+  const deadline = Date.now() + timeoutMs;
+  let last: OnlineCheck = { state: "offline", gateway, detail: "no answer" };
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(gateway + "/mcp/" + encodeURIComponent(String(options.id)), {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(typeof token === "string" ? { "x-device-token": token } : {}) },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const text = await r.text();
+      if (r.status === 200) return { state: "online", gateway, status: 200, detail: "online" };
+      if (r.status === 401 || r.status === 403) return { state: "rejected", gateway, status: r.status, detail: text.slice(0, 120) };
+      last = { state: "offline", gateway, status: r.status, detail: "HTTP " + r.status + " " + text.slice(0, 80) };
+    } catch (err) {
+      last = { state: "offline", gateway, detail: err instanceof Error ? err.message : String(err) };
+    }
+    await Bun.sleep(1_000);
+  }
+  return last;
+}
+
 /** Wait until the service is running - and still running a moment later (no crash loop). */
 async function waitRunning(platform: Platform, configPath: string, timeoutMs = 30_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -75,8 +109,10 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
   if (help) throw new UsageError("'mcp service install' takes code-mcp options (see 'mcp code-mcp --help'), e.g. mcp service install --port 7777");
   const configPath = resolve(opts.config ?? defaultConfigPath());
   // Validate now, not inside a service log: a typo in the config fails here.
-  const fromConfig = optionsFromConfig(loadConfig(configPath).codeMcp, configPath);
-  const effective = mergeOptions(fromConfig, passed);
+  const config = loadConfig(configPath);
+  const fromConfig = optionsFromConfig(config.codeMcp, configPath);
+  // Exactly what the service will compute at start (see effectiveCodeMcpArgv).
+  const effective = withDefaultGateway(mergeOptions(fromConfig, passed), config.defaults.gateway);
 
   if (typeof effective.token !== "string" && typeof effective.gateway !== "string") {
     opts.note(yellow("note: no token configured - code-mcp will accept unauthenticated requests on " + localUrl(effective) + " (code-mcp's default, loopback only)."));
@@ -96,14 +132,29 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
     );
   }
 
+  // Running locally is not the whole job when a device id is set: the device
+  // must also be ONLINE on its gateway, with credentials the gateway accepts.
+  const online = typeof effective.id === "string" ? await waitOnline(effective) : undefined;
+  if (online?.state === "rejected") {
+    throw new CliError(
+      "code-mcp is running, but " + online.gateway + " rejects device " + effective.id + " with this token (HTTP " + online.status + ")",
+      "Check the id and token registered in the gateway's admin page, fix them, then run 'mcp service install' again.",
+    );
+  }
+  if (online?.state === "offline") {
+    const log = recentLog(platform, spec.logPath);
+    opts.note(yellow("warning: code-mcp is running but device " + effective.id + " is not online on " + online.gateway + " yet (" + online.detail + ")") + (log ? "\n" + dim(log) : ""));
+  }
+
   if (opts.json) {
-    printJson({ installed: true, running: true, platform, where, options: describeOptions(effective), url: localUrl(effective), log: platform === "linux" ? "journalctl --user -u code-mcp" : spec.logPath, config: configPath, overrides: overridesPath(configPath) });
+    printJson({ installed: true, running: true, platform, where, device: online ? { id: effective.id, gateway: online.gateway, online: online.state === "online" } : undefined, options: describeOptions(effective), url: localUrl(effective), log: platform === "linux" ? "journalctl --user -u code-mcp" : spec.logPath, config: configPath, overrides: overridesPath(configPath) });
     return;
   }
   opts.out(green("✓") + " code-mcp service installed and running");
   opts.out("  definition  " + where);
   opts.out("  options     " + describeOptions(effective));
   opts.out("  local URL   " + localUrl(effective));
+  if (online?.state === "online") opts.out("  device      " + bold(String(effective.id)) + " online on " + online.gateway);
   opts.out("  logs        " + (platform === "linux" ? "journalctl --user -u code-mcp -f" : spec.logPath));
   opts.out(dim("  Options come from " + configPath + " (code-mcp section), overridden by the ones given here (" + overridesPath(configPath) + ")."));
   opts.out(dim("  They are read at every start: after editing the config, re-run 'mcp service install' to restart it."));
