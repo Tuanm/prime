@@ -6,7 +6,7 @@
 // documented input form.
 
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -721,6 +721,27 @@ try {
     "--to a .js path installs the bundle asset",
     bundleUpdate.code === 0 && readFileSync(bundleTarget, "utf8").includes(`fake ${FAKE_VERSION}`),
     bundleUpdate.out.trim(),
+  );
+
+  // A bare "mcp update" (what the CLI tells users to run) must install, not
+  // print help. Run a copy of the binary so it can replace itself.
+  const selfDir = join(installDir, "self");
+  mkdirSync(selfDir);
+  const selfBin = join(selfDir, "mcp");
+  copyFileSync(BIN, selfBin);
+  chmodSync(selfBin, 0o755);
+  // Async: the fake release server runs in this process, so a blocking spawn
+  // would leave it unable to answer.
+  const bareProc = Bun.spawn([selfBin, "update"], { env: { ...process.env, ...updateEnv, NO_COLOR: "1" }, stdout: "pipe", stderr: "pipe" });
+  const bareUpdate = {
+    exitCode: await bareProc.exited,
+    stdout: await new Response(bareProc.stdout).text(),
+    stderr: await new Response(bareProc.stderr).text(),
+  };
+  check(
+    "a bare 'mcp update' installs the newest release (it used to print help)",
+    bareUpdate.exitCode === 0 && digest(new Uint8Array(readFileSync(selfBin))) === digest(fakeBinaryBytes),
+    `code=${bareUpdate.exitCode} out=${bareUpdate.stdout.slice(0, 160)} err=${bareUpdate.stderr.slice(0, 160)}`,
   );
 
   updateServer.stop(true);
