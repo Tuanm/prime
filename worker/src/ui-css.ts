@@ -36,6 +36,12 @@ export const UI_CSS = `      * {
         justify-content: space-between;
         margin-bottom: 10px;
       }
+      /* A second section on the same page (Anonymous Devices under Devices):
+         clear separation, and the same header height as one with a + button. */
+      .row-head.section {
+        margin-top: 40px;
+        min-height: 28px;
+      }
       .row-head h2 {
         font-size: 11px;
         font-weight: 600;
