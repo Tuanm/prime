@@ -98,6 +98,8 @@ describe("service definitions", () => {
     expect(unit).toContain('ExecStart="/opt/my tools/mcp" "code-mcp" "--service" "--config" "/home/u/.code-mcp-gateway/config.yaml"');
     expect(unit).toContain('Environment="PATH=/usr/local/bin:/usr/bin:/odd/100%%/$HOME"');
     expect(unit).toContain("Restart=on-failure");
+    // Not quoted: systemd rejects a quoted WorkingDirectory as a bad setting.
+    expect(unit).toContain("WorkingDirectory=/home/u\n");
     expect(unit).toContain("WantedBy=default.target");
     expect(systemdQuote('a"b\\c%d$e')).toBe('"a\\"b\\\\c%%d$$e"');
   });
@@ -119,5 +121,8 @@ describe("service definitions", () => {
     expect(script).toContain("-AtLogOn -User $user");
     expect(script).toContain("-LogonType Interactive -RunLevel Limited");
     expect(script).toContain("-RestartCount 999");
+    // The watchdog trigger that actually restarts a crashed service.
+    expect(script).toContain("-RepetitionInterval (New-TimeSpan -Minutes 1)");
+    expect(script).toContain("-MultipleInstances IgnoreNew");
   });
 });

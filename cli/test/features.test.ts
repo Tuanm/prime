@@ -20,7 +20,7 @@ import {
   retryAfterMs,
 } from "../src/connect.ts";
 import { AggregateServer, TOOL_NAME_RE, isLoopback, namespaceTools, sanitizeName, type DeviceTool } from "../src/serve.ts";
-import { GATEWAY_TOKEN_ENV, PARENT_PID_ENV, codeMcpArgv, processAlive, selfCommand, watchParent } from "../src/code-mcp-host.ts";
+import { GATEWAY_TOKEN_ENV, PARENT_PID_ENV, RAW_ENV, codeMcpArgv, processAlive, selfCommand, watchParent } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
 import { GatewayClient } from "../src/client.ts";
 import { fileURLToPath } from "node:url";
@@ -118,14 +118,26 @@ describe("bundled code-mcp", () => {
       probe,
       `const real = Bun.argv; Bun.plugin({ name: "probe", setup(b) { b.onLoad({ filter: /code-mcp\\.ts$/ }, () => ({ loader: "js", contents: "console.log(JSON.stringify({ argv: Bun.argv.slice(2), env: process.env.${GATEWAY_TOKEN_ENV} ?? null })); process.exit(0);" })); } }); void real;`,
     );
+    // As 'mcp connect' launches it: raw, exactly these arguments.
     const proc = Bun.spawnSync(["bun", "--preload", probe, ENTRY, "code-mcp", "--gateway", "g", "--id", "d"], {
-      env: { ...process.env, [GATEWAY_TOKEN_ENV]: "SECR3T" },
+      env: { ...process.env, [GATEWAY_TOKEN_ENV]: "SECR3T", [RAW_ENV]: "1" },
       stdout: "pipe",
       stderr: "pipe",
     });
     const seen = JSON.parse(proc.stdout.toString().trim()) as { argv: string[]; env: string | null };
     expect(seen.argv).toEqual(["--gateway", "g", "--id", "d", "--gateway-token", "SECR3T"]);
     expect(seen.env).toBeNull();
+
+    // Run by a person: the config's code-mcp section, the command line winning.
+    const config = join(dir, "config.yaml");
+    await Bun.write(config, 'code-mcp:\n  port: "1111"\n  token: "cfg-secret"\n  enable-memory: true\n');
+    const own = Bun.spawnSync(["bun", "--preload", probe, ENTRY, "code-mcp", "--port", "2222"], {
+      env: { ...process.env, CODE_MCP_GATEWAY_CONFIG: config },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const fromConfig = JSON.parse(own.stdout.toString().trim()) as { argv: string[] };
+    expect(fromConfig.argv).toEqual(["--port", "2222", "--token", "cfg-secret", "--enable-memory"]);
   });
 
   test("selfCommand re-runs the script under bun", () => {
