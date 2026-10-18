@@ -30,7 +30,8 @@ describe("config", () => {
     expect(loadConfig(path)).toEqual(config);
   });
 
-  test("creates the file 0600", () => {
+  // Windows has no POSIX modes (the per-user profile ACL protects the file).
+  test.skipIf(process.platform === "win32")("creates the file 0600", () => {
     const dir = mkdtempSync(join(tmpdir(), "mcp-cli-"));
     const path = join(dir, "config.yaml");
     saveConfig(path, emptyConfig());

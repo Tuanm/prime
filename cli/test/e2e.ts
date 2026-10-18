@@ -9,17 +9,24 @@ import { spawn } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not URL.pathname: on Windows the latter is "/D:/a/..." -
+// not a path any API accepts.
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const REPO = join(ROOT, "..");
-const WRANGLER = join(REPO, "worker", "node_modules", ".bin", "wrangler");
+// The JS entry, not node_modules/.bin/wrangler: on Windows that is a shell shim
+// node cannot run.
+const WRANGLER = join(REPO, "worker", "node_modules", "wrangler", "bin", "wrangler.js");
+const IS_WINDOWS = process.platform === "win32";
+const EXE = IS_WINDOWS ? ".exe" : "";
 const PORT = 8811;
 const BASE = `http://127.0.0.1:${PORT}`;
 const GATEWAY_TOKEN = "gw-e2e-secret";
 const DEVICE_TOKEN = "dev-e2e-secret";
 const CONFIG_DIR = mkdtempSync(join(tmpdir(), "mcp-e2e-"));
 const CONFIG = join(CONFIG_DIR, "config.yaml");
-const BIN = join(ROOT, "dist", "mcp-e2e");
+const BIN = join(ROOT, "dist", "mcp-e2e" + EXE);
 
 let pass = 0;
 let fail = 0;
@@ -155,6 +162,14 @@ function startMockDevice(deviceId: string, token: string): Promise<WebSocket> {
 
 // ---- gateway ---------------------------------------------------------------
 
+/** Every process's full command line (ps on POSIX, CIM on Windows). */
+function processCommandLines(): string[] {
+  const out = IS_WINDOWS
+    ? Bun.spawnSync(["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }"], { stdout: "pipe" })
+    : Bun.spawnSync(["ps", "-axww", "-o", "args="], { stdout: "pipe" });
+  return out.stdout.toString().split(/\r?\n/).filter(Boolean);
+}
+
 async function startGateway(): Promise<{ kill: () => void }> {
   rmSync(join(REPO, "worker", ".wrangler", `state-${PORT}`), { recursive: true, force: true });
   const proc = spawn(
@@ -248,7 +263,8 @@ try {
 
   const configText = readFileSync(CONFIG, "utf8");
   check("config file written with the device", configText.includes("alpha:") && configText.includes(GATEWAY_TOKEN));
-  check("config file is 0600", (statSync(CONFIG).mode & 0o777) === 0o600, (statSync(CONFIG).mode & 0o777).toString(8));
+  // POSIX only: Windows has no file modes (the per-user profile ACL protects it).
+  check("config file is 0600", IS_WINDOWS || (statSync(CONFIG).mode & 0o777) === 0o600, (statSync(CONFIG).mode & 0o777).toString(8));
 
   const reconnect = await cli(["devices", "connect", "alpha"]);
   check("reconnect with no flags uses stored defaults", reconnect.code === 0 && reconnect.out.includes("online"), `code=${reconnect.code}`);
@@ -387,7 +403,9 @@ try {
   check("--timeout exits 5", timeout.code === 5, `code=${timeout.code} err=${timeout.err}`);
 
   // A batch must not abort on the first failure: every outcome is still reported.
-  const batchWithFailure = await cli(["tools", "call", "alpha.echo", '{"text":"ok1"}', "alpha.slow", '{"ms":5000}', "alpha.echo", '{"text":"ok2"}', "--timeout", "500"]);
+  // The timeout leaves the echoes real headroom (500 ms flaked on loaded CI
+  // runners); only the 15 s call is meant to hit it.
+  const batchWithFailure = await cli(["tools", "call", "alpha.echo", '{"text":"ok1"}', "alpha.slow", '{"ms":15000}', "alpha.echo", '{"text":"ok2"}', "--timeout", "3000"]);
   check(
     "a failing call in a batch still reports the others",
     batchWithFailure.code === 1 && batchWithFailure.out.includes("ok1") && batchWithFailure.out.includes("ok2") && batchWithFailure.out.includes("timed out"),
@@ -680,7 +698,7 @@ try {
   check(
     "the installed file is the released artifact, and executable",
     digest(new Uint8Array(readFileSync(installTarget))) === digest(fakeBinaryBytes) &&
-      (statSync(installTarget).mode & 0o777) === 0o755,
+      (IS_WINDOWS || (statSync(installTarget).mode & 0o777) === 0o755),
     `mode=${(statSync(installTarget).mode & 0o777).toString(8)}`,
   );
 
@@ -704,6 +722,9 @@ try {
   );
   corruptChecksums = false;
 
+  // A read-only directory cannot be made with chmod on Windows (it ignores
+  // directory modes), so this one is POSIX only.
+  if (!IS_WINDOWS) {
   const readOnlyDir = join(installDir, "readonly");
   mkdirSync(readOnlyDir);
   chmodSync(readOnlyDir, 0o500);
@@ -714,6 +735,7 @@ try {
     notWritable.code === 1 && notWritable.err.includes("not writable") && notWritable.err.includes("sudo"),
     `code=${notWritable.code} err=${notWritable.err.trim()}`,
   );
+  }
 
   const bundleTarget = join(installDir, "mcp.js");
   const bundleUpdate = await cli(["update", "--to", bundleTarget, "--json"], { env: updateEnv });
@@ -727,9 +749,9 @@ try {
   // print help. Run a copy of the binary so it can replace itself.
   const selfDir = join(installDir, "self");
   mkdirSync(selfDir);
-  const selfBin = join(selfDir, "mcp");
+  const selfBin = join(selfDir, "mcp" + EXE);
   copyFileSync(BIN, selfBin);
-  chmodSync(selfBin, 0o755);
+  if (!IS_WINDOWS) chmodSync(selfBin, 0o755);
   // Async: the fake release server runs in this process, so a blocking spawn
   // would leave it unable to answer.
   const bareProc = Bun.spawn([selfBin, "update"], { env: { ...process.env, ...updateEnv, NO_COLOR: "1" }, stdout: "pipe", stderr: "pipe" });
@@ -738,7 +760,17 @@ try {
     stdout: await new Response(bareProc.stdout).text(),
     stderr: await new Response(bareProc.stderr).text(),
   };
-  check(
+  if (IS_WINDOWS) {
+    // Windows cannot replace a running .exe: the update is staged next to it
+    // and the exact move command is printed, the running file left intact.
+    check(
+      "a bare 'mcp update' on Windows stages the new build and says how to finish",
+      bareUpdate.exitCode === 1 && bareUpdate.stderr.includes("move /Y") && existsSync(selfBin + ".new") &&
+        digest(new Uint8Array(readFileSync(selfBin + ".new"))) === digest(fakeBinaryBytes) &&
+        digest(new Uint8Array(readFileSync(selfBin))) === digest(new Uint8Array(readFileSync(BIN))),
+      `code=${bareUpdate.exitCode} err=${bareUpdate.stderr.slice(0, 200)}`,
+    );
+  } else check(
     "a bare 'mcp update' installs the newest release (it used to print help)",
     bareUpdate.exitCode === 0 && digest(new Uint8Array(readFileSync(selfBin))) === digest(fakeBinaryBytes),
     `code=${bareUpdate.exitCode} out=${bareUpdate.stdout.slice(0, 160)} err=${bareUpdate.stderr.slice(0, 160)}`,
@@ -795,8 +827,7 @@ try {
   );
 
   // The device code must not be visible to other local users via ps.
-  const psList = Bun.spawnSync(["ps", "-axww", "-o", "args="], { stdout: "pipe" }).stdout.toString();
-  const childLines = psList.split("\n").filter((l) => l.includes(`--id ${anon.device}`));
+  const childLines = processCommandLines().filter((l) => l.includes(`--id ${anon.device}`));
   check(
     "the code-mcp child's command line carries no device code",
     childLines.length > 0 && childLines.every((l) => !l.includes(String(anon.token)) && !l.includes("--gateway-token")),
@@ -887,6 +918,14 @@ try {
     const exited = await Promise.race([runner.exited, Bun.sleep(10_000).then(() => "hung" as const)]);
     check("connect stops on SIGINT", exited !== "hung", `err=${runnerErr.slice(-300)}`);
     if (exited === "hung") runner.kill("SIGKILL");
+    // ...and leaves no code-mcp behind. On POSIX the signal is forwarded; on
+    // Windows kill() terminates only the parent, and the child must notice.
+    let leftover = processCommandLines().filter((l) => l.includes(`--id ${anon.device}`));
+    for (let i = 0; i < 40 && leftover.length > 0; i++) {
+      await Bun.sleep(250);
+      leftover = processCommandLines().filter((l) => l.includes(`--id ${anon.device}`));
+    }
+    check("no code-mcp is left running after connect stops", leftover.length === 0, leftover.join(" | ").slice(0, 300));
   }
 
   // ---- performance ---------------------------------------------------------
