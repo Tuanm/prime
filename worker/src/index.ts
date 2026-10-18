@@ -11,6 +11,8 @@
 //   POST /messages/{deviceId}     -> SSE client->server leg (202 + stream response)
 //   WS   /ws/{deviceId}           -> device auth + origin check -> DeviceDO upgrade
 //   WS   /ws?deviceId=            -> legacy path -> DeviceDO upgrade
+//   POST /api/devices/anonymous   -> create an anonymous device (generated id + 6-char code)
+//   /admin/api/anonymous/{ref}... -> admin actions on anonymous devices, by opaque ref
 //
 // All device state (WebSocket + pending requests) lives in a DeviceDO keyed by
 // deviceId, so every HTTP request finds the right tunnel regardless of which
@@ -18,7 +20,7 @@
 // RegistryDO (durable storage), seeded once from the DEVICE_TOKENS secret, so
 // the admin UI can register devices at runtime without a redeploy.
 
-import { loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
+import { anonConfig, loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { ADMIN_HTML } from "./admin-ui";
@@ -84,8 +86,27 @@ let limiterMax = 0;
 // Effective device->token map, backed by the RegistryDO (durable storage).
 // Cached briefly per isolate; admin mutations invalidate the local cache and
 // other isolates pick the change up within the TTL.
-let mapCache: { at: number; map: Map<string, string> } | null = null;
+interface RegistrySnapshot {
+  map: Map<string, string>; // deviceId -> token (registered, anonymous and virtual)
+  anon: Set<string>; // which of those are anonymous
+  locked: Set<string>; // anonymous devices locked after too many wrong codes
+}
+let mapCache: { at: number; snap: RegistrySnapshot } | null = null;
 const MAP_CACHE_TTL_MS = 2_000;
+
+// Anonymous devices get their own, lower per-client-IP budget on the relay
+// (ANON_RATE_LIMIT_MAX per RATE_LIMIT_WINDOW_MS), on top of the shared one.
+let anonLimiter: RateLimiter | null = null;
+let anonLimiterKey = "";
+function getAnonLimiter(cfg: GatewayConfig, max: number): RateLimiter {
+  const key = cfg.rateWindowMs + "/" + max;
+  if (!anonLimiter || anonLimiterKey !== key) {
+    if (anonLimiter) anonLimiter.stop();
+    anonLimiter = new RateLimiter(cfg.rateWindowMs, max);
+    anonLimiterKey = key;
+  }
+  return anonLimiter;
+}
 
 // Cached set of disabled (deactivated) deviceIds. Same TTL/caching model as the
 // device map; invalidated by admin /state mutations.
@@ -109,48 +130,41 @@ async function effectiveDisabledSet(env: Env): Promise<Set<string>> {
 }
 
 // Per-device auth mode must be driven ONLY by real (tunnel) device tokens.
+// Anonymous devices do not count either: creating one must not flip an open
+// gateway into per-device mode and lock out every unregistered device.
 // The in-process virtual devices (e.g. the built-in "cloud" worker device) are a
 // separate concern: they must NOT force every tunnel deviceId into per-device
 // mode, or a gateway that is only running the cloud device would 401 any
 // unregistered tunnel device (silently disabling open / shared-token access).
-function hasNonVirtualDevice(map: Map<string, string>, env: Env): boolean {
+function hasNonVirtualDevice(snap: RegistrySnapshot, env: Env): boolean {
   const virt = virtualDeviceIds(env);
-  for (const id of map.keys()) if (!virt.has(id)) return true;
+  for (const id of snap.map.keys()) if (!virt.has(id) && !snap.anon.has(id)) return true;
   return false;
 }
 
-async function effectiveDeviceMap(env: Env): Promise<Map<string, string>> {
-  if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.map;
+// Always read the authoritative registry snapshot, bypassing the TTL cache.
+async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  const map = new Map<string, string>();
+  const snap: RegistrySnapshot = { map: new Map(), anon: new Set(), locked: new Set() };
   try {
     const r = await reg.fetch("https://registry/map");
     if (r.ok) {
-      const j = (await r.json()) as { map?: Record<string, string> };
+      const j = (await r.json()) as { map?: Record<string, string>; anonymous?: string[]; locked?: string[] };
       for (const [id, tok] of Object.entries(j.map || {})) {
-        if (typeof tok === "string" && tok.length > 0) map.set(id, tok);
+        if (typeof tok === "string" && tok.length > 0) snap.map.set(id, tok);
       }
+      for (const id of j.anonymous || []) snap.anon.add(id);
+      for (const id of j.locked || []) snap.locked.add(id);
     }
   } catch {}
-  mapCache = { at: Date.now(), map };
-  return map;
+  return snap;
 }
 
-// Always read the authoritative device -> token map from the registry DO,
-// bypassing the per-isolate TTL cache.
-async function freshDeviceMap(env: Env): Promise<Map<string, string>> {
-  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  const map = new Map<string, string>();
-  try {
-    const r = await reg.fetch("https://registry/map");
-    if (r.ok) {
-      const j = (await r.json()) as { map?: Record<string, string> };
-      for (const [id, tok] of Object.entries(j.map || {})) {
-        if (typeof tok === "string" && tok.length > 0) map.set(id, tok);
-      }
-    }
-  } catch {}
-  return map;
+async function effectiveSnapshot(env: Env): Promise<RegistrySnapshot> {
+  if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.snap;
+  const snap = await freshSnapshot(env);
+  mapCache = { at: Date.now(), snap };
+  return snap;
 }
 
 // Resolve the device -> token map for identity checks. A device registered via
@@ -161,13 +175,70 @@ async function freshDeviceMap(env: Env): Promise<Map<string, string>> {
 // gateway CI flake "Expected 101"). Re-reading the registry when the cached map
 // would reject an unknown id closes that window; genuinely unknown ids are still
 // 401, preserving the no-existence-oracle property.
-async function resolveDeviceMap(env: Env, deviceId: string): Promise<Map<string, string>> {
-  let map = await effectiveDeviceMap(env);
-  const perDeviceMode = hasNonVirtualDevice(map, env);
-  if (perDeviceMode && !map.has(deviceId)) {
-    map = await freshDeviceMap(env);
+async function resolveSnapshot(env: Env, deviceId: string): Promise<RegistrySnapshot> {
+  let snap = await effectiveSnapshot(env);
+  // Also re-read for an unknown id in open mode: it may be an anonymous device
+  // created moments ago on another isolate, whose code must then be enforced.
+  if (!snap.map.has(deviceId)) {
+    snap = await freshSnapshot(env);
+    mapCache = { at: Date.now(), snap };
   }
-  return map;
+  return snap;
+}
+
+interface DeviceAuth {
+  denied: Response | null;
+  expected?: string; // the token the device must present (undefined in open mode)
+  anonymous: boolean;
+}
+
+/**
+ * The device-credential gate shared by POST /mcp, the SSE pair, downloads and
+ * the WS upgrade - one copy, so the anonymous rules cannot drift between them.
+ * Callers have already checked the gateway token, the IP limiter and the id
+ * format.
+ */
+async function authorizeDevice(deviceId: string, request: Request, url: URL, cfg: GatewayConfig, env: Env): Promise<DeviceAuth> {
+  const snap = await resolveSnapshot(env, deviceId);
+  const anonymous = snap.anon.has(deviceId);
+  if (hasNonVirtualDevice(snap, env) && !snap.map.has(deviceId)) return { denied: unauthorized(), anonymous };
+  // Locked after too many wrong codes: refuse everyone, the right code included,
+  // or the lock would not stop guessing.
+  if (anonymous && snap.locked.has(deviceId)) {
+    return {
+      denied: Response.json({ error: "too many failed attempts; try again later" }, { status: 429, headers: { "retry-after": "600" } }),
+      anonymous,
+    };
+  }
+  const expected = snap.map.get(deviceId) ?? cfg.deviceToken;
+  if (expected !== undefined) {
+    const given = extractDeviceToken(request, url);
+    if (!given || !timingSafeEq(given, expected)) {
+      if (anonymous) {
+        try {
+          const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+          const r = await reg.fetch("https://registry/anon/fail?id=" + encodeURIComponent(deviceId), { method: "POST" });
+          const j = (await r.json()) as { locked?: boolean };
+          if (j.locked) mapCache = null; // pick the lock up on the next request
+        } catch {}
+      }
+      return { denied: unauthorized(), expected, anonymous };
+    }
+  }
+  if ((await effectiveDisabledSet(env)).has(deviceId)) {
+    return { denied: Response.json({ error: "device disabled" }, { status: 403 }), expected, anonymous };
+  }
+  return { denied: null, expected, anonymous };
+}
+
+/** The lower relay budget for anonymous devices (per client IP, per device). */
+function anonRateLimited(cfg: GatewayConfig, env: Env, request: Request, deviceId: string): Response | null {
+  const max = anonConfig(env).rateMax;
+  if (getAnonLimiter(cfg, max).allow(clientIp(request) + "|" + deviceId)) return null;
+  return Response.json(
+    { error: "rate limited", hint: "anonymous devices allow " + max + " requests per " + Math.round(cfg.rateWindowMs / 1000) + "s; register the device for more" },
+    { status: 429 },
+  );
 }
 
 function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
@@ -202,16 +273,11 @@ async function authorizeRelay(
   if (!validDeviceId(deviceId)) {
     return Response.json({ error: "invalid deviceId" }, { status: 400 });
   }
-  const map = await resolveDeviceMap(env, deviceId);
-  const perDeviceMode = hasNonVirtualDevice(map, env);
-  if (perDeviceMode && !map.has(deviceId)) return unauthorized();
-  const expected = map.get(deviceId) ?? cfg.deviceToken;
-  if (expected !== undefined) {
-    const given = extractDeviceToken(request, url);
-    if (!given || !timingSafeEq(given, expected)) return unauthorized();
-  }
-  if ((await effectiveDisabledSet(env)).has(deviceId)) {
-    return Response.json({ error: "device disabled" }, { status: 403 });
+  const auth = await authorizeDevice(deviceId, request, url, cfg, env);
+  if (auth.denied) return auth.denied;
+  if (auth.anonymous) {
+    const limited = anonRateLimited(cfg, env, request, deviceId);
+    if (limited) return limited;
   }
   if (virtualDeviceIds(env).has(deviceId)) {
     // Virtual devices are in-process only (handleCloudMcp) - there is no tunnel
@@ -225,6 +291,42 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
     const url = new URL(request.url);
+
+    // ---- Anonymous device registration ----
+    // A client that has no registered device asks for one here: the gateway
+    // picks an unused id and a 6-character code. Limits (per-IP creations, the
+    // device cap) are enforced in the RegistryDO, so they hold across isolates.
+    if (url.pathname === "/api/devices/anonymous") {
+      if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+      if (cfg.gatewayToken) {
+        const t = extractToken(request, url, "auth");
+        if (!t || !timingSafeEq(t, cfg.gatewayToken)) return unauthorized();
+      }
+      if (!getLimiter(cfg).allow(clientIp(request))) {
+        return Response.json({ error: "rate limited" }, { status: 429 });
+      }
+      const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+      const created = await reg.fetch("https://registry/anon/create", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ip: clientIp(request) }),
+      });
+      if (created.status !== 201) return created;
+      const { deviceId, token } = (await created.json()) as { deviceId: string; token: string };
+      mapCache = null;
+      const wsScheme = url.protocol === "https:" ? "wss:" : "ws:";
+      return Response.json(
+        {
+          deviceId,
+          token,
+          connect_url: url.origin + "/mcp/" + encodeURIComponent(deviceId) + "?token=" + encodeURIComponent(token),
+          ws_url: wsScheme + "//" + url.host + "/ws/" + encodeURIComponent(deviceId),
+          anonymous: true,
+          rate_limit: { max: anonConfig(env).rateMax, window_ms: cfg.rateWindowMs },
+        },
+        { status: 201, headers: { "cache-control": "no-store" } },
+      );
+    }
 
     // ---- Temporary files (REST API + pages) ----
     // Handled before the device routing because /files and /api/files are
@@ -257,6 +359,64 @@ export default {
     if (url.pathname.startsWith("/admin/api/")) {
       const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
 
+      // ---- anonymous devices, by opaque ref ----
+      // The admin can see and act on them but never sees their id or code: the
+      // ref is resolved to the real device here, server-side.
+      if (request.method === "GET" && url.pathname === "/admin/api/anonymous") {
+        return reg.fetch("https://registry/anon/list");
+      }
+      const anonRoute = /^\/admin\/api\/anonymous\/([a-f0-9]{24})(\/(state|clients|tools))?$/.exec(url.pathname);
+      if (anonRoute) {
+        const resolved = await reg.fetch("https://registry/anon/resolve?ref=" + anonRoute[1]);
+        if (!resolved.ok) return Response.json({ error: "not found" }, { status: 404 });
+        const { deviceId, token } = (await resolved.json()) as { deviceId: string; token: string };
+        const action = anonRoute[3] || "";
+        if (request.method === "DELETE" && action === "") {
+          mapCache = null;
+          disabledCache = null;
+          await reg.fetch(new Request("https://registry/remove", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ deviceId }),
+          }));
+          return Response.json({ ok: true });
+        }
+        if (request.method === "POST" && action === "state") {
+          let body: unknown;
+          try {
+            body = await request.json();
+          } catch {
+            return Response.json({ error: "invalid json" }, { status: 400 });
+          }
+          const disabled = !!(body as { disabled?: unknown })?.disabled;
+          mapCache = null;
+          disabledCache = null;
+          await reg.fetch(new Request("https://registry/setstate", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ deviceId, disabled }),
+          }));
+          return Response.json({ ok: true, disabled });
+        }
+        if (request.method === "GET" && action === "clients") {
+          return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch("https://device/clients");
+        }
+        if (request.method === "POST" && action === "tools") {
+          // Same answer the registered-device Tools dialog gets from /mcp, but
+          // relayed here so the code never reaches the browser.
+          if ((await effectiveDisabledSet(env)).has(deviceId)) {
+            return Response.json({ error: "device disabled" }, { status: 403 });
+          }
+          const headers = new Headers({ "content-type": "application/json", "x-device-id": deviceId, "x-device-token": token });
+          return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch(new Request("https://device/mcp", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+          }));
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      }
+
       if (request.method === "GET" && url.pathname === "/admin/api/devices") {
         return reg.fetch("https://registry/full");
       }
@@ -275,7 +435,7 @@ export default {
         const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
         return stub.fetch("https://device/clients");
       }
-      if (request.method === "POST" && url.pathname.endsWith("/state")) {
+      if (request.method === "POST" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/state")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/state".length);
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
         let body: unknown;
@@ -372,18 +532,13 @@ export default {
       // mode an unknown deviceId is rejected outright (no existence oracle)
       // and unauthenticated probes get 401 - never instantiating a Durable
       // Object for them (no DO churn / cost).
-      const map = await resolveDeviceMap(env, deviceId);
-      const perDeviceMode = hasNonVirtualDevice(map, env);
-      if (perDeviceMode && !map.has(deviceId)) return unauthorized();
-      const expected = map.get(deviceId) ?? cfg.deviceToken;
-      if (expected !== undefined) {
-        const given = extractDeviceToken(request, url);
-        if (!given || !timingSafeEq(given, expected)) return unauthorized();
-      }
-
-      // Deactivated devices are rejected outright (admin UI toggle).
-      if ((await effectiveDisabledSet(env)).has(deviceId)) {
-        return Response.json({ error: "device disabled" }, { status: 403 });
+      // Deactivated devices are rejected outright (admin UI toggle), inside
+      // authorizeDevice, after the credential check.
+      const auth = await authorizeDevice(deviceId, request, url, cfg, env);
+      if (auth.denied) return auth.denied;
+      if (auth.anonymous) {
+        const limited = anonRateLimited(cfg, env, request, deviceId);
+        if (limited) return limited;
       }
 
       // Virtual devices (in-process, no tunnel): handle the MCP request right
@@ -502,19 +657,9 @@ export default {
       // hijacking / intercepting an in-use deviceId is impossible. Unknown
       // deviceIds get the same 401 (no existence oracle). The DO re-checks
       // the credential for defense in depth.
-      const map = await resolveDeviceMap(env, deviceId);
-      const perDeviceMode = hasNonVirtualDevice(map, env);
-      if (perDeviceMode && !map.has(deviceId)) return unauthorized();
-      const expected = map.get(deviceId) ?? cfg.deviceToken;
-      if (expected !== undefined) {
-        const given = extractDeviceToken(request, url);
-        if (!given || !timingSafeEq(given, expected)) return unauthorized();
-      }
-
-      // Deactivated devices are rejected outright (admin UI toggle).
-      if ((await effectiveDisabledSet(env)).has(deviceId)) {
-        return Response.json({ error: "device disabled" }, { status: 403 });
-      }
+      const auth = await authorizeDevice(deviceId, request, url, cfg, env);
+      if (auth.denied) return auth.denied;
+      const expected = auth.expected;
 
       // Virtual devices are in-process only - they have no tunnel to upgrade.
       if (virtualDeviceIds(env).has(deviceId)) {
