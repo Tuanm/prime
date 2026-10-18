@@ -98,7 +98,10 @@ jobs:
           # Release names carry the version; the raw build names do not.
           for file in mcp-*; do
             case "$file" in
-              *.exe) mv "$file" "mcp-$VERSION-windows-x64.exe" ;;
+              # Explicit per platform: a "*.exe" pattern would fold the x64 and
+              # Arm Windows builds into one name and silently drop one of them.
+              mcp-windows-x64.exe)   mv "$file" "mcp-$VERSION-windows-x64.exe" ;;
+              mcp-windows-arm64.exe) mv "$file" "mcp-$VERSION-windows-arm64.exe" ;;
               mcp-darwin-arm64)   mv "$file" "mcp-$VERSION-darwin-arm64" ;;
               mcp-darwin-x64)     mv "$file" "mcp-$VERSION-darwin-x64" ;;
               mcp-linux-x64)      mv "$file" "mcp-$VERSION-linux-x64" ;;
@@ -153,7 +156,7 @@ jobs:
           | macOS (Apple silicon) | `mcp-<version>-darwin-arm64` |
           | macOS (Intel) | `mcp-<version>-darwin-x64` |
           | Linux (x64 / arm64) | `mcp-<version>-linux-x64` / `mcp-<version>-linux-arm64` |
-          | Windows (x64) | `mcp-<version>-windows-x64.exe` |
+          | Windows (x64 / Arm) | `mcp-<version>-windows-x64.exe` / `mcp-<version>-windows-arm64.exe` |
 
           The binaries are self-contained (the Bun runtime is embedded), so no runtime
           installation is needed. They are large for that reason. If Bun >= 1.2 is already

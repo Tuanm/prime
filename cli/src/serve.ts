@@ -307,8 +307,10 @@ async function serveStdio(server: AggregateServer, note: (t: string) => void): P
       .finally(() => pending.delete(job));
     pending.add(job);
   };
-  for await (const chunk of Bun.stdin.stream()) {
-    buffer += decoder.decode(chunk as Uint8Array, { stream: true });
+  // process.stdin, not Bun.stdin.stream(): the latter can leave a piped stdin
+  // unread on Windows, and a server that exits at once is no server.
+  for await (const chunk of process.stdin) {
+    buffer += decoder.decode(typeof chunk === "string" ? new TextEncoder().encode(chunk) : (chunk as Uint8Array), { stream: true });
     let index: number;
     while ((index = buffer.indexOf("\n")) !== -1) {
       dispatch(buffer.slice(0, index));

@@ -146,10 +146,13 @@ export function repoSlug(): string {
  * `argv[1]` is a virtual `/$bunfs/...` entrypoint. Under `bun mcp.js` it is the
  * other way round: execPath is the Bun runtime and argv[1] is the script.
  */
-export function currentInstall(): InstallTarget {
-  const script = process.argv[1] ?? "";
-  const isEmbedded = script.includes("$bunfs") || !existsSync(script);
-  if (isEmbedded) return { path: process.execPath, kind: "binary" };
+export function currentInstall(script: string = process.argv[1] ?? "", execPath: string = process.execPath): InstallTarget {
+  // A compiled binary's entry lives in Bun's virtual filesystem: /$bunfs/... on
+  // POSIX, B:/~BUN/... on Windows. The Windows form used to be missed (and it
+  // can even "exist"), so a Windows .exe was mistaken for a source checkout and
+  // every update was refused.
+  const isEmbedded = script.includes("$bunfs") || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(script) || !existsSync(script);
+  if (isEmbedded) return { path: execPath, kind: "binary" };
   if (script.endsWith(".js") || script.endsWith(".mjs")) return { path: script, kind: "bundle" };
   return { path: script, kind: "source" };
 }
@@ -225,6 +228,18 @@ async function download(url: string, what: string): Promise<Uint8Array> {
 
 // ---- install --------------------------------------------------------------
 
+/**
+ * After a Windows self-update the previous binary is left beside the new one as
+ * "<exe>.old" (it was running, so it could only be renamed). Remove it once it
+ * is no longer in use - the next run of the new binary. Best effort.
+ */
+export function removeStaleWindowsBinary(execPath: string = process.execPath): void {
+  if (process.platform !== "win32") return;
+  try {
+    rmSync(`${execPath}.old`, { force: true });
+  } catch {}
+}
+
 function installBytes(target: string, bytes: Uint8Array, mode: number): void {
   const dir = dirname(target);
   try {
@@ -236,21 +251,20 @@ function installBytes(target: string, bytes: Uint8Array, mode: number): void {
     );
   }
 
-  // Windows refuses to replace a running executable, so stage the new build next
-  // to it and say what to do rather than failing with EBUSY.
-  if (process.platform === "win32") {
-    const staged = `${target}.new`;
-    writeFileSync(staged, bytes);
-    throw new CliError(
-      `downloaded the update to ${staged}, but Windows cannot replace a running executable`,
-      `Close all mcp processes, then: move /Y "${staged}" "${target}"`,
-    );
-  }
-
   const tmp = `${target}.tmp-${process.pid}`;
   try {
     writeFileSync(tmp, bytes, { mode });
     chmodSync(tmp, mode);
+    // Windows will not overwrite or delete a running .exe, but it will rename
+    // one: move the running file aside and put the new build in its place. The
+    // leftover is removed on a later run (see removeStaleWindowsBinary).
+    if (process.platform === "win32" && existsSync(target)) {
+      const aside = `${target}.old`;
+      try {
+        rmSync(aside, { force: true });
+      } catch {}
+      renameSync(target, aside);
+    }
     renameSync(tmp, target); // atomic within the same filesystem
   } catch (err) {
     try {
