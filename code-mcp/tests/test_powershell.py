@@ -44,7 +44,7 @@ class PowerShellLaunchTests(unittest.TestCase):
         java_home = os.environ.get("JAVA_HOME", "")
         javac = str(Path(java_home) / "bin/javac") if java_home else shutil.which("javac")
         java = str(Path(java_home) / "bin/java") if java_home else shutil.which("java")
-        if javac and subprocess.run([javac, "-version"], capture_output=True).returncode == 0:
+        if javac and cls._runs(javac, "-version"):
             helper = cls.work / "PowerShellCommand.java"
             helper.write_text('''import java.util.Base64;
 import java.nio.charset.StandardCharsets;
@@ -62,6 +62,16 @@ public class PowerShellCommand {
                 for line in subprocess.check_output([java, "-cp", str(cls.work),
                                                      "PowerShellCommand", command], text=True).splitlines()]
         cls.powershell = shutil.which("pwsh") or shutil.which("powershell")
+
+    @staticmethod
+    def _runs(*argv):
+        """True when the tool actually runs. A JAVA_HOME pointing nowhere, or
+        macOS's javac stub with no JDK installed, must skip the Java checks -
+        not abort the whole suite in setUpClass."""
+        try:
+            return subprocess.run(list(argv), capture_output=True, timeout=60).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
 
     @staticmethod
     def python_command(command):

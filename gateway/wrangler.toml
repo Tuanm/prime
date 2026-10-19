@@ -1,7 +1,7 @@
 # Cloudflare Worker configuration for the code-mcp gateway.
 #
 # Deploy:
-#   cd worker
+#   cd gateway
 #   wrangler secret put GATEWAY_TOKEN     # optional bearer token for /mcp/*
 #   wrangler secret put DEVICE_TOKEN      # optional bearer token for /ws/* device auth
 #   wrangler secret put ADMIN_TOKEN       # optional; defaults to GATEWAY_TOKEN for /devices

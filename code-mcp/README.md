@@ -29,7 +29,7 @@ All three accept the same flags. See the **Flags** table below.
 
 ### Gateway Mode
 
-Connect to a [code-mcp-gateway](https://github.com/Tuanm/code-mcp-gateway) to expose this server to the internet without `cloudflared`:
+Connect to a [Code MCP Gateway](../gateway) (in this repository) to expose this server to the internet without `cloudflared`:
 
 ```bash
 python3 code_mcp.py --gateway --port 7777          # bare flag: uses wss://code-mcp.tuanm.workers.dev
