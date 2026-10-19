@@ -1,0 +1,4 @@
+*.class
+.memo.jsonl
+__pycache__/
+.code-mcp/
