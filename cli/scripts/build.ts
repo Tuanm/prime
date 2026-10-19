@@ -3,13 +3,10 @@
 //   bun scripts/build.ts              full cross-platform compile + JS bundle
 //   bun scripts/build.ts --host-only  just this machine's binary (fast, for tests)
 //   bun scripts/build.ts --bundle-only  just the portable JS bundle
-//   ... --no-sync                     do not refresh the bundled code-mcp first
 //
-// Every build first refreshes the vendored code-mcp device server
-// (src/code-mcp.ts, run by "mcp code-mcp" / "mcp connect") from the newest
-// upstream main via scripts/sync-code-mcp.ts. When no source is reachable
-// (offline, CI without network) the vendored copy is used as-is, after checking
-// it against src/code-mcp.source.json. CODE_MCP_SYNC=0 is the same as --no-sync.
+// The code-mcp device server ("mcp code-mcp" / "mcp connect") is built in from
+// ../code-mcp/code-mcp.ts in this repository - so an artifact is reproducible
+// from the commit it was built at. Every artifact is smoke-tested to run it.
 //
 // `bun build --compile` embeds the Bun runtime, so each artifact runs on a
 // machine with no Bun installed. Targets are listed explicitly because a
@@ -64,17 +61,6 @@ if (versionProblem) {
 // so the artifact reports the version it was built from - not the environment.
 const DEFINE = `--define=process.env.MCP_CLI_VERSION="${VERSION}"`;
 console.log(`version ${VERSION}`);
-
-// ---- bundled code-mcp ------------------------------------------------------
-{
-  const noSync = args.has("--no-sync") || process.env.CODE_MCP_SYNC === "0";
-  const syncArgs = noSync ? ["--check"] : ["--allow-offline"];
-  const sync = Bun.spawnSync(["bun", `${ROOT}scripts/sync-code-mcp.ts`, ...syncArgs], { stdout: "inherit", stderr: "inherit" });
-  if (sync.exitCode !== 0) {
-    console.error("FAILED: the bundled code-mcp is unavailable or inconsistent (see above)");
-    process.exit(1);
-  }
-}
 
 /** The bundled code-mcp must be reachable in the artifact, not just in src/. */
 function codeMcpSmoke(command: string[]): string | undefined {

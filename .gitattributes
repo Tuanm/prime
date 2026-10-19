@@ -1,3 +1,0 @@
-# The vendored code-mcp must stay byte-identical to upstream (its sha256 is
-# recorded and checked): never let a Windows checkout rewrite its line endings.
-cli/src/code-mcp.ts -text
