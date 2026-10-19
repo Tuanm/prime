@@ -13,7 +13,7 @@ import { parseArgs, flag } from "../src/args.ts";
 import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/client.ts";
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
-import { assetNameFor, currentInstall, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
+import { apiBase, assetNameFor, currentInstall, repoSlug, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
@@ -309,6 +309,23 @@ describe("bounded concurrency", () => {
 });
 
 describe("update helpers", () => {
+  test("release source: the renamed repository; empty overrides are ignored", () => {
+    const saved = { repo: process.env.MCP_CLI_REPO, api: process.env.MCP_CLI_API_BASE };
+    try {
+      delete process.env.MCP_CLI_REPO;
+      expect(repoSlug()).toBe("Tuanm/code-mcp");
+      process.env.MCP_CLI_REPO = "  ";
+      process.env.MCP_CLI_API_BASE = "";
+      expect(repoSlug()).toBe("Tuanm/code-mcp");
+      expect(apiBase()).toBe("https://api.github.com");
+      process.env.MCP_CLI_REPO = "me/fork";
+      expect(repoSlug()).toBe("me/fork");
+    } finally {
+      if (saved.repo === undefined) delete process.env.MCP_CLI_REPO; else process.env.MCP_CLI_REPO = saved.repo;
+      if (saved.api === undefined) delete process.env.MCP_CLI_API_BASE; else process.env.MCP_CLI_API_BASE = saved.api;
+    }
+  });
+
   test("a compiled binary is recognised on every platform, Windows included", () => {
     // The Windows form was once mistaken for a source checkout, so 'mcp update'
     // refused to run from any Windows .exe.

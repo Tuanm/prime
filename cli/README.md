@@ -165,7 +165,7 @@ and credentials `mcp tools list` / `mcp call` use, or just the ids given) into
 
 ### code-mcp - the bundled device server
 
-The CLI embeds [code-mcp](https://github.com/Tuanm/code-mcp), the MCP server that
+The CLI embeds [code-mcp](../code-mcp), the MCP server that
 exposes a machine's files and shell. `mcp connect` runs it for you;
 `mcp code-mcp [options]` runs it directly (`mcp code-mcp --help` lists its
 options), e.g. as a registered device:
