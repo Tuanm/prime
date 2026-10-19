@@ -2,7 +2,7 @@
 
 **Give AI agents your machine's files and shell as MCP tools - locally, or from anywhere through a gateway.**
 
-[![CI](https://github.com/Tuanm/code-mcp-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuanm/code-mcp-gateway/actions/workflows/ci.yml)
+[![CI](https://github.com/Tuanm/code-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuanm/code-mcp/actions/workflows/ci.yml)
 
 | Folder | What it is |
 | --- | --- |

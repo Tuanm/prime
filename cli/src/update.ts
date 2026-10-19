@@ -19,7 +19,9 @@ import { bold, dim, green, yellow } from "./output.ts";
 import { compareVersions, isValidVersion } from "./version.ts";
 
 export const TAG_PREFIX = "cli-v";
-export const DEFAULT_REPO = "Tuanm/code-mcp-gateway";
+// Renamed from Tuanm/code-mcp-gateway; GitHub redirects the old name, which
+// is what releases up to 26.10.19+3 still ask for.
+export const DEFAULT_REPO = "Tuanm/code-mcp";
 export const DEFAULT_API_BASE = "https://api.github.com";
 
 export interface ReleaseAsset {
@@ -131,12 +133,18 @@ export function sha256Hex(bytes: Uint8Array): string {
 
 // ---- environment ----------------------------------------------------------
 
+/** An environment override, where empty or blank means "not set". */
+function envOr(name: string, fallback: string): string {
+  const value = process.env[name]?.trim();
+  return value ? value : fallback;
+}
+
 export function apiBase(): string {
-  return (process.env.MCP_CLI_API_BASE ?? DEFAULT_API_BASE).replace(/\/+$/, "");
+  return envOr("MCP_CLI_API_BASE", DEFAULT_API_BASE).replace(/\/+$/, "");
 }
 
 export function repoSlug(): string {
-  return process.env.MCP_CLI_REPO ?? DEFAULT_REPO;
+  return envOr("MCP_CLI_REPO", DEFAULT_REPO);
 }
 
 /**

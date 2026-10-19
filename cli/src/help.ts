@@ -237,7 +237,7 @@ USAGE
   mcp code-mcp [code-mcp flags]
   mcp code-mcp --help          code-mcp's own flag reference
 
-The CLI embeds code-mcp (github.com/Tuanm/code-mcp), the MCP server that
+The CLI embeds code-mcp (code-mcp/ in github.com/Tuanm/code-mcp), the MCP server that
 exposes this machine's files and shell as tools. 'mcp connect' runs it for
 you; use this command for anything else code-mcp supports, e.g. a registered
 device:
@@ -328,7 +328,7 @@ NOTES
 
 ENVIRONMENT
   GITHUB_TOKEN        Raises the GitHub API rate limit (optional)
-  MCP_CLI_REPO        Override the repository, default Tuanm/code-mcp-gateway
+  MCP_CLI_REPO        Override the repository, default Tuanm/code-mcp
   MCP_CLI_API_BASE    Override the API base, default https://api.github.com
 `;
 
