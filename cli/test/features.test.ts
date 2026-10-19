@@ -33,18 +33,11 @@ const ENTRY = join(ROOT, "src", "index.ts");
 // ---- bundled code-mcp ---------------------------------------------------------
 
 describe("bundled code-mcp", () => {
-  test("the vendored copy matches its recorded provenance", () => {
-    const meta = JSON.parse(readFileSync(join(ROOT, "src", "code-mcp.source.json"), "utf8")) as {
-      repo: string;
-      commit: string;
-      sha256: string;
-      bytes: number;
-    };
-    const bytes = readFileSync(join(ROOT, "src", "code-mcp.ts"));
-    expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(meta.sha256);
-    expect(bytes.length).toBe(meta.bytes);
-    expect(meta.repo).toBe("https://github.com/Tuanm/code-mcp");
-    expect(meta.commit).toMatch(/^[0-9a-f]{40}$/);
+  test("comes from code-mcp/ in this repository", () => {
+    // One source: the entry imports the repository's code-mcp, nothing vendored.
+    const entry = readFileSync(join(ROOT, "src", "code-mcp.ts"), "utf8");
+    expect(entry).toContain('import "../../code-mcp/code-mcp.ts";');
+    expect(readFileSync(join(ROOT, "..", "code-mcp", "code-mcp.ts"), "utf8")).toContain("code-mcp listening on");
   });
 
   test("is wired through the #code-mcp import, never a static import", () => {
@@ -110,7 +103,7 @@ describe("bundled code-mcp", () => {
   });
 
   test("the injected token reaches code-mcp but not its environment", async () => {
-    // A preload stands in for code-mcp: it records what the vendored script
+    // A preload stands in for code-mcp: it records what the real script
     // would see (argv and env) at import time, then stops the process.
     const dir = mkdtempSync(join(tmpdir(), "mcp-host-"));
     const probe = join(dir, "probe.ts");
