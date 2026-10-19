@@ -4,6 +4,8 @@
 
 [![CI](https://github.com/Tuanm/code-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuanm/code-mcp/actions/workflows/ci.yml)
 
+**Get started:** [code-mcp.tuanm.workers.dev](https://code-mcp.tuanm.workers.dev) (also on [GitHub Pages](https://tuanm.github.io/code-mcp/)) - download `mcp` for your platform and run `mcp connect`.
+
 | Folder | What it is |
 | --- | --- |
 | [`code-mcp/`](code-mcp) | **code-mcp**, the MCP server that runs on a machine and exposes its files and shell as tools - in TypeScript (Bun), Python and Java. It serves locally, or connects out to a gateway as a *device*. |

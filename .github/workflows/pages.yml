@@ -1,0 +1,47 @@
+name: Landing page (GitHub Pages)
+
+# The same page the gateway serves at / (gateway/src/landing-page.ts). It looks
+# up the newest mcp release at load time, so releases need no redeploy here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'gateway/src/landing-page.ts'
+      - 'gateway/src/ui-css.ts'
+      - 'gateway/scripts/build-site.ts'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build the site
+        run: bun gateway/scripts/build-site.ts _site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

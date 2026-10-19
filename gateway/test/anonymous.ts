@@ -136,6 +136,13 @@ try {
   const B = mainW.base;
   console.log("== main instance ==");
 
+  // The landing page is served at /.
+  const landing = await fetch(B + "/");
+  const landingText = await landing.text();
+  check("GET / serves the landing page", landing.status === 200 && (landing.headers.get("content-type") ?? "").startsWith("text/html") && landingText.includes('id="connect"'), String(landing.status));
+  check("HEAD / answers without a body", (await fetch(B + "/", { method: "HEAD" })).status === 200);
+  check("POST / is not the landing page", (await fetch(B + "/", { method: "POST" })).status !== 200);
+
   // A registered device, so the gateway is in per-device mode like production.
   const reg = await fetch(B + "/admin/api/devices", { method: "POST", headers: ADMIN_JSON, body: JSON.stringify({ deviceId: "reg1", token: "reg1-secret" }) });
   check("register a normal device", reg.ok, String(reg.status));
