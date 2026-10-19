@@ -627,31 +627,23 @@ release. Each release carries the five platform binaries, the JS bundle, and a
 bun run test          # unit + feature tests (offline; fake gateway in-process)
 bun test:e2e          # end-to-end: boots a local wrangler gateway + mock devices
 bun run typecheck     # tsc with tsconfig.typecheck.json
-bun run sync:code-mcp # refresh the bundled code-mcp
+bun test:service      # mcp service against this OS's real service manager
 ```
 
 ### The bundled code-mcp
 
-`src/code-mcp.ts` is a byte-identical copy of `code-mcp.ts` from
-[Tuanm/code-mcp](https://github.com/Tuanm/code-mcp); `src/code-mcp.source.json`
-records the repo, commit and sha256 (a unit test checks they match). It is a copy,
-not a symlink, because CI and other clones do not have the sibling repository.
+code-mcp lives in this repository at [`../code-mcp`](../code-mcp), and
+`src/code-mcp.ts` simply imports `../../code-mcp/code-mcp.ts` - so a binary is
+built from exactly the code-mcp of the commit it was built at.
 
-- `bun run sync:code-mcp` refreshes it from the newest `main`: `--from <path>`
-  (a checkout or a file), else the sibling checkout `../../code-mcp` (its
-  committed local `main`; uncommitted edits are ignored), else GitHub. `--check`
-  only verifies the copy; `--ref <ref>` picks another ref.
-- `bun run build` syncs first; when no source is reachable it prints a note and
-  builds the vendored copy. `--no-sync` (or `CODE_MCP_SYNC=0`) skips the refresh
-  for a build that must match the committed source exactly.
 - code-mcp is a script with top-level side effects, so it is never imported
   statically: only `mcp code-mcp` loads it, via `await import("#code-mcp")` (a
-  `package.json` subpath import, a static string so `bun build` embeds it). The
-  vendored file is excluded from `tsc` (mapped to `src/code-mcp.stub.d.ts`) because
-  it is not written for this package's strict settings. It uses top-level
+  `package.json` subpath import, a static string so `bun build` embeds it). It is
+  excluded from `tsc` (mapped to `src/code-mcp.stub.d.ts`) because it is written
+  to its own conventions, not this package's strict settings. It uses top-level
   `await`, which is why binaries are compiled with `--bytecode --format=esm`.
 - The build smoke-tests `code-mcp --help` on the bundle and the host binary from
-  a directory without `src/`, so a build that lost the embedded copy fails.
+  a directory outside the repository, so a build that lost it fails.
 
 The end-to-end suite compiles the host binary and drives it against a real local
 gateway, covering both credentials, the tunnel relay, every input form, exit

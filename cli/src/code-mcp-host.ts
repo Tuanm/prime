@@ -1,6 +1,5 @@
-// The bundled code-mcp device server (src/code-mcp.ts, vendored from
-// github.com/Tuanm/code-mcp - see src/code-mcp.source.json and
-// scripts/sync-code-mcp.ts).
+// The bundled code-mcp device server: code-mcp/code-mcp.ts in this repository,
+// reached through src/code-mcp.ts.
 //
 // code-mcp.ts is a script, not a library: importing it parses Bun.argv, starts
 // an HTTP server and (with --gateway) dials the gateway. It must therefore never
@@ -11,8 +10,8 @@
 // ./src/code-mcp.ts. It is a static string literal, so Bun.build and
 // "bun build --compile" include the module in the bundle/binary. It is not a
 // relative path so that "bun run typecheck" (tsconfig.typecheck.json) can map it
-// to a declaration stub: the vendored file is kept byte-identical to upstream
-// and is not written to this package's strict compiler settings.
+// to a declaration stub: code-mcp is written to its own conventions, not this
+// package's strict compiler settings.
 
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";

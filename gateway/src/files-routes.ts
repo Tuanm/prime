@@ -230,7 +230,7 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
   // clearly instead of throwing.
   if (!env.BUCKET) {
     return isApi
-      ? jsonError(503, "file storage is not configured", { hint: "Bind an R2 bucket as BUCKET (see worker/README.md)." })
+      ? jsonError(503, "file storage is not configured", { hint: "Bind an R2 bucket as BUCKET (see gateway/README.md)." })
       : new Response(renderUnavailablePage(), {
           status: 503,
           headers: { "content-type": "text/html; charset=utf-8", ...NO_STORE },
