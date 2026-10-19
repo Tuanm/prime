@@ -24,6 +24,7 @@ import { anonConfig, loadConfig, timingSafeEq, extractToken, extractDeviceToken,
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { ADMIN_HTML } from "./admin-ui";
+import { LANDING_HTML } from "./landing-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 
@@ -280,6 +281,18 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
     const url = new URL(request.url);
+
+    // ---- Landing page (also published to GitHub Pages) ----
+    if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/" || url.pathname === "/index.html")) {
+      return new Response(request.method === "HEAD" ? null : LANDING_HTML, {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "public, max-age=300",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+        },
+      });
+    }
 
     // ---- Anonymous device registration ----
     // A client that has no registered device asks for one here: the gateway
