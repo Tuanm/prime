@@ -22,7 +22,7 @@ See the **Flags** table below.
 
 ### Gateway Mode
 
-Connect to a [code-mcp-gateway](https://github.com/Tuanm/code-mcp-gateway) to expose this server to the internet without `cloudflared`:
+Connect to a [Prime](../gateway) (in this repository) to expose this server to the internet without `cloudflared`:
 ```bash
 bun code-mcp.ts     --gateway wss://gateway.example.workers.dev --port 7777
 ```

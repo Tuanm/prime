@@ -13,7 +13,7 @@
 import type { Config } from "./config.ts";
 import { UsageError } from "./errors.ts";
 
-/** Mirrors the gateway's own allowlist (worker/src/config.ts validDeviceId). */
+/** Mirrors the gateway's own allowlist (gateway/src/config.ts validDeviceId). */
 const DEVICE_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 export const ENV = {

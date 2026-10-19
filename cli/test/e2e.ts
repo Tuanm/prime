@@ -17,7 +17,7 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const REPO = join(ROOT, "..");
 // The JS entry, not node_modules/.bin/wrangler: on Windows that is a shell shim
 // node cannot run.
-const WRANGLER = join(REPO, "worker", "node_modules", "wrangler", "bin", "wrangler.js");
+const WRANGLER = join(REPO, "gateway", "node_modules", "wrangler", "bin", "wrangler.js");
 const IS_WINDOWS = process.platform === "win32";
 const EXE = IS_WINDOWS ? ".exe" : "";
 const PORT = 8811;
@@ -171,14 +171,14 @@ function processCommandLines(): string[] {
 }
 
 async function startGateway(): Promise<{ kill: () => void }> {
-  rmSync(join(REPO, "worker", ".wrangler", `state-${PORT}`), { recursive: true, force: true });
+  rmSync(join(REPO, "gateway", ".wrangler", `state-${PORT}`), { recursive: true, force: true });
   const proc = spawn(
     "node",
     [
       WRANGLER, "dev", "--local",
-      "-c", join(REPO, "worker", "wrangler.dev.toml"),
+      "-c", join(REPO, "gateway", "wrangler.dev.toml"),
       "--port", String(PORT), "--ip", "127.0.0.1",
-      "--persist-to", join(REPO, "worker", ".wrangler", `state-${PORT}`),
+      "--persist-to", join(REPO, "gateway", ".wrangler", `state-${PORT}`),
       "--var", `GATEWAY_TOKEN:${GATEWAY_TOKEN}`,
       "--var", `DEVICE_TOKEN:${DEVICE_TOKEN}`,
       "--var", "ADMIN_TOKEN:admin-e2e",
@@ -188,7 +188,7 @@ async function startGateway(): Promise<{ kill: () => void }> {
       "--var", "RATE_LIMIT_MAX:100000",
       "--var", "KEEPALIVE_TIMEOUT_MS:20000",
     ],
-    { cwd: join(REPO, "worker"), stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: join(REPO, "gateway"), stdio: ["ignore", "pipe", "pipe"] },
   );
   for (let i = 0; i < 240; i++) {
     try {
