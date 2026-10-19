@@ -69,7 +69,7 @@ The production configuration includes a container image; Docker with the buildx
 plugin must be available. The local test configuration omits containers.
 
 ```bash
-cd worker
+cd gateway
 npm install
 npx wrangler secret put DEVICE_TOKENS   # REQUIRED for secure deployments
 npx wrangler secret put ADMIN_TOKEN     # optional — gates GET /devices
@@ -406,7 +406,7 @@ Smoke coverage: gateway/device auth, duplicate-registration rejection, register-
 
 > **Miniflare note** — local DO state persists under `.wrangler/state`. After a
 > hard kill, stale sockets linger until the keepalive alarm fires; for a clean
-> run: `rm -rf worker/.wrangler/state` before starting.
+> run: `rm -rf gateway/.wrangler/state` before starting.
 
 ### Ticket-based file downloads
 

@@ -1,10 +1,19 @@
-# Prime
+# Code MCP
 
-**Cloudflare Worker gateway that exposes local code-mcp devices to MCP clients over the internet, with per-device authentication and Durable-Object colocation.**
+**Give AI agents your machine's files and shell as MCP tools - locally, or from anywhere through a gateway.**
 
 [![CI](https://github.com/Tuanm/code-mcp-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuanm/code-mcp-gateway/actions/workflows/ci.yml)
 
-## Properties
+| Folder | What it is |
+| --- | --- |
+| [`code-mcp/`](code-mcp) | **code-mcp**, the MCP server that runs on a machine and exposes its files and shell as tools - in TypeScript (Bun). It serves locally, or connects out to a gateway as a *device*. |
+| [`gateway/`](gateway) | **Prime**, a Cloudflare Worker that relays MCP clients to devices anywhere: per-device authentication, anonymous devices, an admin page, temporary file storage. |
+| [`cli/`](cli) | **`mcp`**, the command line client: connect this machine as a device (it embeds code-mcp), run code-mcp as a user service, list and call device tools, and serve every device's tools as one MCP server. |
+```text
+MCP client --POST /mcp/{device}--> gateway/ <--WebSocket-- code-mcp/ (run by mcp connect / mcp service)
+```
+
+## Gateway properties
 
 | Property | How it is achieved |
 | --- | --- |
@@ -35,7 +44,7 @@ flowchart LR
 
 ## Quick start
 ```bash
-cd worker
+cd gateway
 npm install
 npx wrangler secret put DEVICE_TOKENS    # JSON map, e.g. {"my-device":"my-secret"}
 npx wrangler secret put ADMIN_TOKEN      # optional: gates GET /devices
@@ -64,18 +73,28 @@ registered at `/admin`). A protected file's key is passed as the
 access log or a `Referer`. Limits: 200 MiB per file, 7 days, 5 files and
 500 MiB per device. Expired files are deleted automatically and never listed.
 Requires an R2 bucket bound as `BUCKET` - see
-[worker/README.md](worker/README.md#temporary-files).
+[gateway/README.md](gateway/README.md#temporary-files).
+
+## code-mcp
+
+`code-mcp/` holds the device server, `code-mcp.ts` (Bun - the one the CLI embeds). See [code-mcp/README.md](code-mcp/README.md).
+```bash
+bun code-mcp/code-mcp.ts --port 7777 --token secret           # a local MCP server
+bun code-mcp/code-mcp.ts --gateway --id my-laptop --token t   # a device on the gateway
+```
 
 ## CLI
 
-`cli/` builds `mcp`, a fast, dependency-free command line client for the
-gateway: connect devices, list and inspect tools, and call one or many tools
-from inline JSON, paired arguments or stdin.
+`cli/` builds `mcp`, a fast, dependency-free command line client: connect this
+machine as a device, run code-mcp as a service, list and inspect tools, and
+call one or many tools from inline JSON, paired arguments or stdin.
 ```text
+mcp connect                                    # this machine, as an anonymous device
+mcp service install --id my-laptop --token t   # ...or a registered one, at every login
 mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
-mcp devices list
 mcp tools list my-laptop
-mcp tools call my-laptop.click '{"selector":"#submit"}'
+mcp tools call my-laptop.read '{"path":"README.md"}'
+claude mcp add devices -- mcp serve            # every device's tools as one MCP server
 ```
 
 Credentials and defaults live in `~/.code-mcp-gateway/config.yaml`; flags override
@@ -85,19 +104,25 @@ defaults section. `mcp --help` lists everything, and `mcp call` is an alias for
 
 ## Documentation
 
+- [code-mcp/README.md](code-mcp/README.md) - code-mcp: tools, flags, the implementation
 - [cli/README.md](cli/README.md) - the `mcp` CLI: install, commands, configuration, exit codes
-- [worker/README.md](worker/README.md) — architecture, security model, deploy, tunables, test
-- [worker/src](worker/src) — entry point, DeviceDO, RegistryDO, config
+- [gateway/README.md](gateway/README.md) — architecture, security model, deploy, tunables, test
+- [gateway/src](gateway/src) — entry point, DeviceDO, RegistryDO, config
 - [MCP specification](https://modelcontextprotocol.io) — the JSON-RPC protocol this gateway transports
 
 ## Development
 ```bash
-cd worker
-npm test          # smoke suite: 21 scenarios against local wrangler instances
-npm run typecheck # tsc --noEmit
-npm run deploy
+cd gateway && npm test            # unit, smoke, file storage, anonymous devices (local wrangler)
+cd gateway && npm run typecheck
+cd cli && bun run test && bun test/e2e.ts      # CLI unit + end-to-end, against a local gateway
+cd cli && bun test/service-e2e.ts              # mcp service on this OS's real service manager
+cd code-mcp && python -m unittest discover -s tests   # launcher tests
 ```
+
+CI runs each component's suites when it, or something it depends on, changes:
+the gateway on Linux; the CLI on Linux and Windows (x64, Arm) plus `mcp service`
+on Linux, macOS and Windows; code-mcp on Linux, macOS and Windows.
 
 Device-issued files can also be downloaded through authenticated
 `GET /mcp/{deviceId}/download/{ticket}` with `X-Device-Token` and gateway
-credentials. See [download protocol and curl usage](worker/README.md#ticket-based-file-downloads).
+credentials. See [download protocol and curl usage](gateway/README.md#ticket-based-file-downloads).

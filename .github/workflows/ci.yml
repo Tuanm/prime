@@ -5,13 +5,50 @@ on:
     branches: [main]
   pull_request:
 
+# Three components share this repository: gateway/ (the Cloudflare Worker),
+# code-mcp/ (the device server, in TypeScript) and cli/ (the
+# mcp command, which embeds code-mcp and tests against the gateway). A pull
+# request runs the jobs its changes can affect; main always runs everything.
 jobs:
+  changes:
+    name: What changed
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      gateway: ${{ github.event_name == 'push' || steps.filter.outputs.gateway == 'true' }}
+      code-mcp: ${{ github.event_name == 'push' || steps.filter.outputs.code-mcp == 'true' }}
+      cli: ${{ github.event_name == 'push' || steps.filter.outputs.cli == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            workflows: &workflows
+              - '.github/**'
+              - 'scripts/**'
+            gateway:
+              - *workflows
+              - 'gateway/**'
+            code-mcp:
+              - *workflows
+              - 'code-mcp/**'
+            # The CLI embeds code-mcp and its end-to-end suite runs the gateway.
+            cli:
+              - *workflows
+              - 'cli/**'
+              - 'code-mcp/**'
+              - 'gateway/**'
+
   test:
     name: Typecheck + unit and smoke tests
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: worker
+        working-directory: gateway
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,6 +76,8 @@ jobs:
 
   cli:
     name: mcp CLI (typecheck, unit, end-to-end)
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -54,10 +93,10 @@ jobs:
         with:
           node-version: '22'
 
-      # The end-to-end suite boots a local wrangler gateway, so the worker's
+      # The end-to-end suite boots a local wrangler gateway, so the gateway's
       # dependencies must be installed even though the CLI itself has none.
-      - name: Install worker dependencies
-        working-directory: worker
+      - name: Install gateway dependencies
+        working-directory: gateway
         run: npm ci
 
       # A malformed ${{ }} is still valid YAML, so only GitHub's parser rejects
@@ -85,6 +124,8 @@ jobs:
   # for both, so they must actually run there - not just cross-compile.
   cli-windows:
     name: mcp CLI on ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -112,8 +153,8 @@ jobs:
           node-version: '22'
           architecture: ${{ matrix.node-arch }}
 
-      - name: Install worker dependencies
-        working-directory: worker
+      - name: Install gateway dependencies
+        working-directory: gateway
         run: npm ci
 
       - name: Install CLI dependencies
@@ -142,6 +183,8 @@ jobs:
   # a launchd agent, a Scheduled Task - installed, exercised, uninstalled.
   cli-service:
     name: mcp service on ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -174,3 +217,42 @@ jobs:
       - name: Install, exercise and uninstall the service
         working-directory: cli
         run: bun test/service-e2e.ts
+
+  # code-mcp's three implementations. The tests check each one's PowerShell
+  # launcher (and run it against real PowerShell, present on all three
+  # runners), the spawn environment, and that every implementation starts.
+  code-mcp:
+    name: code-mcp on ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code-mcp == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: code-mcp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+
+      - name: Tests (Python harness over the TS launcher)
+        run: python -m unittest discover -s tests -v
+
+      - name: The implementation starts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun code-mcp.ts --help | head -1
