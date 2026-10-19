@@ -52,15 +52,19 @@ public class PowerShellCommand {
   public static void main(String[] args) throws Exception {
     var method = CodeMCP.class.getDeclaredMethod("pwshCmd", String.class);
     method.setAccessible(true);
-    for (String arg : (String[]) method.invoke(null, args[0]))
+    // The command arrives base64-encoded: on Windows the JVM decodes argv with
+    // the ANSI code page, which would turn non-ASCII into '?' before pwshCmd
+    // ever saw it. (code-mcp itself receives commands as UTF-8 JSON.)
+    String command = new String(Base64.getDecoder().decode(args[0]), StandardCharsets.UTF_8);
+    for (String arg : (String[]) method.invoke(null, command))
       System.out.println(Base64.getEncoder().encodeToString(arg.getBytes(StandardCharsets.UTF_8)));
   }
 }
 ''')
             subprocess.run([javac, "-d", str(cls.work), str(ROOT / "CodeMCP.java"), str(helper)], check=True)
             cls.launchers["java"] = lambda command: [base64.b64decode(line).decode()
-                for line in subprocess.check_output([java, "-cp", str(cls.work),
-                                                     "PowerShellCommand", command], text=True).splitlines()]
+                for line in subprocess.check_output([java, "-cp", str(cls.work), "PowerShellCommand",
+                                                     base64.b64encode(command.encode()).decode()], text=True).splitlines()]
         cls.powershell = shutil.which("pwsh") or shutil.which("powershell")
 
     @staticmethod
@@ -147,13 +151,16 @@ class SpawnEnvTests(unittest.TestCase):
         }
         with patch.object(module.os, "name", "nt"), patch.dict(module.os.environ, env, clear=True):
             child = module.build_child_env()
+        # Windows variable names are case-insensitive, and on Windows Python's
+        # os.environ upper-cases them, so compare names case-insensitively.
+        names = {key.upper(): value for key, value in child.items()}
         # Without PSModulePath, Windows PowerShell rebuilds its module cache on
         # every start - 10-30 s per command.
-        self.assertEqual(child.get("PSModulePath"), env["PSModulePath"])
-        self.assertIn("ProgramFiles(x86)", child)
-        self.assertIn("PROCESSOR_ARCHITECTURE", child)
-        self.assertNotIn("AWS_SECRET_ACCESS_KEY", child)
-        self.assertNotIn("OPENAI_API_KEY", child)
+        self.assertEqual(names.get("PSMODULEPATH"), env["PSModulePath"])
+        self.assertIn("PROGRAMFILES(X86)", names)
+        self.assertIn("PROCESSOR_ARCHITECTURE", names)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", names)
+        self.assertNotIn("OPENAI_API_KEY", names)
 
 
 if __name__ == "__main__":
