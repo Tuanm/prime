@@ -96,8 +96,9 @@ export default async function add(a, b = 1) { return a + b; }
   async function, no imports, `@param` tags matching the parameters, supported
   types, unique name). View (edit), Download, Deactivate/Activate, Delete. On a
   first visit with no tools, starter tools for building a dashboard are added
-  (`dashboard_add/update/list/remove`, `ask_user`, `confirm`, `bar_chart`,
-  `table`, `cursor_click`, `cursor_type`) - delete what you do not need.
+  (`dashboard_add/update/list/remove/events`, `ask_user`, `confirm`,
+  `bar_chart`, `table`, `increment` - a handler example - `cursor_click`,
+  `cursor_type`) - delete what you do not need.
 - **Connect** opens the device's tunnel (WSS, authorised by a 30-second,
   single-use ticket - the token never goes in a URL). Tools are locked while
   connected. MCP clients reach it at `/mcp/{deviceId}` like any device and see
@@ -110,6 +111,13 @@ export default async function add(a, b = 1) { return a + b; }
   `fill`, `check`, `select`, `drag`). `ui.wait(id)` waits for the person at the
   browser to click or change something. The page's *Components* section shows
   every component with its `ui.add` call.
+- **Event handlers**: `on: { click: { tool, args } }` (or `change`) on a
+  component runs that sandbox tool on every click or change - by the person or
+  by a cursor - with the details as `event`, so a dashboard stays interactive
+  without an agent. `ui.events({ since, timeout })` returns what happened (who
+  clicked what, which handler ran) for agents to react to. Every control is
+  drawn by the page - no native select, checkbox, range or dialogs - with
+  keyboard support.
 - **Isolation**: each call runs in its own iframe sandboxed by attribute and
   CSP - an opaque origin with no storage, cookies or credentials, no network,
   no access to the page - and is stopped after 120 s. Clients are told apart by

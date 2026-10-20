@@ -27,7 +27,7 @@ const SANDBOX_CSS = `
       .dlg.dlg-wide { width: 680px; max-width: calc(100vw - 32px); }
       .dlg.dlg-wide .dlg-body { padding: 14px 16px 16px; }
       .dlg.dlg-wide .dlg-msg { padding: 10px 0 0; }
-      .src { width: 100%; height: 340px; box-sizing: border-box; font: inherit; font-size: 12px; line-height: 1.5; padding: 10px 12px; border: 1px solid #ddd; background: #fafafa; resize: vertical; white-space: pre; tab-size: 2; }
+      .src { width: 100%; height: 340px; box-sizing: border-box; font: inherit; font-size: 12px; line-height: 1.5; padding: 10px 12px; border: 1px solid #ddd; background: #fafafa; resize: none; white-space: pre; tab-size: 2; }
       .src:focus { outline: none; border-color: #111; }
       .dlg-bar { display: flex; justify-content: flex-end; margin-top: 10px; }
       .btn { font: inherit; font-size: 12px; font-weight: 600; padding: 6px 16px; background: #111; color: #fff; border: 1px solid #111; cursor: pointer; }
@@ -66,13 +66,41 @@ const SANDBOX_CSS = `
       .ubtn.pressed { transform: scale(0.96); }
       .uinput { font: inherit; font-size: 13px; width: 100%; box-sizing: border-box; border: 0; border-bottom: 1px dotted #999; padding: 4px 0; background: transparent; color: #111; }
       .uinput:focus { outline: none; border-bottom: 1px solid #111; }
-      .utextarea, .ueditor { font: inherit; font-size: 12px; width: 100%; box-sizing: border-box; border: 1px solid #ddd; padding: 8px 10px; background: #fff; color: #111; resize: vertical; line-height: 1.5; }
+      .utextarea, .ueditor { font: inherit; font-size: 12px; width: 100%; box-sizing: border-box; border: 1px solid #ddd; padding: 8px 10px; background: #fff; color: #111; resize: none; line-height: 1.5; }
       .ueditor { background: #fafafa; white-space: pre; tab-size: 2; }
       .utextarea:focus, .ueditor:focus { outline: none; border-color: #111; }
-      .ucheck { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
-      .ucheck input { accent-color: #111; width: 14px; height: 14px; margin: 0; }
-      .uselect { font: inherit; font-size: 12px; border: 1px solid #111; background: #fff; color: #111; padding: 5px 8px; min-width: 120px; }
-      .uslider { width: 220px; accent-color: #111; }
+      /* Drawn controls: no native checkbox, select or range anywhere. */
+      .ucheck { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; user-select: none; outline: none; }
+      .ucheck-box { width: 14px; height: 14px; border: 1px solid #111; background: #fff; display: inline-flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box; }
+      .ucheck-box svg { width: 10px; height: 10px; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; }
+      .ucheck.on .ucheck-box { background: #111; }
+      .ucheck.on .ucheck-box svg { opacity: 1; }
+      .ucheck:focus-visible .ucheck-box { box-shadow: 0 0 0 2px #fff, 0 0 0 3px #111; }
+      .ucheck.disabled { opacity: 0.4; cursor: default; }
+      .usel { display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 140px; box-sizing: border-box; border: 1px solid #111; background: #fff; color: #111; font-size: 12px; padding: 5px 8px 5px 10px; cursor: pointer; user-select: none; outline: none; }
+      .usel:focus-visible, .usel.open { box-shadow: 0 0 0 1px #111; }
+      .usel-chev { display: inline-flex; }
+      .usel-chev svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 2.2; transition: transform 0.12s; }
+      .usel.open .usel-chev svg { transform: rotate(180deg); }
+      .usel.disabled { opacity: 0.4; cursor: default; }
+      .usel-list { position: fixed; z-index: 1000; max-height: 240px; overflow-y: auto; background: #fff; border: 1px solid #111; padding: 4px 0; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; box-sizing: border-box; }
+      .usel-item { position: relative; padding: 6px 12px 6px 26px; cursor: pointer; white-space: nowrap; color: #111; }
+      .usel-item.active { background: #f2f2f2; }
+      .usel-item[aria-selected="true"] { font-weight: 700; }
+      .usel-item[aria-selected="true"]::before { content: "\\2713"; position: absolute; left: 10px; }
+      .uslide { display: inline-flex; align-items: center; gap: 12px; width: 260px; padding: 6px 0; cursor: pointer; touch-action: none; user-select: none; outline: none; }
+      .uslide-track { position: relative; flex: 1; height: 2px; background: #ddd; }
+      .uslide-fill { position: absolute; left: 0; top: 0; bottom: 0; background: #111; }
+      .uslide-thumb { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; background: #111; border: 2px solid #fff; box-shadow: 0 0 0 1px #111; box-sizing: border-box; }
+      .uslide:focus-visible .uslide-thumb, .uslide.dragging .uslide-thumb { box-shadow: 0 0 0 1px #111, 0 0 0 4px rgba(17,17,17,0.12); }
+      .uslide-value { font-size: 11px; color: #666; min-width: 28px; text-align: right; }
+      .uslide.disabled { opacity: 0.4; cursor: default; }
+      .btn.secondary { background: #fff; color: #111; }
+      .btn.danger { background: #b91c1c; border-color: #b91c1c; }
+      .dlg-bar .btn + .btn { margin-left: 8px; }
+      .dlg.dlg-confirm { width: 420px; max-width: calc(100vw - 32px); }
+      .dlg.dlg-confirm .dlg-body { padding: 14px 16px 16px; }
+      .dlg.dlg-confirm .dlg-msg { padding: 0 0 12px; color: #111; }
       .uc.dragging { opacity: 0.45; }
       /* Virtual cursors: a black arrow and the client's name. */
       .cur { position: absolute; left: 0; top: 0; z-index: 20; pointer-events: none; transform: translate(12px, 12px); }
@@ -224,7 +252,8 @@ const RUNTIME_JS = String.raw`(function () {
     remove: function (id) { return api("ui.remove", [id]); },
     clear: function () { return api("ui.clear", []); },
     list: function () { return api("ui.list", []); },
-    wait: function (id, options) { return api("ui.wait", [id, options || {}]); }
+    wait: function (id, options) { return api("ui.wait", [id, options || {}]); },
+    events: function (options) { return api("ui.events", [options || {}]); }
   });
   var cursor = Object.freeze({
     move: function (id) { return api("cursor.move", [id]); },
@@ -244,7 +273,7 @@ const RUNTIME_JS = String.raw`(function () {
     var source = String(d.source || "");
     var body = "var __tool__;\n" + source.replace(/export\s+default\s+async\s+function/, "__tool__ = async function") + "\n;return __tool__;";
     var fn;
-    try { fn = new Function("ui", "cursor", "console", "client", body)(ui, cursor, sandboxConsole, Object.freeze(d.client || {})); }
+    try { fn = new Function("ui", "cursor", "console", "client", "event", body)(ui, cursor, sandboxConsole, Object.freeze(d.client || {}), d.event ? Object.freeze(d.event) : null); }
     catch (err) { result(false, null, "the tool failed to load: " + (err && err.message || err)); return; }
     if (typeof fn !== "function") { result(false, null, "the tool has no default function"); return; }
     Promise.resolve().then(function () { return fn.apply(null, d.args || []); }).then(
@@ -372,7 +401,7 @@ const PAGE_JS = String.raw`(function () {
           { label: "View", run: function () { view(t); } },
           { label: "Download", run: function () { download(t.filename || t.name + ".js", t.source); } },
           { label: t.active ? "Deactivate" : "Activate", disabled: locked, run: function () { t.active = !t.active; persist(); render(); } },
-          { label: "Delete", danger: true, disabled: locked, run: function () { if (confirm("Delete the tool '" + t.name + "'?")) { tools = tools.filter(function (x) { return x !== t; }); persist(); render(); } } }
+          { label: "Delete", danger: true, disabled: locked, run: function () { askConfirm("Delete tool", "Delete the tool '" + t.name + "'? This cannot be undone.", "Delete").then(function (yes) { if (yes) { tools = tools.filter(function (x) { return x !== t; }); persist(); render(); } }); } }
         ], { disabled: !t.active }));
     });
     pending.forEach(function (p) {
@@ -435,6 +464,30 @@ const PAGE_JS = String.raw`(function () {
       if (!r.ok) { p.error = r.error; setStatus(p.filename + ": " + r.error, true); render(); return; }
       pending = pending.filter(function (x) { return x !== p; });
       setStatus("saved tool '" + r.tool.name + "'"); render();
+    });
+  }
+
+  /** The page's own confirmation dialog (resolves true for the confirm button). */
+  function askConfirm(title, message, okLabel) {
+    return new Promise(function (resolve) {
+      var overlay = document.createElement("div"); overlay.className = "overlay";
+      var dlg = document.createElement("div"); dlg.className = "dlg dlg-confirm"; dlg.setAttribute("role", "alertdialog");
+      var head = document.createElement("div"); head.className = "dlg-head";
+      var t = document.createElement("span"); t.textContent = title; head.appendChild(t);
+      var body = document.createElement("div"); body.className = "dlg-body";
+      var msg = document.createElement("div"); msg.className = "dlg-msg"; msg.textContent = message;
+      var bar = document.createElement("div"); bar.className = "dlg-bar";
+      var cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "btn secondary"; cancel.textContent = "Cancel";
+      var ok = document.createElement("button"); ok.type = "button"; ok.className = "btn danger"; ok.textContent = okLabel || "OK";
+      bar.appendChild(cancel); bar.appendChild(ok); body.appendChild(msg); body.appendChild(bar);
+      dlg.appendChild(head); dlg.appendChild(body); overlay.appendChild(dlg); document.body.appendChild(overlay);
+      function done(v) { document.removeEventListener("keydown", key, true); overlay.remove(); resolve(v); }
+      function key(e) { if (e.key === "Escape") { e.preventDefault(); done(false); } }
+      document.addEventListener("keydown", key, true);
+      cancel.addEventListener("click", function () { done(false); });
+      ok.addEventListener("click", function () { done(true); });
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
+      cancel.focus();
     });
   }
 
@@ -699,18 +752,23 @@ const PAGE_JS = String.raw`(function () {
     });
   }
 
-  function callTool(args, client) {
-    if (typeof args.name !== "string") return textResult("'name' must be a string: the tool's name from search", true);
-    var t = activeTools().filter(function (x) { return x.name === args.name; })[0];
-    if (!t) return textResult("no active tool named '" + args.name + "' - use search to list the tools", true);
-    var a = args.arguments === undefined ? {} : args.arguments;
-    if (a === null || typeof a !== "object" || Array.isArray(a)) return textResult("'arguments' must be an object", true);
+  function argProblems(t, a) {
     var props = t.inputSchema.properties || {}, problems = [];
     Object.keys(a).forEach(function (k) { if (!Object.prototype.hasOwnProperty.call(props, k)) problems.push("unknown argument '" + k + "'"); });
     (t.inputSchema.required || []).forEach(function (k) { if (a[k] === undefined) problems.push("missing required argument '" + k + "'"); });
     Object.keys(props).forEach(function (k) {
       if (a[k] !== undefined && !typeOk(a[k], props[k])) problems.push("'" + k + "' must be " + [].concat(props[k].type).join(" or "));
     });
+    return problems;
+  }
+
+  function callTool(args, client) {
+    if (typeof args.name !== "string") return textResult("'name' must be a string: the tool's name from search", true);
+    var t = activeTools().filter(function (x) { return x.name === args.name; })[0];
+    if (!t) return textResult("no active tool named '" + args.name + "' - use search to list the tools", true);
+    var a = args.arguments === undefined ? {} : args.arguments;
+    if (a === null || typeof a !== "object" || Array.isArray(a)) return textResult("'arguments' must be an object", true);
+    var problems = argProblems(t, a);
     if (problems.length) return textResult("invalid arguments for '" + t.name + "': " + problems.join("; ") + ". inputSchema: " + JSON.stringify(t.inputSchema), true);
     var positional = (t.params || []).map(function (q) { return a[q.name]; });
     return runTool(t, positional, client).then(function (r) {
@@ -727,7 +785,7 @@ const PAGE_JS = String.raw`(function () {
   runner.style.display = "none";
   document.body.appendChild(runner);
 
-  function runTool(tool, args, client) {
+  function runTool(tool, args, client, event) {
     return new Promise(function (resolve) {
       var f = document.createElement("iframe");
       f.setAttribute("sandbox", "allow-scripts");
@@ -746,7 +804,7 @@ const PAGE_JS = String.raw`(function () {
       }
       call.finish = finish;
       call.onMessage = function (d) {
-        if (d.type === "ready") f.contentWindow.postMessage({ type: "run", source: tool.source, args: args, client: client }, "*");
+        if (d.type === "ready") f.contentWindow.postMessage({ type: "run", source: tool.source, args: args, client: client, event: event || null }, "*");
         else if (d.type === "result") finish({ ok: !!d.ok, text: d.text == null ? "" : String(d.text), error: d.error, logs: Array.isArray(d.logs) ? d.logs.map(String) : [] });
         else if (d.type === "api") handleApi(call, d);
       };
@@ -789,6 +847,159 @@ const PAGE_JS = String.raw`(function () {
     if (e) e.hidden = any;
   }
 
+  // ---- drawn controls (no native checkbox, select or range) ----------------------
+  // Each exposes the properties the dash code reads - value / checked / options
+  // / disabled - and fires "change" (and "input") like the native ones would.
+  function prop(el, name, get, set) { Object.defineProperty(el, name, { get: get, set: set, configurable: true }); }
+  function fire(el, type) { el.dispatchEvent(new Event(type, { bubbles: true })); }
+
+  function makeCheckbox(text, initial) {
+    var root = document.createElement("div");
+    root.className = "ucheck"; root.tabIndex = 0; root.setAttribute("role", "checkbox");
+    var box = document.createElement("span"); box.className = "ucheck-box";
+    box.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 L5 8.6 L9.6 3.6" /></svg>';
+    var t = document.createElement("span"); t.textContent = text;
+    root.appendChild(box); root.appendChild(t);
+    var checked = !!initial, disabled = false;
+    function paint() { root.classList.toggle("on", checked); root.setAttribute("aria-checked", checked ? "true" : "false"); }
+    prop(root, "checked", function () { return checked; }, function (v) { checked = !!v; paint(); });
+    prop(root, "disabled", function () { return disabled; }, function (v) { disabled = !!v; root.classList.toggle("disabled", disabled); root.tabIndex = disabled ? -1 : 0; root.setAttribute("aria-disabled", String(disabled)); });
+    function toggle() { if (disabled) return; checked = !checked; paint(); fire(root, "change"); }
+    root.addEventListener("click", toggle);
+    root.addEventListener("keydown", function (e) { if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(); } });
+    paint();
+    return root;
+  }
+
+  var openSelect = null;
+  document.addEventListener("click", function (e) { if (openSelect && !openSelect.contains(e.target) && !openSelect.__list.contains(e.target)) openSelect.__close(); });
+  window.addEventListener("resize", function () { if (openSelect) openSelect.__close(); });
+  document.addEventListener("scroll", function () { if (openSelect) openSelect.__close(); }, true);
+
+  function makeSelect(opts, initial) {
+    var root = document.createElement("div");
+    root.className = "usel"; root.tabIndex = 0;
+    root.setAttribute("role", "combobox"); root.setAttribute("aria-haspopup", "listbox"); root.setAttribute("aria-expanded", "false");
+    var shown = document.createElement("span"); shown.className = "usel-value";
+    var chev = document.createElement("span"); chev.className = "usel-chev";
+    chev.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4" /></svg>';
+    root.appendChild(shown); root.appendChild(chev);
+    // The list is fixed-positioned on the page, so the dash's scroll box cannot clip it.
+    var list = document.createElement("div"); list.className = "usel-list"; list.setAttribute("role", "listbox");
+    var current = opts.some(function (o) { return o.value === initial; }) ? initial : opts[0].value;
+    var active = 0, disabled = false;
+    var items = opts.map(function (o, i) {
+      var it = document.createElement("div"); it.className = "usel-item"; it.setAttribute("role", "option"); it.textContent = o.label;
+      it.addEventListener("mousedown", function (e) { e.preventDefault(); });
+      it.addEventListener("click", function (e) { e.stopPropagation(); choose(o.value); root.focus(); });
+      it.addEventListener("mousemove", function () { setActive(i); });
+      list.appendChild(it);
+      return it;
+    });
+    function indexOf(v) { for (var i = 0; i < opts.length; i++) if (opts[i].value === v) return i; return -1; }
+    function paint() {
+      var i = indexOf(current);
+      shown.textContent = i >= 0 ? opts[i].label : "";
+      items.forEach(function (it, k) { it.setAttribute("aria-selected", k === i ? "true" : "false"); });
+    }
+    function setActive(i) { active = Math.max(0, Math.min(opts.length - 1, i)); items.forEach(function (it, k) { it.classList.toggle("active", k === active); }); items[active].scrollIntoView({ block: "nearest" }); }
+    function open() {
+      if (disabled || root.__isOpen) return;
+      if (openSelect && openSelect !== root) openSelect.__close();
+      document.body.appendChild(list);
+      var r = root.getBoundingClientRect();
+      list.style.minWidth = r.width + "px";
+      list.style.left = r.left + "px";
+      var h = Math.min(list.scrollHeight, 240);
+      list.style.top = (r.bottom + 4 + h > window.innerHeight && r.top - 4 - h > 0 ? r.top - 4 - h : r.bottom + 4) + "px";
+      root.__isOpen = true; openSelect = root;
+      root.classList.add("open"); root.setAttribute("aria-expanded", "true");
+      setActive(Math.max(0, indexOf(current)));
+    }
+    function close() {
+      if (!root.__isOpen) return;
+      root.__isOpen = false; if (openSelect === root) openSelect = null;
+      list.remove(); root.classList.remove("open"); root.setAttribute("aria-expanded", "false");
+    }
+    function choose(v) { var changed = v !== current; current = v; paint(); close(); if (changed) fire(root, "change"); }
+    root.addEventListener("click", function () { if (root.__isOpen) close(); else open(); });
+    root.addEventListener("keydown", function (e) {
+      if (disabled) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (!root.__isOpen) open(); else setActive(active + (e.key === "ArrowDown" ? 1 : -1)); }
+      else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (root.__isOpen) choose(opts[active].value); else open(); }
+      else if (e.key === "Escape" || e.key === "Tab") close();
+      else if (e.key === "Home" && root.__isOpen) { e.preventDefault(); setActive(0); }
+      else if (e.key === "End" && root.__isOpen) { e.preventDefault(); setActive(opts.length - 1); }
+    });
+    root.addEventListener("blur", function () { setTimeout(function () { if (document.activeElement !== root) close(); }, 0); });
+    prop(root, "value", function () { return current; }, function (v) { v = String(v); if (indexOf(v) >= 0) { current = v; paint(); } });
+    prop(root, "options", function () { return opts.map(function (o) { return { value: o.value, label: o.label }; }); });
+    prop(root, "disabled", function () { return disabled; }, function (v) { disabled = !!v; if (disabled) close(); root.classList.toggle("disabled", disabled); root.tabIndex = disabled ? -1 : 0; root.setAttribute("aria-disabled", String(disabled)); });
+    root.__open = open; root.__close = close; root.__list = list;
+    root.__item = function (v) { var i = indexOf(v); return i >= 0 ? items[i] : null; };
+    paint();
+    return root;
+  }
+
+  function makeSlider(min, max, step, initial) {
+    var root = document.createElement("div");
+    root.className = "uslide"; root.tabIndex = 0; root.setAttribute("role", "slider");
+    root.setAttribute("aria-valuemin", String(min)); root.setAttribute("aria-valuemax", String(max));
+    var track = document.createElement("div"); track.className = "uslide-track";
+    var fill = document.createElement("div"); fill.className = "uslide-fill";
+    var thumb = document.createElement("div"); thumb.className = "uslide-thumb";
+    var out = document.createElement("span"); out.className = "uslide-value";
+    track.appendChild(fill); track.appendChild(thumb); root.appendChild(track); root.appendChild(out);
+    var value = min, disabled = false;
+    function snap(v) {
+      v = Math.max(min, Math.min(max, Number(v)));
+      if (!isFinite(v)) v = min;
+      v = min + Math.round((v - min) / step) * step;
+      return Math.max(min, Math.min(max, Number(v.toFixed(10))));
+    }
+    function paint() {
+      var p = (value - min) / (max - min) * 100;
+      fill.style.width = p + "%"; thumb.style.left = p + "%";
+      out.textContent = String(value); root.setAttribute("aria-valuenow", String(value));
+    }
+    function set(v, evt) { var n = snap(v); if (n === value) return; value = n; paint(); if (evt) fire(root, "input"); }
+    function fromX(x) { var r = track.getBoundingClientRect(); return min + (Math.max(0, Math.min(r.width, x - r.left)) / (r.width || 1)) * (max - min); }
+    root.addEventListener("pointerdown", function (e) {
+      if (disabled) return;
+      e.preventDefault(); root.focus();
+      var start = value;
+      root.setPointerCapture(e.pointerId);
+      root.classList.add("dragging");
+      set(fromX(e.clientX), true);
+      function move(ev) { set(fromX(ev.clientX), true); }
+      function up() {
+        root.removeEventListener("pointermove", move); root.removeEventListener("pointerup", up); root.removeEventListener("pointercancel", up);
+        root.classList.remove("dragging");
+        if (value !== start) fire(root, "change");
+      }
+      root.addEventListener("pointermove", move); root.addEventListener("pointerup", up); root.addEventListener("pointercancel", up);
+    });
+    root.addEventListener("keydown", function (e) {
+      if (disabled) return;
+      var before = value, big = Math.max(step, (max - min) / 10);
+      if (e.key === "ArrowRight" || e.key === "ArrowUp") set(value + step, true);
+      else if (e.key === "ArrowLeft" || e.key === "ArrowDown") set(value - step, true);
+      else if (e.key === "PageUp") set(value + big, true);
+      else if (e.key === "PageDown") set(value - big, true);
+      else if (e.key === "Home") set(min, true);
+      else if (e.key === "End") set(max, true);
+      else return;
+      e.preventDefault();
+      if (value !== before) fire(root, "change");
+    });
+    prop(root, "value", function () { return String(value); }, function (v) { set(v, false); });
+    prop(root, "min", function () { return String(min); }, function () {});
+    prop(root, "max", function () { return String(max); }, function () {});
+    prop(root, "disabled", function () { return disabled; }, function (v) { disabled = !!v; root.classList.toggle("disabled", disabled); root.tabIndex = disabled ? -1 : 0; root.setAttribute("aria-disabled", String(disabled)); });
+    value = snap(initial); paint();
+    return root;
+  }
+
   window.__buildComponent = buildComponent;
   function buildComponent(spec) {
     var type = spec.type;
@@ -812,26 +1023,22 @@ const PAGE_JS = String.raw`(function () {
     }
     else if (type === "input") { label(spec.label); input = document.createElement("input"); input.type = "text"; input.className = "uinput"; input.placeholder = str(spec.placeholder, 200); input.value = str(spec.value, 5000); el.appendChild(input); }
     else if (type === "textarea") { label(spec.label); input = document.createElement("textarea"); input.className = "utextarea"; input.placeholder = str(spec.placeholder, 200); input.value = str(spec.value, 100000); input.rows = Math.max(2, Math.min(20, Number(spec.rows) || 4)); el.appendChild(input); }
-    else if (type === "checkbox") {
-      var lab = document.createElement("label"); lab.className = "ucheck";
-      input = document.createElement("input"); input.type = "checkbox"; input.checked = !!spec.checked;
-      var s = document.createElement("span"); s.textContent = str(spec.label, 200);
-      lab.appendChild(input); lab.appendChild(s); el.appendChild(lab);
-    }
+    else if (type === "checkbox") { input = makeCheckbox(str(spec.label, 200), !!spec.checked); el.appendChild(input); }
     else if (type === "select") {
-      label(spec.label); input = document.createElement("select"); input.className = "uselect";
-      (Array.isArray(spec.options) ? spec.options : []).slice(0, 200).forEach(function (o) {
-        var opt = document.createElement("option");
-        if (o && typeof o === "object") { opt.value = str(o.value, 200); opt.textContent = str(o.label === undefined ? o.value : o.label, 200); } else { opt.value = str(o, 200); opt.textContent = str(o, 200); }
-        input.appendChild(opt);
+      label(spec.label);
+      var opts = (Array.isArray(spec.options) ? spec.options : []).slice(0, 200).map(function (o) {
+        return o && typeof o === "object" ? { value: str(o.value, 200), label: str(o.label === undefined ? o.value : o.label, 200) } : { value: str(o, 200), label: str(o, 200) };
       });
-      if (spec.value !== undefined) input.value = str(spec.value, 200);
+      if (!opts.length) throw new Error("select: give it options, e.g. options: ['S', 'M', 'L']");
+      input = makeSelect(opts, spec.value === undefined ? undefined : str(spec.value, 200));
       el.appendChild(input);
     }
     else if (type === "slider") {
-      label(spec.label); input = document.createElement("input"); input.type = "range"; input.className = "uslider";
-      input.min = String(Number(spec.min) || 0); input.max = String(spec.max === undefined ? 100 : Number(spec.max)); input.step = String(Number(spec.step) || 1);
-      if (spec.value !== undefined) input.value = String(Number(spec.value)); el.appendChild(input);
+      label(spec.label);
+      var min = Number(spec.min) || 0, max = spec.max === undefined ? 100 : Number(spec.max);
+      if (!(max > min)) throw new Error("slider: max must be greater than min");
+      input = makeSlider(min, max, Number(spec.step) > 0 ? Number(spec.step) : 1, spec.value === undefined ? min : Number(spec.value));
+      el.appendChild(input);
     }
     else if (type === "status") {
       var dot = document.createElement("span"); dot.className = "dot " + (spec.state === "off" ? "off" : spec.state === "pending" ? "pending" : "on");
@@ -848,8 +1055,64 @@ const PAGE_JS = String.raw`(function () {
     return { el: el, input: input, body: body };
   }
 
+  // Every interaction - by the person or by a client's cursor - is logged (for
+  // ui.events), wakes ui.wait / ui.events callers, and runs the component's
+  // handler, if it has one.
+  var eventLog = [], eventSeq = 0, eventWaiters = [], handlerRuns = 0;
+  var MAX_HANDLER_RUNS = 4;
   function notify(c, ev) {
+    ev.seq = ++eventSeq;
+    ev.at = new Date().toISOString();
+    ev.type = c.type;
+    eventLog.push(ev);
+    if (eventLog.length > 200) eventLog.shift();
     c.waiters.slice().forEach(function (w) { if (!w.event || w.event === ev.event) w.resolve(ev); });
+    eventWaiters.slice().forEach(function (w) { w.check(); });
+    runHandler(c, ev);
+  }
+
+  function handlerSpec(on) {
+    if (on === undefined || on === null) return null;
+    if (typeof on !== "object" || Array.isArray(on)) throw new Error("'on' must be an object like { click: { tool: 'name', args: {...} } }");
+    var out = {};
+    Object.keys(on).forEach(function (ev) {
+      if (ev !== "click" && ev !== "change") throw new Error("'on' supports click and change, not '" + ev + "'");
+      var h = on[ev];
+      if (typeof h === "string") h = { tool: h };
+      if (!h || typeof h.tool !== "string") throw new Error("on." + ev + " needs { tool: 'name', args: {...} }");
+      var t = activeTools().filter(function (x) { return x.name === h.tool; })[0];
+      if (!t) throw new Error("on." + ev + ": no active tool named '" + h.tool + "'");
+      var args = h.args === undefined ? {} : h.args;
+      if (args === null || typeof args !== "object" || Array.isArray(args)) throw new Error("on." + ev + ".args must be an object");
+      var problems = argProblems(t, args);
+      if (problems.length) throw new Error("on." + ev + " -> " + t.name + ": " + problems.join("; "));
+      out[ev] = { tool: t.name, args: args };
+    });
+    return out;
+  }
+
+  function dashNote(text, isErr) {
+    var el = document.getElementById("running");
+    el.textContent = text; el.style.color = isErr ? "#b91c1c" : "#666";
+    clearTimeout(dashNote.t);
+    dashNote.t = setTimeout(function () { el.style.color = "#666"; updateRunning(); }, 6000);
+  }
+
+  function runHandler(c, ev) {
+    var h = c.handlers && c.handlers[ev.event];
+    if (!h || conn.state === "idle") return;
+    if (c.handlerBusy) { ev.handler = "skipped: the previous run of " + h.tool + " is still going"; return; }
+    if (handlerRuns >= MAX_HANDLER_RUNS) { ev.handler = "skipped: too many handlers running"; return; }
+    var t = activeTools().filter(function (x) { return x.name === h.tool; })[0];
+    if (!t) { ev.handler = "skipped: tool " + h.tool + " is not active"; return; }
+    c.handlerBusy = true; handlerRuns++;
+    ev.handler = h.tool;
+    var positional = (t.params || []).map(function (q) { return h.args[q.name]; });
+    var detail = {}; Object.keys(ev).forEach(function (k) { if (k !== "handler") detail[k] = ev[k]; });
+    runTool(t, positional, c.ownerClient, detail).then(function (r) {
+      c.handlerBusy = false; handlerRuns--;
+      if (!r.ok) dashNote(h.tool + " (on " + ev.event + " of " + c.id + ") failed: " + r.error, true);
+    });
   }
 
   function wire(c) {
@@ -868,7 +1131,8 @@ const PAGE_JS = String.raw`(function () {
     if (Object.keys(comps).length >= MAX_COMPONENTS) throw new Error("the dash holds at most " + MAX_COMPONENTS + " components");
     var built = buildComponent(spec);
     var id = "c" + (++order);
-    var c = { id: id, type: spec.type, el: built.el, input: built.input, body: built.body, owner: call ? call.client.id : "", waiters: [], spec: spec };
+    var handlers = handlerSpec(spec.on);
+    var c = { id: id, type: spec.type, el: built.el, input: built.input, body: built.body, owner: call ? call.client.id : "", ownerClient: call ? call.client : { id: "page", name: "page" }, waiters: [], spec: spec, handlers: handlers };
     built.el.dataset.cid = id;
     var host = dashArea;
     if (spec.parent !== undefined && spec.parent !== null) {
@@ -889,6 +1153,7 @@ const PAGE_JS = String.raw`(function () {
     if (!c) return;
     c.el.querySelectorAll("[data-cid]").forEach(function (child) { delete comps[child.dataset.cid]; });
     c.waiters.slice().forEach(function (w) { w.cancel("the component was removed"); });
+    if (openSelect && c.el.contains(openSelect)) openSelect.__close();
     c.el.remove();
     delete comps[id];
     emptyHint();
@@ -899,6 +1164,7 @@ const PAGE_JS = String.raw`(function () {
     Object.keys(cursors).forEach(function (k) { cursors[k].el.remove(); });
     cursors = {};
     clientsEl.textContent = "";
+    eventLog = []; eventSeq = 0;
     emptyHint();
   }
 
@@ -909,6 +1175,7 @@ const PAGE_JS = String.raw`(function () {
     if (c.type === "checkbox") d.checked = c.input.checked;
     else if (c.input && "value" in c.input && c.type !== "button") d.value = c.input.value;
     if (c.input && c.input.disabled) d.disabled = true;
+    if (c.handlers) d.on = c.handlers;
     return d;
   }
 
@@ -918,6 +1185,7 @@ const PAGE_JS = String.raw`(function () {
       if (props.title !== undefined && c.type === "card") { var t = c.el.querySelector(".uc-title"); if (t) t.textContent = str(props.title, 120); }
       return describe(c);
     }
+    if (props.on !== undefined) c.handlers = handlerSpec(props.on);
     var spec = Object.assign({}, c.spec, props, { type: c.type, parent: c.spec.parent });
     if (c.input && props.value === undefined && c.type !== "button" && c.type !== "checkbox") spec.value = c.input.value;
     if (c.type === "checkbox" && props.checked === undefined) spec.checked = c.input.checked;
@@ -1008,6 +1276,23 @@ const PAGE_JS = String.raw`(function () {
         c.waiters.push(w); call.waiters.push(w);
       });
     },
+    "ui.events": function (call, a) {
+      var o = a[0] || {}, since = Number(o.since) || 0;
+      var ids = Array.isArray(o.ids) ? o.ids.map(String) : o.id !== undefined ? [String(o.id)] : null;
+      function pick() { return eventLog.filter(function (e) { return e.seq > since && (!ids || ids.indexOf(e.id) >= 0); }); }
+      function result(list) { return { events: list, next: list.length ? list[list.length - 1].seq : Math.max(since, 0), latest: eventSeq }; }
+      var now = pick();
+      var ms = Math.max(0, Math.min(CALL_TIMEOUT_MS - 5000, (Number(o.timeout) || 0)));
+      if (now.length || !ms) return result(now);
+      return new Promise(function (resolve, reject) {
+        var w = {};
+        var timer = setTimeout(function () { done(); resolve(result([])); }, ms);
+        function done() { clearTimeout(timer); eventWaiters = eventWaiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
+        w.check = function () { var l = pick(); if (l.length) { done(); resolve(result(l)); } };
+        w.cancel = function (why) { done(); reject(new Error(why)); };
+        eventWaiters.push(w); call.waiters.push(w);
+      });
+    },
     "cursor.move": function (call, a) { var c = compOf(String(a[0])); return moveTo(cursorFor(call.client), pointIn(c)).then(function () { return true; }); },
     "cursor.click": function (call, a) {
       var c = compOf(String(a[0])), cur = cursorFor(call.client);
@@ -1056,8 +1341,16 @@ const PAGE_JS = String.raw`(function () {
     "cursor.select": function (call, a) {
       var c = compOf(String(a[0])), cur = cursorFor(call.client), v = str(a[1], 200);
       needInput(c, ["select"]);
-      if (!Array.prototype.some.call(c.input.options, function (o) { return o.value === v; })) throw new Error("select '" + c.id + "' has no option '" + v + "'");
-      return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () { setValue(c, v, call.client.name); return describe(c); });
+      if (!c.input.options.some(function (o) { return o.value === v; })) throw new Error("select '" + c.id + "' has no option '" + v + "'");
+      return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () {
+        c.input.__open();
+        var item = c.input.__item(v), a = dashArea.getBoundingClientRect(), r = item.getBoundingClientRect();
+        return moveTo(cur, { x: r.left - a.left + dashArea.scrollLeft + Math.min(24, r.width / 2), y: r.top - a.top + dashArea.scrollTop + r.height / 2 }, 300);
+      }).then(function () { return pulse(cur); }).then(function () {
+        c.input.__close();
+        if (c.input.value !== v) { c.synthetic = true; c.input.value = v; c.synthetic = false; notify(c, { event: "change", id: c.id, value: v, by: call.client.name }); }
+        return describe(c);
+      });
     },
     "cursor.drag": function (call, a) {
       var c = compOf(String(a[0])), cur = cursorFor(call.client), target = a[1];
@@ -1138,7 +1431,7 @@ const PAGE_JS = String.raw`(function () {
 export const STARTER_TOOLS: { filename: string; source: string }[] = [
   {
     "filename": "dashboard_add.js",
-    "source": "/**\n * Add a component to the dashboard and return its id. Types: heading, text, code,\n * image (data URL), editor, button, input, textarea, checkbox, select, slider,\n * status, divider, row, card. Put it inside a row or card with spec.parent.\n * Example spec: {\"type\": \"card\", \"title\": \"Build\"} or {\"type\": \"button\", \"label\": \"Run\", \"parent\": \"c1\"}.\n * @param {object} spec The component, e.g. {\"type\": \"text\", \"text\": \"Hello\"}\n */\nexport default async function dashboard_add(spec) {\n  return await ui.add(spec);\n}\n"
+    "source": "/**\n * Add a component to the dashboard and return its id. Types: heading, text, code,\n * image (data URL), editor, button, input, textarea, checkbox, select, slider,\n * status, divider, row, card. Put it inside a row or card with spec.parent.\n * Example spec: {\"type\": \"card\", \"title\": \"Build\"} or {\"type\": \"button\", \"label\": \"Run\", \"parent\": \"c1\"}.\n * Make it interactive with \"on\": {\"click\": {\"tool\": \"increment\", \"args\": {\"id\": \"c2\"}}}\n * (or \"change\"): each click or change runs that tool in the browser, no agent needed.\n * @param {object} spec The component, e.g. {\"type\": \"text\", \"text\": \"Hello\"}\n */\nexport default async function dashboard_add(spec) {\n  return await ui.add(spec);\n}\n"
   },
   {
     "filename": "dashboard_update.js",
@@ -1151,6 +1444,10 @@ export const STARTER_TOOLS: { filename: string; source: string }[] = [
   {
     "filename": "dashboard_remove.js",
     "source": "/**\n * Remove one component (and anything inside it), or - with no id - everything\n * this client added to the dashboard.\n * @param {string} [id] The component to remove; omit to clear your components\n */\nexport default async function dashboard_remove(id) {\n  if (id === undefined) return { removed: await ui.clear() };\n  await ui.remove(id);\n  return { removed: 1 };\n}\n"
+  },
+  {
+    "filename": "dashboard_events.js",
+    "source": "/**\n * What happened on the dashboard: clicks and changes by the person at the\n * browser or by any client's cursor, oldest first. Pass the returned 'next' as\n * 'since' to get only newer events; with timeout_seconds, wait for one.\n * @param {integer} [since=0] Only events after this sequence number\n * @param {number} [timeout_seconds=0] Wait up to this long when nothing new has happened\n */\nexport default async function dashboard_events(since = 0, timeout_seconds = 0) {\n  return await ui.events({ since, timeout: Math.min(timeout_seconds, 110) * 1000 });\n}\n"
   },
   {
     "filename": "ask_user.js",
@@ -1167,6 +1464,10 @@ export const STARTER_TOOLS: { filename: string; source: string }[] = [
   {
     "filename": "table.js",
     "source": "/**\n * Show rows of data as an aligned table on the dashboard. Returns its id.\n * @param {string[]} columns The column headings\n * @param {array} rows The rows: each an array with one value per column\n * @param {string} [title] A heading above the table\n */\nexport default async function table(columns, rows, title) {\n  const cells = [columns.map(String)].concat(rows.map((r) => columns.map((_, i) => (r[i] === undefined || r[i] === null ? \"\" : String(r[i])))));\n  const widths = columns.map((_, i) => Math.max(...cells.map((r) => r[i].length)));\n  const line = (r) => r.map((c, i) => c.padEnd(widths[i])).join(\"  \").trimEnd();\n  const text = [line(cells[0]), widths.map((w) => \"-\".repeat(w)).join(\"  \")].concat(cells.slice(1).map(line)).join(\"\\n\");\n  if (!title) return await ui.add({ type: \"code\", text });\n  const card = await ui.add({ type: \"card\", title });\n  await ui.add({ type: \"code\", text, parent: card });\n  return card;\n}\n"
+  },
+  {
+    "filename": "increment.js",
+    "source": "/**\n * Add to the number shown by a text or heading component - an example of an\n * event handler: give a button on: {click: {tool: \"increment\", args: {id: \"c2\"}}}\n * and every click counts up, in the browser. The click itself arrives as 'event'.\n * @param {string} id The text or heading showing the number\n * @param {number} [by=1] How much to add\n */\nexport default async function increment(id, by = 1) {\n  const current = Number((await ui.get(id)).text) || 0;\n  await ui.update(id, { text: String(current + by) });\n  return { value: current + by, clicked_by: event ? event.by : null };\n}\n"
   },
   {
     "filename": "cursor_click.js",
@@ -1214,7 +1515,7 @@ export function renderSandboxPage(deviceId: string): string {
     "    </section>",
     '    <details class="gallery" id="gallery">',
     "      <summary>Components</summary>",
-    '      <p class="gal-intro">Inside a tool, <code>ui.add({...})</code> returns a component id; <code>ui.update</code>, <code>ui.get</code>, <code>ui.remove</code>, <code>ui.clear</code>, <code>ui.list</code> and <code>ui.wait(id)</code> (the next click or change) work on it. <code>cursor.move</code>, <code>click</code>, <code>type</code>, <code>fill</code>, <code>check</code>, <code>select</code> and <code>drag</code> drive this client\'s named cursor. Pass <code>parent</code> to put a component in a row or card. Tools have no network; images are data URLs.</p>',
+    '      <p class="gal-intro">Inside a tool, <code>ui.add({...})</code> returns a component id; <code>ui.update</code>, <code>ui.get</code>, <code>ui.remove</code>, <code>ui.clear</code>, <code>ui.list</code> and <code>ui.wait(id)</code> (the next click or change) work on it. Give a component <code>on: { click: { tool: \'name\', args: {...} } }</code> (or <code>change</code>) and every click or change runs that tool in the browser - it receives the details as <code>event</code>; <code>ui.events({ since, timeout })</code> returns what happened, for agents to react to. <code>cursor.move</code>, <code>click</code>, <code>type</code>, <code>fill</code>, <code>check</code>, <code>select</code> and <code>drag</code> drive this client\'s named cursor. Pass <code>parent</code> to put a component in a row or card. Tools have no network; images are data URLs.</p>',
     '      <div id="gallery-list"></div>',
     "    </details>",
     '    <input id="picker" type="file" accept=".js,.mjs,text/javascript" multiple style="display:none" />',
