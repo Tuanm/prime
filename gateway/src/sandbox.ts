@@ -45,6 +45,8 @@ const SANDBOX_CSS = `
       .dash-head #running { flex: 1; text-align: right; }
       .icon-btn { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: #fff; color: #111; border: 1px solid #111; cursor: pointer; padding: 0; }
       .icon-btn:hover { background: #f2f2f2; }
+      .icon-btn:disabled { opacity: 0.3; cursor: default; background: #fff; }
+      .dash-head .icon-btn + .icon-btn { margin-left: -4px; }
       .icon-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: square; }
       /* Expanded: the dash covers the page (the browser window), not the screen. */
       #dash.full { position: fixed; inset: 0; z-index: 50; margin: 0; background: #fff; padding: 16px 20px 20px; display: flex; flex-direction: column; box-sizing: border-box; }
@@ -631,9 +633,10 @@ const PAGE_JS = String.raw`(function () {
     connectBtn.disabled = state === "connecting";
     connectBtn.textContent = state === "idle" ? "Connect" : state === "connecting" ? "Connecting\u2026" : "Disconnect";
     connectBtn.classList.toggle("on", state === "connected");
-    dashSection.hidden = state === "idle";
+    dashSection.hidden = state === "idle" && !Object.keys(comps).length;
     connInfo.textContent = info || "";
-    if (state === "idle") { abortCalls("the sandbox was disconnected"); clearDash(); if (dashSection.classList.contains("full")) setFull(false); }
+    if (state === "idle") { abortCalls("the sandbox was disconnected"); clearCursors(); }
+    emptyHint();
     if (wasConnected !== connected) render();
   }
 
@@ -917,6 +920,10 @@ const PAGE_JS = String.raw`(function () {
     var e = dashArea.querySelector(".dash-empty");
     var any = Object.keys(comps).length > 0;
     if (e) e.hidden = any;
+    if (typeof conn !== "undefined") {
+      dashSection.hidden = conn.state === "idle" && !any;
+      var clr = document.getElementById("dashClear"); if (clr) clr.disabled = !any;
+    }
   }
 
   // ---- drawn controls (no native checkbox, select or range) ----------------------
@@ -1207,6 +1214,7 @@ const PAGE_JS = String.raw`(function () {
     if (eventLog.length > 200) eventLog.shift();
     c.waiters.slice().forEach(function (w) { if (!w.event || w.event === ev.event) w.resolve(ev); });
     eventWaiters.slice().forEach(function (w) { w.check(); });
+    saveDash();
     runHandler(c, ev);
   }
 
@@ -1239,7 +1247,7 @@ const PAGE_JS = String.raw`(function () {
 
   function runHandler(c, ev) {
     var h = c.handlers && c.handlers[ev.event];
-    if (!h || conn.state === "idle") return;
+    if (!h) return;
     if (c.handlerBusy) { ev.handler = "skipped: the previous run of " + h.tool + " is still going"; return; }
     if (handlerRuns >= MAX_HANDLER_RUNS) { ev.handler = "skipped: too many handlers running"; return; }
     var t = activeTools().filter(function (x) { return x.name === h.tool; })[0];
@@ -1284,6 +1292,7 @@ const PAGE_JS = String.raw`(function () {
     c.parentId = containerIdOf(host);
     c.spec.parent = c.parentId === null ? undefined : c.parentId;
     var sibs = childrenOf(host);
+    saveDash();
     return { parent: c.parentId, index: sibs.indexOf(c.el), before: before ? before.dataset.cid : null };
   }
   /** Where a drop at (x, y) would land: a host element and the child to insert before. */
@@ -1329,7 +1338,7 @@ const PAGE_JS = String.raw`(function () {
   }
   function enableDrag(c) {
     c.el.addEventListener("pointerdown", function (e) {
-      if (e.button !== 0 || conn.state === "idle") return;
+      if (e.button !== 0) return;
       if (e.target.closest("input, textarea, .usel, .uslide, .ucheck, .utoggle, .uradio")) return;
       var sx = e.clientX, sy = e.clientY, dragging = false, target = null;
       function move(ev) {
@@ -1358,6 +1367,55 @@ const PAGE_JS = String.raw`(function () {
     });
   }
 
+  // ---- the dash survives Disconnect, reloads and restarts ----------------------------
+  // Saved to IndexedDB (per device) shortly after any change: the components in
+  // page order, each with its spec, parent, handlers, owner and current value.
+  var dashRestoring = false;
+  function snapshotDash() {
+    var list = Array.prototype.map.call(dashArea.querySelectorAll("[data-cid]"), function (el) { return comps[el.dataset.cid]; }).filter(Boolean);
+    return {
+      v: 1, order: order,
+      components: list.map(function (c) {
+        var d = describe(c), spec = Object.assign({}, c.spec);
+        delete spec.on;
+        if (c.parentId) spec.parent = c.parentId; else delete spec.parent;
+        if (d.value !== undefined && c.type !== "progress") spec.value = d.value;
+        if (d.checked !== undefined) spec.checked = d.checked;
+        return { id: c.id, spec: spec, handlers: c.handlers || null, owner: c.owner, ownerClient: c.ownerClient };
+      })
+    };
+  }
+  function saveDash() {
+    if (dashRestoring) return;
+    clearTimeout(saveDash.t);
+    saveDash.t = setTimeout(function () {
+      var snap = snapshotDash();
+      idbDo("dash", "readwrite", function (st) { st.put(JSON.stringify(snap), DEVICE); }).catch(function (e) { setStatus("could not save the dash: " + e.message, true); });
+    }, 250);
+  }
+  function restoreDash() {
+    return idbDo("dash", "readonly", function (st) { return st.get(DEVICE); }).then(function (raw) {
+      if (!raw) return;
+      var snap = JSON.parse(raw);
+      dashRestoring = true;
+      try {
+        (snap.components || []).forEach(function (x) {
+          try {
+            var built = buildComponent(x.spec);
+            built.el.dataset.cid = x.id;
+            var host = x.spec.parent && comps[x.spec.parent] && comps[x.spec.parent].body ? comps[x.spec.parent].body : dashArea;
+            host.appendChild(built.el);
+            var c = { id: x.id, type: x.spec.type, el: built.el, input: built.input, body: built.body, owner: x.owner || "", ownerClient: x.ownerClient || { id: "page", name: "page" }, waiters: [], spec: x.spec, handlers: x.handlers || null, parentId: host === dashArea ? null : x.spec.parent };
+            comps[x.id] = c;
+            wire(c);
+          } catch (e) { /* a component that no longer builds is dropped */ }
+        });
+        order = Math.max(order, Number(snap.order) || 0);
+      } finally { dashRestoring = false; }
+      emptyHint();
+    }).catch(function () {});
+  }
+
   function addComponent(call, spec) {
     if (!spec || typeof spec !== "object") throw new Error("ui.add needs a component, e.g. { type: 'button', label: 'Run' }");
     if (Object.keys(comps).length >= MAX_COMPONENTS) throw new Error("the dash holds at most " + MAX_COMPONENTS + " components");
@@ -1377,6 +1435,7 @@ const PAGE_JS = String.raw`(function () {
     comps[id] = c;
     wire(c);
     emptyHint();
+    saveDash();
     return id;
   }
 
@@ -1389,14 +1448,19 @@ const PAGE_JS = String.raw`(function () {
     c.el.remove();
     delete comps[id];
     emptyHint();
+    saveDash();
   }
 
-  function clearDash() {
-    Object.keys(comps).forEach(removeComponent);
+  function clearCursors() {
     Object.keys(cursors).forEach(function (k) { cursors[k].el.remove(); });
     cursors = {};
+  }
+  function clearDash() {
+    Object.keys(comps).forEach(removeComponent);
+    clearCursors();
     eventLog = []; eventSeq = 0;
     emptyHint();
+    saveDash();
   }
 
   function describe(c) {
@@ -1430,6 +1494,7 @@ const PAGE_JS = String.raw`(function () {
     c.el.replaceWith(built.el);
     c.el = built.el; c.input = built.input; c.spec = spec;
     wire(c);
+    saveDash();
     return describe(c);
   }
 
@@ -1486,6 +1551,7 @@ const PAGE_JS = String.raw`(function () {
     dashArea.classList.add("mine");
     me.style.transform = "translate(" + Math.round(e.clientX - a.left + dashArea.scrollLeft) + "px, " + Math.round(e.clientY - a.top + dashArea.scrollTop) + "px)";
   }
+  dashArea.addEventListener("input", function (e) { if (e.target.closest && e.target.closest("[data-cid]")) saveDash(); });
   dashArea.addEventListener("pointermove", showMe);
   dashArea.addEventListener("pointerenter", showMe);
   dashArea.addEventListener("pointerdown", function (e) { me.classList.remove("click"); void me.offsetWidth; me.classList.add("click"); showMe(e); });
@@ -1743,8 +1809,11 @@ const PAGE_JS = String.raw`(function () {
   var idbPromise = null;
   function idb() {
     if (!idbPromise) idbPromise = new Promise(function (resolve, reject) {
-      var req = indexedDB.open("code-mcp-sandbox", 1);
-      req.onupgradeneeded = function () { var d = req.result; if (!d.objectStoreNames.contains("kv")) d.createObjectStore("kv"); if (!d.objectStoreNames.contains("db")) d.createObjectStore("db"); };
+      var req = indexedDB.open("code-mcp-sandbox", 2);
+      req.onupgradeneeded = function () {
+        var d = req.result;
+        ["kv", "db", "dash"].forEach(function (n) { if (!d.objectStoreNames.contains(n)) d.createObjectStore(n); });
+      };
       req.onsuccess = function () { resolve(req.result); };
       req.onerror = function () { idbPromise = null; reject(new Error("browser storage unavailable: " + (req.error && req.error.message))); };
     });
@@ -1884,6 +1953,11 @@ const PAGE_JS = String.raw`(function () {
   var DATA_API = dataApi();
   Object.keys(DATA_API).forEach(function (k) { API[k] = DATA_API[k]; });
   refreshData();
+
+  document.getElementById("dashClear").addEventListener("click", function () {
+    askConfirm("Clear the dash", "Remove every component from the dash? Tools can build it again.", "Clear").then(function (yes) { if (yes) { clearDash(); setStatus("Dash cleared."); } });
+  });
+  restoreDash();
 
   // ---- the Components reference (same renderer as the dash) -----------------------
   var SAMPLES = [
@@ -2080,8 +2154,8 @@ export function renderSandboxPage(deviceId: string): string {
     '    <div class="status" id="data"></div>',
     '    <div class="connect-row"><button class="connect" id="connect" type="button">Connect</button><div class="conninfo" id="conninfo"></div></div>',
     '    <section id="dash" hidden>',
-    '      <div class="row-head section dash-head"><h2>Dash</h2><span class="status" id="running"></span><button class="icon-btn" id="dashSize" type="button" title="Expand" aria-label="Expand"></button></div>',
-    '      <div class="dash-area" id="dash-area"><div class="dash-empty">Connected. Tools called by MCP clients show their UI here.</div></div>',
+    '      <div class="row-head section dash-head"><h2>Dash</h2><span class="status" id="running"></span><button class="icon-btn" id="dashClear" type="button" title="Clear the dash" aria-label="Clear the dash"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" /></svg></button><button class="icon-btn" id="dashSize" type="button" title="Expand" aria-label="Expand"></button></div>',
+    '      <div class="dash-area" id="dash-area"><div class="dash-empty">Tools called by MCP clients show their UI here. It stays across Disconnect and reloads.</div></div>',
     "    </section>",
     '    <details class="gallery" id="gallery">',
     "      <summary>Components</summary>",
