@@ -65,14 +65,20 @@ try {
   const ctx = await browser.newContext({ httpCredentials: { username: ID, password: TOKEN }, viewport: { width: 1280, height: 1000 } });
   const page = await ctx.newPage();
   const errors = []; page.on("pageerror", (e) => errors.push(e.message));
-  page.on("dialog", (d) => d.accept());
+  let nativeDialogs = 0;
+  page.on("dialog", (d) => { nativeDialogs++; d.dismiss(); });
   await page.goto(B + "/mcp", { waitUntil: "networkidle" });
-  await page.waitForFunction(() => window.__sandbox.tools().length >= 10, null, { timeout: 15000 });
+  await page.waitForFunction(() => window.__sandbox.tools().length >= 12, null, { timeout: 15000 });
   const starterNames = await page.evaluate(() => window.__sandbox.tools().map((t) => t.name));
   ok(starterNames.includes("bar_chart") && starterNames.includes("ask_user") && starterNames.includes("dashboard_add"), "first visit: starter tools added (" + starterNames.length + ")");
   // the user can delete starters, and they do not come back
   const firstRow = page.locator("#list li.row").first();
   await firstRow.locator(".menu-btn").click(); await firstRow.locator(".menu button", { hasText: "Delete" }).click();
+  await page.waitForSelector(".dlg-confirm");
+  await page.click(".dlg-confirm .btn.secondary");
+  ok((await page.evaluate(() => window.__sandbox.tools().length)) === starterNames.length && !(await page.isVisible(".dlg-confirm")), "Delete asks in the page's own dialog; Cancel keeps the tool");
+  await firstRow.locator(".menu-btn").click(); await firstRow.locator(".menu button", { hasText: "Delete" }).click();
+  await page.click(".dlg-confirm .btn.danger");
   await page.reload({ waitUntil: "networkidle" }); await sleep(800);
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === starterNames.length - 1, "a deleted starter stays deleted after reload");
   await page.evaluate(() => { localStorage.removeItem("code-mcp.sandbox.tools.demo"); });
@@ -80,13 +86,15 @@ try {
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === 0, "deleting every tool does not bring the starters back");
   await page.evaluate(() => { localStorage.removeItem("code-mcp.sandbox.seeded.demo"); });
   await page.reload({ waitUntil: "networkidle" });
-  await page.waitForFunction(() => window.__sandbox.tools().length >= 10);
+  await page.waitForFunction(() => window.__sandbox.tools().length >= 12);
 
   const custom = {
     "add.js": "/**\n * Add two numbers.\n * @param {number} a First\n * @param {number} [b=1] Second\n */\nexport default async function add(a, b = 1) {\n  console.log('adding', a, b);\n  return a + b;\n}\n",
     "boom.js": "/**\n * Always fails.\n */\nexport default async function boom() {\n  throw new Error('kaboom');\n}\n",
     "exfil.js": "/**\n * Tries the network.\n */\nexport default async function exfil() {\n  const r = await fetch('https://example.com/');\n  return r.status;\n}\n",
     "peek.js": "/**\n * Tries the page's storage.\n */\nexport default async function peek() {\n  return localStorage.getItem('code-mcp.sandbox.tools.demo');\n}\n",
+    "pick.js": "/**\n * Pick an option with the cursor.\n * @param {string} id The select\n * @param {string} value The option\n */\nexport default async function pick(id, value) {\n  return await cursor.select(id, value);\n}\n",
+    "slide.js": "/**\n * Drag a slider with the cursor.\n * @param {string} id The slider\n * @param {number} to The value\n */\nexport default async function slide(id, to) {\n  return await cursor.drag(id, to);\n}\n",
   };
   for (const [n, s] of Object.entries(custom)) {
     writeFileSync(join(TMP, n), s);
@@ -96,7 +104,8 @@ try {
     await last.locator(".menu-btn").click(); await last.locator(".menu button", { hasText: "Save" }).click();
     await sleep(300);
   }
-  ok((await page.evaluate(() => window.__sandbox.tools().length)) === 14, "custom tools saved (14 in total)");
+  const TOTAL = starterNames.length + 6;
+  ok((await page.evaluate(() => window.__sandbox.tools().length)) === TOTAL, "custom tools saved (" + TOTAL + " in total)");
 
   // ---- connect ----
   await page.click("#connect");
@@ -117,7 +126,7 @@ try {
   const found = JSON.parse(text(await alpha.callTool({ name: "search", arguments: { query: "chart" } })));
   ok(found.tools[0].name === "bar_chart" && found.tools[0].inputSchema.required.includes("values"), "search 'chart' -> bar_chart with its schema");
   const all = JSON.parse(text(await alpha.callTool({ name: "search", arguments: {} })));
-  ok(all.total === 14, "search with no query lists all 14 active tools");
+  ok(all.total === TOTAL, "search with no query lists all " + TOTAL + " active tools");
   const sum = await alpha.callTool({ name: "call", arguments: { name: "add", arguments: { a: 2, b: 3 } } });
   ok(text(sum).startsWith("5") && text(sum).includes("adding 2 3") && !sum.isError, "call add(2,3) -> 5, with console output");
   ok(text(await alpha.callTool({ name: "call", arguments: { name: "add", arguments: { a: 2 } } })).startsWith("3"), "the default for an optional argument applies");
@@ -156,6 +165,62 @@ try {
   await call(beta, "table", { title: "Builds", columns: ["id", "status", "time"], rows: [[101, "ok", "2m"], [102, "failed", "5m"]] });
   ok((await page.textContent("#dash-area")).includes("failed"), "table renders");
 
+  // ---- drawn controls: no native select / checkbox / range anywhere ----
+  const sel = text(await call(alpha, "dashboard_add", { spec: { type: "select", label: "Region", options: ["sgp", "fra", "iad"], value: "fra" } }));
+  const chk = text(await call(alpha, "dashboard_add", { spec: { type: "checkbox", label: "Canary" } }));
+  const sld = text(await call(alpha, "dashboard_add", { spec: { type: "slider", label: "Replicas", min: 0, max: 10, value: 2 } }));
+  await page.click("#gallery summary");
+  const natives = await page.locator("select, option, input[type=checkbox], input[type=radio], input[type=range]").count();
+  ok(natives === 0, "no native select, checkbox or range in the dash or the Components section (" + natives + ")");
+  await page.click("#gallery summary");
+  // the person opens the drawn select and picks with the mouse, then with the keyboard
+  await page.click('[data-cid="' + sel + '"] .usel');
+  ok(await page.isVisible(".usel-list") && (await page.locator(".usel-item").count()) === 3, "the select opens its own list");
+  await page.click(".usel-item:has-text('iad')");
+  const afterPick = JSON.parse(text(await call(beta, "dashboard_list", {})));
+  ok(afterPick.find((c) => c.id === sel).value === "iad" && !(await page.isVisible(".usel-list")), "picking with the mouse sets the value and closes the list");
+  await page.focus('[data-cid="' + sel + '"] .usel');
+  await page.keyboard.press("ArrowDown"); await page.keyboard.press("Home"); await page.keyboard.press("Enter");
+  ok(JSON.parse(text(await call(beta, "dashboard_list", {}))).find((c) => c.id === sel).value === "sgp", "keyboard: ArrowDown opens, Home + Enter picks the first option");
+  const picked = JSON.parse(text(await call(beta, "pick", { id: sel, value: "fra" })));
+  ok(picked.value === "fra" && (await page.textContent('[data-cid="' + sel + '"] .usel-value')) === "fra", "cursor.select opens the list and picks (agent-beta)");
+  await page.click('[data-cid="' + chk + '"] .ucheck');
+  ok(JSON.parse(text(await call(beta, "dashboard_list", {}))).find((c) => c.id === chk).checked === true, "the drawn checkbox toggles on click");
+  await page.focus('[data-cid="' + chk + '"] .ucheck'); await page.keyboard.press(" ");
+  ok(JSON.parse(text(await call(beta, "dashboard_list", {}))).find((c) => c.id === chk).checked === false, "and with the space bar");
+  const track = await page.locator('[data-cid="' + sld + '"] .uslide-track').boundingBox();
+  await page.mouse.move(track.x + track.width * 0.2, track.y + 1); await page.mouse.down();
+  await page.mouse.move(track.x + track.width * 0.8, track.y + 1, { steps: 6 }); await page.mouse.up();
+  ok(JSON.parse(text(await call(beta, "dashboard_list", {}))).find((c) => c.id === sld).value === "8", "dragging the drawn slider with the mouse -> 8");
+  await page.focus('[data-cid="' + sld + '"] .uslide'); await page.keyboard.press("ArrowLeft");
+  ok((await page.textContent('[data-cid="' + sld + '"] .uslide-value')) === "7", "keyboard arrows step it -> 7");
+  ok(JSON.parse(text(await call(alpha, "slide", { id: sld, to: 3 }))).value === "3", "cursor.drag moves the slider (agent-alpha)");
+
+  // ---- event handlers: components stay interactive after the call ----
+  const counter = text(await call(alpha, "dashboard_add", { spec: { type: "heading", text: "0" } }));
+  const plus = text(await call(alpha, "dashboard_add", { spec: { type: "button", label: "+1", on: { click: { tool: "increment", args: { id: counter } } } } }));
+  const plus5 = text(await call(alpha, "dashboard_add", { spec: { type: "button", label: "+5", on: { click: { tool: "increment", args: { id: counter, by: 5 } } } } }));
+  const badOn = await call(alpha, "dashboard_add", { spec: { type: "button", label: "x", on: { click: { tool: "nope" } } } });
+  ok(badOn.isError && text(badOn).includes("no active tool named 'nope'"), "a handler naming an unknown tool is refused at ui.add");
+  const badArgs = await call(alpha, "dashboard_add", { spec: { type: "button", label: "x", on: { click: { tool: "increment", args: { by: 1 } } } } });
+  ok(badArgs.isError && text(badArgs).includes("missing required argument 'id'"), "handler arguments are checked at ui.add");
+  await page.click('[data-cid="' + plus + '"] .ubtn');
+  await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"]').textContent === "1", counter);
+  await page.click('[data-cid="' + plus + '"] .ubtn');
+  await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"]').textContent === "2", counter);
+  ok(true, "clicking +1 twice (no tool call running) -> the heading counts 1, 2");
+  await call(beta, "cursor_click", { id: plus5 });
+  await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"]').textContent === "7", counter, { timeout: 10000 });
+  ok(true, "an agent's cursor click runs the handler too -> 7");
+  const evs = JSON.parse(text(await call(beta, "dashboard_events", {})));
+  const clicks = evs.events.filter((e) => e.id === plus || e.id === plus5);
+  ok(clicks.length === 3 && clicks[0].by === "user" && clicks[2].by === "agent-beta" && clicks.every((e) => e.handler === "increment"), "dashboard_events lists the clicks, who made them, and the handler they ran");
+  const waiting = call(beta, "dashboard_events", { since: evs.next, timeout_seconds: 20 });
+  await sleep(500);
+  await page.click('[data-cid="' + plus + '"] .ubtn');
+  const woke = JSON.parse(text(await waiting));
+  ok(woke.events.length >= 1 && woke.events[0].id === plus && woke.events[0].seq > evs.next, "dashboard_events with a timeout waits for the next event");
+
   // ---- the person at the browser answers ----
   const asking = call(alpha, "ask_user", { question: "Which region?", placeholder: "e.g. sgp" });
   await page.waitForSelector(".uc-card .uinput[placeholder='e.g. sgp']");
@@ -189,6 +254,7 @@ try {
   ok(true, "Connect while " + ID + " is online elsewhere: refused with a clear message");
   squatter.ws.close();
   ok(errors.length === 0, "no page errors " + errors.join(" | "));
+  ok(nativeDialogs === 0, "no native browser dialogs (" + nativeDialogs + ")");
   await alpha.close(); await beta.close();
   await browser.close();
 } catch (e) { fails++; console.log("FAIL harness " + (e.stack || e)); }
