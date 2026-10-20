@@ -125,6 +125,86 @@ const SANDBOX_CSS = `
       .uprog { height: 6px; border: 1px solid #111; background: #fff; position: relative; }
       .uprog-fill { position: absolute; left: 0; top: 0; bottom: 0; background: #111; transition: width 0.25s; }
       .uprog-text { font-size: 11px; color: #666; min-width: 34px; text-align: right; }
+      /* Layout */
+      .uc[hidden] { display: none !important; }
+      .uc-column { display: flex; flex-direction: column; gap: 10px; }
+      .uc-grid { display: grid; gap: 10px; }
+      .uc-accordion { border: 1px solid #111; }
+      .uacc-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; outline: none; user-select: none; }
+      .uacc-head:focus-visible { background: #f5f5f5; }
+      .uc-accordion.open .usel-chev svg { transform: rotate(180deg); }
+      .uc-accordion > .uc-body { display: none; flex-direction: column; gap: 10px; padding: 0 14px 12px; }
+      .uc-accordion.open > .uc-body { display: flex; }
+      .utabs-bar { display: flex; gap: 0; border-bottom: 1px solid #111; margin-bottom: 12px; overflow-x: auto; }
+      .utab { padding: 7px 14px; font-size: 12px; cursor: pointer; color: #666; border: 1px solid transparent; border-bottom: 0; margin-bottom: -1px; outline: none; white-space: nowrap; user-select: none; }
+      .utab:hover { color: #111; }
+      .utab.on { color: #111; font-weight: 700; border-color: #111; background: #fff; }
+      .utab:focus-visible { text-decoration: underline; }
+      .utab-panel { display: flex; flex-direction: column; gap: 10px; }
+      .utab-panel[hidden] { display: none; }
+      /* Overlays: modal and drawer, inside the dash */
+      .uc-overlay { position: absolute; left: 0; right: 0; top: 0; z-index: 15; display: none; }
+      .uc-overlay.open { display: block; }
+      .uoverlay-back { position: absolute; inset: 0; background: rgba(17,17,17,0.35); }
+      .umodal-panel { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: calc(100% - 32px); max-height: calc(100% - 32px); background: #fff; border: 1px solid #111; display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.18); }
+      .udrawer-panel { position: absolute; top: 0; bottom: 0; max-width: 90%; background: #fff; display: flex; flex-direction: column; box-shadow: 0 0 24px rgba(0,0,0,0.15); animation: udrawer-in 0.14s ease-out; }
+      .udrawer-panel.right { right: 0; border-left: 1px solid #111; }
+      .udrawer-panel.left { left: 0; border-right: 1px solid #111; animation-name: udrawer-in-left; }
+      @keyframes udrawer-in { from { transform: translateX(30px); opacity: 0; } }
+      @keyframes udrawer-in-left { from { transform: translateX(-30px); opacity: 0; } }
+      .umodal-panel > .dlg-head, .udrawer-panel > .dlg-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .umodal-panel > .dlg-head .uc-title-text, .udrawer-panel > .dlg-head .uc-title-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .umodal-body { padding: 14px 16px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+      .uc-preview .umodal-panel, .uc-preview .udrawer-panel { position: static; transform: none; box-shadow: none; animation: none; max-width: 100%; border: 1px solid #111; }
+      .dash-area.locked { overflow: hidden; }
+      .uc-title-text { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; }
+      /* Data */
+      .utable { overflow-x: auto; border: 1px solid #111; outline: none; }
+      .utable table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .utable th { text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; padding: 8px 10px; border-bottom: 1px solid #111; white-space: nowrap; user-select: none; }
+      .utable th.sortable { cursor: pointer; }
+      .utable th[data-sort="asc"]::after { content: " \\25b2"; font-size: 8px; }
+      .utable th[data-sort="desc"]::after { content: " \\25bc"; font-size: 8px; }
+      .utable td { padding: 7px 10px; border-bottom: 1px solid #eee; }
+      .utable tr:last-child td { border-bottom: 0; }
+      .utable.selectable tbody tr { cursor: pointer; }
+      .utable.selectable tbody tr:hover td { background: #f5f5f5; }
+      .utable tbody tr.on td { background: #111; color: #fff; }
+      .utable-empty { color: #999; text-align: center !important; }
+      .ulist { border: 1px solid #111; display: flex; flex-direction: column; }
+      .ulist-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; cursor: pointer; border-left: 3px solid transparent; outline: none; user-select: none; }
+      .ulist-item + .ulist-item { border-top: 1px solid #eee; }
+      .ulist-item:hover, .ulist-item:focus-visible { background: #f5f5f5; }
+      .ulist-item.on { border-left-color: #111; font-weight: 700; }
+      .ulist-label { font-size: 13px; }
+      .ulist-desc { font-size: 11px; color: #666; font-weight: 400; margin-top: 2px; }
+      .ubadge { display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.3px; padding: 1px 7px; border: 1px solid #111; color: #111; background: #fff; white-space: nowrap; }
+      .ubadge.solid { background: #111; color: #fff; }
+      .ubadge.success { border-color: #16a34a; color: #16a34a; }
+      .ubadge.warning { border-color: #ca8a04; color: #a16207; }
+      .ubadge.error { border-color: #b91c1c; color: #b91c1c; }
+      .uc-alert { border: 1px solid #111; border-left-width: 4px; padding: 10px 14px; font-size: 12px; }
+      .uc-alert.info { border-left-color: #2563eb; }
+      .uc-alert.success { border-left-color: #16a34a; }
+      .uc-alert.warning { border-left-color: #ca8a04; }
+      .uc-alert.error { border-left-color: #b91c1c; }
+      .ualert-title { font-weight: 700; margin-bottom: 3px; }
+      .ualert-text { white-space: pre-wrap; line-height: 1.5; }
+      .uc-stat { border: 1px solid #111; padding: 10px 14px; }
+      .ustat-value { font-size: 22px; font-weight: 700; letter-spacing: 0.3px; line-height: 1.2; }
+      .ustat-delta { font-size: 11px; color: #666; margin-top: 2px; }
+      .ustat-delta.up { color: #16a34a; }
+      .ustat-delta.down { color: #b91c1c; }
+      .utoasts { position: absolute; right: 12px; z-index: 22; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: none; }
+      .utoast { background: #111; color: #fff; font-size: 12px; padding: 7px 12px; border-left: 4px solid #111; box-shadow: 0 4px 14px rgba(0,0,0,0.15); animation: utoast-in 0.18s ease-out; transition: opacity 0.3s; }
+      .utoast.success { border-left-color: #16a34a; }
+      .utoast.warning { border-left-color: #ca8a04; }
+      .utoast.error { border-left-color: #b91c1c; }
+      .utoast.leaving { opacity: 0; }
+      .utoast.static { display: inline-block; animation: none; }
+      @keyframes utoast-in { from { transform: translateY(-6px); opacity: 0; } }
+      .uinput::-webkit-outer-spin-button, .uinput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+      .uinput[type=number] { -moz-appearance: textfield; }
       /* Drag and drop */
       .uc[data-draggable] { border: 1px solid #ddd; background: #fff; padding: 7px 10px; cursor: grab; user-select: none; touch-action: none; }
       .uc[data-draggable]:hover { border-color: #111; }
@@ -304,7 +384,8 @@ const RUNTIME_JS = String.raw`(function () {
     clear: function () { return api("ui.clear", []); },
     list: function () { return api("ui.list", []); },
     wait: function (id, options) { return api("ui.wait", [id, options || {}]); },
-    events: function (options) { return api("ui.events", [options || {}]); }
+    events: function (options) { return api("ui.events", [options || {}]); },
+    toast: function (text, options) { return api("ui.toast", [String(text), options || {}]); }
   });
   var cursor = Object.freeze({
     move: function (id) { return api("cursor.move", [id]); },
@@ -917,7 +998,7 @@ const PAGE_JS = String.raw`(function () {
   // ===========================================================================
   var comps = {}, order = 0, cursors = {};
   var MAX_COMPONENTS = 300;
-  var CONTAINERS = { row: 1, card: 1 };
+  var CONTAINERS = { row: 1, column: 1, grid: 1, card: 1, tabs: 1, accordion: 1, modal: 1, drawer: 1 };
   var PALETTE = ["#2563eb", "#db2777", "#16a34a", "#ea580c", "#7c3aed", "#0891b2", "#ca8a04"];
 
   function str(v, max) { return v === undefined || v === null ? "" : String(v).slice(0, max || 2000); }
@@ -1131,6 +1212,138 @@ const PAGE_JS = String.raw`(function () {
     return root;
   }
 
+  var TYPES = ["heading", "text", "code", "image", "editor", "button", "input", "textarea", "checkbox", "toggle", "radio", "select", "slider", "progress", "status", "badge", "alert", "stat", "table", "list", "divider", "row", "column", "grid", "card", "tabs", "accordion", "modal", "drawer"];
+  // Every component: hidden, width (px number or a CSS length/percent), grow.
+  function applyCommon(el, spec) {
+    el.hidden = !!spec.hidden;
+    if (spec.width !== undefined && el.className.indexOf("uc-modal") < 0 && el.className.indexOf("uc-drawer") < 0) {
+      var w = typeof spec.width === "number" ? Math.max(20, Math.min(2000, spec.width)) + "px" : /^\d{1,4}(px|%|rem|em|ch)$/.test(String(spec.width)) ? String(spec.width) : "";
+      if (w) { el.style.width = w; el.style.flex = "0 0 " + w; }
+    }
+    if (spec.grow) el.style.flex = "1 1 0";
+  }
+
+  function makeTable(spec) {
+    var cols = (Array.isArray(spec.columns) ? spec.columns : []).slice(0, 20).map(function (c, i) {
+      if (c && typeof c === "object") return { key: c.key !== undefined ? String(c.key) : String(c.label !== undefined ? c.label : i), label: str(c.label !== undefined ? c.label : c.key, 80), align: c.align === "right" || c.align === "center" ? c.align : "left" };
+      return { key: String(c), label: str(c, 80), align: "left" };
+    });
+    if (!cols.length) throw new Error("table: give it columns, e.g. columns: ['Name', 'Status'] or [{ key: 'name', label: 'Name' }]");
+    var raw = (Array.isArray(spec.rows) ? spec.rows : []).slice(0, 1000);
+    var rows = raw.map(function (r, i) {
+      var cells = cols.map(function (c, k) { var v = Array.isArray(r) ? r[k] : r && typeof r === "object" ? r[c.key] : k === 0 ? r : ""; return v === undefined || v === null ? "" : v; });
+      return { index: i, cells: cells, raw: r };
+    });
+    var root = document.createElement("div"); root.className = "utable"; root.tabIndex = -1;
+    var table = document.createElement("table"), thead = document.createElement("thead"), tbody = document.createElement("tbody");
+    var hr = document.createElement("tr");
+    var sortKey = -1, sortDir = 1, selected = Number.isInteger(spec.value) ? spec.value : -1, disabled = false;
+    var sortable = spec.sortable !== false, selectable = spec.selectable !== false;
+    cols.forEach(function (c, k) {
+      var th = document.createElement("th"); th.textContent = c.label; th.style.textAlign = c.align;
+      if (sortable) { th.classList.add("sortable"); th.addEventListener("click", function () { sortDir = sortKey === k ? -sortDir : 1; sortKey = k; paint(); }); }
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr); table.appendChild(thead); table.appendChild(tbody); root.appendChild(table);
+    if (selectable) root.classList.add("selectable");
+    var trs = {};
+    function cmp(a, b) {
+      var x = a.cells[sortKey], y = b.cells[sortKey];
+      var nx = typeof x === "number" ? x : Number(x), ny = typeof y === "number" ? y : Number(y);
+      if (x !== "" && y !== "" && !isNaN(nx) && !isNaN(ny)) return (nx - ny) * sortDir;
+      return String(x).localeCompare(String(y)) * sortDir;
+    }
+    function paint() {
+      tbody.innerHTML = ""; trs = {};
+      var list = sortKey >= 0 ? rows.slice().sort(cmp) : rows;
+      Array.prototype.forEach.call(hr.children, function (th, k) { th.dataset.sort = k === sortKey ? (sortDir > 0 ? "asc" : "desc") : ""; });
+      if (!list.length) { var er = document.createElement("tr"); var ed = document.createElement("td"); ed.colSpan = cols.length; ed.className = "utable-empty"; ed.textContent = str(spec.empty || "No rows", 120); er.appendChild(ed); tbody.appendChild(er); return; }
+      list.forEach(function (r) {
+        var tr = document.createElement("tr");
+        if (r.index === selected) tr.classList.add("on");
+        r.cells.forEach(function (v, k) { var td = document.createElement("td"); td.textContent = typeof v === "object" ? JSON.stringify(v) : String(v); td.style.textAlign = cols[k].align; tr.appendChild(td); });
+        if (selectable) tr.addEventListener("click", function () { root.__pick(r.index); });
+        tbody.appendChild(tr); trs[r.index] = tr;
+      });
+    }
+    root.__pick = function (i) {
+      i = Number(i);
+      if (!rows[i]) throw new Error("table has no row " + i + " (rows 0 to " + (rows.length - 1) + ")");
+      if (disabled || !selectable) return;
+      selected = i; spec.value = i; paint();
+      root.dispatchEvent(new CustomEvent("upick", { detail: { event: "select", index: i, row: rows[i].raw } }));
+    };
+    root.__item = function (i) { return trs[Number(i)] || null; };
+    prop(root, "value", function () { return selected; }, function (v) { selected = Number(v); spec.value = selected; paint(); });
+    prop(root, "disabled", function () { return disabled; }, function (v) { disabled = !!v; });
+    root.__rows = function () { return rows.length; };
+    root.__selectedRow = function () { return rows[selected] ? rows[selected].raw : null; };
+    paint();
+    return root;
+  }
+
+  function makeList(spec) {
+    var items = (Array.isArray(spec.items) ? spec.items : []).slice(0, 200).map(function (o) {
+      return o && typeof o === "object" ? { value: str(o.value !== undefined ? o.value : o.label, 200), label: str(o.label !== undefined ? o.label : o.value, 200), description: o.description ? str(o.description, 200) : "", badge: o.badge !== undefined ? str(o.badge, 30) : "" } : { value: str(o, 200), label: str(o, 200), description: "", badge: "" };
+    });
+    if (!items.length) throw new Error("list: give it items, e.g. items: ['Overview', 'Settings']");
+    var root = document.createElement("div"); root.className = "ulist"; root.setAttribute("role", "listbox");
+    var current = spec.value !== undefined ? str(spec.value, 200) : null, disabled = false, els = {};
+    items.forEach(function (it) {
+      var row = document.createElement("div"); row.className = "ulist-item"; row.tabIndex = 0; row.setAttribute("role", "option");
+      var main = document.createElement("div"); main.className = "ulist-main";
+      var l = document.createElement("div"); l.className = "ulist-label"; l.textContent = it.label; main.appendChild(l);
+      if (it.description) { var d = document.createElement("div"); d.className = "ulist-desc"; d.textContent = it.description; main.appendChild(d); }
+      row.appendChild(main);
+      if (it.badge) { var b = document.createElement("span"); b.className = "ubadge"; b.textContent = it.badge; row.appendChild(b); }
+      row.addEventListener("click", function () { root.__pick(it.value); });
+      row.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); root.__pick(it.value); } });
+      root.appendChild(row); els[it.value] = row;
+    });
+    function paint() { items.forEach(function (it) { els[it.value].classList.toggle("on", it.value === current); els[it.value].setAttribute("aria-selected", String(it.value === current)); }); }
+    root.__pick = function (v) {
+      v = String(v);
+      var it = items.filter(function (x) { return x.value === v; })[0];
+      if (!it) throw new Error("list has no item '" + v + "'");
+      if (disabled) return;
+      current = v; spec.value = v; paint();
+      root.dispatchEvent(new CustomEvent("upick", { detail: { event: "click", value: v, label: it.label } }));
+    };
+    root.__item = function (v) { return els[String(v)] || null; };
+    prop(root, "value", function () { return current; }, function (v) { current = String(v); spec.value = current; paint(); });
+    prop(root, "options", function () { return items.map(function (x) { return { value: x.value, label: x.label }; }); });
+    prop(root, "disabled", function () { return disabled; }, function (v) { disabled = !!v; root.classList.toggle("disabled", disabled); });
+    paint();
+    return root;
+  }
+
+  // Modals and drawers cover the dash's visible area (it scrolls), under the cursors.
+  function positionOverlays() {
+    var any = false;
+    Object.keys(comps).forEach(function (id) {
+      var c = comps[id];
+      if (c.type !== "modal" && c.type !== "drawer") return;
+      if (c.spec.open && !c.el.hidden) any = true;
+      c.el.style.top = dashArea.scrollTop + "px";
+      c.el.style.height = dashArea.clientHeight + "px";
+    });
+    dashArea.classList.toggle("locked", any);
+  }
+  window.addEventListener("resize", positionOverlays);
+
+  function toast(text, o) {
+    o = o || {};
+    var t = document.createElement("div");
+    t.className = "utoast " + (["success", "warning", "error"].indexOf(o.variant) >= 0 ? o.variant : "");
+    t.textContent = str(text, 300);
+    var holder = dashArea.querySelector(".utoasts");
+    if (!holder) { holder = document.createElement("div"); holder.className = "utoasts"; dashArea.appendChild(holder); }
+    holder.style.top = dashArea.scrollTop + 10 + "px";
+    holder.appendChild(t);
+    setTimeout(function () { t.classList.add("leaving"); setTimeout(function () { t.remove(); }, 300); }, Math.max(1000, Math.min(15000, Number(o.timeout) || 4000)));
+    return true;
+  }
+
   window.__buildComponent = buildComponent;
   function buildComponent(spec) {
     var type = spec.type;
@@ -1152,7 +1365,7 @@ const PAGE_JS = String.raw`(function () {
     else if (type === "button") {
       input = document.createElement("button"); input.type = "button"; input.className = "ubtn" + (spec.variant === "secondary" ? " secondary" : spec.variant === "danger" ? " danger" : ""); input.textContent = str(spec.label || "Button", 80); input.disabled = !!spec.disabled; el.appendChild(input);
     }
-    else if (type === "input") { label(spec.label); input = document.createElement("input"); input.type = "text"; input.className = "uinput"; input.placeholder = str(spec.placeholder, 200); input.value = str(spec.value, 5000); el.appendChild(input); }
+    else if (type === "input") { label(spec.label); input = document.createElement("input"); input.type = ["password", "number", "email", "search", "url"].indexOf(spec.inputType) >= 0 ? spec.inputType : "text"; input.className = "uinput"; input.placeholder = str(spec.placeholder, 200); input.value = str(spec.value, 5000); el.appendChild(input); }
     else if (type === "textarea") { label(spec.label); input = document.createElement("textarea"); input.className = "utextarea"; input.placeholder = str(spec.placeholder, 200); input.value = str(spec.value, 100000); input.rows = Math.max(2, Math.min(20, Number(spec.rows) || 4)); el.appendChild(input); }
     else if (type === "checkbox") { input = makeCheckbox(str(spec.label, 200), !!spec.checked); el.appendChild(input); }
     else if (type === "select") {
@@ -1196,13 +1409,91 @@ const PAGE_JS = String.raw`(function () {
       el.appendChild(dot); el.appendChild(t);
     }
     else if (type === "divider") { }
-    else if (type === "row") { body = el; }
+    else if (type === "row" || type === "column") { body = el; }
+    else if (type === "grid") { body = el; el.style.gridTemplateColumns = "repeat(" + Math.max(1, Math.min(6, Number(spec.columns) || 2)) + ", minmax(0, 1fr))"; }
+    else if (type === "accordion") {
+      var ah = document.createElement("div"); ah.className = "uacc-head"; ah.tabIndex = 0; ah.setAttribute("role", "button");
+      var at = document.createElement("span"); at.className = "uc-title-text"; at.textContent = str(spec.title || "Section", 120);
+      var ac = document.createElement("span"); ac.className = "usel-chev"; ac.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4" /></svg>';
+      ah.appendChild(at); ah.appendChild(ac); el.appendChild(ah);
+      body = document.createElement("div"); body.className = "uc-body"; el.appendChild(body);
+      if (spec.open === undefined) spec.open = true;
+      el.classList.toggle("open", !!spec.open); ah.setAttribute("aria-expanded", String(!!spec.open));
+      el.__toggle = function () { spec.open = !spec.open; el.classList.toggle("open", spec.open); ah.setAttribute("aria-expanded", String(spec.open)); el.dispatchEvent(new CustomEvent("uc", { detail: { event: "toggle", open: spec.open } })); };
+      ah.addEventListener("click", el.__toggle);
+      ah.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.__toggle(); } });
+    }
+    else if (type === "tabs") {
+      var names = (Array.isArray(spec.tabs) ? spec.tabs : []).slice(0, 12).map(function (x) { return str(x, 60); }).filter(Boolean);
+      if (!names.length) throw new Error("tabs: give it tab names, e.g. tabs: ['Overview', 'Logs']");
+      if (names.indexOf(spec.value) < 0) spec.value = names[0];
+      var bar = document.createElement("div"); bar.className = "utabs-bar"; bar.setAttribute("role", "tablist");
+      el.appendChild(bar);
+      el.__bodies = {}; el.__tabEls = {};
+      names.forEach(function (n) {
+        var tb = document.createElement("div"); tb.className = "utab"; tb.tabIndex = 0; tb.setAttribute("role", "tab"); tb.textContent = n;
+        var panel = document.createElement("div"); panel.className = "uc-body utab-panel"; panel.dataset.tab = n; panel.setAttribute("role", "tabpanel");
+        tb.addEventListener("click", function () { el.__pick(n); });
+        tb.addEventListener("keydown", function (e) {
+          var i = names.indexOf(spec.value);
+          if (e.key === "ArrowRight") { e.preventDefault(); el.__pick(names[(i + 1) % names.length]); el.__tabEls[spec.value].focus(); }
+          else if (e.key === "ArrowLeft") { e.preventDefault(); el.__pick(names[(i - 1 + names.length) % names.length]); el.__tabEls[spec.value].focus(); }
+          else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.__pick(n); }
+        });
+        bar.appendChild(tb); el.appendChild(panel);
+        el.__bodies[n] = panel; el.__tabEls[n] = tb;
+      });
+      el.__show = function () { names.forEach(function (n) { var on = n === spec.value; el.__tabEls[n].classList.toggle("on", on); el.__tabEls[n].setAttribute("aria-selected", String(on)); el.__bodies[n].hidden = !on; }); };
+      el.__pick = function (n) { if (names.indexOf(n) < 0) throw new Error("tabs has no tab '" + n + "'"); var changed = n !== spec.value; spec.value = n; el.__show(); if (el.__comp) el.__comp.body = el.__bodies[n]; if (changed) el.dispatchEvent(new CustomEvent("uc", { detail: { event: "change", value: n } })); };
+      el.__show();
+      body = el.__bodies[spec.value];
+    }
+    else if (type === "modal" || type === "drawer") {
+      if (spec.parent !== undefined && spec.parent !== null && !spec.__preview) throw new Error(type + ": add it at the top of the dash (no parent); put components inside it with parent");
+      var panelEl = document.createElement("div"); panelEl.className = type === "modal" ? "umodal-panel" : "udrawer-panel " + (spec.side === "left" ? "left" : "right");
+      if (type === "modal") panelEl.style.width = Math.max(240, Math.min(900, Number(spec.width) || 460)) + "px";
+      else panelEl.style.width = Math.max(180, Math.min(600, Number(spec.width) || 280)) + "px";
+      panelEl.setAttribute("role", "dialog");
+      var mh = document.createElement("div"); mh.className = "dlg-head";
+      var mt = document.createElement("span"); mt.className = "uc-title-text"; mt.textContent = str(spec.title || "", 120);
+      mh.appendChild(mt);
+      if (spec.closable !== false) { var mx = document.createElement("button"); mx.type = "button"; mx.className = "dlg-close"; mx.title = "Close"; mx.innerHTML = "&times;"; mx.addEventListener("click", function () { el.__close(); }); mh.appendChild(mx); }
+      body = document.createElement("div"); body.className = "uc-body umodal-body";
+      panelEl.appendChild(mh); panelEl.appendChild(body);
+      if (spec.__preview) { el.classList.add("uc-preview"); el.appendChild(panelEl); }
+      else {
+        var back = document.createElement("div"); back.className = "uoverlay-back";
+        back.addEventListener("click", function () { if (spec.closable !== false) el.__close(); });
+        el.appendChild(back); el.appendChild(panelEl);
+        el.classList.add("uc-overlay");
+        if (spec.open === undefined) spec.open = true;
+        el.classList.toggle("open", !!spec.open);
+        el.__close = function () { if (!spec.open) return; spec.open = false; el.classList.remove("open"); positionOverlays(); el.dispatchEvent(new CustomEvent("uc", { detail: { event: "close" } })); };
+      }
+    }
+    else if (type === "table") { input = makeTable(spec); el.appendChild(input); }
+    else if (type === "list") { input = makeList(spec); el.appendChild(input); }
+    else if (type === "badge") {
+      var bd = document.createElement("span"); bd.className = "ubadge " + (["solid", "success", "warning", "error"].indexOf(spec.variant) >= 0 ? spec.variant : ""); bd.textContent = str(spec.text, 60); el.appendChild(bd);
+    }
+    else if (type === "alert") {
+      el.classList.add(["success", "warning", "error"].indexOf(spec.variant) >= 0 ? spec.variant : "info");
+      if (spec.title) { var alt = document.createElement("div"); alt.className = "ualert-title"; alt.textContent = str(spec.title, 120); el.appendChild(alt); }
+      var alx = document.createElement("div"); alx.className = "ualert-text"; alx.textContent = str(spec.text, 2000); el.appendChild(alx);
+    }
+    else if (type === "stat") {
+      var sl = document.createElement("div"); sl.className = "uc-label"; sl.textContent = str(spec.label, 80);
+      var sv = document.createElement("div"); sv.className = "ustat-value"; sv.textContent = str(spec.value, 40);
+      el.appendChild(sl); el.appendChild(sv);
+      if (spec.delta !== undefined) { var sd = document.createElement("div"); sd.className = "ustat-delta " + (spec.trend === "down" ? "down" : spec.trend === "up" ? "up" : ""); sd.textContent = (spec.trend === "down" ? "\u25bc " : spec.trend === "up" ? "\u25b2 " : "") + str(spec.delta, 40); el.appendChild(sd); }
+    }
     else if (type === "card") {
       if (spec.title) { var h = document.createElement("div"); h.className = "uc-title"; h.textContent = str(spec.title, 120); el.appendChild(h); }
       body = document.createElement("div"); body.className = "uc-body"; el.appendChild(body);
     }
-    else throw new Error("unknown component type '" + type + "' - use heading, text, code, image, editor, button, input, textarea, checkbox, toggle, radio, select, slider, progress, status, divider, row or card");
-    if (spec.draggable) { if (body) throw new Error(type + ": rows and cards cannot be draggable; put draggable components inside them"); el.dataset.draggable = "1"; }
+    else throw new Error("unknown component type '" + type + "' - use " + TYPES.join(", "));
+    if (spec.draggable) { if (body) throw new Error(type + ": containers cannot be draggable; put draggable components inside them"); el.dataset.draggable = "1"; }
+    applyCommon(el, spec);
     return { el: el, input: input, body: body };
   }
 
@@ -1210,6 +1501,7 @@ const PAGE_JS = String.raw`(function () {
   // ui.events), wakes ui.wait / ui.events callers, and runs the component's
   // handler, if it has one.
   var eventLog = [], eventSeq = 0, eventWaiters = [], handlerRuns = 0;
+  var EVENTS = ["click", "change", "drop", "dblclick", "select", "toggle", "close"];
   var MAX_HANDLER_RUNS = 4;
   function notify(c, ev) {
     ev.seq = ++eventSeq;
@@ -1228,7 +1520,7 @@ const PAGE_JS = String.raw`(function () {
     if (typeof on !== "object" || Array.isArray(on)) throw new Error("'on' must be an object like { click: { tool: 'name', args: {...} } }");
     var out = {};
     Object.keys(on).forEach(function (ev) {
-      if (["click", "change", "drop", "dblclick"].indexOf(ev) < 0) throw new Error("'on' supports click, change, drop and dblclick, not '" + ev + "'");
+      if (EVENTS.indexOf(ev) < 0) throw new Error("'on' supports " + EVENTS.join(", ") + ", not '" + ev + "'");
       var h = on[ev];
       if (typeof h === "string") h = { tool: h };
       if (!h || typeof h.tool !== "string") throw new Error("on." + ev + " needs { tool: 'name', args: {...} }");
@@ -1277,8 +1569,11 @@ const PAGE_JS = String.raw`(function () {
       notify(c, { event: "dblclick", id: c.id, by: by() });
     });
     if (c.el.dataset.draggable) enableDrag(c);
+    c.el.__comp = c;
+    c.el.addEventListener("uc", function (e) { if (e.target === c.el) notify(c, Object.assign({ id: c.id, by: by() }, e.detail)); });
+    if (c.input) c.input.addEventListener("upick", function (e) { notify(c, Object.assign({ id: c.id, by: by() }, e.detail)); });
     var i = c.input;
-    if (!i) return;
+    if (!i || c.type === "table" || c.type === "list") return;
     if (c.type === "button") i.addEventListener("click", function () { if (!c.synthetic && !c.el.__suppressClick) notify(c, { event: "click", id: c.id, by: by() }); });
     else if (c.type === "checkbox" || c.type === "toggle") i.addEventListener("change", function () { if (!c.synthetic) notify(c, { event: "change", id: c.id, checked: i.checked, by: by() }); });
     else {
@@ -1290,12 +1585,14 @@ const PAGE_JS = String.raw`(function () {
   // ---- drag and drop (pointer-driven: no native HTML drag) ------------------------
   function hostOf(el) { return el.parentNode; }
   function containerIdOf(host) { if (host === dashArea) return null; var p = host.closest("[data-cid]"); return p ? p.dataset.cid : null; }
+  dashArea.addEventListener("scroll", function () { positionOverlays(); var h = dashArea.querySelector(".utoasts"); if (h) h.style.top = dashArea.scrollTop + 10 + "px"; });
   function childrenOf(host) { return Array.prototype.filter.call(host.children, function (x) { return x.dataset && x.dataset.cid; }); }
   function isRow(host) { return host.classList && host.classList.contains("uc-row"); }
   function moveComponent(c, host, before) {
     host.insertBefore(c.el, before || null);
     c.parentId = containerIdOf(host);
     c.spec.parent = c.parentId === null ? undefined : c.parentId;
+    if (host.dataset && host.dataset.tab) c.spec.tab = host.dataset.tab; else delete c.spec.tab;
     var sibs = childrenOf(host);
     saveDash();
     return { parent: c.parentId, index: sibs.indexOf(c.el), before: before ? before.dataset.cid : null };
@@ -1408,17 +1705,32 @@ const PAGE_JS = String.raw`(function () {
           try {
             var built = buildComponent(x.spec);
             built.el.dataset.cid = x.id;
-            var host = x.spec.parent && comps[x.spec.parent] && comps[x.spec.parent].body ? comps[x.spec.parent].body : dashArea;
+            var host = dashArea;
+            if (x.spec.parent && comps[x.spec.parent]) { try { host = hostFor(comps[x.spec.parent], x.spec); } catch (e) { host = dashArea; } }
             host.appendChild(built.el);
             var c = { id: x.id, type: x.spec.type, el: built.el, input: built.input, body: built.body, owner: x.owner || "", ownerClient: x.ownerClient || { id: "page", name: "page" }, waiters: [], spec: x.spec, handlers: x.handlers || null, parentId: host === dashArea ? null : x.spec.parent };
             comps[x.id] = c;
             wire(c);
+            if (c.type === "tabs") c.body = c.el.__bodies[c.spec.value];
           } catch (e) { /* a component that no longer builds is dropped */ }
         });
         order = Math.max(order, Number(snap.order) || 0);
       } finally { dashRestoring = false; }
+      positionOverlays();
       emptyHint();
     }).catch(function () {});
+  }
+
+  /** Where a child of component p goes: its body, or for tabs the named tab's panel. */
+  function hostFor(p, spec) {
+    if (!p.body) throw new Error("parent '" + p.id + "' is a " + p.type + "; only " + Object.keys(CONTAINERS).join(", ") + " hold components");
+    if (p.type === "tabs") {
+      var tab = spec.tab !== undefined ? String(spec.tab) : p.spec.value;
+      if (!p.el.__bodies[tab]) throw new Error("tabs '" + p.id + "' has no tab '" + tab + "' (tabs: " + Object.keys(p.el.__bodies).join(", ") + ")");
+      spec.tab = tab;
+      return p.el.__bodies[tab];
+    }
+    return p.body;
   }
 
   function addComponent(call, spec) {
@@ -1430,15 +1742,12 @@ const PAGE_JS = String.raw`(function () {
     var c = { id: id, type: spec.type, el: built.el, input: built.input, body: built.body, owner: call ? call.client.id : "", ownerClient: call ? call.client : { id: "page", name: "page" }, waiters: [], spec: spec, handlers: handlers, parentId: spec.parent !== undefined && spec.parent !== null ? String(spec.parent) : null };
     built.el.dataset.cid = id;
     var host = dashArea;
-    if (spec.parent !== undefined && spec.parent !== null) {
-      var p = compOf(String(spec.parent));
-      if (!p.body) throw new Error("parent '" + spec.parent + "' is a " + p.type + "; only row and card hold components");
-      host = p.body;
-    }
+    if (spec.parent !== undefined && spec.parent !== null) host = hostFor(compOf(String(spec.parent)), spec);
     host.appendChild(built.el);
-    reveal(built.el);
+    if (c.type !== "modal" && c.type !== "drawer") reveal(built.el);
     comps[id] = c;
     wire(c);
+    positionOverlays();
     emptyHint();
     saveDash();
     return id;
@@ -1468,9 +1777,15 @@ const PAGE_JS = String.raw`(function () {
     if (c.spec.text !== undefined) d.text = str(c.spec.text, 2000);
     if (c.spec.title !== undefined) d.title = str(c.spec.title, 120);
     if (c.type === "checkbox") d.checked = c.input.checked;
-    else if (c.input && "value" in c.input && c.type !== "button" && c.type !== "toggle") d.value = c.input.value;
+    else if (c.input && "value" in c.input && c.type !== "button" && c.type !== "toggle" && c.type !== "table") d.value = c.input.value;
     if (c.type === "progress") d.value = Number(c.spec.value) || 0;
     if (c.input && c.input.disabled) d.disabled = true;
+    if (c.type === "modal" || c.type === "drawer" || c.type === "accordion") d.open = !!c.spec.open;
+    if (c.type === "tabs") { d.value = c.spec.value; d.tabs = Object.keys(c.el.__bodies); }
+    if (c.type === "table") { d.value = c.input.value; d.rows = c.input.__rows(); if (c.input.value >= 0) d.selected = c.input.__selectedRow(); }
+    if (c.type === "stat") d.value = str(c.spec.value, 40);
+    if (c.spec.tab !== undefined) d.tab = c.spec.tab;
+    if (c.el.hidden) d.hidden = true;
     if (c.handlers) d.on = c.handlers;
     if (c.parentId) d.parent = c.parentId;
     if (c.el.dataset.draggable) d.draggable = true;
@@ -1481,12 +1796,27 @@ const PAGE_JS = String.raw`(function () {
   function update(c, props) {
     if (!props || typeof props !== "object") throw new Error("ui.update needs an object of properties");
     if (CONTAINERS[c.type]) {
-      if (props.title !== undefined && c.type === "card") { var t = c.el.querySelector(".uc-title"); if (t) t.textContent = str(props.title, 120); }
+      if (props.title !== undefined) {
+        c.spec.title = props.title;
+        var t = c.type === "card" ? c.el.querySelector(":scope > .uc-title") : c.el.querySelector(".uc-title-text");
+        if (t) t.textContent = str(props.title, 120);
+      }
+      if (props.open !== undefined && (c.type === "modal" || c.type === "drawer" || c.type === "accordion")) {
+        var want = !!props.open;
+        if (c.type === "accordion") { if (want !== !!c.spec.open) c.el.__toggle(); }
+        else { c.spec.open = want; c.el.classList.toggle("open", want); }
+      }
+      if (props.value !== undefined && c.type === "tabs") { c.el.__pick(String(props.value)); c.body = c.el.__bodies[c.spec.value]; }
+      if (props.columns !== undefined && c.type === "grid") { c.spec.columns = props.columns; c.el.style.gridTemplateColumns = "repeat(" + Math.max(1, Math.min(6, Number(props.columns) || 2)) + ", minmax(0, 1fr))"; }
+      ["hidden", "width", "grow"].forEach(function (k) { if (props[k] !== undefined) c.spec[k] = props[k]; });
+      applyCommon(c.el, c.spec);
+      positionOverlays();
+      saveDash();
       return describe(c);
     }
     if (props.on !== undefined) c.handlers = handlerSpec(props.on);
     var spec = Object.assign({}, c.spec, props, { type: c.type, parent: c.spec.parent });
-    if (c.input && props.value === undefined && c.type !== "button" && c.type !== "checkbox") spec.value = c.input.value;
+    if (c.input && props.value === undefined && c.type !== "button" && c.type !== "checkbox" && !(c.type === "table" && props.rows !== undefined)) spec.value = c.input.value;
     if ((c.type === "checkbox" || c.type === "toggle") && props.checked === undefined) spec.checked = c.input.checked;
     if (c.type === "progress" || c.type === "heading" || c.type === "text") { /* plain props */ }
     var built = buildComponent(spec);
@@ -1550,6 +1880,11 @@ const PAGE_JS = String.raw`(function () {
     if (openSelect) openSelect.__close();
   }
   sizeBtn.addEventListener("click", function () { setFull(!dashSection.classList.contains("full")); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape" || document.querySelector(".overlay") || openSelect) return;
+    var open = Object.keys(comps).map(function (k) { return comps[k]; }).filter(function (c) { return (c.type === "modal" || c.type === "drawer") && c.spec.open && c.spec.closable !== false && c.el.__close; });
+    if (open.length) { e.stopImmediatePropagation(); open[open.length - 1].el.__close(); }
+  }, true);
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && dashSection.classList.contains("full") && !document.querySelector(".overlay") && !openSelect) setFull(false);
   });
@@ -1655,12 +1990,13 @@ const PAGE_JS = String.raw`(function () {
       return n;
     },
     // In page order (after drags), each with its parent.
+    "ui.toast": function (call, a) { return toast(a[0], a[1]); },
     "ui.list": function () { return Array.prototype.map.call(dashArea.querySelectorAll("[data-cid]"), function (el) { return comps[el.dataset.cid]; }).filter(Boolean).map(describe); },
     "ui.wait": function (call, a) {
       var c = compOf(String(a[0])), o = a[1] || {};
       var ms = Math.max(100, Math.min(CALL_TIMEOUT_MS - 5000, Number(o.timeout) || 60000));
       return new Promise(function (resolve, reject) {
-        var w = { event: ["click", "change", "drop", "dblclick"].indexOf(o.event) >= 0 ? o.event : null };
+        var w = { event: EVENTS.indexOf(o.event) >= 0 ? o.event : null };
         var timer = setTimeout(function () { done(); resolve({ event: "timeout", id: c.id }); }, ms);
         call.waitingFor++; updateRunning();
         function done() { clearTimeout(timer); if (w.finished) return; w.finished = true; call.waitingFor--; updateRunning(); c.waiters = c.waiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
@@ -1692,6 +2028,8 @@ const PAGE_JS = String.raw`(function () {
       var c = compOf(String(a[0])), cur = cursorFor(call.client);
       return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () {
         if (c.input && c.input.disabled) throw new Error("component '" + c.id + "' is disabled");
+        if (c.type === "accordion") { actor = call.client.name; try { c.el.__toggle(); } finally { actor = null; } return describe(c); }
+        if ((c.type === "modal" || c.type === "drawer") && c.el.__close) { actor = call.client.name; try { c.el.__close(); } finally { actor = null; } return describe(c); }
         if (c.type === "button") { c.input.classList.add("pressed"); setTimeout(function () { c.input.classList.remove("pressed"); }, 180); notify(c, { event: "click", id: c.id, by: call.client.name }); }
         else if (c.type === "checkbox" || c.type === "toggle") { c.input.checked = !c.input.checked; notify(c, { event: "change", id: c.id, checked: c.input.checked, by: call.client.name }); }
         else if (c.input && c.input.focus) c.input.focus();
@@ -1734,6 +2072,17 @@ const PAGE_JS = String.raw`(function () {
     },
     "cursor.select": function (call, a) {
       var c = compOf(String(a[0])), cur = cursorFor(call.client), v = str(a[1], 200);
+      if (c.type === "table" || c.type === "list" || c.type === "tabs") {
+        var itemEl = c.type === "tabs" ? c.el.__tabEls[v] : c.input.__item(c.type === "table" ? Number(v) : v);
+        if (!itemEl) throw new Error(c.type + " '" + c.id + "' has no " + (c.type === "table" ? "row " : c.type === "tabs" ? "tab '" : "item '") + v + (c.type === "table" ? "" : "'"));
+        reveal(itemEl.closest("[data-cid]") || c.el);
+        var a1 = dashArea.getBoundingClientRect(), ri = itemEl.getBoundingClientRect();
+        return moveTo(cur, { x: ri.left - a1.left + dashArea.scrollLeft + Math.min(30, ri.width / 2), y: ri.top - a1.top + dashArea.scrollTop + ri.height / 2 }).then(function () { return pulse(cur); }).then(function () {
+          actor = call.client.name;
+          try { if (c.type === "tabs") c.el.__pick(v); else c.input.__pick(c.type === "table" ? Number(v) : v); } finally { actor = null; }
+          return describe(c);
+        });
+      }
       needInput(c, ["select", "radio"]);
       if (!c.input.options.some(function (o) { return o.value === v; })) throw new Error(c.type + " '" + c.id + "' has no option '" + v + "'");
       if (c.type === "radio") {
@@ -1993,19 +2342,41 @@ const PAGE_JS = String.raw`(function () {
     ["toggle", { type: "toggle", label: "Dark mode", checked: true }],
     ["radio", { type: "radio", label: "Plan", options: ["Free", "Pro", "Team"], value: "Pro", direction: "row" }],
     ["progress", { type: "progress", label: "Upload", value: 64 }],
-    ["draggable", { type: "text", text: "Drag me (when connected)", draggable: true }],
+    ["draggable", { type: "text", text: "Drag me", draggable: true }],
+    ["badge", { type: "badge", text: "beta", variant: "solid" }],
+    ["alert", { type: "alert", title: "Heads up", text: "Deploys are paused until 18:00.", variant: "warning" }],
+    ["stat", { type: "stat", label: "Requests", value: "12.4k", delta: "8% this week", trend: "up" }],
+    ["table", { type: "table", columns: [{ key: "name", label: "Name" }, { key: "status", label: "Status" }, { key: "ms", label: "ms", align: "right" }], rows: [{ name: "api", status: "ok", ms: 41 }, { name: "web", status: "slow", ms: 380 }, { name: "jobs", status: "ok", ms: 12 }] }],
+    ["list", { type: "list", items: [{ label: "Overview", value: "overview", description: "Today at a glance" }, { label: "Deploys", value: "deploys", badge: "3" }, "Settings"], value: "overview" }],
+    ["tabs", { type: "tabs", tabs: ["Overview", "Logs"] }],
+    ["accordion", { type: "accordion", title: "Advanced", open: true }],
+    ["grid", { type: "grid", columns: 3 }],
+    ["modal", { type: "modal", title: "Modal", __preview: true }],
+    ["drawer", { type: "drawer", title: "Drawer (sidebar)", side: "right", __preview: true }],
     ["editor", { type: "editor", label: "Editor", value: "function hi() {\n  return 'hi';\n}", rows: 3 }],
-    ["card", { type: "card", title: "Card" }]
+    ["card", { type: "card", title: "Card" }],
+    ["toast", null]
   ];
   var gal = document.getElementById("gallery-list");
   SAMPLES.forEach(function (s) {
+    if (!s[1]) {
+      var ti = document.createElement("div"); ti.className = "gal-item";
+      var tn = document.createElement("div"); tn.className = "gal-name"; tn.textContent = "toast";
+      var td = document.createElement("div"); td.className = "gal-demo"; var tt = document.createElement("div"); tt.className = "utoast success static"; tt.textContent = "Saved"; td.appendChild(tt);
+      var tc = document.createElement("code"); tc.className = "gal-code"; tc.textContent = "ui.toast('Saved', { variant: 'success' })";
+      ti.appendChild(tn); ti.appendChild(td); ti.appendChild(tc); gal.appendChild(ti);
+      return;
+    }
     var item = document.createElement("div"); item.className = "gal-item";
     var name = document.createElement("div"); name.className = "gal-name"; name.textContent = s[0];
     var demo = document.createElement("div"); demo.className = "gal-demo";
     var b = buildComponent(s[1]);
-    if (b.body) { var inner = buildComponent({ type: "text", text: "Components inside a card or row.", muted: true }); b.body.appendChild(inner.el); }
+    if (s[1].type === "tabs") Object.keys(b.el.__bodies).forEach(function (n) { b.el.__bodies[n].appendChild(buildComponent({ type: "text", text: "The " + n + " tab: put components in it with parent and tab: '" + n + "'.", muted: true }).el); });
+    else if (s[1].type === "grid") ["One", "Two", "Three"].forEach(function (n) { b.body.appendChild(buildComponent({ type: "stat", label: n, value: n.length }).el); });
+    else if (b.body) { var inner = buildComponent({ type: "text", text: s[1].type === "modal" || s[1].type === "drawer" ? "Shown over the dash; put components inside with parent. Opens with open: true, closes with the x, Esc or a click outside (a 'close' event)." : "Components inside it.", muted: true }); b.body.appendChild(inner.el); }
     demo.appendChild(b.el);
-    var code = document.createElement("code"); code.className = "gal-code"; code.textContent = "ui.add(" + JSON.stringify(s[1]) + ")";
+    var shown = Object.assign({}, s[1]); delete shown.__preview;
+    var code = document.createElement("code"); code.className = "gal-code"; code.textContent = "ui.add(" + JSON.stringify(shown) + ")";
     item.appendChild(name); item.appendChild(demo); item.appendChild(code);
     gal.appendChild(item);
   });
@@ -2074,11 +2445,11 @@ const PAGE_JS = String.raw`(function () {
 export const STARTER_TOOLS: { filename: string; source: string }[] = [
   {
     "filename": "dashboard_add.js",
-    "source": "/**\n * Add a component to the dashboard and return its id. Types: heading, text, code,\n * image (data URL), editor, button, input, textarea, checkbox, toggle, radio,\n * select, slider, progress, status, divider, row, card. \"draggable\": true lets\n * people drag it (a 'drop' event). Put it inside a row or card with spec.parent.\n * Example spec: {\"type\": \"card\", \"title\": \"Build\"} or {\"type\": \"button\", \"label\": \"Run\", \"parent\": \"c1\"}.\n * Make it interactive with \"on\": {\"click\": {\"tool\": \"increment\", \"args\": {\"id\": \"c2\"}}}\n * (or \"change\"): each click or change runs that tool in the browser, no agent needed.\n * @param {object} spec The component, e.g. {\"type\": \"text\", \"text\": \"Hello\"}\n */\nexport default async function dashboard_add(spec) {\n  return await ui.add(spec);\n}\n"
+    "source": "/**\n * Add a component to the dashboard and return its id. Types:\n * - content: heading, text, code, image (data URL), badge, alert, stat, status, progress, divider\n * - input: button, input (inputType: text|password|number|email), textarea, editor, checkbox,\n *   toggle, radio, select, slider\n * - data: table (columns, rows; sortable, selectable -> 'select'), list (items -> 'click')\n * - layout: row, column, grid (columns: n), card (title), tabs (tabs: [...]; children give tab),\n *   accordion (title, open), modal and drawer (title, open, side; 'close' event; top level only)\n * Put a component inside a container with parent. Any component takes hidden, width, grow;\n * \"draggable\": true lets people drag it (a 'drop' event). Make it interactive with\n * \"on\": {\"click\": {\"tool\": \"dashboard_update\", \"args\": {\"id\": \"c7\", \"props\": {\"open\": true}}}}\n * (events: click, change, drop, dblclick, select, toggle, close) - it runs in the browser.\n * Example spec: {\"type\": \"card\", \"title\": \"Build\"} or {\"type\": \"button\", \"label\": \"Run\", \"parent\": \"c1\"}.\n * @param {object} spec The component, e.g. {\"type\": \"text\", \"text\": \"Hello\"}\n */\nexport default async function dashboard_add(spec) {\n  return await ui.add(spec);\n}\n"
   },
   {
     "filename": "dashboard_update.js",
-    "source": "/**\n * Change a dashboard component: its text, label, value, options, checked,\n * variant, state or disabled. Returns the component as it is now.\n * @param {string} id The component id (from dashboard_add or dashboard_list)\n * @param {object} props The properties to change, e.g. {\"text\": \"Done\", \"state\": \"off\"}\n */\nexport default async function dashboard_update(id, props) {\n  return await ui.update(id, props);\n}\n"
+    "source": "/**\n * Change a dashboard component: its text, label, value, options, checked, rows,\n * variant, state, disabled, hidden, open (modal, drawer, accordion), value (the\n * tab of tabs) or on (handlers). Returns the component as it is now.\n * @param {string} id The component id (from dashboard_add or dashboard_list)\n * @param {object} props The properties to change, e.g. {\"text\": \"Done\", \"state\": \"off\"}\n */\nexport default async function dashboard_update(id, props) {\n  return await ui.update(id, props);\n}\n"
   },
   {
     "filename": "dashboard_list.js",
@@ -2139,6 +2510,10 @@ export const STARTER_TOOLS: { filename: string; source: string }[] = [
   {
     "filename": "storage.js",
     "source": "/**\n * Keep small values in this browser across calls and reloads (a key-value\n * store). get returns the value (or null), set stores any JSON value, delete\n * removes a key, list returns the keys (optionally those starting with key).\n * @param {string} action get, set, delete or list\n * @param {string} [key] The key - for list, an optional prefix\n * @param {*} [value] For set: the value to store\n */\nexport default async function storage(action, key, value) {\n  if (action === \"list\") return await kv.list(key || \"\");\n  if (!key) throw new Error(\"give a key\");\n  if (action === \"get\") return await kv.get(key);\n  if (action === \"set\") return await kv.set(key, value);\n  if (action === \"delete\") return await kv.delete(key);\n  throw new Error(\"action must be get, set, delete or list\");\n}\n"
+  },
+  {
+    "filename": "example_app.js",
+    "source": "/**\n * Build an example web app on the dashboard - a header, a navigation drawer,\n * stats, alerts, a sortable table in tabs, an accordion and an About modal - to\n * show what the components can do. Buttons open the drawer and the modal with\n * dashboard_update handlers, so it works in the browser without an agent.\n * Returns the ids, so an agent can keep building on it.\n */\nexport default async function example_app() {\n  const nav = await ui.add({ type: \"drawer\", title: \"Navigate\", side: \"left\", open: false });\n  const navList = await ui.add({ type: \"list\", parent: nav, value: \"overview\", items: [\n    { label: \"Overview\", value: \"overview\", description: \"Today at a glance\" },\n    { label: \"Deploys\", value: \"deploys\", badge: \"3\" },\n    { label: \"Settings\", value: \"settings\" },\n  ] });\n  const about = await ui.add({ type: \"modal\", title: \"About Acme Ops\", open: false });\n  await ui.add({ type: \"text\", parent: about, text: \"Built by an agent with the Sandbox components. Close with the x, Esc or a click outside.\" });\n  const header = await ui.add({ type: \"row\" });\n  await ui.add({ type: \"button\", label: \"\\u2630 Menu\", variant: \"secondary\", parent: header, on: { click: { tool: \"dashboard_update\", args: { id: nav, props: { open: true } } } } });\n  await ui.add({ type: \"heading\", text: \"Acme Ops\", parent: header, grow: true });\n  await ui.add({ type: \"badge\", text: \"live\", variant: \"success\", parent: header });\n  await ui.add({ type: \"button\", label: \"About\", variant: \"secondary\", parent: header, on: { click: { tool: \"dashboard_update\", args: { id: about, props: { open: true } } } } });\n  await ui.add({ type: \"alert\", variant: \"warning\", title: \"Maintenance\", text: \"Database upgrade on Saturday 02:00-03:00.\" });\n  const stats = await ui.add({ type: \"grid\", columns: 3 });\n  await ui.add({ type: \"stat\", parent: stats, label: \"Requests\", value: \"12.4k\", delta: \"8% this week\", trend: \"up\" });\n  await ui.add({ type: \"stat\", parent: stats, label: \"Errors\", value: \"0.3%\", delta: \"0.1% this week\", trend: \"down\" });\n  await ui.add({ type: \"stat\", parent: stats, label: \"Deploys\", value: \"27\" });\n  const tabs = await ui.add({ type: \"tabs\", tabs: [\"Deploys\", \"Logs\"] });\n  const table = await ui.add({ type: \"table\", parent: tabs, tab: \"Deploys\",\n    columns: [{ key: \"id\", label: \"#\", align: \"right\" }, { key: \"service\", label: \"Service\" }, { key: \"status\", label: \"Status\" }, { key: \"ms\", label: \"Duration (s)\", align: \"right\" }],\n    rows: [{ id: 104, service: \"api\", status: \"ok\", ms: 41 }, { id: 103, service: \"web\", status: \"failed\", ms: 380 }, { id: 102, service: \"jobs\", status: \"ok\", ms: 12 }] });\n  await ui.add({ type: \"code\", parent: tabs, tab: \"Logs\", text: \"02:14 api   deploy 104 ok\\n02:09 web   deploy 103 failed: health check\\n01:58 jobs  deploy 102 ok\" });\n  const more = await ui.add({ type: \"accordion\", title: \"Settings\", open: false });\n  await ui.add({ type: \"toggle\", label: \"Auto-deploy main\", checked: true, parent: more });\n  await ui.add({ type: \"input\", label: \"Alert email\", inputType: \"email\", placeholder: \"ops@acme.dev\", parent: more });\n  await ui.toast(\"Example app ready\", { variant: \"success\" });\n  return { nav, navList, about, header, stats, tabs, table, more };\n}\n"
   }
 ];
 
