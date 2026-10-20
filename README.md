@@ -60,6 +60,7 @@ npx wrangler deploy
 | `POST <worker>/api/files?name=&expiry_days=&key=` | Upload a temporary file (device Basic auth; streamed into R2) |
 | `GET <worker>/api/files/{id}` | Download it (supports `Range`) |
 | `GET <worker>/files` | File management page (device Basic auth) |
+| `GET <worker>/mcp` | Sandbox: the browser as a device with JavaScript tools (device Basic auth) |
 
 ## Temporary files
 
@@ -76,6 +77,47 @@ access log or a `Referer`. Limits: 200 MiB per file, 7 days, 5 files and
 500 MiB per device. Expired files are deleted automatically and never listed.
 Requires an R2 bucket bound as `BUCKET` - see
 [gateway/README.md](gateway/README.md#temporary-files).
+
+## Sandbox: this browser as a device
+
+`GET /mcp` (HTTP Basic with a registered device's id and token, like `/files`)
+turns the browser tab into that device. Instead of files, it holds **tools**:
+JavaScript files, one tool each, kept in the browser's storage.
+```js
+/**
+ * Add two numbers.            <- the tool's description
+ * @param {number} a First     <- arguments and their JSON schema
+ * @param {number} [b=1] Second
+ */
+export default async function add(a, b = 1) { return a + b; }
+```
+
+- **Manage**: `+` adds a .js file; Save validates it (syntax, a single default
+  async function, no imports, `@param` tags matching the parameters, supported
+  types, unique name). View (edit), Download, Deactivate/Activate, Delete. On a
+  first visit with no tools, starter tools for building a dashboard are added
+  (`dashboard_add/update/list/remove`, `ask_user`, `confirm`, `bar_chart`,
+  `table`, `cursor_click`, `cursor_type`) - delete what you do not need.
+- **Connect** opens the device's tunnel (WSS, authorised by a 30-second,
+  single-use ticket - the token never goes in a URL). Tools are locked while
+  connected. MCP clients reach it at `/mcp/{deviceId}` like any device and see
+  exactly two tools: `search` (find tools, with their schemas) and `call`
+  (`{name, arguments}`).
+- **Dash**: while connected, tools can show UI - `ui.add({type, ...})` with
+  heading, text, code, image, editor, button, input, textarea, checkbox,
+  select, slider, status, divider, row, card - rendered by the page in its own
+  style, and drive a **named cursor per MCP client** (`cursor.click`, `type`,
+  `fill`, `check`, `select`, `drag`). `ui.wait(id)` waits for the person at the
+  browser to click or change something. The page's *Components* section shows
+  every component with its `ui.add` call.
+- **Isolation**: each call runs in its own iframe sandboxed by attribute and
+  CSP - an opaque origin with no storage, cookies or credentials, no network,
+  no access to the page - and is stopped after 120 s. Clients are told apart by
+  the `Mcp-Session-Id` the gateway now issues on `initialize`; devices receive
+  `client: {id, name}` with each request (the id is a salted hash, not an IP).
+- One tunnel per device: if the device is already connected elsewhere (e.g.
+  code-mcp), Connect says so instead of replacing it. Closing the tab
+  disconnects.
 
 ## code-mcp
 

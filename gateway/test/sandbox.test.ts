@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RUNTIME_JS, renderSandboxPage } from "../src/sandbox";
+import { RUNTIME_JS, STARTER_TOOLS, renderSandboxPage, signTicket, verifyTicket } from "../src/sandbox";
 
 // Run the runtime's analyzer as the sandboxed iframe would, with a fake parent.
 function analyzer() {
@@ -56,8 +56,43 @@ describe("sandbox tool validation", () => {
     expect((globalThis as any).__ran).toBe(false);
   });
 
+  test("every starter tool is valid, with a unique name", () => {
+    expect(STARTER_TOOLS.length).toBeGreaterThanOrEqual(8);
+    const names = STARTER_TOOLS.map((s) => {
+      const r = analyze(s.source, s.filename);
+      expect(r.error).toBeUndefined();
+      expect(r.ok).toBe(true);
+      expect(r.name + ".js").toBe(s.filename);
+      return r.name;
+    });
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test("the page script declares each function once (a later one would silently replace it)", () => {
+    const js = [...renderSandboxPage("demo").matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+    expect(() => new Function(js)).not.toThrow();
+    const names = [...js.matchAll(/^  function ([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1]);
+    expect(names.length).toBeGreaterThan(40);
+    expect(names.filter((n, i) => names.indexOf(n) !== i)).toEqual([]);
+  });
+
   test("the page escapes the device id", () => {
     const html = renderSandboxPage('a"<b>');
     expect(html).not.toContain('a"<b>');
+  });
+});
+
+describe("sandbox WebSocket tickets", () => {
+  test("valid for its device and token, within 30 s", async () => {
+    const now = Date.now();
+    const ticket = await signTicket("demo", "tok", now);
+    expect(await verifyTicket("demo", ticket, "tok", now + 1000)).not.toBeNull();
+    expect(await verifyTicket("other", ticket, "tok", now)).toBeNull();
+    expect(await verifyTicket("demo", ticket, "rotated", now)).toBeNull();
+    expect(await verifyTicket("demo", ticket, "tok", now + 31_000)).toBeNull();
+    const [exp, nonce, sig] = ticket.split(".");
+    expect(await verifyTicket("demo", [String(Number(exp) + 60_000), nonce, sig].join("."), "tok", now)).toBeNull();
+    expect(await verifyTicket("demo", [exp, nonce, sig.slice(0, -2) + "AA"].join("."), "tok", now)).toBeNull();
+    expect(await verifyTicket("demo", "garbage", "tok", now)).toBeNull();
   });
 });

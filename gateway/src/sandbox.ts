@@ -32,6 +32,68 @@ const SANDBOX_CSS = `
       .dlg-bar { display: flex; justify-content: flex-end; margin-top: 10px; }
       .btn { font: inherit; font-size: 12px; font-weight: 600; padding: 6px 16px; background: #111; color: #fff; border: 1px solid #111; cursor: pointer; }
       .btn:disabled { opacity: 0.4; cursor: default; }
+      .connect:disabled { opacity: 0.5; cursor: default; }
+      .connect.on { background: #fff; color: #111; }
+      .connect.on:hover { background: #f2f2f2; }
+      .conninfo { font-size: 11px; color: #666; line-height: 1.5; word-break: break-all; }
+      /* ---- dash: where tools put UI and drive cursors ---- */
+      #dash { margin-top: 28px; }
+      #dash[hidden] { display: none; }
+      .dash-area { position: relative; min-height: 320px; border: 1px dashed #bbb; padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow: auto; max-height: 70vh; }
+      .dash-empty { color: #999; font-size: 12px; margin: auto; text-align: center; }
+      .dash-empty[hidden] { display: none; }
+      /* Components: the page's own vocabulary - mono type, black on white, 1px lines. */
+      .uc { font-size: 13px; color: #111; min-width: 0; }
+      .uc-heading { font-size: 15px; font-weight: 700; letter-spacing: 0.3px; }
+      .uc-text { white-space: pre-wrap; line-height: 1.5; }
+      .uc-text.muted { color: #666; font-size: 12px; }
+      .uc-code pre { margin: 0; background: #f5f5f5; border: 1px solid #ddd; padding: 10px 12px; font: inherit; font-size: 12px; overflow-x: auto; white-space: pre; }
+      .uc-image img { display: block; max-width: 100%; border: 1px solid #111; }
+      .uc-label { font-size: 10px; color: #999; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 4px; }
+      .uc-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px; }
+      .uc-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+      .uc-card { border: 1px solid #111; padding: 12px 14px; }
+      .uc-card .uc-body { display: flex; flex-direction: column; gap: 10px; }
+      .uc-status { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+      .uc-divider { border-top: 1px solid #ddd; }
+      .uc-status .dot.pending { background: #ccc; }
+      .ubtn { font: inherit; font-size: 12px; font-weight: 600; padding: 7px 16px; background: #111; color: #fff; border: 1px solid #111; cursor: pointer; transition: transform 0.08s; }
+      .ubtn:hover { background: #000; }
+      .ubtn.secondary { background: #fff; color: #111; }
+      .ubtn.secondary:hover { background: #f2f2f2; }
+      .ubtn.danger { background: #b91c1c; border-color: #b91c1c; }
+      .ubtn:disabled { opacity: 0.4; cursor: default; }
+      .ubtn.pressed { transform: scale(0.96); }
+      .uinput { font: inherit; font-size: 13px; width: 100%; box-sizing: border-box; border: 0; border-bottom: 1px dotted #999; padding: 4px 0; background: transparent; color: #111; }
+      .uinput:focus { outline: none; border-bottom: 1px solid #111; }
+      .utextarea, .ueditor { font: inherit; font-size: 12px; width: 100%; box-sizing: border-box; border: 1px solid #ddd; padding: 8px 10px; background: #fff; color: #111; resize: vertical; line-height: 1.5; }
+      .ueditor { background: #fafafa; white-space: pre; tab-size: 2; }
+      .utextarea:focus, .ueditor:focus { outline: none; border-color: #111; }
+      .ucheck { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+      .ucheck input { accent-color: #111; width: 14px; height: 14px; margin: 0; }
+      .uselect { font: inherit; font-size: 12px; border: 1px solid #111; background: #fff; color: #111; padding: 5px 8px; min-width: 120px; }
+      .uslider { width: 220px; accent-color: #111; }
+      .uc.dragging { opacity: 0.45; }
+      /* Virtual cursors: a black arrow and the client's name. */
+      .cur { position: absolute; left: 0; top: 0; z-index: 20; pointer-events: none; transform: translate(12px, 12px); }
+      .cur svg { width: 16px; height: 20px; display: block; fill: #111; stroke: #fff; stroke-width: 1.2; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.25)); }
+      .cur-name { position: absolute; left: 14px; top: 16px; font-size: 10px; font-weight: 600; color: #fff; padding: 2px 6px; white-space: nowrap; letter-spacing: 0.3px; }
+      .cur.click svg { animation: curclick 0.16s ease-out; }
+      .cur.grab svg { transform: scale(0.9); }
+      .cur::after { content: ""; position: absolute; left: -6px; top: -6px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--cur); opacity: 0; }
+      .cur.click::after { animation: curring 0.4s ease-out; }
+      @keyframes curclick { 50% { transform: scale(0.85); } }
+      @keyframes curring { from { opacity: 0.9; transform: scale(0.4); } to { opacity: 0; transform: scale(2.2); } }
+      /* ---- the components reference ---- */
+      .gallery { margin-top: 36px; }
+      .gallery summary { cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; list-style: none; }
+      .gallery summary::-webkit-details-marker { display: none; }
+      .gallery summary::before { content: "+ "; }
+      .gallery[open] summary::before { content: "\\2212  "; }
+      .gal-intro { font-size: 12px; color: #666; margin: 12px 0 4px; line-height: 1.6; }
+      .gal-item { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; padding: 12px 0; border-bottom: 1px solid #eee; align-items: start; }
+      .gal-name { font-size: 11px; color: #666; padding-top: 4px; }
+      .gal-code { grid-column: 2; font-size: 10.5px; color: #888; background: none; border: 0; padding: 0; word-break: break-all; }
 `;
 
 const RUNTIME_JS = String.raw`(function () {
@@ -133,9 +195,75 @@ const RUNTIME_JS = String.raw`(function () {
     };
   }
 
+  // ---- running a tool (one iframe per call; the page owns everything else) ----
+  var seq = 1, waiting = {}, logs = [], logBytes = 0;
+  function api(method, args) {
+    return new Promise(function (resolve, reject) {
+      var s = seq++;
+      waiting[s] = { resolve: resolve, reject: reject };
+      var clean;
+      try { clean = JSON.parse(JSON.stringify(args)); } catch (err) { delete waiting[s]; reject(new Error(method + ": arguments must be plain data")); return; }
+      parent.postMessage({ type: "api", seq: s, method: method, args: clean }, "*");
+    });
+  }
+  function fmt(v) {
+    if (typeof v === "string") return v;
+    try { var j = JSON.stringify(v); return j === undefined ? String(v) : j; } catch (e) { return String(v); }
+  }
+  function log(level) {
+    return function () {
+      var line = (level === "log" ? "" : level + ": ") + Array.prototype.map.call(arguments, fmt).join(" ");
+      if (logs.length < 200 && logBytes < 20000) { logs.push(line.slice(0, 2000)); logBytes += line.length; }
+    };
+  }
+  var sandboxConsole = Object.freeze({ log: log("log"), info: log("info"), warn: log("warn"), error: log("error"), debug: log("debug") });
+  var ui = Object.freeze({
+    add: function (spec) { return api("ui.add", [spec]); },
+    update: function (id, props) { return api("ui.update", [id, props]); },
+    get: function (id) { return api("ui.get", [id]); },
+    remove: function (id) { return api("ui.remove", [id]); },
+    clear: function () { return api("ui.clear", []); },
+    list: function () { return api("ui.list", []); },
+    wait: function (id, options) { return api("ui.wait", [id, options || {}]); }
+  });
+  var cursor = Object.freeze({
+    move: function (id) { return api("cursor.move", [id]); },
+    click: function (id) { return api("cursor.click", [id]); },
+    type: function (id, text) { return api("cursor.type", [id, String(text)]); },
+    fill: function (id, text) { return api("cursor.fill", [id, String(text)]); },
+    check: function (id, value) { return api("cursor.check", [id, value === undefined ? true : !!value]); },
+    select: function (id, value) { return api("cursor.select", [id, String(value)]); },
+    drag: function (id, target) { return api("cursor.drag", [id, target]); }
+  });
+  function result(ok, value, error) {
+    var text = null;
+    if (ok) text = value === undefined ? "" : (typeof value === "string" ? value : fmt(value));
+    parent.postMessage({ type: "result", ok: ok, text: text, error: error || null, logs: logs }, "*");
+  }
+  function run(d) {
+    var source = String(d.source || "");
+    var body = "var __tool__;\n" + source.replace(/export\s+default\s+async\s+function/, "__tool__ = async function") + "\n;return __tool__;";
+    var fn;
+    try { fn = new Function("ui", "cursor", "console", "client", body)(ui, cursor, sandboxConsole, Object.freeze(d.client || {})); }
+    catch (err) { result(false, null, "the tool failed to load: " + (err && err.message || err)); return; }
+    if (typeof fn !== "function") { result(false, null, "the tool has no default function"); return; }
+    Promise.resolve().then(function () { return fn.apply(null, d.args || []); }).then(
+      function (v) { result(true, v); },
+      function (err) { result(false, null, err && err.message ? String(err.message) : String(err)); }
+    );
+  }
+
   window.addEventListener("message", function (e) {
     if (e.source !== parent) return;
     var d = e.data || {};
+    if (d.type === "run") { run(d); return; }
+    if (d.type === "api-result") {
+      var w = waiting[d.seq];
+      if (!w) return;
+      delete waiting[d.seq];
+      if (d.ok) w.resolve(d.value); else w.reject(new Error(d.error || "failed"));
+      return;
+    }
     if (d.type !== "analyze") return;
     var result;
     try { result = analyze(d.source, d.filename); }
@@ -151,10 +279,13 @@ const PAGE_JS = String.raw`(function () {
   var KEY = "code-mcp.sandbox.tools." + DEVICE;
   var MAX_TOOLS = 50;
   var tools = load();
+  var SEEDED_KEY = "code-mcp.sandbox.seeded." + DEVICE;
+  var STARTERS = window.__STARTERS__ || [];
   var pending = [];
   var nextQid = 1;
   var showDropzone = false;
   var connected = false;
+  var calls = [];
   var list = document.getElementById("list");
   var statusEl = document.getElementById("status");
   var picker = document.getElementById("picker");
@@ -170,6 +301,9 @@ const PAGE_JS = String.raw`(function () {
   ready = new Promise(function (r) { readyResolve = r; });
   var waiting = {}, nextId = 1;
   window.addEventListener("message", function (e) {
+    for (var i = 0; i < calls.length; i++) {
+      if (calls[i].frame.contentWindow === e.source) { calls[i].onMessage(e.data || {}); return; }
+    }
     if (e.source !== frame.contentWindow) return;
     var d = e.data || {};
     if (d.type === "ready") readyResolve();
@@ -344,14 +478,705 @@ const PAGE_JS = String.raw`(function () {
     });
   }
 
-  // ---- connect (wired to the gateway in the next step) -------------------------
-  document.getElementById("connect").addEventListener("click", function () {
-    setStatus("Connecting this sandbox to the gateway is not available yet.", true);
+  // ===========================================================================
+  // Connection: a Worker owns the WebSocket (timers in a background tab are
+  // throttled; a Worker's are not), the page speaks MCP over the tunnel.
+  // ===========================================================================
+  var connectBtn = document.getElementById("connect");
+  var connInfo = document.getElementById("conninfo");
+  var dashSection = document.getElementById("dash");
+  var dashArea = document.getElementById("dash-area");
+  var clientsEl = document.getElementById("clients");
+  var conn = { worker: null, state: "idle", userClosed: false, retry: 0, timer: null, mcpUrl: "", registered: false };
+  var WORKER_SRC = [
+    "var ws = null, beat = null;",
+    "onmessage = function (e) {",
+    "  var d = e.data || {};",
+    "  if (d.type === 'open') {",
+    "    try { ws = new WebSocket(d.url); } catch (err) { postMessage({ type: 'close', code: 0, reason: String(err) }); return; }",
+    "    ws.onopen = function () { ws.send(JSON.stringify({ type: 'register', deviceId: d.deviceId })); beat = setInterval(function () { try { ws.send('{\"type\":\"keepalive\"}'); } catch (x) {} }, 20000); postMessage({ type: 'open' }); };",
+    "    ws.onmessage = function (ev) { postMessage({ type: 'message', data: ev.data }); };",
+    "    ws.onclose = function (ev) { clearInterval(beat); postMessage({ type: 'close', code: ev.code, reason: ev.reason }); };",
+    "  } else if (d.type === 'send') { if (ws && ws.readyState === 1) ws.send(d.data); }",
+    "  else if (d.type === 'close') { if (ws) ws.close(1000, 'disconnected by the user'); }",
+    "};"
+  ].join("\n");
+
+  function setConn(state, info) {
+    conn.state = state;
+    var wasConnected = connected;
+    connected = state !== "idle";
+    connectBtn.disabled = state === "connecting";
+    connectBtn.textContent = state === "idle" ? "Connect" : state === "connecting" ? "Connecting\u2026" : "Disconnect";
+    connectBtn.classList.toggle("on", state === "connected");
+    dashSection.hidden = state === "idle";
+    connInfo.textContent = info || "";
+    if (state === "idle") { abortCalls("the sandbox was disconnected"); clearDash(); }
+    if (wasConnected !== connected) render();
+  }
+
+  function connect(first) {
+    conn.userClosed = false;
+    clearTimeout(conn.timer);
+    if (first) setConn("connecting");
+    fetch("/mcp?ticket=1", { method: "POST", headers: { "x-sandbox": "1" }, credentials: "same-origin", cache: "no-store" })
+      .then(function (r) {
+        if (r.status === 401) throw new Error("signed out - reload the page and sign in again");
+        if (!r.ok) throw new Error("ticket request failed (HTTP " + r.status + ")");
+        return r.json();
+      })
+      .then(function (t) {
+        if (conn.userClosed) return;
+        if (t.online && first) {
+          setConn("idle");
+          setStatus("Device " + DEVICE + " is already connected from somewhere else (for example code-mcp or 'mcp connect'). Stop it there, then Connect.", true);
+          return;
+        }
+        conn.mcpUrl = t.mcp_url;
+        openSocket(t.ws_url);
+      })
+      .catch(function (err) {
+        if (conn.userClosed) return;
+        if (first) { setConn("idle"); setStatus("Could not connect: " + (err && err.message || err), true); }
+        else scheduleReconnect();
+      });
+  }
+
+  function openSocket(url) {
+    if (conn.worker) conn.worker.terminate();
+    var blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" }));
+    var w = new Worker(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+    conn.worker = w;
+    conn.registered = false;
+    w.onmessage = function (e) {
+      if (w !== conn.worker) return;
+      var d = e.data || {};
+      if (d.type === "message") onFrame(d.data);
+      else if (d.type === "close") onClose(d.code, d.reason);
+    };
+    w.postMessage({ type: "open", url: url, deviceId: DEVICE });
+  }
+
+  function onFrame(raw) {
+    var msg;
+    try { msg = JSON.parse(raw); } catch (e) { return; }
+    if (!msg || typeof msg !== "object") return;
+    if (msg.type === "registered") {
+      conn.registered = true;
+      conn.retry = 0;
+      setStatus("");
+      setConn("connected");
+      return;
+    }
+    if (msg.type) return;
+    if (typeof msg.id === "string" && msg.request) handleRpc(msg);
+  }
+
+  function onClose(code, reason) {
+    if (conn.worker) { conn.worker.terminate(); conn.worker = null; }
+    if (conn.userClosed || conn.state === "idle") return;
+    if (!conn.registered && conn.state === "connecting") {
+      setConn("idle");
+      setStatus("Could not connect: the gateway refused the tunnel (" + (reason || "code " + code) + "). Is " + DEVICE + " connected from somewhere else?", true);
+      return;
+    }
+    if (/replaced/.test(reason || "")) {
+      setConn("idle");
+      setStatus("Disconnected: another connection for " + DEVICE + " replaced this one.", true);
+      return;
+    }
+    abortCalls("the connection to the gateway was lost");
+    scheduleReconnect();
+  }
+
+  function scheduleReconnect() {
+    conn.retry += 1;
+    if (conn.retry > 8) { setConn("idle"); setStatus("Disconnected: the gateway could not be reached. Connect to try again.", true); return; }
+    var delay = Math.min(30000, 1000 * Math.pow(2, conn.retry - 1));
+    setConn("reconnecting", "Reconnecting in " + Math.round(delay / 1000) + " s\u2026");
+    conn.timer = setTimeout(function () { connect(false); }, delay);
+  }
+
+  function disconnect() {
+    conn.userClosed = true;
+    clearTimeout(conn.timer);
+    if (conn.worker) { conn.worker.postMessage({ type: "close" }); var w = conn.worker; conn.worker = null; setTimeout(function () { w.terminate(); }, 500); }
+    setConn("idle");
+    setStatus("Disconnected.");
+  }
+
+  connectBtn.addEventListener("click", function () {
+    if (conn.state === "idle") connect(true); else disconnect();
+  });
+  window.addEventListener("beforeunload", function () { if (conn.worker) conn.worker.postMessage({ type: "close" }); });
+
+  function send(obj) { if (conn.worker) conn.worker.postMessage({ type: "send", data: JSON.stringify(obj) }); }
+
+  // ===========================================================================
+  // MCP: exactly two tools, search and call.
+  // ===========================================================================
+  var SEARCH_TOOL = {
+    name: "search",
+    description: "Search the tools available in the browser sandbox of device " + DEVICE + ". Returns each match's name, description and inputSchema; run one with the 'call' tool. An empty query lists every active tool.",
+    inputSchema: { type: "object", properties: { query: { type: "string", description: "Words to look for in tool names, descriptions and parameter names" }, limit: { type: "integer", minimum: 1, maximum: 50, description: "At most this many results (default 20)" } }, additionalProperties: false }
+  };
+  var CALL_TOOL = {
+    name: "call",
+    description: "Run one of the sandbox's tools (find them with 'search') in the browser of device " + DEVICE + ". Tools can show UI and use a virtual cursor in the page's dash area.",
+    inputSchema: { type: "object", properties: { name: { type: "string", description: "The tool's name, as returned by search" }, arguments: { type: "object", description: "The tool's arguments, matching its inputSchema" } }, required: ["name"], additionalProperties: false }
+  };
+
+  function handleRpc(env) {
+    var req = env.request || {};
+    var client = env.client && typeof env.client === "object" ? { id: String(env.client.id || "client").slice(0, 32), name: String(env.client.name || "client").slice(0, 40) } : { id: "client", name: "client" };
+    if (!Object.prototype.hasOwnProperty.call(req, "id")) { send({ id: env.id, response: null }); return; }
+    Promise.resolve().then(function () { return dispatch(req, client); }).then(
+      function (result) { send({ id: env.id, response: { jsonrpc: "2.0", id: req.id, result: result } }); },
+      function (err) { send({ id: env.id, response: { jsonrpc: "2.0", id: req.id, error: { code: err && err.code || -32603, message: String(err && err.message || err) } } }); }
+    );
+  }
+
+  function rpcError(code, message) { var e = new Error(message); e.code = code; return e; }
+  function textResult(text, isError) { var r = { content: [{ type: "text", text: text }] }; if (isError) r.isError = true; return r; }
+
+  function dispatch(req, client) {
+    var p = req.params || {};
+    if (req.method === "initialize") {
+      return {
+        protocolVersion: typeof p.protocolVersion === "string" ? p.protocolVersion : "2025-03-26",
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "code-mcp-sandbox", version: "1.0.0" },
+        instructions: "Tools run in a browser (device " + DEVICE + "). Use 'search' to find a tool and its inputSchema, then 'call' it with {name, arguments}."
+      };
+    }
+    if (req.method === "ping") return {};
+    if (req.method === "tools/list") return { tools: [SEARCH_TOOL, CALL_TOOL] };
+    if (req.method === "resources/list") return { resources: [] };
+    if (req.method === "prompts/list") return { prompts: [] };
+    if (req.method === "tools/call") {
+      if (p.name === "search") return search(p.arguments || {});
+      if (p.name === "call") return callTool(p.arguments || {}, client);
+      return textResult("unknown tool '" + p.name + "': this device has 'search' and 'call'", true);
+    }
+    throw rpcError(-32601, "method not found: " + req.method);
+  }
+
+  function activeTools() { return tools.filter(function (t) { return t.active; }); }
+  function toolView(t) { return { name: t.name, description: t.description, inputSchema: t.inputSchema }; }
+
+  function search(args) {
+    if (args.query !== undefined && typeof args.query !== "string") return textResult("'query' must be a string", true);
+    var limit = args.limit === undefined ? 20 : args.limit;
+    if (typeof limit !== "number" || !(limit >= 1 && limit <= 50) || Math.floor(limit) !== limit) return textResult("'limit' must be an integer from 1 to 50", true);
+    var words = String(args.query || "").toLowerCase().split(/\s+/).filter(Boolean);
+    var scored = [];
+    activeTools().forEach(function (t) {
+      var name = t.name.toLowerCase(), desc = t.description.toLowerCase();
+      var params = (t.params || []).map(function (q) { return (q.name + " " + q.description).toLowerCase(); }).join(" ");
+      var score = 0, all = true;
+      words.forEach(function (w) {
+        var s = (name.indexOf(w) >= 0 ? 3 : 0) + (desc.indexOf(w) >= 0 ? 2 : 0) + (params.indexOf(w) >= 0 ? 1 : 0);
+        if (!s) all = false;
+        score += s;
+      });
+      if (all) scored.push({ t: t, score: score });
+    });
+    scored.sort(function (a, b) { return b.score - a.score || (a.t.name < b.t.name ? -1 : 1); });
+    var out = { total: scored.length, tools: scored.slice(0, limit).map(function (s) { return toolView(s.t); }) };
+    return textResult(JSON.stringify(out, null, 2));
+  }
+
+  function typeOk(value, schema) {
+    if (!schema || schema.type === undefined) return true;
+    var types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    return types.some(function (t) {
+      if (t === "integer") return typeof value === "number" && Math.floor(value) === value;
+      if (t === "array") return Array.isArray(value);
+      if (t === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
+      if (t === "null") return value === null;
+      return typeof value === t;
+    });
+  }
+
+  function callTool(args, client) {
+    if (typeof args.name !== "string") return textResult("'name' must be a string: the tool's name from search", true);
+    var t = activeTools().filter(function (x) { return x.name === args.name; })[0];
+    if (!t) return textResult("no active tool named '" + args.name + "' - use search to list the tools", true);
+    var a = args.arguments === undefined ? {} : args.arguments;
+    if (a === null || typeof a !== "object" || Array.isArray(a)) return textResult("'arguments' must be an object", true);
+    var props = t.inputSchema.properties || {}, problems = [];
+    Object.keys(a).forEach(function (k) { if (!Object.prototype.hasOwnProperty.call(props, k)) problems.push("unknown argument '" + k + "'"); });
+    (t.inputSchema.required || []).forEach(function (k) { if (a[k] === undefined) problems.push("missing required argument '" + k + "'"); });
+    Object.keys(props).forEach(function (k) {
+      if (a[k] !== undefined && !typeOk(a[k], props[k])) problems.push("'" + k + "' must be " + [].concat(props[k].type).join(" or "));
+    });
+    if (problems.length) return textResult("invalid arguments for '" + t.name + "': " + problems.join("; ") + ". inputSchema: " + JSON.stringify(t.inputSchema), true);
+    var positional = (t.params || []).map(function (q) { return a[q.name]; });
+    return runTool(t, positional, client).then(function (r) {
+      var text = r.ok ? r.text : "error: " + r.error;
+      if (r.logs && r.logs.length) text += "\n--- console ---\n" + r.logs.join("\n");
+      return textResult(text, !r.ok);
+    });
+  }
+
+  // One sandboxed iframe per call: calls cannot see each other, and a hung or
+  // runaway tool is stopped by removing its frame.
+  var CALL_TIMEOUT_MS = 120000;
+  var runner = document.createElement("div");
+  runner.style.display = "none";
+  document.body.appendChild(runner);
+
+  function runTool(tool, args, client) {
+    return new Promise(function (resolve) {
+      var f = document.createElement("iframe");
+      f.setAttribute("sandbox", "allow-scripts");
+      f.src = "/mcp?frame=runtime";
+      var call = { frame: f, tool: tool, client: client, done: false, waiters: [] };
+      var timer = setTimeout(function () { finish({ ok: false, error: "the tool did not finish within " + CALL_TIMEOUT_MS / 1000 + " s and was stopped", logs: [] }); }, CALL_TIMEOUT_MS);
+      function finish(r) {
+        if (call.done) return;
+        call.done = true;
+        clearTimeout(timer);
+        f.remove();
+        calls = calls.filter(function (c) { return c !== call; });
+        call.waiters.slice().forEach(function (w) { w.cancel("the call ended"); });
+        updateRunning();
+        resolve(r);
+      }
+      call.finish = finish;
+      call.onMessage = function (d) {
+        if (d.type === "ready") f.contentWindow.postMessage({ type: "run", source: tool.source, args: args, client: client }, "*");
+        else if (d.type === "result") finish({ ok: !!d.ok, text: d.text == null ? "" : String(d.text), error: d.error, logs: Array.isArray(d.logs) ? d.logs.map(String) : [] });
+        else if (d.type === "api") handleApi(call, d);
+      };
+      calls.push(call);
+      runner.appendChild(f);
+      updateRunning();
+    });
+  }
+
+  function abortCalls(why) { calls.slice().forEach(function (c) { c.finish({ ok: false, error: why, logs: [] }); }); }
+  function updateRunning() {
+    var n = calls.length;
+    document.getElementById("running").textContent = n ? n + " call" + (n === 1 ? "" : "s") + " running" : "";
+  }
+
+  function handleApi(call, d) {
+    var fn = API[d.method];
+    Promise.resolve().then(function () {
+      if (!fn) throw new Error("unknown method " + d.method);
+      return fn(call, Array.isArray(d.args) ? d.args : []);
+    }).then(
+      function (v) { if (!call.done) call.frame.contentWindow.postMessage({ type: "api-result", seq: d.seq, ok: true, value: v === undefined ? null : v }, "*"); },
+      function (err) { if (!call.done) call.frame.contentWindow.postMessage({ type: "api-result", seq: d.seq, ok: false, error: String(err && err.message || err) }, "*"); }
+    );
+  }
+
+  // ===========================================================================
+  // Dash: components (rendered by the page, styled by the page) and cursors.
+  // ===========================================================================
+  var comps = {}, order = 0, cursors = {};
+  var MAX_COMPONENTS = 300;
+  var CONTAINERS = { row: 1, card: 1 };
+  var PALETTE = ["#2563eb", "#db2777", "#16a34a", "#ea580c", "#7c3aed", "#0891b2", "#ca8a04"];
+
+  function str(v, max) { return v === undefined || v === null ? "" : String(v).slice(0, max || 2000); }
+  function compOf(id) { var c = comps[id]; if (!c) throw new Error("no component '" + id + "'"); return c; }
+  function emptyHint() {
+    var e = dashArea.querySelector(".dash-empty");
+    var any = Object.keys(comps).length > 0;
+    if (e) e.hidden = any;
+  }
+
+  window.__buildComponent = buildComponent;
+  function buildComponent(spec) {
+    var type = spec.type;
+    var el = document.createElement("div");
+    el.className = "uc uc-" + type;
+    var input = null, body = null;
+    function label(text) { if (!text) return; var l = document.createElement("div"); l.className = "uc-label"; l.textContent = str(text, 120); el.appendChild(l); }
+    if (type === "heading") { el.textContent = str(spec.text, 200); }
+    else if (type === "text") { el.textContent = str(spec.text, 20000); if (spec.muted) el.classList.add("muted"); }
+    else if (type === "code") { var pre = document.createElement("pre"); pre.textContent = str(spec.text, 50000); el.appendChild(pre); }
+    else if (type === "image") {
+      var src = str(spec.src, 3000000);
+      if (!/^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+\/=]+$/.test(src)) throw new Error("image: src must be a base64 data:image/... URL (tools have no network)");
+      var img = document.createElement("img"); img.src = src; img.alt = str(spec.alt, 200);
+      if (spec.width) img.style.width = Math.max(16, Math.min(640, Number(spec.width) || 0)) + "px";
+      el.appendChild(img);
+    }
+    else if (type === "editor") { label(spec.label); input = document.createElement("textarea"); input.className = "ueditor"; input.spellcheck = false; input.value = str(spec.value, 200000); input.rows = Math.max(3, Math.min(30, Number(spec.rows) || 10)); input.readOnly = !!spec.readonly; el.appendChild(input); }
+    else if (type === "button") {
+      input = document.createElement("button"); input.type = "button"; input.className = "ubtn" + (spec.variant === "secondary" ? " secondary" : spec.variant === "danger" ? " danger" : ""); input.textContent = str(spec.label || "Button", 80); input.disabled = !!spec.disabled; el.appendChild(input);
+    }
+    else if (type === "input") { label(spec.label); input = document.createElement("input"); input.type = "text"; input.className = "uinput"; input.placeholder = str(spec.placeholder, 200); input.value = str(spec.value, 5000); el.appendChild(input); }
+    else if (type === "textarea") { label(spec.label); input = document.createElement("textarea"); input.className = "utextarea"; input.placeholder = str(spec.placeholder, 200); input.value = str(spec.value, 100000); input.rows = Math.max(2, Math.min(20, Number(spec.rows) || 4)); el.appendChild(input); }
+    else if (type === "checkbox") {
+      var lab = document.createElement("label"); lab.className = "ucheck";
+      input = document.createElement("input"); input.type = "checkbox"; input.checked = !!spec.checked;
+      var s = document.createElement("span"); s.textContent = str(spec.label, 200);
+      lab.appendChild(input); lab.appendChild(s); el.appendChild(lab);
+    }
+    else if (type === "select") {
+      label(spec.label); input = document.createElement("select"); input.className = "uselect";
+      (Array.isArray(spec.options) ? spec.options : []).slice(0, 200).forEach(function (o) {
+        var opt = document.createElement("option");
+        if (o && typeof o === "object") { opt.value = str(o.value, 200); opt.textContent = str(o.label === undefined ? o.value : o.label, 200); } else { opt.value = str(o, 200); opt.textContent = str(o, 200); }
+        input.appendChild(opt);
+      });
+      if (spec.value !== undefined) input.value = str(spec.value, 200);
+      el.appendChild(input);
+    }
+    else if (type === "slider") {
+      label(spec.label); input = document.createElement("input"); input.type = "range"; input.className = "uslider";
+      input.min = String(Number(spec.min) || 0); input.max = String(spec.max === undefined ? 100 : Number(spec.max)); input.step = String(Number(spec.step) || 1);
+      if (spec.value !== undefined) input.value = String(Number(spec.value)); el.appendChild(input);
+    }
+    else if (type === "status") {
+      var dot = document.createElement("span"); dot.className = "dot " + (spec.state === "off" ? "off" : spec.state === "pending" ? "pending" : "on");
+      var t = document.createElement("span"); t.textContent = str(spec.text, 200);
+      el.appendChild(dot); el.appendChild(t);
+    }
+    else if (type === "divider") { }
+    else if (type === "row") { body = el; }
+    else if (type === "card") {
+      if (spec.title) { var h = document.createElement("div"); h.className = "uc-title"; h.textContent = str(spec.title, 120); el.appendChild(h); }
+      body = document.createElement("div"); body.className = "uc-body"; el.appendChild(body);
+    }
+    else throw new Error("unknown component type '" + type + "' - use heading, text, code, image, editor, button, input, textarea, checkbox, select, slider, status, divider, row or card");
+    return { el: el, input: input, body: body };
+  }
+
+  function notify(c, ev) {
+    c.waiters.slice().forEach(function (w) { if (!w.event || w.event === ev.event) w.resolve(ev); });
+  }
+
+  function wire(c) {
+    var i = c.input;
+    if (!i) return;
+    if (c.type === "button") i.addEventListener("click", function () { if (!c.synthetic) notify(c, { event: "click", id: c.id, by: "user" }); });
+    else if (c.type === "checkbox") i.addEventListener("change", function () { if (!c.synthetic) notify(c, { event: "change", id: c.id, checked: i.checked, by: "user" }); });
+    else {
+      i.addEventListener("change", function () { if (!c.synthetic) notify(c, { event: "change", id: c.id, value: i.value, by: "user" }); });
+      if (c.type === "input") i.addEventListener("keydown", function (e) { if (e.key === "Enter") i.blur(); });
+    }
+  }
+
+  function addComponent(call, spec) {
+    if (!spec || typeof spec !== "object") throw new Error("ui.add needs a component, e.g. { type: 'button', label: 'Run' }");
+    if (Object.keys(comps).length >= MAX_COMPONENTS) throw new Error("the dash holds at most " + MAX_COMPONENTS + " components");
+    var built = buildComponent(spec);
+    var id = "c" + (++order);
+    var c = { id: id, type: spec.type, el: built.el, input: built.input, body: built.body, owner: call ? call.client.id : "", waiters: [], spec: spec };
+    built.el.dataset.cid = id;
+    var host = dashArea;
+    if (spec.parent !== undefined && spec.parent !== null) {
+      var p = compOf(String(spec.parent));
+      if (!p.body) throw new Error("parent '" + spec.parent + "' is a " + p.type + "; only row and card hold components");
+      host = p.body;
+    }
+    host.appendChild(built.el);
+    reveal(built.el);
+    comps[id] = c;
+    wire(c);
+    emptyHint();
+    return id;
+  }
+
+  function removeComponent(id) {
+    var c = comps[id];
+    if (!c) return;
+    c.el.querySelectorAll("[data-cid]").forEach(function (child) { delete comps[child.dataset.cid]; });
+    c.waiters.slice().forEach(function (w) { w.cancel("the component was removed"); });
+    c.el.remove();
+    delete comps[id];
+    emptyHint();
+  }
+
+  function clearDash() {
+    Object.keys(comps).forEach(removeComponent);
+    Object.keys(cursors).forEach(function (k) { cursors[k].el.remove(); });
+    cursors = {};
+    clientsEl.textContent = "";
+    emptyHint();
+  }
+
+  function describe(c) {
+    var d = { id: c.id, type: c.type };
+    if (c.spec.label !== undefined) d.label = str(c.spec.label, 200);
+    if (c.spec.text !== undefined) d.text = str(c.spec.text, 2000);
+    if (c.type === "checkbox") d.checked = c.input.checked;
+    else if (c.input && "value" in c.input && c.type !== "button") d.value = c.input.value;
+    if (c.input && c.input.disabled) d.disabled = true;
+    return d;
+  }
+
+  function update(c, props) {
+    if (!props || typeof props !== "object") throw new Error("ui.update needs an object of properties");
+    if (CONTAINERS[c.type]) {
+      if (props.title !== undefined && c.type === "card") { var t = c.el.querySelector(".uc-title"); if (t) t.textContent = str(props.title, 120); }
+      return describe(c);
+    }
+    var spec = Object.assign({}, c.spec, props, { type: c.type, parent: c.spec.parent });
+    if (c.input && props.value === undefined && c.type !== "button" && c.type !== "checkbox") spec.value = c.input.value;
+    if (c.type === "checkbox" && props.checked === undefined) spec.checked = c.input.checked;
+    var built = buildComponent(spec);
+    built.el.dataset.cid = c.id;
+    c.el.replaceWith(built.el);
+    c.el = built.el; c.input = built.input; c.spec = spec;
+    wire(c);
+    return describe(c);
+  }
+
+  // ---- cursors ------------------------------------------------------------------
+  function cursorFor(client) {
+    var cur = cursors[client.id];
+    if (cur) return cur;
+    // The first colour no cursor on the dash is using: clients stay apart.
+    var used = Object.keys(cursors).map(function (k) { return cursors[k].color; });
+    var color = PALETTE.filter(function (c) { return used.indexOf(c) < 0; })[0] || PALETTE[used.length % PALETTE.length];
+    var el = document.createElement("div");
+    el.className = "cur";
+    el.innerHTML = '<svg viewBox="0 0 16 20" aria-hidden="true"><path d="M1 1 L1 16 L5 12 L8 19 L11 17.6 L8 11 L14 11 Z" /></svg><span class="cur-name"></span>';
+    el.querySelector(".cur-name").textContent = client.name;
+    el.querySelector(".cur-name").style.background = color;
+    el.style.setProperty("--cur", color);
+    dashArea.appendChild(el);
+    cur = { el: el, x: 12, y: 12, client: client, color: color };
+    el.style.transform = "translate(12px, 12px)";
+    cursors[client.id] = cur;
+    clientsEl.textContent = "clients: " + Object.keys(cursors).map(function (k) { return cursors[k].client.name; }).join(", ");
+    return cur;
+  }
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  // Keep what a tool works on in view: inside the dash's own scroll area only.
+  function reveal(el) {
+    var a = dashArea.getBoundingClientRect(), r = el.getBoundingClientRect();
+    if (r.bottom > a.bottom) dashArea.scrollTop += r.bottom - a.bottom + 16;
+    else if (r.top < a.top) dashArea.scrollTop -= a.top - r.top + 16;
+  }
+  function pointIn(c, fx, fy) {
+    reveal(c.el);
+    var a = dashArea.getBoundingClientRect(), r = (c.input || c.el).getBoundingClientRect();
+    return { x: r.left - a.left + dashArea.scrollLeft + r.width * (fx === undefined ? 0.5 : fx), y: r.top - a.top + dashArea.scrollTop + r.height * (fy === undefined ? 0.5 : fy) };
+  }
+  function moveTo(cur, p, ms) {
+    cur.el.style.transition = "transform " + (ms || 380) + "ms cubic-bezier(.3,.7,.4,1)";
+    cur.el.style.transform = "translate(" + Math.round(p.x) + "px, " + Math.round(p.y) + "px)";
+    cur.x = p.x; cur.y = p.y;
+    return sleep((ms || 380) + 40);
+  }
+  function pulse(cur) {
+    cur.el.classList.remove("click"); void cur.el.offsetWidth; cur.el.classList.add("click");
+    return sleep(160);
+  }
+  function needInput(c, kinds) {
+    if (kinds.indexOf(c.type) < 0) throw new Error("component '" + c.id + "' is a " + c.type + "; this works on " + kinds.join(", "));
+    if (c.input.disabled) throw new Error("component '" + c.id + "' is disabled");
+  }
+  function setValue(c, value, by) {
+    c.synthetic = true;
+    c.input.value = value;
+    c.input.dispatchEvent(new Event("input", { bubbles: true }));
+    c.synthetic = false;
+    notify(c, { event: "change", id: c.id, value: c.input.value, by: by });
+  }
+
+  var TEXTUAL = ["input", "textarea", "editor"];
+  var API = {
+    "ui.add": function (call, a) { return addComponent(call, a[0]); },
+    "ui.update": function (call, a) { return update(compOf(String(a[0])), a[1]); },
+    "ui.get": function (call, a) { return describe(compOf(String(a[0]))); },
+    "ui.remove": function (call, a) { compOf(String(a[0])); removeComponent(String(a[0])); return true; },
+    "ui.clear": function (call) {
+      var n = 0;
+      Object.keys(comps).forEach(function (id) { if (comps[id] && comps[id].owner === call.client.id) { removeComponent(id); n++; } });
+      return n;
+    },
+    "ui.list": function () { return Object.keys(comps).map(function (id) { return describe(comps[id]); }); },
+    "ui.wait": function (call, a) {
+      var c = compOf(String(a[0])), o = a[1] || {};
+      var ms = Math.max(100, Math.min(CALL_TIMEOUT_MS - 5000, Number(o.timeout) || 60000));
+      return new Promise(function (resolve, reject) {
+        var w = { event: o.event === "click" || o.event === "change" ? o.event : null };
+        var timer = setTimeout(function () { done(); resolve({ event: "timeout", id: c.id }); }, ms);
+        function done() { clearTimeout(timer); c.waiters = c.waiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
+        w.resolve = function (ev) { done(); resolve(ev); };
+        w.cancel = function (why) { done(); reject(new Error(why)); };
+        c.waiters.push(w); call.waiters.push(w);
+      });
+    },
+    "cursor.move": function (call, a) { var c = compOf(String(a[0])); return moveTo(cursorFor(call.client), pointIn(c)).then(function () { return true; }); },
+    "cursor.click": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client);
+      return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () {
+        if (c.input && c.input.disabled) throw new Error("component '" + c.id + "' is disabled");
+        if (c.type === "button") { c.input.classList.add("pressed"); setTimeout(function () { c.input.classList.remove("pressed"); }, 180); notify(c, { event: "click", id: c.id, by: call.client.name }); }
+        else if (c.type === "checkbox") { c.input.checked = !c.input.checked; notify(c, { event: "change", id: c.id, checked: c.input.checked, by: call.client.name }); }
+        else if (c.input && c.input.focus) c.input.focus();
+        return describe(c);
+      });
+    },
+    "cursor.type": function (call, a) {
+      var c = compOf(String(a[0])), text = str(a[1], 5000), cur = cursorFor(call.client);
+      needInput(c, TEXTUAL);
+      if (c.input.readOnly) throw new Error("component '" + c.id + "' is read-only");
+      var stepMs = text.length > 400 ? 2 : text.length > 100 ? 10 : 35;
+      return moveTo(cur, pointIn(c, 0.15)).then(function () { return pulse(cur); }).then(function () {
+        c.input.focus();
+        var i = 0;
+        return new Promise(function (resolve) {
+          (function next() {
+            if (i >= text.length || !comps[c.id]) { resolve(); return; }
+            var chunk = stepMs < 5 ? text.slice(i, i + 8) : text[i];
+            i += chunk.length;
+            c.input.value += chunk;
+            c.input.dispatchEvent(new Event("input", { bubbles: true }));
+            setTimeout(next, stepMs);
+          })();
+        });
+      }).then(function () { notify(c, { event: "change", id: c.id, value: c.input.value, by: call.client.name }); return describe(c); });
+    },
+    "cursor.fill": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client);
+      needInput(c, TEXTUAL);
+      if (c.input.readOnly) throw new Error("component '" + c.id + "' is read-only");
+      return moveTo(cur, pointIn(c, 0.15)).then(function () { return pulse(cur); }).then(function () { setValue(c, str(a[1], 200000), call.client.name); return describe(c); });
+    },
+    "cursor.check": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client);
+      needInput(c, ["checkbox"]);
+      return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () {
+        if (c.input.checked !== !!a[1]) { c.input.checked = !!a[1]; notify(c, { event: "change", id: c.id, checked: c.input.checked, by: call.client.name }); }
+        return describe(c);
+      });
+    },
+    "cursor.select": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client), v = str(a[1], 200);
+      needInput(c, ["select"]);
+      if (!Array.prototype.some.call(c.input.options, function (o) { return o.value === v; })) throw new Error("select '" + c.id + "' has no option '" + v + "'");
+      return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () { setValue(c, v, call.client.name); return describe(c); });
+    },
+    "cursor.drag": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client), target = a[1];
+      if (c.type === "slider") {
+        if (typeof target !== "number") throw new Error("dragging a slider needs a number to drag it to");
+        needInput(c, ["slider"]);
+        var min = Number(c.input.min), max = Number(c.input.max), v = Math.max(min, Math.min(max, target));
+        var from = (Number(c.input.value) - min) / ((max - min) || 1), to = (v - min) / ((max - min) || 1);
+        return moveTo(cur, pointIn(c, from)).then(function () { cur.el.classList.add("grab"); return moveTo(cur, pointIn(c, to), 600); })
+          .then(function () { cur.el.classList.remove("grab"); setValue(c, String(v), call.client.name); return describe(c); });
+      }
+      var t = compOf(String(target));
+      if (t === c || c.el.contains(t.el)) throw new Error("cannot drag a component onto itself");
+      return moveTo(cur, pointIn(c)).then(function () { cur.el.classList.add("grab"); c.el.classList.add("dragging"); return moveTo(cur, pointIn(t, 0.5, 0.1), 650); })
+        .then(function () {
+          cur.el.classList.remove("grab"); c.el.classList.remove("dragging");
+          t.el.parentNode.insertBefore(c.el, t.el);
+          return { moved: c.id, before: t.id };
+        });
+    }
+  };
+
+  // ---- the Components reference (same renderer as the dash) -----------------------
+  var SAMPLES = [
+    ["heading", { type: "heading", text: "Heading" }],
+    ["text", { type: "text", text: "Plain text, wrapping as needed." }],
+    ["code", { type: "code", text: "const x = 42;" }],
+    ["status", { type: "status", text: "Running", state: "on" }],
+    ["button", { type: "button", label: "Run" }],
+    ["button (secondary)", { type: "button", label: "Cancel", variant: "secondary" }],
+    ["button (danger)", { type: "button", label: "Delete", variant: "danger" }],
+    ["input", { type: "input", label: "Name", placeholder: "type here" }],
+    ["textarea", { type: "textarea", label: "Notes", rows: 2 }],
+    ["checkbox", { type: "checkbox", label: "I agree" }],
+    ["select", { type: "select", label: "Size", options: ["S", "M", "L"], value: "M" }],
+    ["slider", { type: "slider", label: "Volume", min: 0, max: 10, value: 4 }],
+    ["editor", { type: "editor", label: "Editor", value: "function hi() {\n  return 'hi';\n}", rows: 3 }],
+    ["card", { type: "card", title: "Card" }]
+  ];
+  var gal = document.getElementById("gallery-list");
+  SAMPLES.forEach(function (s) {
+    var item = document.createElement("div"); item.className = "gal-item";
+    var name = document.createElement("div"); name.className = "gal-name"; name.textContent = s[0];
+    var demo = document.createElement("div"); demo.className = "gal-demo";
+    var b = buildComponent(s[1]);
+    if (b.body) { var inner = buildComponent({ type: "text", text: "Components inside a card or row.", muted: true }); b.body.appendChild(inner.el); }
+    demo.appendChild(b.el);
+    var code = document.createElement("code"); code.className = "gal-code"; code.textContent = "ui.add(" + JSON.stringify(s[1]) + ")";
+    item.appendChild(name); item.appendChild(demo); item.appendChild(code);
+    gal.appendChild(item);
   });
 
-  window.__sandbox = { analyze: analyze, tools: function () { return tools; } };
+  // ---- starter tools: added once, on a first visit with no tools --------------
+  function seedStarters() {
+    var seeded = null;
+    try { seeded = localStorage.getItem(SEEDED_KEY); } catch (e) {}
+    if (seeded || tools.length || !STARTERS.length) return;
+    var chain = Promise.resolve(), added = 0;
+    STARTERS.forEach(function (s) {
+      chain = chain.then(function () {
+        return validateAndStore(s.source, s.filename, null).then(function (r) { if (r.ok) added++; });
+      });
+    });
+    chain.then(function () {
+      try { localStorage.setItem(SEEDED_KEY, new Date().toISOString()); } catch (e) {}
+      render();
+      if (added) setStatus("Added " + added + " starter tools for building an interactive dashboard - View them as examples, or delete the ones you do not need.");
+    });
+  }
+  seedStarters();
+
+  window.__sandbox = { analyze: analyze, tools: function () { return tools; }, comps: function () { return comps; }, state: function () { return conn.state; } };
   render();
 })();`;
+
+/** Example tools added on a first visit with no tools: building blocks for an
+ *  interactive dashboard, and templates for writing new tools. */
+export const STARTER_TOOLS: { filename: string; source: string }[] = [
+  {
+    "filename": "dashboard_add.js",
+    "source": "/**\n * Add a component to the dashboard and return its id. Types: heading, text, code,\n * image (data URL), editor, button, input, textarea, checkbox, select, slider,\n * status, divider, row, card. Put it inside a row or card with spec.parent.\n * Example spec: {\"type\": \"card\", \"title\": \"Build\"} or {\"type\": \"button\", \"label\": \"Run\", \"parent\": \"c1\"}.\n * @param {object} spec The component, e.g. {\"type\": \"text\", \"text\": \"Hello\"}\n */\nexport default async function dashboard_add(spec) {\n  return await ui.add(spec);\n}\n"
+  },
+  {
+    "filename": "dashboard_update.js",
+    "source": "/**\n * Change a dashboard component: its text, label, value, options, checked,\n * variant, state or disabled. Returns the component as it is now.\n * @param {string} id The component id (from dashboard_add or dashboard_list)\n * @param {object} props The properties to change, e.g. {\"text\": \"Done\", \"state\": \"off\"}\n */\nexport default async function dashboard_update(id, props) {\n  return await ui.update(id, props);\n}\n"
+  },
+  {
+    "filename": "dashboard_list.js",
+    "source": "/**\n * List every component on the dashboard with its id, type and current value,\n * so an agent can see what is there - including what the user typed or checked.\n */\nexport default async function dashboard_list() {\n  return await ui.list();\n}\n"
+  },
+  {
+    "filename": "dashboard_remove.js",
+    "source": "/**\n * Remove one component (and anything inside it), or - with no id - everything\n * this client added to the dashboard.\n * @param {string} [id] The component to remove; omit to clear your components\n */\nexport default async function dashboard_remove(id) {\n  if (id === undefined) return { removed: await ui.clear() };\n  await ui.remove(id);\n  return { removed: 1 };\n}\n"
+  },
+  {
+    "filename": "ask_user.js",
+    "source": "/**\n * Ask the person at the browser a question and wait for the answer (typed into\n * a box on the dashboard, sent with Enter or the Send button).\n * @param {string} question What to ask\n * @param {string} [placeholder] Hint shown in the empty answer box\n * @param {number} [timeout_seconds=100] How long to wait for an answer\n */\nexport default async function ask_user(question, placeholder, timeout_seconds = 100) {\n  const card = await ui.add({ type: \"card\", title: \"Question\" });\n  await ui.add({ type: \"text\", text: question, parent: card });\n  const row = await ui.add({ type: \"row\", parent: card });\n  const answer = await ui.add({ type: \"input\", placeholder: placeholder || \"your answer\", parent: row });\n  const send = await ui.add({ type: \"button\", label: \"Send\", parent: row });\n  const timeout = Math.min(timeout_seconds, 110) * 1000;\n  const quiet = (p) => p.catch(() => ({ event: \"cancelled\" }));\n  const ev = await Promise.race([quiet(ui.wait(send, { event: \"click\", timeout })), quiet(ui.wait(answer, { event: \"change\", timeout }))]);\n  const text = (await ui.get(answer)).value;\n  await ui.remove(card);\n  if (ev.event === \"timeout\") return { answered: false };\n  return { answered: true, answer: text };\n}\n"
+  },
+  {
+    "filename": "confirm.js",
+    "source": "/**\n * Ask the person at the browser to confirm something: shows the message with\n * Yes and No buttons and waits for a click. Returns true for Yes.\n * @param {string} message What to confirm\n * @param {number} [timeout_seconds=100] How long to wait\n */\nexport default async function confirm(message, timeout_seconds = 100) {\n  const card = await ui.add({ type: \"card\", title: \"Confirm\" });\n  await ui.add({ type: \"text\", text: message, parent: card });\n  const row = await ui.add({ type: \"row\", parent: card });\n  const yes = await ui.add({ type: \"button\", label: \"Yes\", parent: row });\n  const no = await ui.add({ type: \"button\", label: \"No\", variant: \"secondary\", parent: row });\n  const timeout = Math.min(timeout_seconds, 110) * 1000;\n  const quiet = (p) => p.catch(() => ({ event: \"cancelled\" }));\n  const ev = await Promise.race([quiet(ui.wait(yes, { event: \"click\", timeout })), quiet(ui.wait(no, { event: \"click\", timeout }))]);\n  await ui.remove(card);\n  if (ev.event !== \"click\") return { answered: false };\n  return { answered: true, confirmed: ev.id === yes };\n}\n"
+  },
+  {
+    "filename": "bar_chart.js",
+    "source": "/**\n * Draw a bar chart on the dashboard (an SVG image). Returns the image's id;\n * call it again with the same id to redraw it with new numbers.\n * @param {string} title The chart's title\n * @param {string[]} labels One label per bar\n * @param {number[]} values One number per bar\n * @param {string} [id] An existing chart to redraw instead of adding a new one\n */\nexport default async function bar_chart(title, labels, values, id) {\n  if (labels.length !== values.length) throw new Error(\"labels and values must have the same length\");\n  const esc = (s) => String(s).replace(/&/g, \"&amp;\").replace(/</g, \"&lt;\").replace(/>/g, \"&gt;\");\n  const W = 560, H = 240, pad = 34, bw = (W - pad * 2) / Math.max(1, values.length);\n  const max = Math.max(1, ...values.map(Math.abs));\n  let bars = \"\";\n  values.forEach((v, i) => {\n    const h = Math.round((Math.abs(v) / max) * (H - pad * 2 - 14));\n    const x = pad + i * bw + bw * 0.15, y = H - pad - h;\n    bars += '<rect x=\"' + x + '\" y=\"' + y + '\" width=\"' + bw * 0.7 + '\" height=\"' + h + '\" fill=\"#111\"/>';\n    bars += '<text x=\"' + (x + bw * 0.35) + '\" y=\"' + (y - 4) + '\" text-anchor=\"middle\" font-size=\"10\">' + esc(v) + '</text>';\n    bars += '<text x=\"' + (x + bw * 0.35) + '\" y=\"' + (H - pad + 14) + '\" text-anchor=\"middle\" font-size=\"10\" fill=\"#666\">' + esc(labels[i]) + '</text>';\n  });\n  const svg = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"' + W + '\" height=\"' + H + '\" font-family=\"JetBrains Mono, monospace\">' +\n    '<rect width=\"100%\" height=\"100%\" fill=\"#fff\"/>' +\n    '<text x=\"' + pad + '\" y=\"20\" font-size=\"12\" font-weight=\"700\">' + esc(title) + '</text>' +\n    '<line x1=\"' + pad + '\" y1=\"' + (H - pad) + '\" x2=\"' + (W - pad) + '\" y2=\"' + (H - pad) + '\" stroke=\"#111\"/>' + bars + '</svg>';\n  const src = \"data:image/svg+xml;base64,\" + btoa(unescape(encodeURIComponent(svg)));\n  if (id) { await ui.update(id, { src, alt: title }); return id; }\n  return await ui.add({ type: \"image\", src, alt: title });\n}\n"
+  },
+  {
+    "filename": "table.js",
+    "source": "/**\n * Show rows of data as an aligned table on the dashboard. Returns its id.\n * @param {string[]} columns The column headings\n * @param {array} rows The rows: each an array with one value per column\n * @param {string} [title] A heading above the table\n */\nexport default async function table(columns, rows, title) {\n  const cells = [columns.map(String)].concat(rows.map((r) => columns.map((_, i) => (r[i] === undefined || r[i] === null ? \"\" : String(r[i])))));\n  const widths = columns.map((_, i) => Math.max(...cells.map((r) => r[i].length)));\n  const line = (r) => r.map((c, i) => c.padEnd(widths[i])).join(\"  \").trimEnd();\n  const text = [line(cells[0]), widths.map((w) => \"-\".repeat(w)).join(\"  \")].concat(cells.slice(1).map(line)).join(\"\\n\");\n  if (!title) return await ui.add({ type: \"code\", text });\n  const card = await ui.add({ type: \"card\", title });\n  await ui.add({ type: \"code\", text, parent: card });\n  return card;\n}\n"
+  },
+  {
+    "filename": "cursor_click.js",
+    "source": "/**\n * Move your named cursor to a component and click it (a button presses, a\n * checkbox toggles, a text box gets focus). Returns the component's state.\n * @param {string} id The component to click\n */\nexport default async function cursor_click(id) {\n  return await cursor.click(id);\n}\n"
+  },
+  {
+    "filename": "cursor_type.js",
+    "source": "/**\n * Move your named cursor to a text box (input, textarea or editor) and type\n * into it, key by key. With replace=true the box is cleared first.\n * @param {string} id The text box\n * @param {string} text What to type\n * @param {boolean} [replace=false] Clear the box before typing\n */\nexport default async function cursor_type(id, text, replace = false) {\n  if (replace) await cursor.fill(id, \"\");\n  return await cursor.type(id, text);\n}\n"
+  }
+];
 
 function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -382,9 +1207,18 @@ export function renderSandboxPage(deviceId: string): string {
     '    <ul id="list"></ul>',
     '    <div class="status" id="status"></div>',
     '    <div class="status" id="count"></div>',
-    '    <div class="connect-row"><button class="connect" id="connect" type="button">Connect</button></div>',
+    '    <div class="connect-row"><button class="connect" id="connect" type="button">Connect</button><div class="conninfo" id="conninfo"></div></div>',
+    '    <section id="dash" hidden>',
+    '      <div class="row-head section"><h2>Dash</h2><span class="status" id="clients"></span><span class="status" id="running"></span></div>',
+    '      <div class="dash-area" id="dash-area"><div class="dash-empty">Connected. Tools called by MCP clients show their UI here.</div></div>',
+    "    </section>",
+    '    <details class="gallery" id="gallery">',
+    "      <summary>Components</summary>",
+    '      <p class="gal-intro">Inside a tool, <code>ui.add({...})</code> returns a component id; <code>ui.update</code>, <code>ui.get</code>, <code>ui.remove</code>, <code>ui.clear</code>, <code>ui.list</code> and <code>ui.wait(id)</code> (the next click or change) work on it. <code>cursor.move</code>, <code>click</code>, <code>type</code>, <code>fill</code>, <code>check</code>, <code>select</code> and <code>drag</code> drive this client\'s named cursor. Pass <code>parent</code> to put a component in a row or card. Tools have no network; images are data URLs.</p>',
+    '      <div id="gallery-list"></div>',
+    "    </details>",
     '    <input id="picker" type="file" accept=".js,.mjs,text/javascript" multiple style="display:none" />',
-    "    <script>window.__DEVICE__ = " + JSON.stringify(deviceId).replace(/</g, "\\u003c") + ";</script>",
+    "    <script>window.__DEVICE__ = " + JSON.stringify(deviceId).replace(/</g, "\\u003c") + "; window.__STARTERS__ = " + JSON.stringify(STARTER_TOOLS).replace(/</g, "\\u003c") + ";</script>",
     "    <script>" + PAGE_JS + "</script>",
     "  </body>",
     "</html>",
@@ -404,7 +1238,6 @@ const PAGE_CSP = [
   "font-src https://fonts.gstatic.com",
   "img-src data: blob:",
   "frame-src 'self'",
-  "connect-src 'self'",
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
@@ -420,8 +1253,84 @@ const RUNTIME_CSP = [
   "frame-ancestors 'self'",
 ].join("; ");
 
-/** GET/HEAD /mcp. Anything else at exactly /mcp is a 405. */
+// ---- WebSocket tickets ----------------------------------------------------------
+// "<exp>.<nonce>.<sig>", sig = HMAC-SHA256(device token, "sandbox|id|exp|nonce").
+// Short-lived (30 s), bound to the device id, single-use (the DO remembers the
+// nonce). Signed with the device's own token: no extra secret to manage, and
+// rotating the token invalidates outstanding tickets.
+export const TICKET_TTL_MS = 30_000;
+
+function b64url(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function ticketSig(deviceId: string, token: string, exp: string, nonce: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(token), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("sandbox|" + deviceId + "|" + exp + "|" + nonce));
+  return b64url(new Uint8Array(sig));
+}
+
+export async function signTicket(deviceId: string, token: string, now = Date.now()): Promise<string> {
+  const exp = String(now + TICKET_TTL_MS);
+  const nonce = b64url(crypto.getRandomValues(new Uint8Array(16)));
+  return exp + "." + nonce + "." + (await ticketSig(deviceId, token, exp, nonce));
+}
+
+export async function verifyTicket(deviceId: string, ticket: string, token: string, now = Date.now()): Promise<{ nonce: string } | null> {
+  const parts = ticket.split(".");
+  if (parts.length !== 3 || !/^\d{13}$/.test(parts[0]) || !/^[\w-]{16,64}$/.test(parts[1])) return null;
+  const exp = Number(parts[0]);
+  if (exp < now || exp > now + TICKET_TTL_MS + 5_000) return null;
+  const expected = await ticketSig(deviceId, token, parts[0], parts[1]);
+  if (expected.length !== parts[2].length) return null;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ parts[2].charCodeAt(i);
+  return diff === 0 ? { nonce: parts[1] } : null;
+}
+
+function basicPassword(request: Request): string | null {
+  const h = request.headers.get("authorization") || "";
+  if (!/^basic /i.test(h)) return null;
+  try {
+    const raw = atob(h.slice(6).trim());
+    const i = raw.indexOf(":");
+    return i < 0 ? null : raw.slice(i + 1);
+  } catch {
+    return null;
+  }
+}
+
+function sandboxUnauthorized(base: Record<string, string>): Response {
+  return new Response(JSON.stringify({ error: "unauthorized" }), {
+    status: 401,
+    headers: { ...base, "content-type": "application/json; charset=utf-8", "www-authenticate": 'Basic realm="Prime sandbox", charset="UTF-8"' },
+  });
+}
+
+/** GET/HEAD /mcp (page, runtime frame); POST /mcp?ticket=1 (WebSocket ticket). */
 export async function handleSandbox(request: Request, env: Env, url: URL): Promise<Response> {
+  if (request.method === "POST" && url.searchParams.has("ticket")) {
+    const base = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
+    // A custom header forces a CORS preflight, so another site cannot make the
+    // browser mint a ticket with its remembered Basic credentials.
+    if (request.headers.get("x-sandbox") !== "1") return Response.json({ error: "missing x-sandbox header" }, { status: 400, headers: base });
+    const auth = await authorizeDevice(env, request);
+    const token = basicPassword(request);
+    if (auth instanceof Response || !token) return sandboxUnauthorized(base);
+    let online = false;
+    try {
+      const r = await env.DEVICES.get(env.DEVICES.idFromName(auth.deviceId)).fetch("https://device/online");
+      online = ((await r.json()) as { online?: boolean }).online === true;
+    } catch {}
+    const ticket = await signTicket(auth.deviceId, token);
+    const wsBase = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
+    return Response.json(
+      { device_id: auth.deviceId, online, ticket, ws_url: wsBase + "/ws/" + encodeURIComponent(auth.deviceId) + "?ticket=" + encodeURIComponent(ticket), mcp_url: url.origin + "/mcp/" + encodeURIComponent(auth.deviceId), expires_in_ms: TICKET_TTL_MS },
+      { headers: base },
+    );
+  }
   if (request.method !== "GET" && request.method !== "HEAD") {
     return Response.json({ error: "method not allowed", hint: "MCP clients POST to /mcp/{deviceId}" }, { status: 405, headers: { allow: "GET, HEAD" } });
   }
@@ -432,13 +1341,9 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
     });
   }
   const auth = await authorizeDevice(env, request);
-  if (auth instanceof Response) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { ...base, "content-type": "application/json; charset=utf-8", "www-authenticate": 'Basic realm="Prime sandbox", charset="UTF-8"' },
-    });
-  }
+  if (auth instanceof Response) return sandboxUnauthorized(base);
+  const ws = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
   return new Response(request.method === "HEAD" ? null : renderSandboxPage(auth.deviceId), {
-    headers: { ...base, "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP },
+    headers: { ...base, "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP + "; connect-src 'self' " + ws + "; worker-src blob:" },
   });
 }
