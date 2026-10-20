@@ -17,14 +17,26 @@ const ID = "demo", TOKEN = "demo";
 let w = null;
 if (LOCAL) {
   rmSync(R + "/.wrangler/state-" + PORT, { recursive: true, force: true });
-  w = spawn("node", [R + "/node_modules/wrangler/bin/wrangler.js", "dev", "--local", "-c", R + "/wrangler.dev.toml", "--port", String(PORT), "--ip", "127.0.0.1", "--persist-to", R + "/.wrangler/state-" + PORT], { cwd: R, stdio: "ignore" });
+  w = spawn("node", [R + "/node_modules/wrangler/bin/wrangler.js", "dev", "--local", "-c", R + "/wrangler.dev.toml", "--port", String(PORT), "--ip", "127.0.0.1", "--persist-to", R + "/.wrangler/state-" + PORT, "--var", "RATE_LIMIT_MAX:100000"], { cwd: R, stdio: "ignore" });
 }
 let fails = 0; const ok = (c, m) => { if (!c) fails++; console.log((c ? "PASS " : "FAIL ") + m); };
 const auth = "Basic " + btoa(ID + ":" + TOKEN);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A deployed gateway allows 100 requests a minute per IP: stay under it there.
+const recent = [];
+async function throttle() {
+  if (LOCAL) return;
+  for (;;) {
+    const now = Date.now();
+    while (recent.length && now - recent[0] > 61000) recent.shift();
+    if (recent.length < 80) { recent.push(now); return; }
+    await sleep(61000 - (now - recent[0]));
+  }
+}
+const throttledFetch = async (url, init) => { await throttle(); return fetch(url, init); };
 async function mcpClient(name) {
   const client = new Client({ name, version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(B + "/mcp/" + ID), { requestInit: { headers: { "x-device-token": TOKEN } } }));
+  await client.connect(new StreamableHTTPClientTransport(new URL(B + "/mcp/" + ID), { fetch: throttledFetch, requestInit: { headers: { "x-device-token": TOKEN } } }));
   return client;
 }
 const text = (r) => (r.content || []).map((c) => c.text).join("");
@@ -368,13 +380,60 @@ try {
   ok(rows2[0].n === 2 && rows2[0].done === 2, "after a reload the SQLite database is still there");
   ok(text(await call(beta, "storage", { action: "get", key: "settings/lang" })) === "vi", "and so is kv (a string comes back as plain text)");
 
+  // ---- a dash to carry across Disconnect / reload / reconnect ----
+  const pCounter = text(await call(beta, "dashboard_add", { spec: { type: "heading", text: "10" } }));
+  const pPlus = text(await call(beta, "dashboard_add", { spec: { type: "button", label: "+1", on: { click: { tool: "increment", args: { id: pCounter } } } } }));
+  const pField = text(await call(beta, "dashboard_add", { spec: { type: "input", label: "Note" } }));
+  const pSel = text(await call(beta, "dashboard_add", { spec: { type: "select", options: ["a", "b", "c"], value: "a" } }));
+  await call(beta, "pick", { id: pSel, value: "c" });
+  const pBoard = JSON.parse(text(await call(beta, "kanban", { columns: ["Todo", "Done"], tasks: ["one", "two"] })));
+  await call(beta, "cursor_drag", { id: pBoard.tasks[1], target: pBoard.columns["Done"] });
+
   // ---- disconnect ----
   await page.click("#connect");
   await page.waitForFunction(() => window.__sandbox.state() === "idle");
-  ok(!(await page.isVisible("#dash")) && !(await page.isDisabled("#addBtn")), "Disconnect: dash hidden, editing unlocked");
+  ok(!(await page.isDisabled("#addBtn")), "Disconnect: editing unlocked");
+  // ---- the dash persists across Disconnect and reloads ----
+  const snapshot = async () => page.evaluate(() => [...document.querySelectorAll("#dash-area [data-cid]")].map((el) => {
+    const v = el.querySelector("input, textarea"), sel = el.querySelector(".usel-value"), chk = el.querySelector(".ucheck, .utoggle"), sl = el.querySelector(".uslide-value");
+    return [el.dataset.cid, (el.parentElement.closest("[data-cid]") || {}).dataset?.cid || "", v ? v.value : sel ? sel.textContent : chk ? chk.getAttribute("aria-checked") : sl ? sl.textContent : el.firstChild && el.firstChild.nodeType === 3 ? el.textContent : ""].join("|");
+  }));
+  const beforeDisc = await snapshot();
+  ok(await page.isVisible("#dash") && beforeDisc.length >= 9 && (await page.locator(".cur:not(.me)").count()) === 0, "after Disconnect the dash stays (" + beforeDisc.length + " components); only the clients' cursors go");
+  await page.click('[data-cid="' + pPlus + '"] .ubtn');
+  await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"]').textContent === "11", pCounter, { timeout: 10000 }).catch(() => {});
+  ok((await page.textContent('[data-cid="' + pCounter + '"]')) === "11", "handlers still run while disconnected (they are local): 10 -> 11");
+  await page.fill('[data-cid="' + pField + '"] input', "typed while offline");
+  await sleep(600);
+  const beforeReload = await snapshot();
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForFunction((n) => document.querySelectorAll("#dash-area [data-cid]").length >= n, beforeReload.length, { timeout: 10000 });
+  const afterReload = await snapshot();
+  ok(JSON.stringify(afterReload) === JSON.stringify(beforeReload), "after a reload the dash is rebuilt exactly: ids, nesting, order (incl. the kanban drags) and values");
+  if (JSON.stringify(afterReload) !== JSON.stringify(beforeReload)) console.log("  diff:", afterReload.filter((x, i) => x !== beforeReload[i]).slice(0, 5), beforeReload.filter((x, i) => x !== afterReload[i]).slice(0, 5));
+  ok((await page.textContent('[data-cid="' + pSel + '"] .usel-value')) === "c" && (await page.inputValue('[data-cid="' + pField + '"] input')) === "typed while offline", "restored values: the select's pick and the typed note");
+  await page.click('[data-cid="' + pPlus + '"] .ubtn');
+  await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"]').textContent === "12", pCounter, { timeout: 10000 }).catch(() => {});
+  ok((await page.textContent('[data-cid="' + pCounter + '"]')) === "12", "restored handlers work: 11 -> 12");
+  await page.click("#connect");
+  await page.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 20000 });
+  const relisted = JSON.parse(text(await call(beta, "dashboard_list", {})));
+  ok(relisted.length === afterReload.length && relisted.find((c) => c.id === pField).value === "typed while offline" && relisted.find((c) => c.id === pBoard.tasks[1]).parent === pBoard.columns["Done"] && relisted.find((c) => c.id === pCounter).text === "12", "reconnected, clients see the same dash with the same ids and values");
+  const kept = JSON.parse(text(await call(beta, "sql", { statement: "SELECT count(*) AS n FROM todo" })));
+  ok(kept[0].n === 2 && text(await call(beta, "storage", { action: "get", key: "settings/lang" })) === "vi", "kv and SQLite data are still there after Disconnect + reload + reconnect");
+  const fresh = text(await call(alpha, "dashboard_add", { spec: { type: "text", text: "after restore" } }));
+  ok(!relisted.some((c) => c.id === fresh), "new components get fresh ids (" + fresh + "), no clash with restored ones");
+  await page.click("#connect");
+  await page.waitForFunction(() => window.__sandbox.state() === "idle");
+  await page.click("#dashClear"); await page.click(".dlg-confirm .btn.danger");
+  await sleep(500);
+  ok((await page.locator("#dash-area [data-cid]").count()) === 0 && !(await page.isVisible("#dash")), "Clear the dash (confirmed) empties it; disconnected and empty, it hides");
+  await page.reload({ waitUntil: "networkidle" }); await sleep(500);
+  ok((await page.locator("#dash-area [data-cid]").count()) === 0, "and it stays empty after a reload");
   await page.click("#data .linkbtn"); await page.click(".dlg-confirm .btn.danger");
   await page.waitForFunction(() => document.getElementById("data").textContent === "", null, { timeout: 5000 });
   ok(true, "Clear data (after confirming) empties kv and the database");
+
   await sleep(1500);
   let offline = "";
   try { await alpha.callTool({ name: "call", arguments: { name: "add", arguments: { a: 1 } } }); offline = "answered"; } catch (e) { offline = String(e.message); }

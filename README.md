@@ -134,6 +134,10 @@ export default async function add(a, b = 1) { return a + b; }
   `db.query/execute` - SQLite (sql.js, vendored) running in the page - kept in
   the browser's IndexedDB per device, across calls and reloads. The page shows
   what is stored and can clear it.
+- **Persistent dash**: the dash - components, nesting and order, values,
+  handlers - is saved to IndexedDB after every change and rebuilt on load, so it
+  survives Disconnect, reloads and browser restarts (handlers keep working
+  while disconnected; they run in the browser). A button clears it.
 - **Isolation**: each call runs in its own iframe sandboxed by attribute and
   CSP - an opaque origin with no storage, cookies or credentials, no network,
   no access to the page - and is stopped after 120 s. Clients are told apart by
@@ -141,7 +145,7 @@ export default async function add(a, b = 1) { return a + b; }
   `client: {id, name}` with each request (the id is a salted hash, not an IP).
 - One tunnel per device: if the device is already connected elsewhere (e.g.
   code-mcp), Connect says so instead of replacing it. Closing the tab
-  disconnects.
+  disconnects (the dash and data stay).
 
 ## code-mcp
 
