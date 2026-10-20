@@ -46,7 +46,6 @@ const SANDBOX_CSS = `
       .icon-btn { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: #fff; color: #111; border: 1px solid #111; cursor: pointer; padding: 0; }
       .icon-btn:hover { background: #f2f2f2; }
       .icon-btn:disabled { opacity: 0.3; cursor: default; background: #fff; }
-      .dash-head .icon-btn + .icon-btn { margin-left: -4px; }
       .icon-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: square; }
       /* Expanded: the dash covers the page (the browser window), not the screen. */
       #dash.full { position: fixed; inset: 0; z-index: 50; margin: 0; background: #fff; padding: 16px 20px 20px; display: flex; flex-direction: column; box-sizing: border-box; }
@@ -922,7 +921,6 @@ const PAGE_JS = String.raw`(function () {
     if (e) e.hidden = any;
     if (typeof conn !== "undefined") {
       dashSection.hidden = conn.state === "idle" && !any;
-      var clr = document.getElementById("dashClear"); if (clr) clr.disabled = !any;
     }
   }
 
@@ -1455,13 +1453,7 @@ const PAGE_JS = String.raw`(function () {
     Object.keys(cursors).forEach(function (k) { cursors[k].el.remove(); });
     cursors = {};
   }
-  function clearDash() {
-    Object.keys(comps).forEach(removeComponent);
-    clearCursors();
-    eventLog = []; eventSeq = 0;
-    emptyHint();
-    saveDash();
-  }
+
 
   function describe(c) {
     var d = { id: c.id, type: c.type };
@@ -1953,10 +1945,6 @@ const PAGE_JS = String.raw`(function () {
   var DATA_API = dataApi();
   Object.keys(DATA_API).forEach(function (k) { API[k] = DATA_API[k]; });
   refreshData();
-
-  document.getElementById("dashClear").addEventListener("click", function () {
-    askConfirm("Clear the dash", "Remove every component from the dash? Tools can build it again.", "Clear").then(function (yes) { if (yes) { clearDash(); setStatus("Dash cleared."); } });
-  });
   restoreDash();
 
   // ---- the Components reference (same renderer as the dash) -----------------------
@@ -2154,7 +2142,7 @@ export function renderSandboxPage(deviceId: string): string {
     '    <div class="status" id="data"></div>',
     '    <div class="connect-row"><button class="connect" id="connect" type="button">Connect</button><div class="conninfo" id="conninfo"></div></div>',
     '    <section id="dash" hidden>',
-    '      <div class="row-head section dash-head"><h2>Dash</h2><span class="status" id="running"></span><button class="icon-btn" id="dashClear" type="button" title="Clear the dash" aria-label="Clear the dash"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" /></svg></button><button class="icon-btn" id="dashSize" type="button" title="Expand" aria-label="Expand"></button></div>',
+    '      <div class="row-head section dash-head"><h2>Dash</h2><span class="status" id="running"></span><button class="icon-btn" id="dashSize" type="button" title="Expand" aria-label="Expand"></button></div>',
     '      <div class="dash-area" id="dash-area"><div class="dash-empty">Tools called by MCP clients show their UI here. It stays across Disconnect and reloads.</div></div>',
     "    </section>",
     '    <details class="gallery" id="gallery">',
