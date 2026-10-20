@@ -27,6 +27,7 @@ import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
+import { handleSandbox } from "./sandbox";
 
 export { DeviceDO } from "./device-do";
 export { RegistryDO } from "./registry-do";
@@ -502,6 +503,10 @@ export default {
         method: "GET", headers, signal: request.signal,
       }));
     }
+
+    // GET /mcp: the Sandbox page (this browser as a device). Exactly /mcp only:
+    // MCP clients use /mcp/{deviceId}, which is untouched.
+    if (url.pathname === "/mcp") return handleSandbox(request, env, url);
 
     // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.
     // Return a clear 405 instead of a bare 404 so opening the URL in a browser
