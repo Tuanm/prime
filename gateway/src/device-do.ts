@@ -377,15 +377,24 @@ export class DeviceDO extends DurableObject<Env> {
       .catch(() => {});
   }
 
-  // Salt for client ids: per object instance, so a device cannot map an id
-  // back to an IP address by hashing candidate addresses.
-  private clientSalt = crypto.randomUUID();
+  // Salt for client ids, so a device cannot map an id back to an IP address by
+  // hashing candidate addresses. Kept in storage: a hibernating object loses
+  // its memory, and a new salt would give every client a new id.
+  private clientSalt: string | null = null;
+  private async salt(): Promise<string> {
+    if (this.clientSalt) return this.clientSalt;
+    let v = await this.ctx.storage.get<string>("client-salt");
+    if (!v) { v = crypto.randomUUID(); await this.ctx.storage.put("client-salt", v); }
+    this.clientSalt = v;
+    return v;
+  }
 
   private issuedSessions = new WeakMap<Request, string>();
   private sessionNames = new Map<string, string>();
 
-  /** The calling MCP client, for the device: a stable id and its name. */
-  private clientTag(request: Request, body?: unknown): { id: string; name: string } {
+  /** The calling MCP client, for the device: a stable id and its name. Session
+   *  names live in storage as well as memory - they must survive hibernation. */
+  private async clientTag(request: Request, body?: unknown): Promise<{ id: string; name: string }> {
     const ip = request.headers.get("x-client-ip") || "unknown";
     const m = (body || {}) as { method?: string; params?: { clientInfo?: { name?: unknown } } };
     const given = m.method === "initialize" && typeof m.params?.clientInfo?.name === "string" ? m.params.clientInfo.name.slice(0, 64) : "";
@@ -397,16 +406,28 @@ export class DeviceDO extends DurableObject<Env> {
     if (sid && given) {
       if (this.sessionNames.size >= 2_000) this.sessionNames.delete(this.sessionNames.keys().next().value!);
       this.sessionNames.set(sid, given);
+      await this.ctx.storage.put("sess:" + sid, { name: given, at: Date.now() });
+      if (Math.random() < 0.05) await this.pruneSessions();
+    } else if (sid && !this.sessionNames.has(sid)) {
+      const stored = await this.ctx.storage.get<{ name: string; at: number }>("sess:" + sid);
+      if (stored && typeof stored.name === "string") this.sessionNames.set(sid, stored.name);
     }
     const name = (sid && this.sessionNames.get(sid)) || given || this.clients.get(ip)?.name || "client";
     const key = sid ? "s|" + sid : "ip|" + ip + "|" + name;
     let h = 0x811c9dc5;
-    const s = this.clientSalt + "|" + key;
+    const s = (await this.salt()) + "|" + key;
     for (let i = 0; i < s.length; i++) {
       h ^= s.charCodeAt(i);
       h = Math.imul(h, 0x01000193) >>> 0;
     }
     return { id: h.toString(16).padStart(8, "0"), name };
+  }
+
+  /** Forget session names unused for a week (sessions come and go with clients). */
+  private async pruneSessions(): Promise<void> {
+    const all = await this.ctx.storage.list<{ at: number }>({ prefix: "sess:", limit: 2000 });
+    const old = [...all].filter(([, v]) => !v || Date.now() - (v.at || 0) > 7 * 86_400_000).map(([k]) => k);
+    if (old.length) await this.ctx.storage.delete(old.slice(0, 128));
   }
 
   private recordClient(request: Request, body: unknown): void {
@@ -528,7 +549,7 @@ export class DeviceDO extends DurableObject<Env> {
       id,
       request: body as TunnelRequest["request"],
       ...(relayToken && { token: relayToken }),
-      client: this.clientTag(request, body),
+      client: await this.clientTag(request, body),
     };
 
     return new Promise<Response>((resolve) => {
@@ -650,7 +671,7 @@ export class DeviceDO extends DurableObject<Env> {
       id,
       request: body as TunnelRequest["request"],
       ...(relayToken && { token: relayToken }),
-      client: this.clientTag(request, body),
+      client: await this.clientTag(request, body),
     };
     const sess = this.sseSessions.get(sessionId)!;
     this.resetSessionIdle(sess);
