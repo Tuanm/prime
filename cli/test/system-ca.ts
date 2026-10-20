@@ -52,7 +52,10 @@ try {
   const plain = await tunnel({});
   const system = await tunnel({ NODE_USE_SYSTEM_CA: "1" });
   const ok = (c: boolean, m: string) => { if (!c) fail++; console.log((c ? "PASS " : "FAIL ") + m); };
-  ok(plain.startsWith("fail"), "without NODE_USE_SYSTEM_CA the OS-installed root is not trusted (" + plain.slice(0, 80) + ")");
+  // macOS and Windows need the variable; Bun on Linux reads the system store
+  // (/etc/ssl/certs) anyway. Either way the requirement is the line below.
+  if (process.platform === "linux") console.log("INFO without NODE_USE_SYSTEM_CA: " + plain.slice(0, 80) + " (Linux trusts the system store regardless)");
+  else ok(plain.startsWith("fail"), "without NODE_USE_SYSTEM_CA the OS-installed root is not trusted (" + plain.slice(0, 80) + ")");
   ok(system === "echo:hi", "with NODE_USE_SYSTEM_CA=1 the tunnel connects (" + system.slice(0, 80) + ")");
 } finally {
   uninstall();
