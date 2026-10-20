@@ -218,6 +218,14 @@ jobs:
         working-directory: cli
         run: bun test/service-e2e.ts
 
+      # A root installed in the OS store (how IT deploys TLS inspection) must be
+      # trusted by the service's tunnel: NODE_USE_SYSTEM_CA=1 is what makes it so.
+      - name: OS certificate store is trusted (NODE_USE_SYSTEM_CA)
+        working-directory: cli
+        env:
+          CODE_MCP_SYSTEM_CA_TEST: '1'
+        run: bun test/system-ca.ts
+
   # code-mcp's three implementations. The tests check each one's PowerShell
   # launcher (and run it against real PowerShell, present on all three
   # runners), the spawn environment, and that every implementation starts.

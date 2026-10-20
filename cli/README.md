@@ -228,6 +228,17 @@ line. To apply a config change, run `mcp service install` again; `uninstall`
 stops it and removes the definition and `service.yaml`. `--config <path>`
 selects another config for all three commands.
 
+**Proxies and TLS-inspecting networks.** A service starts with almost no
+environment, so `install` carries over the network settings of the shell it is
+run from - `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` (either case),
+`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` - into `service.yaml`
+(0600; a proxy URL can hold a password), and lists their names. The service
+also trusts the operating system's certificate store (`NODE_USE_SYSTEM_CA=1`),
+where an organisation installs its TLS-inspection root, so a company machine
+usually needs nothing set at all. code-mcp's tunnel uses `HTTPS_PROXY`
+(respecting `NO_PROXY`). If the tunnel still reports `TLS handshake failed`,
+export `NODE_EXTRA_CA_CERTS=/path/to/your-org-root.pem` and re-run `install`.
+
 On Linux, a user service stops at logout unless lingering is enabled
 (`loginctl enable-linger $USER`); `install` says so when it is off.
 

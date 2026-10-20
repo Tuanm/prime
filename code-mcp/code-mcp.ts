@@ -6105,6 +6105,53 @@ if (makePublic) {
   })();
 }
 
+// ---------- gateway proxy / diagnostics ----------
+// The proxy for a gateway URL, from the usual environment variables (either
+// case): HTTPS_PROXY (or ALL_PROXY) for wss://, HTTP_PROXY for ws://. NO_PROXY
+// is honoured: "*", a host, a ".domain" or "domain" suffix, optionally ":port".
+function gatewayProxyFor(target: string, env: Record<string, string | undefined> = process.env): string | undefined {
+  const get = (name: string) => env[name] || env[name.toLowerCase()] || undefined;
+  let u: URL;
+  try { u = new URL(target); } catch { return undefined; }
+  const secure = u.protocol === "wss:" || u.protocol === "https:";
+  const proxy = (secure ? get("HTTPS_PROXY") : get("HTTP_PROXY")) || get("ALL_PROXY");
+  if (!proxy) return undefined;
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const port = u.port || (secure ? "443" : "80");
+  for (const raw of (get("NO_PROXY") || "").split(",")) {
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry === "*") return undefined;
+    const [name, entryPort] = entry.replace(/^\[|\]$/g, "").split(/:(?=\d+$)/);
+    if (entryPort && entryPort !== port) continue;
+    const bare = name.replace(/^\*?\./, "");
+    if (host === bare || host.endsWith("." + bare)) return undefined;
+  }
+  return proxy;
+}
+
+// A proxy URL for logs: never print its credentials.
+function redactProxy(proxy: string): string {
+  try {
+    const u = new URL(proxy);
+    if (u.username || u.password) { u.username = "***"; u.password = ""; }
+    return u.toString().replace(/\/$/, "");
+  } catch { return "(configured)"; }
+}
+
+// What to tell the user when the first connection attempt fails, by cause.
+function gatewayConnectHint(error: string): string {
+  if (/TLS|certificate|handshake|SSL/i.test(error)) {
+    return "the TLS connection to the gateway failed. This is usually a network that inspects TLS (a corporate proxy or security agent) or that requires a proxy. "
+      + "If it inspects TLS, set NODE_EXTRA_CA_CERTS to your organisation's root certificate (PEM file), or NODE_USE_SYSTEM_CA=1 to trust the operating system's certificates. "
+      + "If it requires a proxy, set HTTPS_PROXY. These must be set when code-mcp starts.";
+  }
+  if (/Expected 101|401|403/.test(error)) {
+    return "gateway rejected the upgrade (likely 401) - check that --id and --token (or --gateway-token) match the device id and its registered token in the gateway";
+  }
+  return "could not reach the gateway (" + (error || "no response") + ") - check the network, the --gateway address, and HTTPS_PROXY if your network needs a proxy";
+}
+
 // ---------- gateway client ----------
 // If --gateway is set, connect to the gateway server via WebSocket and
 // tunnel remote requests to the local MCP handler.
@@ -6114,6 +6161,7 @@ if (gatewayDomain) {
   const MAX_DELAY_MS = 60_000;
   let retries = 0;
   let everOpened = false;
+  let lastConnectError = "";
 
   (function connect() {
     // Normalize the gateway domain: accept bare host, ws(s):// or http(s)://
@@ -6132,7 +6180,14 @@ if (gatewayDomain) {
     // this device id (X-Device-Token header); legacy gateways ignore it.
     // Defensive: never let a token inject headers into the handshake.
     const safeTok = gatewayToken?.replace(/[\r\n]/g, "");
-    const ws = new WebSocket(url, safeTok ? { headers: { "X-Device-Token": safeTok } } : undefined);
+    // Bun's WebSocket ignores HTTPS_PROXY on its own (fetch honours it), so a
+    // network that only lets traffic out through a proxy never saw the tunnel.
+    const proxy = gatewayProxyFor(url);
+    if (proxy && retries === 0) console.error(`[${deviceId}] Using proxy ${redactProxy(proxy)}`);
+    const ws = new WebSocket(url, {
+      ...(safeTok ? { headers: { "X-Device-Token": safeTok } } : {}),
+      ...(proxy ? { proxy } : {}),
+    } as any);
 
     // App-layer keepalive: HTTP/2 tunnels (cloudflared) can swallow WS control
     // frames, so a data-frame heartbeat is what actually proves liveness.
@@ -6198,7 +6253,7 @@ if (gatewayDomain) {
       // If the very first attempt never opened, the upgrade was rejected (e.g.
       // 401): give an actionable hint once, then keep retrying.
       if (!everOpened && retries === 0) {
-        console.error(`[${deviceId}] hint: gateway rejected the upgrade (likely 401) - check that --id and --token (or --gateway-token) match the device id and its registered token in the gateway`);
+        console.error(`[${deviceId}] hint: ${gatewayConnectHint(lastConnectError)}`);
       }
       // Exponential backoff with jitter — never kill the local server.
       const delay = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * 2 ** Math.min(retries, 6))
@@ -6209,6 +6264,7 @@ if (gatewayDomain) {
     });
 
     ws.addEventListener("error", (err) => {
+      lastConnectError = String((err as any)?.message ?? err);
       console.error(`[${deviceId}] Gateway WS error:`, (err as any)?.message ?? err);
     });
   })();

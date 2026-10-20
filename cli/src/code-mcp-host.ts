@@ -19,7 +19,7 @@ import { type OptionMap, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCo
 import { defaultConfigPath, loadConfig } from "./config.ts";
 import { UsageError } from "./errors.ts";
 import { DEFAULT_GATEWAY } from "./target.ts";
-import { type ServiceStatus, loadOverrides, overridesPath, pidFilePath, serviceStatus } from "./service.ts";
+import { type ServiceStatus, loadOverrides, loadServiceEnv, overridesPath, pidFilePath, serviceStatus } from "./service.ts";
 
 /**
  * Environment variable carrying the device credential from "mcp connect" to the
@@ -148,6 +148,42 @@ function redirectOutput(path: string): void {
   write(`\n--- code-mcp service started ${new Date().toISOString()} (pid ${process.pid}) ---\n`);
 }
 
+/** Set on the relaunched service process, so it does not relaunch again. */
+export const SERVICE_ENV_APPLIED = "MCP_CODE_MCP_SERVICE_ENV";
+
+/**
+ * The environment the service's code-mcp runs with: this process's, plus the
+ * network settings saved at install, plus trust in the operating system's
+ * certificate store - where an organisation installs its root certificate - in
+ * addition to Bun's own (NODE_USE_SYSTEM_CA=1, unless the user chose otherwise).
+ */
+export function serviceEnv(base: Record<string, string | undefined>, saved: Record<string, string>): Record<string, string | undefined> {
+  return { NODE_USE_SYSTEM_CA: "1", ...base, ...saved };
+}
+
+async function relaunchWithServiceEnv(args: string[], configPath: string): Promise<void> {
+  const env = { ...serviceEnv(process.env, loadServiceEnv(overridesPath(configPath))), [SERVICE_ENV_APPLIED]: "1", [PARENT_PID_ENV]: String(process.pid) };
+  const child = Bun.spawn([...selfCommand(), "code-mcp", ...args], { env, stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+  const stop = (signal: NodeJS.Signals) => () => {
+    try {
+      child.kill(signal);
+    } catch {}
+  };
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, stop(signal));
+  // Windows: the task runs conhost, which runs this. When the task is stopped,
+  // conhost goes and so must this process - and its child with it.
+  if (process.platform === "win32" && process.ppid > 0) {
+    watchParent(process.ppid, () => {
+      try {
+        child.kill();
+      } catch {}
+      process.exit(0);
+    }, "the service's console host");
+  }
+  const code = await child.exited;
+  process.exit(child.signalCode ? 1 : (code ?? 1));
+}
+
 /** Status check that never blocks 'mcp code-mcp' on a broken service manager. */
 function serviceStatusSafe(configPath: string): ServiceStatus | undefined {
   try {
@@ -177,6 +213,12 @@ export async function runCodeMcp(args: string[]): Promise<void> {
       );
     }
   }
+  if (host.service && process.env[SERVICE_ENV_APPLIED] !== "1") {
+    // Relaunch once with the network settings in the environment: Bun reads the
+    // CA variables only at start, and a service starts without them.
+    return relaunchWithServiceEnv(args, configPath);
+  }
+  delete process.env[SERVICE_ENV_APPLIED];
   if (host.service) {
     if (host.log) redirectOutput(host.log);
     // Lets 'service status' (and 'mcp code-mcp') tell that the service is up.
