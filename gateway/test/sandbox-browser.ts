@@ -332,6 +332,15 @@ try {
   st = JSON.parse(text(await call(beta, "dashboard_list", {})));
   const doneOrder = st.filter((c) => c.parent === board.columns["Done"]).map((c) => c.id);
   ok(JSON.stringify(doneOrder) === JSON.stringify([tDocs, tShip]), "cursor_drag with position 'after' -> Done holds Write docs, Ship (list is in page order)");
+  await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"] .uprog-text').textContent === "2 / 3", board.progress, { timeout: 10000 }).catch(() => {});
+  ok((await page.textContent('[data-cid="' + board.progress + '"] .uprog-text')) === "2 / 3" && (await page.textContent('[data-cid="' + board.status + '"]')).includes("0 to do \u00b7 1 doing \u00b7 2 done"), "the board's progress followed every move by itself: " + (await page.textContent('[data-cid="' + board.progress + '"] .uprog-text')) + ", " + (await page.textContent('[data-cid="' + board.status + '"]')));
+  // a person drags 'Fix bug' to Done: progress updates with no tool call running
+  const fb = await page.locator('[data-cid="' + tBug + '"]').boundingBox();
+  const dn = await page.locator('[data-cid="' + board.columns["Done"] + '"] .uc-body').boundingBox();
+  await page.mouse.move(fb.x + 20, fb.y + fb.height / 2); await page.mouse.down();
+  await page.mouse.move(fb.x + 60, fb.y + 30, { steps: 4 }); await page.mouse.move(dn.x + dn.width / 2, dn.y + dn.height - 4, { steps: 8 }); await page.mouse.up();
+  await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"] .uprog-text').textContent === "3 / 3", board.progress, { timeout: 10000 }).catch(() => {});
+  ok((await page.textContent('[data-cid="' + board.progress + '"] .uprog-text')) === "3 / 3" && (await page.getAttribute('[data-cid="' + board.progress + '"] .uprog-fill', "style")).includes("100%"), "a person's drag to Done updates the progress bar to 3 / 3 (100%) in the browser");
 
   // ---- double click and key presses ----
   const dcount = text(await call(alpha, "dashboard_add", { spec: { type: "heading", text: "0" } }));
