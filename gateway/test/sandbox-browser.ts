@@ -270,7 +270,8 @@ try {
   ok((await page.locator(".cur:not(.me)").count()) === 0, "a long-poll for events does not bring a cursor back or keep it");
   await longPoll;
   await call(alpha, "cursor_click", { id: plus });
-  ok((await page.$$eval(".cur:not(.me) .cur-label", (els) => els.map((e) => e.textContent))).join() === "agent-alpha", "the next action brings the client's cursor back");
+  const backLabels = (await page.$$eval(".cur:not(.me):not(.leaving) .cur-label", (els) => els.map((e) => e.textContent))).join();
+  ok(backLabels === "agent-alpha", "the next action brings the client's cursor back: " + backLabels);
   ok(!/running/.test(await page.textContent("#dash")), "no 'call running' text");
   // the person's own cursor
   await page.locator("#dash-area").scrollIntoViewIfNeeded();
@@ -415,7 +416,7 @@ try {
   await call(alpha, "press", { id: field, key: "Backspace" });
   await call(alpha, "press", { id: field, key: "Enter" });
   const keyEvs = JSON.parse(text(await call(beta, "dashboard_events", { since: sinceKey }))).events;
-  ok((await page.inputValue('[data-cid="' + field + '"] input')) === "ab" && keyEvs.some((e) => e.id === field && e.event === "change" && e.value === "ab" && e.by === "agent-alpha"), "cursor.press: Backspace edits, Enter submits (a change by agent-alpha)");
+  ok((await page.inputValue('[data-cid="' + field + '"] input')) === "ab" && keyEvs.some((e) => e.id === field && e.event === "change" && e.value === "ab" && e.by === "agent-alpha"), "cursor.press: Backspace edits, Enter submits (a change by agent-alpha) " + JSON.stringify({ value: await page.inputValue('[data-cid="' + field + '"] input'), sinceKey, evs: keyEvs.map((e) => [e.seq, e.id, e.event, e.value, e.by]) }));
   await call(alpha, "press", { id: sld, key: "ArrowRight" });
   ok((await page.textContent('[data-cid="' + sld + '"] .uslide-value')) === "4", "cursor.press ArrowRight steps the slider");
 
