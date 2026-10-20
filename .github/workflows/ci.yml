@@ -13,7 +13,10 @@ jobs:
   changes:
     name: What changed
     runs-on: ubuntu-latest
+    # contents: read is needed to check out a private repository; listing
+    # the pull request's files needs pull-requests: read.
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       gateway: ${{ github.event_name == 'push' || steps.filter.outputs.gateway == 'true' }}
@@ -73,6 +76,12 @@ jobs:
         # run-smoke.ts resolves bun via $BUN_PATH or ~/.bun/bin/bun
         # (setup-bun's install location on Linux runners).
         run: bun run test
+
+      # The Sandbox page (GET /mcp) in a real browser, used by real MCP clients.
+      - name: Sandbox in Chromium with MCP clients
+        run: |
+          npx playwright install --with-deps chromium
+          bun test/sandbox-browser.ts
 
   cli:
     name: mcp CLI (typecheck, unit, end-to-end)
