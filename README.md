@@ -105,10 +105,12 @@ export default async function add(a, b = 1) { return a + b; }
   connected. MCP clients reach it at `/mcp/{deviceId}` like any device and see
   exactly two tools: `search` (find tools, with their schemas) and `call`
   (`{name, arguments}`).
-- **Dash**: while connected, tools can show UI - `ui.add({type, ...})` with
-  heading, text, code, image, editor, button, input, textarea, checkbox,
-  select, slider, status, divider, row, card - rendered by the page in its own
-  style, and drive a **named cursor per MCP client** (`cursor.click`, `type`,
+- **Dash**: tools build UI with `ui.add({type, ...})` - heading, text, code,
+  image, badge, alert, stat, status, progress, divider; button, input,
+  textarea, editor, checkbox, toggle, radio, select, slider; table (sortable,
+  selectable rows) and list; row, column, grid, card, tabs, accordion, modal and
+  drawer; plus `ui.toast` - rendered by the page in its own style, enough for a
+  whole web app (the `example_app` starter builds one), and drive a **named cursor per MCP client** (`cursor.click`, `type`,
   `fill`, `check`, `select`, `drag`). `ui.wait(id)` waits for the person at the
   browser to click or change something. The page's *Components* section shows
   every component with its `ui.add` call.
