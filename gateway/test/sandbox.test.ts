@@ -96,3 +96,14 @@ describe("sandbox WebSocket tickets", () => {
     expect(await verifyTicket("demo", "garbage", "tok", now)).toBeNull();
   });
 });
+
+describe("vendored sql.js", () => {
+  test("equals the sql.js devDependency", () => {
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    const { join } = require("node:path") as typeof import("node:path");
+    const root = join(import.meta.dir, "..");
+    for (const [vendored, original] of [["vendor/sql-wasm.js.txt", "node_modules/sql.js/dist/sql-wasm.js"], ["vendor/sql-wasm.wasm.bin", "node_modules/sql.js/dist/sql-wasm.wasm"]]) {
+      expect(Buffer.compare(readFileSync(join(root, vendored)), readFileSync(join(root, original)))).toBe(0);
+    }
+  });
+});

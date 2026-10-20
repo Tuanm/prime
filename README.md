@@ -103,7 +103,8 @@ export default async function add(a, b = 1) { return a + b; }
   first visit with no tools, starter tools for building a dashboard are added
   (`dashboard_add/update/list/remove/events`, `ask_user`, `confirm`,
   `bar_chart`, `table`, `increment` - a handler example - `cursor_click`,
-  `cursor_type`) - delete what you do not need.
+  `cursor_type`, `cursor_drag`, `kanban`, `sql`, `storage`); browsers with an
+  older set are offered the new ones - delete what you do not need.
 - **Connect** opens the device's tunnel (WSS, authorised by a 30-second,
   single-use ticket - the token never goes in a URL). Tools are locked while
   connected. MCP clients reach it at `/mcp/{deviceId}` like any device and see
@@ -123,6 +124,16 @@ export default async function add(a, b = 1) { return a + b; }
   clicked what, which handler ran) for agents to react to. Every control is
   drawn by the page - no native select, checkbox, range or dialogs - with
   keyboard support.
+- **More interaction**: toggle, radio and progress components; `draggable: true`
+  lets people drag a component between others or into a row or card (a
+  `drop` event); cursors also `hover`, `dblclick`, `press` keys and `scroll`, and
+  glide along a curve. The person's own pointer shows as "you", a spinner
+  marks a client whose call is running, the tab icon turns green while
+  connected, and the dash can be expanded to the whole page.
+- **Data for tools**: `kv.get/set/delete/list` (JSON values) and
+  `db.query/execute` - SQLite (sql.js, vendored) running in the page - kept in
+  the browser's IndexedDB per device, across calls and reloads. The page shows
+  what is stored and can clear it.
 - **Isolation**: each call runs in its own iframe sandboxed by attribute and
   CSP - an opaque origin with no storage, cookies or credentials, no network,
   no access to the page - and is stopped after 120 s. Clients are told apart by
