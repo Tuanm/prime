@@ -109,6 +109,7 @@ try {
     "big.js": "/**\n * Stores a value over 1 MB.\n */\nexport default async function big() {\n  return await kv.set('big', 'x'.repeat(1100000));\n}\n",
     "idb.js": "/**\n * Tries to open IndexedDB itself.\n */\nexport default async function idb() {\n  return await new Promise((res, rej) => { const r = indexedDB.open('x'); r.onsuccess = () => res('opened'); r.onerror = () => rej(r.error); });\n}\n",
     "press.js": "/**\n * Press a key with the cursor.\n * @param {string} id The component\n * @param {string} key The key\n */\nexport default async function press(id, key) {\n  return await cursor.press(id, key);\n}\n",
+    "slow.js": "/**\n * Works for a while.\n * @param {number} ms How long\n */\nexport default async function slow(ms) {\n  await ui.list();\n  await new Promise((r) => setTimeout(r, ms));\n  return 'done';\n}\n",
     "slide.js": "/**\n * Drag a slider with the cursor.\n * @param {string} id The slider\n * @param {number} to The value\n */\nexport default async function slide(id, to) {\n  return await cursor.drag(id, to);\n}\n",
   };
   for (const [n, s] of Object.entries(custom)) {
@@ -119,7 +120,7 @@ try {
     await last.locator(".menu-btn").click(); await last.locator(".menu button", { hasText: "Save" }).click();
     await sleep(300);
   }
-  const TOTAL = starterNames.length + 9;
+  const TOTAL = starterNames.length + 10;
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === TOTAL, "custom tools saved (" + TOTAL + " in total)");
 
   // ---- connect ----
@@ -252,12 +253,24 @@ try {
   await call(beta, "dashboard_add", { spec: { type: "status", text: "added by beta", state: "on" } });
   await sleep(1200);
   ok((await curOf("agent-beta")) !== before, "adding a component moves the client's cursor to it");
-  const spinning = call(beta, "confirm", { message: "Spinner check" });
-  await page.waitForSelector(".uc-card .ubtn:has-text('Yes')");
+  const spinning = call(beta, "slow", { ms: 2500 });
+  await sleep(800);
   const busy = await page.evaluate(() => [...document.querySelectorAll(".cur.busy .cur-label")].map((e) => e.textContent));
-  ok(busy.includes("agent-beta") && !busy.includes("agent-alpha"), "a spinner shows beside agent-beta's name while its call runs: " + busy.join(","));
-  await page.click(".uc-card .ubtn:has-text('Yes')"); await spinning; await sleep(200);
+  ok(busy.includes("agent-beta") && !busy.includes("agent-alpha"), "a spinner shows beside agent-beta's name while its call works: " + busy.join(","));
+  await spinning; await sleep(200);
   ok((await page.locator(".cur.busy").count()) === 0, "and goes when the call ends");
+  const waitingCall = call(beta, "confirm", { message: "Waiting is not working" });
+  await page.waitForSelector(".uc-card .ubtn:has-text('Yes')"); await sleep(400);
+  ok((await page.locator(".cur.busy").count()) === 0, "a call that only waits for the person shows no spinner");
+  await page.click(".uc-card .ubtn:has-text('Yes')"); await waitingCall;
+  // idle cursors fade away, and come back with the next action
+  await page.waitForFunction(() => document.querySelectorAll(".cur:not(.me)").length === 0, null, { timeout: 16000 }).then(() => ok(true, "after 10 s without activity the clients' cursors fade away")).catch(async () => ok(false, "idle cursors fade away: " + (await page.locator(".cur:not(.me)").count()) + " left"));
+  const longPoll = call(beta, "dashboard_events", { since: 1e9, timeout_seconds: 14 });
+  await sleep(12000);
+  ok((await page.locator(".cur:not(.me)").count()) === 0, "a long-poll for events does not bring a cursor back or keep it");
+  await longPoll;
+  await call(alpha, "cursor_click", { id: plus });
+  ok((await page.$$eval(".cur:not(.me) .cur-label", (els) => els.map((e) => e.textContent))).join() === "agent-alpha", "the next action brings the client's cursor back");
   ok(!/running/.test(await page.textContent("#dash")), "no 'call running' text");
   // the person's own cursor
   await page.locator("#dash-area").scrollIntoViewIfNeeded();
