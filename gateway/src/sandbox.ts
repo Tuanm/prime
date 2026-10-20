@@ -151,6 +151,8 @@ const SANDBOX_CSS = `
       .cur-spin { display: none; width: 8px; height: 8px; border: 1.5px solid rgba(255,255,255,0.45); border-top-color: #fff; border-radius: 50%; animation: curspin 0.7s linear infinite; }
       .cur.busy .cur-spin { display: inline-block; }
       @keyframes curspin { to { transform: rotate(360deg); } }
+      .cur { transition: opacity 0.45s; }
+      .cur.leaving { opacity: 0; }
       .cur.me { z-index: 21; --cur: #111; }
       .cur.me .cur-name { background: #111; }
       .cur.me[hidden] { display: none; }
@@ -880,7 +882,7 @@ const PAGE_JS = String.raw`(function () {
         else if (d.type === "api") handleApi(call, d);
       };
       calls.push(call);
-      if (client && conn.state !== "idle") cursorFor(client);
+      call.waitingFor = 0;
       runner.appendChild(f);
       updateRunning();
     });
@@ -890,12 +892,17 @@ const PAGE_JS = String.raw`(function () {
   // A client's cursor shows a spinner while any of its calls is running.
   function updateRunning() {
     var busy = {};
-    calls.forEach(function (c) { if (c.client) busy[c.client.id] = (busy[c.client.id] || 0) + 1; });
-    Object.keys(cursors).forEach(function (k) { cursors[k].el.classList.toggle("busy", !!busy[k]); });
+    calls.forEach(function (c) { if (c.client && !c.waitingFor) busy[c.client.id] = (busy[c.client.id] || 0) + 1; });
+    Object.keys(cursors).forEach(function (k) {
+      var was = cursors[k].el.classList.contains("busy");
+      cursors[k].el.classList.toggle("busy", !!busy[k]);
+      if (was && !busy[k]) touch(cursors[k]);
+    });
   }
 
   function handleApi(call, d) {
     var fn = API[d.method];
+    if (call.client && conn.state !== "idle" && !/^ui\.(wait|events|list|get)$|^kv\.|^db\./.test(d.method)) cursorFor(call.client);
     Promise.resolve().then(function () {
       if (!fn) throw new Error("unknown method " + d.method);
       return fn(call, Array.isArray(d.args) ? d.args : []);
@@ -1491,9 +1498,26 @@ const PAGE_JS = String.raw`(function () {
   }
 
   // ---- cursors ------------------------------------------------------------------
+  // MCP clients speak stateless HTTP: nothing says "I am gone". So a cursor
+  // fades away after a while with no activity (waiting does not count) and
+  // comes back, from where it was, with the client's next action.
+  var CURSOR_IDLE_MS = 10000;
+  var lastSpot = {};
+  function touch(cur) { cur.lastActive = Date.now(); }
+  setInterval(function () {
+    var now = Date.now();
+    Object.keys(cursors).forEach(function (k) {
+      var cur = cursors[k];
+      if (cur.el.classList.contains("busy") || now - (cur.lastActive || 0) < CURSOR_IDLE_MS) return;
+      lastSpot[k] = { x: cur.x, y: cur.y };
+      delete cursors[k];
+      cur.el.classList.add("leaving");
+      setTimeout(function () { cur.el.remove(); }, 500);
+    });
+  }, 1000);
   function cursorFor(client) {
     var cur = cursors[client.id];
-    if (cur) return cur;
+    if (cur) { touch(cur); return cur; }
     // The first colour no cursor on the dash is using: clients stay apart.
     var used = Object.keys(cursors).map(function (k) { return cursors[k].color; });
     var color = PALETTE.filter(function (c) { return used.indexOf(c) < 0; })[0] || PALETTE[used.length % PALETTE.length];
@@ -1504,8 +1528,9 @@ const PAGE_JS = String.raw`(function () {
     el.querySelector(".cur-name").style.background = color;
     el.style.setProperty("--cur", color);
     dashArea.appendChild(el);
-    cur = { el: el, x: 12, y: 12, client: client, color: color, busy: 0 };
-    el.style.transform = "translate(12px, 12px)";
+    var spot = lastSpot[client.id] || { x: 12, y: 12 };
+    cur = { el: el, x: spot.x, y: spot.y, client: client, color: color, busy: 0, lastActive: Date.now() };
+    el.style.transform = "translate(" + Math.round(spot.x) + "px, " + Math.round(spot.y) + "px)";
     cursors[client.id] = cur;
     return cur;
   }
@@ -1567,6 +1592,7 @@ const PAGE_JS = String.raw`(function () {
   // In a hidden tab (no animation frames) it jumps, so tools never stall.
   function place(cur, x, y) { cur.x = x; cur.y = y; cur.el.style.transform = "translate(" + Math.round(x) + "px, " + Math.round(y) + "px)"; }
   function moveTo(cur, p, ms) {
+    touch(cur);
     var x0 = cur.x, y0 = cur.y, x1 = p.x, y1 = p.y;
     var dist = Math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
     var token = (cur.token || 0) + 1; cur.token = token;
@@ -1635,7 +1661,8 @@ const PAGE_JS = String.raw`(function () {
       return new Promise(function (resolve, reject) {
         var w = { event: ["click", "change", "drop", "dblclick"].indexOf(o.event) >= 0 ? o.event : null };
         var timer = setTimeout(function () { done(); resolve({ event: "timeout", id: c.id }); }, ms);
-        function done() { clearTimeout(timer); c.waiters = c.waiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
+        call.waitingFor++; updateRunning();
+        function done() { clearTimeout(timer); if (w.finished) return; w.finished = true; call.waitingFor--; updateRunning(); c.waiters = c.waiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
         w.resolve = function (ev) { done(); resolve(ev); };
         w.cancel = function (why) { done(); reject(new Error(why)); };
         c.waiters.push(w); call.waiters.push(w);
@@ -1652,7 +1679,8 @@ const PAGE_JS = String.raw`(function () {
       return new Promise(function (resolve, reject) {
         var w = {};
         var timer = setTimeout(function () { done(); resolve(result([])); }, ms);
-        function done() { clearTimeout(timer); eventWaiters = eventWaiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
+        call.waitingFor++; updateRunning();
+        function done() { clearTimeout(timer); if (w.finished) return; w.finished = true; call.waitingFor--; updateRunning(); eventWaiters = eventWaiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
         w.check = function () { var l = pick(); if (l.length) { done(); resolve(result(l)); } };
         w.cancel = function (why) { done(); reject(new Error(why)); };
         eventWaiters.push(w); call.waiters.push(w);
