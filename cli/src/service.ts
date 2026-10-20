@@ -85,12 +85,57 @@ export function loadOverrides(path: string): OptionMap {
   return optionsFromConfig(cleaned, path);
 }
 
-export function saveOverrides(path: string, options: OptionMap): void {
+/**
+ * Network settings carried from the shell that ran 'mcp service install' to
+ * the service. A service starts with almost no environment, so without these a
+ * machine behind a proxy, or one whose network inspects TLS, connects fine from
+ * a terminal and fails from the service ("TLS handshake failed"). Bun reads the
+ * CA variables only at process start, so they are applied by relaunching.
+ */
+export const NETWORK_ENV_NAMES = [
+  "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+  "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_USE_SYSTEM_CA",
+] as const;
+
+export function captureNetworkEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of NETWORK_ENV_NAMES) {
+    const value = env[name];
+    if (typeof value === "string" && value.trim() !== "") out[name] = value;
+  }
+  return out;
+}
+
+export function loadServiceEnv(path: string): Record<string, string> {
+  if (!existsSync(path)) return {};
+  let raw: unknown;
+  try {
+    raw = Bun.YAML.parse(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+  const section = raw && typeof raw === "object" ? (raw as Record<string, unknown>).env : undefined;
+  const out: Record<string, string> = {};
+  if (!section || typeof section !== "object") return out;
+  const allowed = new Set<string>(NETWORK_ENV_NAMES);
+  for (const [k, v] of Object.entries(section as Record<string, unknown>)) {
+    if (allowed.has(k) && typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
+export function saveOverrides(path: string, options: OptionMap, env: Record<string, string> = {}): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   let text = "# Options given to 'mcp service install'. They override the code-mcp\n";
   text += "# section of config.yaml for the service only. Holds secrets: keep it private.\n";
   const keys = Object.keys(options);
   text += keys.length === 0 ? "code-mcp: {}\n" : "code-mcp:\n" + keys.map((k) => "  " + k + ": " + yamlScalar(options[k]!) + "\n").join("");
+  // Proxy URLs can hold credentials: this file is 0600, the service definition is not.
+  const envKeys = Object.keys(env);
+  if (envKeys.length > 0) {
+    text += "# Network settings from the shell that ran 'mcp service install'.\n";
+    text += "env:\n" + envKeys.map((k) => "  " + k + ": " + yamlScalar(env[k]!) + "\n").join("");
+  }
   writeFileSync(path, text, { mode: 0o600 });
   try {
     chmodSync(path, 0o600);

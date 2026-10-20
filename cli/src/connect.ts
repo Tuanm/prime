@@ -387,7 +387,9 @@ export function codeMcpLaunch(
     // outright (on Windows, killing a process never takes its children).
     // RAW: connect's device runs with exactly these arguments - not the config's
     // code-mcp section, and not refused when the code-mcp service is running.
-    env: { ...process.env, [GATEWAY_TOKEN_ENV]: device.token, [PARENT_PID_ENV]: String(process.pid), [RAW_ENV]: "1" },
+    // NODE_USE_SYSTEM_CA: trust the OS certificate store as well (where an
+    // organisation installs its root certificate), unless the user set it.
+    env: { NODE_USE_SYSTEM_CA: "1", ...process.env, [GATEWAY_TOKEN_ENV]: device.token, [PARENT_PID_ENV]: String(process.pid), [RAW_ENV]: "1" },
   };
 }
 

@@ -3,10 +3,13 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
-import { effectiveCodeMcpArgv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
+import { effectiveCodeMcpArgv, serviceEnv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
+import { codeMcpLaunch } from "../src/connect.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
 import { rememberAnonymous } from "../src/connect.ts";
 import {
+  captureNetworkEnv,
+  loadServiceEnv,
   loadOverrides,
   renderLaunchdPlist,
   renderSystemdUnit,
@@ -102,6 +105,36 @@ describe("default gateway for a device id", () => {
     c.codeMcp = { id: "demo", token: "demo" };
     saveConfig(config, c);
     expect(effectiveCodeMcpArgv([], { service: false }, config).argv).toEqual(["--token", "demo", "--gateway", "https://code-mcp.tuanm.workers.dev", "--id", "demo"]);
+  });
+});
+
+describe("network settings for the service", () => {
+  test("install captures proxy and CA variables, and nothing else", () => {
+    const env = { HTTPS_PROXY: "http://u:p@proxy:8080", no_proxy: "localhost", NODE_EXTRA_CA_CERTS: "/etc/corp.pem", SSL_CERT_FILE: "  ", AWS_SECRET_ACCESS_KEY: "x", PATH: "/bin" };
+    expect(captureNetworkEnv(env)).toEqual({ HTTPS_PROXY: "http://u:p@proxy:8080", no_proxy: "localhost", NODE_EXTRA_CA_CERTS: "/etc/corp.pem" });
+  });
+
+  test("they are saved privately with the overrides and read back", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const path = join(dir, "service.yaml");
+    saveOverrides(path, { port: "7777" }, { HTTPS_PROXY: 'http://u:p"q@proxy:8080', NODE_EXTRA_CA_CERTS: "C:\\corp\\root.pem" });
+    expect(loadServiceEnv(path)).toEqual({ HTTPS_PROXY: 'http://u:p"q@proxy:8080', NODE_EXTRA_CA_CERTS: "C:\\corp\\root.pem" });
+    expect(loadOverrides(path)).toEqual({ port: "7777" });
+    if (process.platform !== "win32") expect((statSync(path).mode & 0o777).toString(8)).toBe("600");
+  });
+
+  test("only known variables are ever applied from the file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const path = join(dir, "service.yaml");
+    Bun.write(path, 'env:\n  HTTPS_PROXY: "http://p"\n  LD_PRELOAD: "/evil.so"\n');
+    return Bun.sleep(10).then(() => expect(loadServiceEnv(path)).toEqual({ HTTPS_PROXY: "http://p" }));
+  });
+
+  test("the service and connect's child trust the OS certificate store unless told otherwise", () => {
+    expect(serviceEnv({ PATH: "/bin" }, {}).NODE_USE_SYSTEM_CA).toBe("1");
+    expect(serviceEnv({ NODE_USE_SYSTEM_CA: "0" }, {}).NODE_USE_SYSTEM_CA).toBe("0");
+    expect(serviceEnv({}, { NODE_EXTRA_CA_CERTS: "/c.pem" }).NODE_EXTRA_CA_CERTS).toBe("/c.pem");
+    expect(codeMcpLaunch("https://gw", { deviceId: "anon-0123456789abcdef", token: "ABC123" }, 1, []).env.NODE_USE_SYSTEM_CA).toBeDefined();
   });
 });
 

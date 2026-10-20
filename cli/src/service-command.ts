@@ -10,6 +10,7 @@ import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, red, yellow } from "./output.ts";
 import {
   type Platform,
+  captureNetworkEnv,
   installService,
   loadOverrides,
   overridesPath,
@@ -119,7 +120,8 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
   }
 
   const spec = serviceSpecFor(platform, configPath);
-  saveOverrides(overridesPath(configPath), passed);
+  const networkEnv = captureNetworkEnv();
+  saveOverrides(overridesPath(configPath), passed, networkEnv);
   const where = installService(platform, spec);
   const running = await waitRunning(platform, configPath);
   const status = serviceStatus(platform, configPath);
@@ -155,6 +157,8 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
   opts.out("  options     " + describeOptions(effective));
   opts.out("  local URL   " + localUrl(effective));
   if (online?.state === "online") opts.out("  device      " + bold(String(effective.id)) + " online on " + online.gateway);
+  const carried = Object.keys(networkEnv);
+  if (carried.length > 0) opts.out("  network     " + carried.join(", ") + " (from this shell)");
   opts.out("  logs        " + (platform === "linux" ? "journalctl --user -u code-mcp -f" : spec.logPath));
   opts.out(dim("  Options come from " + configPath + " (code-mcp section), overridden by the ones given here (" + overridesPath(configPath) + ")."));
   opts.out(dim("  They are read at every start: after editing the config, re-run 'mcp service install' to restart it."));
