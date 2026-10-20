@@ -423,11 +423,13 @@ try {
   ok(kept[0].n === 2 && text(await call(beta, "storage", { action: "get", key: "settings/lang" })) === "vi", "kv and SQLite data are still there after Disconnect + reload + reconnect");
   const fresh = text(await call(alpha, "dashboard_add", { spec: { type: "text", text: "after restore" } }));
   ok(!relisted.some((c) => c.id === fresh), "new components get fresh ids (" + fresh + "), no clash with restored ones");
+  ok((await page.locator("#dashClear").count()) === 0, "there is no clear-dash button (tools remove components)");
+  await call(alpha, "dashboard_remove", {}); await call(beta, "dashboard_remove", {});
+  for (const c of JSON.parse(text(await call(beta, "dashboard_list", {})))) { try { await call(beta, "dashboard_remove", { id: c.id }); } catch {} }
   await page.click("#connect");
   await page.waitForFunction(() => window.__sandbox.state() === "idle");
-  await page.click("#dashClear"); await page.click(".dlg-confirm .btn.danger");
-  await sleep(500);
-  ok((await page.locator("#dash-area [data-cid]").count()) === 0 && !(await page.isVisible("#dash")), "Clear the dash (confirmed) empties it; disconnected and empty, it hides");
+  await sleep(600);
+  ok((await page.locator("#dash-area [data-cid]").count()) === 0 && !(await page.isVisible("#dash")), "emptied by tools; disconnected and empty, the dash hides");
   await page.reload({ waitUntil: "networkidle" }); await sleep(500);
   ok((await page.locator("#dash-area [data-cid]").count()) === 0, "and it stays empty after a reload");
   await page.click("#data .linkbtn"); await page.click(".dlg-confirm .btn.danger");
