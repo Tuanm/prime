@@ -26,6 +26,9 @@ export interface TunnelRequest {
   id: string;
   request: JsonRpcRequest;
   token?: string;
+  /** Which MCP client sent it: a stable per-client id (salted hash, not the
+   *  IP) and the name it gave in initialize. Devices may ignore it. */
+  client?: { id: string; name: string };
 }
 
 export interface TunnelResponse {

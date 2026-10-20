@@ -27,6 +27,7 @@ import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
+import { handleSandbox, verifyTicket } from "./sandbox";
 
 export { DeviceDO } from "./device-do";
 export { RegistryDO } from "./registry-do";
@@ -503,6 +504,10 @@ export default {
       }));
     }
 
+    // GET /mcp: the Sandbox page (this browser as a device). Exactly /mcp only:
+    // MCP clients use /mcp/{deviceId}, which is untouched.
+    if (url.pathname === "/mcp") return handleSandbox(request, env, url);
+
     // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.
     // Return a clear 405 instead of a bare 404 so opening the URL in a browser
     // (or an SSE-style client) gets an actionable message, not "cannot connect".
@@ -565,6 +570,9 @@ export default {
       if (cip && cip !== "unknown") headers.set("x-client-ip", cip);
       const xdt = request.headers.get("x-device-token");
       if (xdt) headers.set("x-device-token", xdt);
+      // The MCP session (issued by the DO on initialize) tells clients apart.
+      const sid = request.headers.get("mcp-session-id");
+      if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) headers.set("mcp-session-id", sid);
       // Preserve auth params for the DO's own device-auth check.
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
@@ -660,6 +668,22 @@ export default {
       // hijacking / intercepting an in-use deviceId is impossible. Unknown
       // deviceIds get the same 401 (no existence oracle). The DO re-checks
       // the credential for defense in depth.
+      // A Sandbox page connects with ?ticket= (a browser WebSocket cannot send
+      // headers, and the device token must never sit in a URL). A valid ticket
+      // stands in for the token; the DO then refuses its nonce a second time.
+      let ticketNonce: string | null = null;
+      const ticket = url.searchParams.get("ticket");
+      if (ticket) {
+        const registered = (await resolveSnapshot(env, deviceId)).map.get(deviceId);
+        const verdict = registered === undefined ? null : await verifyTicket(deviceId, ticket, registered);
+        if (!verdict) return unauthorized();
+        ticketNonce = verdict.nonce;
+        url.searchParams.delete("ticket");
+        const withToken = new Headers(request.headers);
+        withToken.set("x-device-token", registered!);
+        request = new Request(url, { headers: withToken, method: request.method });
+      }
+
       const auth = await authorizeDevice(deviceId, request, url, cfg, env);
       if (auth.denied) return auth.denied;
       const expected = auth.expected;
@@ -675,6 +699,8 @@ export default {
       // as x-expected-token so the DO's defense-in-depth check matches the
       // registry (the DO reads x-expected-token first, then its env copy).
       const headers = new Headers(request.headers);
+      headers.delete("x-ticket-nonce");
+      if (ticketNonce) headers.set("x-ticket-nonce", ticketNonce);
       headers.set("x-device-id", deviceId);
       if (expected !== undefined) headers.set("x-expected-token", expected);
       const givenToken = extractDeviceToken(request, url);
