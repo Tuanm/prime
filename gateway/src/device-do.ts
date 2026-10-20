@@ -130,7 +130,24 @@ export class DeviceDO extends DurableObject<Env> {
 
     // WebSocket upgrade: /ws (device tunnel)
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      // A Sandbox ticket (see sandbox.ts) is single-use: the entry passes its
+      // nonce, and a nonce seen before is refused even within its 30 s life.
+      const nonce = request.headers.get("x-ticket-nonce");
+      if (nonce) {
+        const key = "ticket:" + nonce;
+        if (await this.ctx.storage.get(key)) return Response.json({ error: "ticket already used" }, { status: 401 });
+        await this.ctx.storage.put(key, Date.now() + 60_000);
+        const all = await this.ctx.storage.list<number>({ prefix: "ticket:" });
+        for (const [k, exp] of all) if (exp < Date.now()) await this.ctx.storage.delete(k);
+      }
       return this.handleUpgrade(request, url, authToken);
+    }
+
+    // Internal (the entry asks before issuing a Sandbox ticket): is a live
+    // tunnel attached? Stale sockets do not count - a reconnect may replace them.
+    if (request.method === "GET" && url.pathname === "/online") {
+      const live = !!this.ws && Date.now() - this.lastSeen <= this.tunnelReplaceGraceMs;
+      return Response.json({ online: live });
     }
 
     // The entry marks relay requests for an anonymous device with its limit
@@ -165,7 +182,16 @@ export class DeviceDO extends DurableObject<Env> {
 
     // HTTP relay: POST /mcp (JSON-RPC body)
     if (request.method === "POST" && (url.pathname === "/mcp" || url.pathname === "/")) {
-      return this.handleMcp(request);
+      const response = await this.handleMcp(request);
+      // A session issued on initialize goes back to the client, which then
+      // sends it on every request (MCP Streamable HTTP) - that is how the
+      // device can tell two clients behind one IP apart.
+      const sid = this.issuedSessions.get(request);
+      if (!sid || response.status !== 200) return response;
+      const withSid = new Response(response.body, response);
+      withSid.headers.set("mcp-session-id", sid);
+      withSid.headers.append("access-control-expose-headers", "mcp-session-id");
+      return withSid;
     }
 
     // SSE transport: GET /sse opens a server->client stream, POST /messages
@@ -351,6 +377,38 @@ export class DeviceDO extends DurableObject<Env> {
       .catch(() => {});
   }
 
+  // Salt for client ids: per object instance, so a device cannot map an id
+  // back to an IP address by hashing candidate addresses.
+  private clientSalt = crypto.randomUUID();
+
+  private issuedSessions = new WeakMap<Request, string>();
+  private sessionNames = new Map<string, string>();
+
+  /** The calling MCP client, for the device: a stable id and its name. */
+  private clientTag(request: Request, body?: unknown): { id: string; name: string } {
+    const ip = request.headers.get("x-client-ip") || "unknown";
+    const m = (body || {}) as { method?: string; params?: { clientInfo?: { name?: unknown } } };
+    const given = m.method === "initialize" && typeof m.params?.clientInfo?.name === "string" ? m.params.clientInfo.name.slice(0, 64) : "";
+    let sid = request.headers.get("mcp-session-id") || "";
+    if (!sid && m.method === "initialize") {
+      sid = crypto.randomUUID();
+      this.issuedSessions.set(request, sid);
+    }
+    if (sid && given) {
+      if (this.sessionNames.size >= 2_000) this.sessionNames.delete(this.sessionNames.keys().next().value!);
+      this.sessionNames.set(sid, given);
+    }
+    const name = (sid && this.sessionNames.get(sid)) || given || this.clients.get(ip)?.name || "client";
+    const key = sid ? "s|" + sid : "ip|" + ip + "|" + name;
+    let h = 0x811c9dc5;
+    const s = this.clientSalt + "|" + key;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return { id: h.toString(16).padStart(8, "0"), name };
+  }
+
   private recordClient(request: Request, body: unknown): void {
     try {
       const ip = request.headers.get("x-client-ip") || "unknown";
@@ -470,6 +528,7 @@ export class DeviceDO extends DurableObject<Env> {
       id,
       request: body as TunnelRequest["request"],
       ...(relayToken && { token: relayToken }),
+      client: this.clientTag(request, body),
     };
 
     return new Promise<Response>((resolve) => {
@@ -591,6 +650,7 @@ export class DeviceDO extends DurableObject<Env> {
       id,
       request: body as TunnelRequest["request"],
       ...(relayToken && { token: relayToken }),
+      client: this.clientTag(request, body),
     };
     const sess = this.sseSessions.get(sessionId)!;
     this.resetSessionIdle(sess);
