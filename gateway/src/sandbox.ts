@@ -41,6 +41,16 @@ const SANDBOX_CSS = `
       #dash[hidden] { display: none; }
       .dash-area { position: relative; min-height: 320px; border: 1px dashed #bbb; padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow: auto; max-height: 70vh; }
       .dash-empty { color: #999; font-size: 12px; margin: auto; text-align: center; }
+      .dash-head { gap: 12px; }
+      .dash-head #running { flex: 1; text-align: right; }
+      .icon-btn { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: #fff; color: #111; border: 1px solid #111; cursor: pointer; padding: 0; }
+      .icon-btn:hover { background: #f2f2f2; }
+      .icon-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: square; }
+      /* Expanded: the dash covers the page (the browser window), not the screen. */
+      #dash.full { position: fixed; inset: 0; z-index: 50; margin: 0; background: #fff; padding: 16px 20px 20px; display: flex; flex-direction: column; box-sizing: border-box; }
+      #dash.full .dash-head { margin-top: 0; }
+      #dash.full .dash-area { flex: 1; max-height: none; min-height: 0; }
+      body.dash-full { overflow: hidden; }
       .dash-empty[hidden] { display: none; }
       /* Components: the page's own vocabulary - mono type, black on white, 1px lines. */
       .uc { font-size: 13px; color: #111; min-width: 0; }
@@ -95,6 +105,37 @@ const SANDBOX_CSS = `
       .uslide:focus-visible .uslide-thumb, .uslide.dragging .uslide-thumb { box-shadow: 0 0 0 1px #111, 0 0 0 4px rgba(17,17,17,0.12); }
       .uslide-value { font-size: 11px; color: #666; min-width: 28px; text-align: right; }
       .uslide.disabled { opacity: 0.4; cursor: default; }
+      .utoggle { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; user-select: none; outline: none; }
+      .utoggle-track { position: relative; width: 30px; height: 16px; border: 1px solid #111; background: #fff; box-sizing: border-box; flex: none; transition: background 0.12s; }
+      .utoggle-knob { position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; background: #111; transition: left 0.12s, background 0.12s; }
+      .utoggle.on .utoggle-track { background: #111; }
+      .utoggle.on .utoggle-knob { left: 16px; background: #fff; }
+      .utoggle:focus-visible .utoggle-track { box-shadow: 0 0 0 2px #fff, 0 0 0 3px #111; }
+      .utoggle.disabled { opacity: 0.4; cursor: default; }
+      .uradio { display: inline-flex; flex-direction: column; gap: 6px; outline: none; }
+      .uradio.row { flex-direction: row; flex-wrap: wrap; gap: 6px 18px; }
+      .uradio-opt { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; user-select: none; }
+      .uradio-dot { width: 14px; height: 14px; border: 1px solid #111; border-radius: 50%; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; flex: none; background: #fff; }
+      .uradio-opt.on .uradio-dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #111; }
+      .uradio:focus-visible .uradio-opt.on .uradio-dot { box-shadow: 0 0 0 2px #fff, 0 0 0 3px #111; }
+      .uradio.disabled { opacity: 0.4; pointer-events: none; }
+      .uc-progress { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 0 12px; }
+      .uc-progress .uc-label { grid-column: 1 / -1; }
+      .uprog { height: 6px; border: 1px solid #111; background: #fff; position: relative; }
+      .uprog-fill { position: absolute; left: 0; top: 0; bottom: 0; background: #111; transition: width 0.25s; }
+      .uprog-text { font-size: 11px; color: #666; min-width: 34px; text-align: right; }
+      /* Drag and drop */
+      .uc[data-draggable] { border: 1px solid #ddd; background: #fff; padding: 7px 10px; cursor: grab; user-select: none; touch-action: none; }
+      .uc[data-draggable]:hover { border-color: #111; }
+      .uc[data-draggable].dragging { position: relative; z-index: 30; opacity: 0.85; cursor: grabbing; border-color: #111; box-shadow: 0 6px 18px rgba(0,0,0,0.12); }
+      body.dragging-any, body.dragging-any * { cursor: grabbing !important; }
+      .drop-line { position: absolute; z-index: 25; background: #2563eb; pointer-events: none; }
+      .uc-row > .uc-card { flex: 1 1 160px; min-width: 150px; align-self: stretch; }
+      .uc-card .uc-body:empty { min-height: 36px; border: 1px dashed #ddd; }
+      .uc.hovered { outline: 1px dashed #111; outline-offset: 3px; }
+      #status:empty, #starters:empty, #data:empty, #running:empty { display: none; }
+      .linkbtn:disabled { color: #bbb; cursor: default; text-decoration: none; }
+      .linkbtn { font: inherit; font-size: 11px; background: none; border: 0; padding: 0; color: #111; text-decoration: underline; cursor: pointer; }
       .btn.secondary { background: #fff; color: #111; }
       .btn.danger { background: #b91c1c; border-color: #b91c1c; }
       .dlg-bar .btn + .btn { margin-left: 8px; }
@@ -105,7 +146,14 @@ const SANDBOX_CSS = `
       /* Virtual cursors: a black arrow and the client's name. */
       .cur { position: absolute; left: 0; top: 0; z-index: 20; pointer-events: none; transform: translate(12px, 12px); }
       .cur svg { width: 16px; height: 20px; display: block; fill: #111; stroke: #fff; stroke-width: 1.2; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.25)); }
-      .cur-name { position: absolute; left: 14px; top: 16px; font-size: 10px; font-weight: 600; color: #fff; padding: 2px 6px; white-space: nowrap; letter-spacing: 0.3px; }
+      .cur-name { position: absolute; left: 14px; top: 16px; font-size: 10px; font-weight: 600; color: #fff; padding: 2px 6px; white-space: nowrap; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 5px; }
+      .cur-spin { display: none; width: 8px; height: 8px; border: 1.5px solid rgba(255,255,255,0.45); border-top-color: #fff; border-radius: 50%; animation: curspin 0.7s linear infinite; }
+      .cur.busy .cur-spin { display: inline-block; }
+      @keyframes curspin { to { transform: rotate(360deg); } }
+      .cur.me { z-index: 21; --cur: #111; }
+      .cur.me .cur-name { background: #111; }
+      .cur.me[hidden] { display: none; }
+      .dash-area.mine, .dash-area.mine * { cursor: none !important; }
       .cur.click svg { animation: curclick 0.16s ease-out; }
       .cur.grab svg { transform: scale(0.9); }
       .cur::after { content: ""; position: absolute; left: -6px; top: -6px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--cur); opacity: 0; }
@@ -262,7 +310,21 @@ const RUNTIME_JS = String.raw`(function () {
     fill: function (id, text) { return api("cursor.fill", [id, String(text)]); },
     check: function (id, value) { return api("cursor.check", [id, value === undefined ? true : !!value]); },
     select: function (id, value) { return api("cursor.select", [id, String(value)]); },
-    drag: function (id, target) { return api("cursor.drag", [id, target]); }
+    drag: function (id, target) { return api("cursor.drag", [id, target]); },
+    hover: function (id) { return api("cursor.hover", [id]); },
+    dblclick: function (id) { return api("cursor.dblclick", [id]); },
+    press: function (id, key) { return api("cursor.press", [id, String(key)]); },
+    scroll: function (id) { return api("cursor.scroll", [id]); }
+  });
+  var kv = Object.freeze({
+    get: function (key) { return api("kv.get", [String(key)]); },
+    set: function (key, value) { return api("kv.set", [String(key), value === undefined ? null : value]); },
+    delete: function (key) { return api("kv.delete", [String(key)]); },
+    list: function (prefix) { return api("kv.list", [prefix === undefined ? "" : String(prefix)]); }
+  });
+  var db = Object.freeze({
+    query: function (sql, params) { return api("db.query", [String(sql), params === undefined ? null : params]); },
+    execute: function (sql, params) { return api("db.execute", [String(sql), params === undefined ? null : params]); }
   });
   function result(ok, value, error) {
     var text = null;
@@ -273,7 +335,7 @@ const RUNTIME_JS = String.raw`(function () {
     var source = String(d.source || "");
     var body = "var __tool__;\n" + source.replace(/export\s+default\s+async\s+function/, "__tool__ = async function") + "\n;return __tool__;";
     var fn;
-    try { fn = new Function("ui", "cursor", "console", "client", "event", body)(ui, cursor, sandboxConsole, Object.freeze(d.client || {}), d.event ? Object.freeze(d.event) : null); }
+    try { fn = new Function("ui", "cursor", "console", "client", "event", "kv", "db", body)(ui, cursor, sandboxConsole, Object.freeze(d.client || {}), d.event ? Object.freeze(d.event) : null, kv, db); }
     catch (err) { result(false, null, "the tool failed to load: " + (err && err.message || err)); return; }
     if (typeof fn !== "function") { result(false, null, "the tool has no default function"); return; }
     Promise.resolve().then(function () { return fn.apply(null, d.args || []); }).then(
@@ -427,6 +489,8 @@ const PAGE_JS = String.raw`(function () {
       var em = document.createElement("li"); em.className = "empty"; em.textContent = "No tools yet. Click + to add one."; list.appendChild(em);
     }
     document.getElementById("addBtn").disabled = connected;
+    if (typeof renderStarterOffer === "function" && document.getElementById("starters")) renderStarterOffer();
+    var clrBtn = document.querySelector("#data .linkbtn"); if (clrBtn) clrBtn.disabled = connected;
     var active = tools.filter(function (t) { return t.active; }).length;
     document.getElementById("count").textContent = tools.length + " tool" + (tools.length === 1 ? "" : "s") + " \u00b7 " + active + " active";
   }
@@ -539,7 +603,6 @@ const PAGE_JS = String.raw`(function () {
   var connInfo = document.getElementById("conninfo");
   var dashSection = document.getElementById("dash");
   var dashArea = document.getElementById("dash-area");
-  var clientsEl = document.getElementById("clients");
   var conn = { worker: null, state: "idle", userClosed: false, retry: 0, timer: null, mcpUrl: "", registered: false };
   var WORKER_SRC = [
     "var ws = null, beat = null;",
@@ -555,8 +618,14 @@ const PAGE_JS = String.raw`(function () {
     "};"
   ].join("\n");
 
+  // The tab's icon turns green while connected (as browser-mcp's toolbar icon does).
+  var faviconEl = document.getElementById("favicon");
+  var FAVICON_OFF = faviconEl ? faviconEl.href : "";
+  var FAVICON_ON = FAVICON_OFF.replace(/%23111111/g, "%2316a34a");
   function setConn(state, info) {
     conn.state = state;
+    if (faviconEl) faviconEl.href = state === "connected" ? FAVICON_ON : FAVICON_OFF;
+    document.title = (state === "connected" ? "\u25cf " : "") + "Prime - Sandbox";
     var wasConnected = connected;
     connected = state !== "idle";
     connectBtn.disabled = state === "connecting";
@@ -564,7 +633,7 @@ const PAGE_JS = String.raw`(function () {
     connectBtn.classList.toggle("on", state === "connected");
     dashSection.hidden = state === "idle";
     connInfo.textContent = info || "";
-    if (state === "idle") { abortCalls("the sandbox was disconnected"); clearDash(); }
+    if (state === "idle") { abortCalls("the sandbox was disconnected"); clearDash(); if (dashSection.classList.contains("full")) setFull(false); }
     if (wasConnected !== connected) render();
   }
 
@@ -809,15 +878,18 @@ const PAGE_JS = String.raw`(function () {
         else if (d.type === "api") handleApi(call, d);
       };
       calls.push(call);
+      if (client && conn.state !== "idle") cursorFor(client);
       runner.appendChild(f);
       updateRunning();
     });
   }
 
   function abortCalls(why) { calls.slice().forEach(function (c) { c.finish({ ok: false, error: why, logs: [] }); }); }
+  // A client's cursor shows a spinner while any of its calls is running.
   function updateRunning() {
-    var n = calls.length;
-    document.getElementById("running").textContent = n ? n + " call" + (n === 1 ? "" : "s") + " running" : "";
+    var busy = {};
+    calls.forEach(function (c) { if (c.client) busy[c.client.id] = (busy[c.client.id] || 0) + 1; });
+    Object.keys(cursors).forEach(function (k) { cursors[k].el.classList.toggle("busy", !!busy[k]); });
   }
 
   function handleApi(call, d) {
@@ -941,6 +1013,53 @@ const PAGE_JS = String.raw`(function () {
     return root;
   }
 
+  function makeToggle(text, initial) {
+    var root = document.createElement("div");
+    root.className = "utoggle"; root.tabIndex = 0; root.setAttribute("role", "switch");
+    var track = document.createElement("span"); track.className = "utoggle-track";
+    var knob = document.createElement("span"); knob.className = "utoggle-knob"; track.appendChild(knob);
+    var t = document.createElement("span"); t.textContent = text;
+    root.appendChild(track); root.appendChild(t);
+    var checked = !!initial, disabled = false;
+    function paint() { root.classList.toggle("on", checked); root.setAttribute("aria-checked", checked ? "true" : "false"); }
+    prop(root, "checked", function () { return checked; }, function (v) { checked = !!v; paint(); });
+    prop(root, "disabled", function () { return disabled; }, function (v) { disabled = !!v; root.classList.toggle("disabled", disabled); root.tabIndex = disabled ? -1 : 0; root.setAttribute("aria-disabled", String(disabled)); });
+    function flip() { if (disabled) return; checked = !checked; paint(); fire(root, "change"); }
+    root.addEventListener("click", flip);
+    root.addEventListener("keydown", function (e) { if (e.key === " " || e.key === "Enter") { e.preventDefault(); flip(); } });
+    paint();
+    return root;
+  }
+
+  function makeRadio(opts, initial, horizontal) {
+    var root = document.createElement("div");
+    root.className = "uradio" + (horizontal ? " row" : ""); root.tabIndex = 0; root.setAttribute("role", "radiogroup");
+    var current = opts.some(function (o) { return o.value === initial; }) ? initial : opts[0].value, disabled = false;
+    var items = opts.map(function (o) {
+      var it = document.createElement("div"); it.className = "uradio-opt"; it.setAttribute("role", "radio");
+      var dot = document.createElement("span"); dot.className = "uradio-dot";
+      var t = document.createElement("span"); t.textContent = o.label;
+      it.appendChild(dot); it.appendChild(t);
+      it.addEventListener("click", function () { choose(o.value); });
+      root.appendChild(it);
+      return it;
+    });
+    function indexOf(v) { for (var i = 0; i < opts.length; i++) if (opts[i].value === v) return i; return -1; }
+    function paint() { var i = indexOf(current); items.forEach(function (it, k) { it.classList.toggle("on", k === i); it.setAttribute("aria-checked", k === i ? "true" : "false"); }); }
+    function choose(v) { if (disabled) return; var changed = v !== current; current = v; paint(); if (changed) fire(root, "change"); }
+    root.addEventListener("keydown", function (e) {
+      var i = indexOf(current);
+      if (e.key === "ArrowDown" || e.key === "ArrowRight") { e.preventDefault(); choose(opts[(i + 1) % opts.length].value); }
+      else if (e.key === "ArrowUp" || e.key === "ArrowLeft") { e.preventDefault(); choose(opts[(i - 1 + opts.length) % opts.length].value); }
+    });
+    prop(root, "value", function () { return current; }, function (v) { v = String(v); if (indexOf(v) >= 0) { current = v; paint(); } });
+    prop(root, "options", function () { return opts.map(function (o) { return { value: o.value, label: o.label }; }); });
+    prop(root, "disabled", function () { return disabled; }, function (v) { disabled = !!v; root.classList.toggle("disabled", disabled); root.tabIndex = disabled ? -1 : 0; });
+    root.__item = function (v) { var i = indexOf(v); return i >= 0 ? items[i] : null; };
+    paint();
+    return root;
+  }
+
   function makeSlider(min, max, step, initial) {
     var root = document.createElement("div");
     root.className = "uslide"; root.tabIndex = 0; root.setAttribute("role", "slider");
@@ -1040,6 +1159,25 @@ const PAGE_JS = String.raw`(function () {
       input = makeSlider(min, max, Number(spec.step) > 0 ? Number(spec.step) : 1, spec.value === undefined ? min : Number(spec.value));
       el.appendChild(input);
     }
+    else if (type === "toggle") { input = makeToggle(str(spec.label, 200), !!spec.checked); el.appendChild(input); }
+    else if (type === "radio") {
+      label(spec.label);
+      var ropts = (Array.isArray(spec.options) ? spec.options : []).slice(0, 50).map(function (o) {
+        return o && typeof o === "object" ? { value: str(o.value, 200), label: str(o.label === undefined ? o.value : o.label, 200) } : { value: str(o, 200), label: str(o, 200) };
+      });
+      if (!ropts.length) throw new Error("radio: give it options, e.g. options: ['Small', 'Large']");
+      input = makeRadio(ropts, spec.value === undefined ? undefined : str(spec.value, 200), spec.direction === "row");
+      el.appendChild(input);
+    }
+    else if (type === "progress") {
+      label(spec.label);
+      var pmax = Number(spec.max) > 0 ? Number(spec.max) : 100, pv = Math.max(0, Math.min(pmax, Number(spec.value) || 0));
+      var bar = document.createElement("div"); bar.className = "uprog";
+      var fillEl = document.createElement("div"); fillEl.className = "uprog-fill"; fillEl.style.width = (pv / pmax * 100) + "%";
+      var pt = document.createElement("span"); pt.className = "uprog-text"; pt.textContent = spec.text !== undefined ? str(spec.text, 40) : Math.round(pv / pmax * 100) + "%";
+      bar.appendChild(fillEl); el.appendChild(bar); el.appendChild(pt);
+      bar.setAttribute("role", "progressbar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(pmax)); bar.setAttribute("aria-valuenow", String(pv));
+    }
     else if (type === "status") {
       var dot = document.createElement("span"); dot.className = "dot " + (spec.state === "off" ? "off" : spec.state === "pending" ? "pending" : "on");
       var t = document.createElement("span"); t.textContent = str(spec.text, 200);
@@ -1051,7 +1189,8 @@ const PAGE_JS = String.raw`(function () {
       if (spec.title) { var h = document.createElement("div"); h.className = "uc-title"; h.textContent = str(spec.title, 120); el.appendChild(h); }
       body = document.createElement("div"); body.className = "uc-body"; el.appendChild(body);
     }
-    else throw new Error("unknown component type '" + type + "' - use heading, text, code, image, editor, button, input, textarea, checkbox, select, slider, status, divider, row or card");
+    else throw new Error("unknown component type '" + type + "' - use heading, text, code, image, editor, button, input, textarea, checkbox, toggle, radio, select, slider, progress, status, divider, row or card");
+    if (spec.draggable) { if (body) throw new Error(type + ": rows and cards cannot be draggable; put draggable components inside them"); el.dataset.draggable = "1"; }
     return { el: el, input: input, body: body };
   }
 
@@ -1076,7 +1215,7 @@ const PAGE_JS = String.raw`(function () {
     if (typeof on !== "object" || Array.isArray(on)) throw new Error("'on' must be an object like { click: { tool: 'name', args: {...} } }");
     var out = {};
     Object.keys(on).forEach(function (ev) {
-      if (ev !== "click" && ev !== "change") throw new Error("'on' supports click and change, not '" + ev + "'");
+      if (["click", "change", "drop", "dblclick"].indexOf(ev) < 0) throw new Error("'on' supports click, change, drop and dblclick, not '" + ev + "'");
       var h = on[ev];
       if (typeof h === "string") h = { tool: h };
       if (!h || typeof h.tool !== "string") throw new Error("on." + ev + " needs { tool: 'name', args: {...} }");
@@ -1095,7 +1234,7 @@ const PAGE_JS = String.raw`(function () {
     var el = document.getElementById("running");
     el.textContent = text; el.style.color = isErr ? "#b91c1c" : "#666";
     clearTimeout(dashNote.t);
-    dashNote.t = setTimeout(function () { el.style.color = "#666"; updateRunning(); }, 6000);
+    dashNote.t = setTimeout(function () { el.textContent = ""; }, 8000);
   }
 
   function runHandler(c, ev) {
@@ -1115,15 +1254,108 @@ const PAGE_JS = String.raw`(function () {
     });
   }
 
+  // Who is acting right now: a client's name while its cursor presses keys,
+  // otherwise the person at the browser.
+  var actor = null;
+  function by() { return actor || "user"; }
   function wire(c) {
+    c.el.addEventListener("dblclick", function (e) {
+      if (e.target.closest("[data-cid]") !== c.el) return;
+      notify(c, { event: "dblclick", id: c.id, by: by() });
+    });
+    if (c.el.dataset.draggable) enableDrag(c);
     var i = c.input;
     if (!i) return;
-    if (c.type === "button") i.addEventListener("click", function () { if (!c.synthetic) notify(c, { event: "click", id: c.id, by: "user" }); });
-    else if (c.type === "checkbox") i.addEventListener("change", function () { if (!c.synthetic) notify(c, { event: "change", id: c.id, checked: i.checked, by: "user" }); });
+    if (c.type === "button") i.addEventListener("click", function () { if (!c.synthetic && !c.el.__suppressClick) notify(c, { event: "click", id: c.id, by: by() }); });
+    else if (c.type === "checkbox" || c.type === "toggle") i.addEventListener("change", function () { if (!c.synthetic) notify(c, { event: "change", id: c.id, checked: i.checked, by: by() }); });
     else {
-      i.addEventListener("change", function () { if (!c.synthetic) notify(c, { event: "change", id: c.id, value: i.value, by: "user" }); });
+      i.addEventListener("change", function () { if (!c.synthetic) notify(c, { event: "change", id: c.id, value: i.value, by: by() }); });
       if (c.type === "input") i.addEventListener("keydown", function (e) { if (e.key === "Enter") i.blur(); });
     }
+  }
+
+  // ---- drag and drop (pointer-driven: no native HTML drag) ------------------------
+  function hostOf(el) { return el.parentNode; }
+  function containerIdOf(host) { if (host === dashArea) return null; var p = host.closest("[data-cid]"); return p ? p.dataset.cid : null; }
+  function childrenOf(host) { return Array.prototype.filter.call(host.children, function (x) { return x.dataset && x.dataset.cid; }); }
+  function isRow(host) { return host.classList && host.classList.contains("uc-row"); }
+  function moveComponent(c, host, before) {
+    host.insertBefore(c.el, before || null);
+    c.parentId = containerIdOf(host);
+    c.spec.parent = c.parentId === null ? undefined : c.parentId;
+    var sibs = childrenOf(host);
+    return { parent: c.parentId, index: sibs.indexOf(c.el), before: before ? before.dataset.cid : null };
+  }
+  /** Where a drop at (x, y) would land: a host element and the child to insert before. */
+  function dropTarget(c, x, y) {
+    var under = document.elementFromPoint(x, y);
+    if (!under || !dashArea.contains(under)) return null;
+    var t = under.closest("[data-cid]");
+    while (t && c.el.contains(t)) t = t.parentNode && t.parentNode.closest ? t.parentNode.closest("[data-cid]") : null;
+    var host, ref = null;
+    if (!t) host = dashArea;
+    else {
+      var tc = comps[t.dataset.cid];
+      if (tc && tc.body && !c.el.contains(tc.body)) host = tc.body;
+      else { host = hostOf(t); ref = t; }
+    }
+    var kids = childrenOf(host).filter(function (k) { return k !== c.el; });
+    if (ref) {
+      var r = ref.getBoundingClientRect();
+      var after = isRow(host) ? x > r.left + r.width / 2 : y > r.top + r.height / 2;
+      var idx = kids.indexOf(ref);
+      return { host: host, before: after ? kids[idx + 1] || null : ref };
+    }
+    var before = null;
+    for (var k = 0; k < kids.length; k++) {
+      var kr = kids[k].getBoundingClientRect();
+      if (isRow(host) ? x < kr.left + kr.width / 2 : y < kr.top + kr.height / 2) { before = kids[k]; break; }
+    }
+    return { host: host, before: before };
+  }
+  var dropLine = document.createElement("div"); dropLine.className = "drop-line";
+  function showDropLine(t) {
+    if (!t) { dropLine.remove(); return; }
+    var a = dashArea.getBoundingClientRect(), hr = t.host.getBoundingClientRect();
+    var kids = childrenOf(t.host).filter(function (k) { return !k.classList.contains("dragging"); });
+    var row = isRow(t.host), r;
+    if (t.before) r = t.before.getBoundingClientRect();
+    else if (kids.length) { var last = kids[kids.length - 1].getBoundingClientRect(); r = row ? { left: last.right + 5, top: last.top, height: last.height, width: 0 } : { left: hr.left, top: last.bottom + 5, width: hr.width, height: 0 }; }
+    else r = { left: hr.left + 4, top: hr.top + 4, width: Math.max(20, hr.width - 8), height: Math.max(20, hr.height - 8) };
+    dashArea.appendChild(dropLine);
+    var ox = -a.left + dashArea.scrollLeft, oy = -a.top + dashArea.scrollTop;
+    if (row) { dropLine.style.cssText = "left:" + (r.left - 5 + ox) + "px;top:" + (r.top + oy) + "px;width:2px;height:" + (r.height || hr.height) + "px"; }
+    else { dropLine.style.cssText = "left:" + ((t.before ? r.left : r.left) + ox) + "px;top:" + (r.top - 5 + oy) + "px;height:2px;width:" + (r.width || hr.width) + "px"; }
+  }
+  function enableDrag(c) {
+    c.el.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0 || conn.state === "idle") return;
+      if (e.target.closest("input, textarea, .usel, .uslide, .ucheck, .utoggle, .uradio")) return;
+      var sx = e.clientX, sy = e.clientY, dragging = false, target = null;
+      function move(ev) {
+        if (!dragging) {
+          if (Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 6) return;
+          dragging = true; c.el.classList.add("dragging"); document.body.classList.add("dragging-any");
+        }
+        ev.preventDefault();
+        c.el.style.transform = "translate(" + (ev.clientX - sx) + "px, " + (ev.clientY - sy) + "px)";
+        c.el.style.pointerEvents = "none";
+        target = dropTarget(c, ev.clientX, ev.clientY);
+        showDropLine(target);
+        var a = dashArea.getBoundingClientRect();
+        if (ev.clientY > a.bottom - 30) dashArea.scrollTop += 12; else if (ev.clientY < a.top + 30) dashArea.scrollTop -= 12;
+      }
+      function up() {
+        document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up); document.removeEventListener("pointercancel", up);
+        if (!dragging) return;
+        c.el.classList.remove("dragging"); document.body.classList.remove("dragging-any");
+        c.el.style.transform = ""; c.el.style.pointerEvents = "";
+        showDropLine(null);
+        c.el.__suppressClick = true; setTimeout(function () { c.el.__suppressClick = false; }, 0);
+        if (target && comps[c.id]) { var where = moveComponent(c, target.host, target.before); notify(c, Object.assign({ event: "drop", id: c.id, by: "user" }, where)); }
+      }
+      document.addEventListener("pointermove", move); document.addEventListener("pointerup", up); document.addEventListener("pointercancel", up);
+    });
   }
 
   function addComponent(call, spec) {
@@ -1132,7 +1364,7 @@ const PAGE_JS = String.raw`(function () {
     var built = buildComponent(spec);
     var id = "c" + (++order);
     var handlers = handlerSpec(spec.on);
-    var c = { id: id, type: spec.type, el: built.el, input: built.input, body: built.body, owner: call ? call.client.id : "", ownerClient: call ? call.client : { id: "page", name: "page" }, waiters: [], spec: spec, handlers: handlers };
+    var c = { id: id, type: spec.type, el: built.el, input: built.input, body: built.body, owner: call ? call.client.id : "", ownerClient: call ? call.client : { id: "page", name: "page" }, waiters: [], spec: spec, handlers: handlers, parentId: spec.parent !== undefined && spec.parent !== null ? String(spec.parent) : null };
     built.el.dataset.cid = id;
     var host = dashArea;
     if (spec.parent !== undefined && spec.parent !== null) {
@@ -1163,7 +1395,6 @@ const PAGE_JS = String.raw`(function () {
     Object.keys(comps).forEach(removeComponent);
     Object.keys(cursors).forEach(function (k) { cursors[k].el.remove(); });
     cursors = {};
-    clientsEl.textContent = "";
     eventLog = []; eventSeq = 0;
     emptyHint();
   }
@@ -1173,9 +1404,13 @@ const PAGE_JS = String.raw`(function () {
     if (c.spec.label !== undefined) d.label = str(c.spec.label, 200);
     if (c.spec.text !== undefined) d.text = str(c.spec.text, 2000);
     if (c.type === "checkbox") d.checked = c.input.checked;
-    else if (c.input && "value" in c.input && c.type !== "button") d.value = c.input.value;
+    else if (c.input && "value" in c.input && c.type !== "button" && c.type !== "toggle") d.value = c.input.value;
+    if (c.type === "progress") d.value = Number(c.spec.value) || 0;
     if (c.input && c.input.disabled) d.disabled = true;
     if (c.handlers) d.on = c.handlers;
+    if (c.parentId) d.parent = c.parentId;
+    if (c.el.dataset.draggable) d.draggable = true;
+    if (c.type === "toggle") d.checked = c.input.checked;
     return d;
   }
 
@@ -1188,7 +1423,8 @@ const PAGE_JS = String.raw`(function () {
     if (props.on !== undefined) c.handlers = handlerSpec(props.on);
     var spec = Object.assign({}, c.spec, props, { type: c.type, parent: c.spec.parent });
     if (c.input && props.value === undefined && c.type !== "button" && c.type !== "checkbox") spec.value = c.input.value;
-    if (c.type === "checkbox" && props.checked === undefined) spec.checked = c.input.checked;
+    if ((c.type === "checkbox" || c.type === "toggle") && props.checked === undefined) spec.checked = c.input.checked;
+    if (c.type === "progress" || c.type === "heading" || c.type === "text") { /* plain props */ }
     var built = buildComponent(spec);
     built.el.dataset.cid = c.id;
     c.el.replaceWith(built.el);
@@ -1206,19 +1442,57 @@ const PAGE_JS = String.raw`(function () {
     var color = PALETTE.filter(function (c) { return used.indexOf(c) < 0; })[0] || PALETTE[used.length % PALETTE.length];
     var el = document.createElement("div");
     el.className = "cur";
-    el.innerHTML = '<svg viewBox="0 0 16 20" aria-hidden="true"><path d="M1 1 L1 16 L5 12 L8 19 L11 17.6 L8 11 L14 11 Z" /></svg><span class="cur-name"></span>';
-    el.querySelector(".cur-name").textContent = client.name;
+    el.innerHTML = '<svg viewBox="0 0 16 20" aria-hidden="true"><path d="M1 1 L1 16 L5 12 L8 19 L11 17.6 L8 11 L14 11 Z" /></svg><span class="cur-name"><span class="cur-label"></span><span class="cur-spin" aria-label="working"></span></span>';
+    el.querySelector(".cur-label").textContent = client.name;
     el.querySelector(".cur-name").style.background = color;
     el.style.setProperty("--cur", color);
     dashArea.appendChild(el);
-    cur = { el: el, x: 12, y: 12, client: client, color: color };
+    cur = { el: el, x: 12, y: 12, client: client, color: color, busy: 0 };
     el.style.transform = "translate(12px, 12px)";
     cursors[client.id] = cur;
-    clientsEl.textContent = "clients: " + Object.keys(cursors).map(function (k) { return cursors[k].client.name; }).join(", ");
     return cur;
   }
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // ---- expand the dash to the whole page (not the screen) and back ----------------
+  var sizeBtn = document.getElementById("dashSize");
+  var ICON_EXPAND = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" /></svg>', ICON_COLLAPSE = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2v4H2M14 6h-4V2M10 14v-4h4M2 10h4v4" /></svg>';
+  function setFull(on) {
+    dashSection.classList.toggle("full", on);
+    document.body.classList.toggle("dash-full", on);
+    sizeBtn.innerHTML = on ? ICON_COLLAPSE : ICON_EXPAND;
+    sizeBtn.title = on ? "Collapse" : "Expand";
+    sizeBtn.setAttribute("aria-label", sizeBtn.title);
+    if (openSelect) openSelect.__close();
+  }
+  sizeBtn.addEventListener("click", function () { setFull(!dashSection.classList.contains("full")); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && dashSection.classList.contains("full") && !document.querySelector(".overlay") && !openSelect) setFull(false);
+  });
+  setFull(false);
+
+  // The person's own pointer, drawn like the clients' and labelled "you".
+  var me = document.createElement("div");
+  me.className = "cur me";
+  me.innerHTML = '<svg viewBox="0 0 16 20" aria-hidden="true"><path d="M1 1 L1 16 L5 12 L8 19 L11 17.6 L8 11 L14 11 Z" /></svg><span class="cur-name"><span class="cur-label">you</span></span>';
+  me.hidden = true;
+  var lastPointer = null;
+  function showMe(e) {
+    lastPointer = { clientX: e.clientX, clientY: e.clientY };
+    var a = dashArea.getBoundingClientRect();
+    if (me.parentNode !== dashArea) dashArea.appendChild(me);
+    me.hidden = false;
+    dashArea.classList.add("mine");
+    me.style.transform = "translate(" + Math.round(e.clientX - a.left + dashArea.scrollLeft) + "px, " + Math.round(e.clientY - a.top + dashArea.scrollTop) + "px)";
+  }
+  dashArea.addEventListener("pointermove", showMe);
+  dashArea.addEventListener("pointerenter", showMe);
+  dashArea.addEventListener("pointerdown", function (e) { me.classList.remove("click"); void me.offsetWidth; me.classList.add("click"); showMe(e); });
+  dashArea.addEventListener("pointerleave", function () { me.hidden = true; lastPointer = null; dashArea.classList.remove("mine"); });
+  // The dash can scroll under a still pointer (a tool revealing a component):
+  // keep the drawn pointer where the real one is.
+  dashArea.addEventListener("scroll", function () { if (lastPointer && !me.hidden) showMe(lastPointer); });
   // Keep what a tool works on in view: inside the dash's own scroll area only.
   function reveal(el) {
     var a = dashArea.getBoundingClientRect(), r = el.getBoundingClientRect();
@@ -1230,11 +1504,40 @@ const PAGE_JS = String.raw`(function () {
     var a = dashArea.getBoundingClientRect(), r = (c.input || c.el).getBoundingClientRect();
     return { x: r.left - a.left + dashArea.scrollLeft + r.width * (fx === undefined ? 0.5 : fx), y: r.top - a.top + dashArea.scrollTop + r.height * (fy === undefined ? 0.5 : fy) };
   }
+  // A cursor glides like a hand would: along a slight arc, easing in and out,
+  // taking longer for longer distances. A newer move supersedes an older one.
+  // In a hidden tab (no animation frames) it jumps, so tools never stall.
+  function place(cur, x, y) { cur.x = x; cur.y = y; cur.el.style.transform = "translate(" + Math.round(x) + "px, " + Math.round(y) + "px)"; }
   function moveTo(cur, p, ms) {
-    cur.el.style.transition = "transform " + (ms || 380) + "ms cubic-bezier(.3,.7,.4,1)";
-    cur.el.style.transform = "translate(" + Math.round(p.x) + "px, " + Math.round(p.y) + "px)";
-    cur.x = p.x; cur.y = p.y;
-    return sleep((ms || 380) + 40);
+    var x0 = cur.x, y0 = cur.y, x1 = p.x, y1 = p.y;
+    var dist = Math.sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+    var token = (cur.token || 0) + 1; cur.token = token;
+    cur.el.style.transition = "none";
+    if (dist < 2 || document.hidden) { place(cur, x1, y1); return sleep(document.hidden ? 0 : 60); }
+    var dur = Math.max(260, Math.min(1000, (ms || 420) * (0.55 + dist / 700)));
+    cur.bend = -(cur.bend || 1);
+    var bend = Math.min(70, dist * 0.18) * cur.bend;
+    var cx = (x0 + x1) / 2 - (y1 - y0) / dist * bend, cy = (y0 + y1) / 2 + (x1 - x0) / dist * bend;
+    return new Promise(function (resolve) {
+      var t0 = null, done = false;
+      function finish() { if (done) return; done = true; if (cur.token === token) place(cur, x1, y1); resolve(); }
+      function step(now) {
+        if (done || cur.token !== token) { finish(); return; }
+        if (t0 === null) t0 = now;
+        var t = Math.min(1, (now - t0) / dur);
+        var e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        var u = 1 - e;
+        place(cur, u * u * x0 + 2 * u * e * cx + e * e * x1, u * u * y0 + 2 * u * e * cy + e * e * y1);
+        if (t < 1) requestAnimationFrame(step); else finish();
+      }
+      requestAnimationFrame(step);
+      setTimeout(finish, dur + 400);
+    });
+  }
+  /** Glide a client's cursor to a component it just added or changed (no waiting). */
+  function glide(call, c) {
+    if (!call || !call.client || conn.state === "idle" || !comps[c.id]) return;
+    try { moveTo(cursorFor(call.client), pointIn(c, 0.12, 0.5)); } catch (e) {}
   }
   function pulse(cur) {
     cur.el.classList.remove("click"); void cur.el.offsetWidth; cur.el.classList.add("click");
@@ -1254,21 +1557,25 @@ const PAGE_JS = String.raw`(function () {
 
   var TEXTUAL = ["input", "textarea", "editor"];
   var API = {
-    "ui.add": function (call, a) { return addComponent(call, a[0]); },
-    "ui.update": function (call, a) { return update(compOf(String(a[0])), a[1]); },
+    "ui.add": function (call, a) { var id = addComponent(call, a[0]); glide(call, comps[id]); return id; },
+    "ui.update": function (call, a) { var c = compOf(String(a[0])); var r = update(c, a[1]); glide(call, c); return r; },
     "ui.get": function (call, a) { return describe(compOf(String(a[0]))); },
-    "ui.remove": function (call, a) { compOf(String(a[0])); removeComponent(String(a[0])); return true; },
+    "ui.remove": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client);
+      return moveTo(cur, pointIn(c, 0.12, 0.5), 300).then(function () { removeComponent(String(a[0])); return true; });
+    },
     "ui.clear": function (call) {
       var n = 0;
       Object.keys(comps).forEach(function (id) { if (comps[id] && comps[id].owner === call.client.id) { removeComponent(id); n++; } });
       return n;
     },
-    "ui.list": function () { return Object.keys(comps).map(function (id) { return describe(comps[id]); }); },
+    // In page order (after drags), each with its parent.
+    "ui.list": function () { return Array.prototype.map.call(dashArea.querySelectorAll("[data-cid]"), function (el) { return comps[el.dataset.cid]; }).filter(Boolean).map(describe); },
     "ui.wait": function (call, a) {
       var c = compOf(String(a[0])), o = a[1] || {};
       var ms = Math.max(100, Math.min(CALL_TIMEOUT_MS - 5000, Number(o.timeout) || 60000));
       return new Promise(function (resolve, reject) {
-        var w = { event: o.event === "click" || o.event === "change" ? o.event : null };
+        var w = { event: ["click", "change", "drop", "dblclick"].indexOf(o.event) >= 0 ? o.event : null };
         var timer = setTimeout(function () { done(); resolve({ event: "timeout", id: c.id }); }, ms);
         function done() { clearTimeout(timer); c.waiters = c.waiters.filter(function (x) { return x !== w; }); call.waiters = call.waiters.filter(function (x) { return x !== w; }); }
         w.resolve = function (ev) { done(); resolve(ev); };
@@ -1299,7 +1606,7 @@ const PAGE_JS = String.raw`(function () {
       return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () {
         if (c.input && c.input.disabled) throw new Error("component '" + c.id + "' is disabled");
         if (c.type === "button") { c.input.classList.add("pressed"); setTimeout(function () { c.input.classList.remove("pressed"); }, 180); notify(c, { event: "click", id: c.id, by: call.client.name }); }
-        else if (c.type === "checkbox") { c.input.checked = !c.input.checked; notify(c, { event: "change", id: c.id, checked: c.input.checked, by: call.client.name }); }
+        else if (c.type === "checkbox" || c.type === "toggle") { c.input.checked = !c.input.checked; notify(c, { event: "change", id: c.id, checked: c.input.checked, by: call.client.name }); }
         else if (c.input && c.input.focus) c.input.focus();
         return describe(c);
       });
@@ -1332,7 +1639,7 @@ const PAGE_JS = String.raw`(function () {
     },
     "cursor.check": function (call, a) {
       var c = compOf(String(a[0])), cur = cursorFor(call.client);
-      needInput(c, ["checkbox"]);
+      needInput(c, ["checkbox", "toggle"]);
       return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () {
         if (c.input.checked !== !!a[1]) { c.input.checked = !!a[1]; notify(c, { event: "change", id: c.id, checked: c.input.checked, by: call.client.name }); }
         return describe(c);
@@ -1340,8 +1647,17 @@ const PAGE_JS = String.raw`(function () {
     },
     "cursor.select": function (call, a) {
       var c = compOf(String(a[0])), cur = cursorFor(call.client), v = str(a[1], 200);
-      needInput(c, ["select"]);
-      if (!c.input.options.some(function (o) { return o.value === v; })) throw new Error("select '" + c.id + "' has no option '" + v + "'");
+      needInput(c, ["select", "radio"]);
+      if (!c.input.options.some(function (o) { return o.value === v; })) throw new Error(c.type + " '" + c.id + "' has no option '" + v + "'");
+      if (c.type === "radio") {
+        var opt = c.input.__item(v), a0 = dashArea.getBoundingClientRect();
+        reveal(c.el);
+        var ro = opt.getBoundingClientRect();
+        return moveTo(cur, { x: ro.left - a0.left + dashArea.scrollLeft + 6, y: ro.top - a0.top + dashArea.scrollTop + ro.height / 2 }).then(function () { return pulse(cur); }).then(function () {
+          if (c.input.value !== v) { c.synthetic = true; c.input.value = v; c.synthetic = false; notify(c, { event: "change", id: c.id, value: v, by: call.client.name }); }
+          return describe(c);
+        });
+      }
       return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () {
         c.input.__open();
         var item = c.input.__item(v), a = dashArea.getBoundingClientRect(), r = item.getBoundingClientRect();
@@ -1362,16 +1678,212 @@ const PAGE_JS = String.raw`(function () {
         return moveTo(cur, pointIn(c, from)).then(function () { cur.el.classList.add("grab"); return moveTo(cur, pointIn(c, to), 600); })
           .then(function () { cur.el.classList.remove("grab"); setValue(c, String(v), call.client.name); return describe(c); });
       }
-      var t = compOf(String(target));
-      if (t === c || c.el.contains(t.el)) throw new Error("cannot drag a component onto itself");
-      return moveTo(cur, pointIn(c)).then(function () { cur.el.classList.add("grab"); c.el.classList.add("dragging"); return moveTo(cur, pointIn(t, 0.5, 0.1), 650); })
+      // target: a component id (drop before it - or into it, for a row or card),
+      // or { before | after | into: id }.
+      var spec2 = typeof target === "string" ? { to: target } : target && typeof target === "object" ? target : null;
+      if (!spec2) throw new Error("cursor.drag needs a target: a component id, { before | after | into: id }, or a number for a slider");
+      var tid = String(spec2.to || spec2.before || spec2.after || spec2.into);
+      var t = compOf(tid);
+      if (t === c || c.el.contains(t.el)) throw new Error("cannot drag a component onto itself or into itself");
+      var host, before;
+      if ((spec2.to && t.body) || spec2.into) { if (!t.body) throw new Error("'" + tid + "' is a " + t.type + "; only rows and cards take components"); host = t.body; before = null; }
+      else if (spec2.after) { host = t.el.parentNode; before = t.el.nextSibling; while (before && before === c.el) before = before.nextSibling; }
+      else { host = t.el.parentNode; before = t.el; }
+      return moveTo(cur, pointIn(c)).then(function () { cur.el.classList.add("grab"); c.el.classList.add("dragging"); return moveTo(cur, pointIn(t, 0.5, before === t.el ? 0.05 : 0.9), 650); })
         .then(function () {
           cur.el.classList.remove("grab"); c.el.classList.remove("dragging");
-          t.el.parentNode.insertBefore(c.el, t.el);
-          return { moved: c.id, before: t.id };
+          var where = moveComponent(c, host, before);
+          notify(c, Object.assign({ event: "drop", id: c.id, by: call.client.name }, where));
+          return Object.assign({ moved: c.id }, where);
         });
+    },
+    "cursor.hover": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client);
+      return moveTo(cur, pointIn(c)).then(function () { c.el.classList.add("hovered"); setTimeout(function () { c.el.classList.remove("hovered"); }, 900); return describe(c); });
+    },
+    "cursor.dblclick": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client);
+      return moveTo(cur, pointIn(c)).then(function () { return pulse(cur); }).then(function () { return pulse(cur); }).then(function () { notify(c, { event: "dblclick", id: c.id, by: call.client.name }); return describe(c); });
+    },
+    "cursor.scroll": function (call, a) {
+      var c = compOf(String(a[0])), cur = cursorFor(call.client);
+      return moveTo(cur, pointIn(c), 500).then(function () { return describe(c); });
+    },
+    "cursor.press": function (call, a) {
+      var c = compOf(String(a[0])), key = str(a[1], 20), cur = cursorFor(call.client);
+      var target = c.input || c.el;
+      return moveTo(cur, pointIn(c, 0.15)).then(function () { return pulse(cur); }).then(function () {
+        if (target.disabled) throw new Error("component '" + c.id + "' is disabled");
+        if (TEXTUAL.indexOf(c.type) >= 0) {
+          if (c.input.readOnly) throw new Error("component '" + c.id + "' is read-only");
+          c.input.focus();
+          if (key === "Enter" && c.type === "input") { notify(c, { event: "change", id: c.id, value: c.input.value, by: call.client.name }); }
+          else if (key === "Enter") setValue(c, c.input.value + "\n", call.client.name);
+          else if (key === "Backspace") setValue(c, c.input.value.slice(0, -1), call.client.name);
+          else if (key.length === 1) setValue(c, c.input.value + key, call.client.name);
+          else throw new Error("text boxes take Enter, Backspace or a single character");
+          return describe(c);
+        }
+        actor = call.client.name;
+        try {
+          if (target.focus) target.focus();
+          if (c.type === "button" && (key === "Enter" || key === " ")) { notify(c, { event: "click", id: c.id, by: call.client.name }); }
+          else target.dispatchEvent(new KeyboardEvent("keydown", { key: key, bubbles: true, cancelable: true }));
+        } finally { actor = null; }
+        return describe(c);
+      });
     }
   };
+
+  // ===========================================================================
+  // Data: kv and db for tools, kept in this browser's IndexedDB, per device.
+  // Tools are sandboxed (no storage of their own); the page holds it for them.
+  // ===========================================================================
+  var KV_MAX_VALUE = 1048576, KV_MAX_KEYS = 10000, DB_MAX_BYTES = 52428800, ROWS_MAX = 10000;
+  var idbPromise = null;
+  function idb() {
+    if (!idbPromise) idbPromise = new Promise(function (resolve, reject) {
+      var req = indexedDB.open("code-mcp-sandbox", 1);
+      req.onupgradeneeded = function () { var d = req.result; if (!d.objectStoreNames.contains("kv")) d.createObjectStore("kv"); if (!d.objectStoreNames.contains("db")) d.createObjectStore("db"); };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { idbPromise = null; reject(new Error("browser storage unavailable: " + (req.error && req.error.message))); };
+    });
+    return idbPromise;
+  }
+  function idbDo(store, mode, fn) {
+    return idb().then(function (d) {
+      return new Promise(function (resolve, reject) {
+        var tx = d.transaction(store, mode), st = tx.objectStore(store), out;
+        var r = fn(st); if (r) r.onsuccess = function () { out = r.result; };
+        tx.oncomplete = function () { resolve(out); };
+        tx.onerror = tx.onabort = function () { reject(new Error("browser storage: " + (tx.error && tx.error.message || "failed"))); };
+      });
+    });
+  }
+  var KV_PREFIX = DEVICE + "\u0000";
+  function kvRange(prefix) { return IDBKeyRange.bound(KV_PREFIX + prefix, KV_PREFIX + prefix + "\uffff"); }
+  function kvKey(key) {
+    if (typeof key !== "string" || !key.length || key.length > 256) throw new Error("kv: a key is a string of 1 to 256 characters");
+    return KV_PREFIX + key;
+  }
+
+  var sqlReady = null, sqlDb = null;
+  function loadSql() {
+    if (!sqlReady) sqlReady = new Promise(function (resolve, reject) {
+      var sc = document.createElement("script");
+      sc.src = "/mcp?asset=sql-wasm.js";
+      sc.onload = function () {
+        window.initSqlJs({ locateFile: function () { return "/mcp?asset=sql-wasm.wasm"; } }).then(function (SQL) {
+          return idbDo("db", "readonly", function (st) { return st.get(DEVICE); }).then(function (bytes) {
+            sqlDb = bytes ? new SQL.Database(new Uint8Array(bytes)) : new SQL.Database();
+            resolve(sqlDb);
+          });
+        }).catch(function (err) { sqlReady = null; reject(new Error("could not start SQLite: " + (err && err.message || err))); });
+      };
+      sc.onerror = function () { sqlReady = null; reject(new Error("could not load SQLite")); };
+      document.head.appendChild(sc);
+    });
+    return sqlReady;
+  }
+  function saveDb() {
+    var bytes = sqlDb.export();
+    if (bytes.length > DB_MAX_BYTES) throw new Error("db: the database would exceed " + DB_MAX_BYTES / 1048576 + " MB; the change was not saved");
+    return idbDo("db", "readwrite", function (st) { st.put(bytes.buffer, DEVICE); });
+  }
+  function sqlParams(p) {
+    if (p === null || p === undefined) return undefined;
+    if (Array.isArray(p) || (typeof p === "object")) return p;
+    throw new Error("db: params must be an array (for ?) or an object (for :name)");
+  }
+  var dbChain = Promise.resolve();
+  function serial(fn) { var r = dbChain.then(fn); dbChain = r.catch(function () {}); return r; }
+
+  function dataApi() {
+    return {
+      "kv.get": function (call, a) { var k = kvKey(a[0]); return idbDo("kv", "readonly", function (st) { return st.get(k); }).then(function (v) { return v === undefined ? null : JSON.parse(v); }); },
+      "kv.set": function (call, a) {
+        var k = kvKey(a[0]), json = JSON.stringify(a[1] === undefined ? null : a[1]);
+        if (json.length > KV_MAX_VALUE) throw new Error("kv: a value is at most 1 MB as JSON");
+        return idbDo("kv", "readonly", function (st) { return st.count(kvRange("")); }).then(function (n) {
+          return idbDo("kv", "readonly", function (st) { return st.get(k); }).then(function (old) {
+            if (old === undefined && n >= KV_MAX_KEYS) throw new Error("kv: at most " + KV_MAX_KEYS + " keys");
+            return idbDo("kv", "readwrite", function (st) { st.put(json, k); });
+          });
+        }).then(function () { refreshData(); return true; });
+      },
+      "kv.delete": function (call, a) {
+        var k = kvKey(a[0]);
+        return idbDo("kv", "readonly", function (st) { return st.get(k); }).then(function (old) {
+          if (old === undefined) return false;
+          return idbDo("kv", "readwrite", function (st) { st.delete(k); }).then(function () { refreshData(); return true; });
+        });
+      },
+      "kv.list": function (call, a) {
+        var prefix = typeof a[0] === "string" ? a[0] : "";
+        return idbDo("kv", "readonly", function (st) { return st.getAllKeys(kvRange(prefix), 1000); }).then(function (keys) { return (keys || []).map(function (k) { return String(k).slice(KV_PREFIX.length); }); });
+      },
+      "db.query": function (call, a) {
+        return serial(function () {
+          return loadSql().then(function (d) {
+            var stmt = d.prepare(String(a[0])), rows = [];
+            try {
+              var p = sqlParams(a[1]); if (p !== undefined) stmt.bind(p);
+              while (stmt.step()) { if (rows.length >= ROWS_MAX) throw new Error("db.query: more than " + ROWS_MAX + " rows - add a LIMIT"); rows.push(stmt.getAsObject()); }
+            } finally { stmt.free(); }
+            var changed = d.getRowsModified() > 0 && !/^\s*(select|with|pragma|explain)\b/i.test(String(a[0]));
+            return (changed ? saveDb() : Promise.resolve()).then(function () { if (changed) refreshData(); return rows; });
+          });
+        });
+      },
+      "db.execute": function (call, a) {
+        return serial(function () {
+          return loadSql().then(function (d) {
+            var p = sqlParams(a[1]);
+            if (p === undefined) d.exec(String(a[0])); else d.run(String(a[0]), p);
+            var changes = d.getRowsModified();
+            var last = d.exec("SELECT last_insert_rowid() AS id");
+            var lastId = last.length ? last[0].values[0][0] : 0;
+            return saveDb().then(function () { refreshData(); return { changes: changes, lastInsertRowid: lastId }; });
+          });
+        });
+      }
+    };
+  }
+
+  // The "Data" line: what tools have stored, and a way to clear it.
+  function refreshData() {
+    clearTimeout(refreshData.t);
+    refreshData.t = setTimeout(function () {
+      Promise.all([
+        idbDo("kv", "readonly", function (st) { return st.count(kvRange("")); }),
+        idbDo("db", "readonly", function (st) { return st.get(DEVICE); })
+      ]).then(function (r) {
+        var keys = r[0] || 0, bytes = r[1] ? r[1].byteLength : 0;
+        var tables = 0;
+        if (sqlDb) { try { var t = sqlDb.exec("SELECT count(*) FROM sqlite_master WHERE type = 'table'"); tables = t.length ? t[0].values[0][0] : 0; } catch (e) {} }
+        var el = document.getElementById("data");
+        el.innerHTML = "";
+        if (!keys && !bytes) return;
+        var label = document.createElement("span");
+        label.textContent = "Data: " + keys + " key" + (keys === 1 ? "" : "s") + (bytes ? " \u00b7 SQLite " + (sqlDb ? tables + " table" + (tables === 1 ? "" : "s") + ", " : "") + fmtSize(bytes) : "") + " \u00b7 ";
+        var clr = document.createElement("button"); clr.type = "button"; clr.className = "linkbtn"; clr.textContent = "Clear data";
+        clr.disabled = connected;
+        clr.addEventListener("click", function () {
+          askConfirm("Clear data", "Delete every kv key and the SQLite database that tools stored in this browser for " + DEVICE + "?", "Clear").then(function (yes) {
+            if (!yes) return;
+            idbDo("kv", "readwrite", function (st) { st.delete(kvRange("")); }).then(function () {
+              return idbDo("db", "readwrite", function (st) { st.delete(DEVICE); });
+            }).then(function () { sqlDb = null; sqlReady = null; refreshData(); setStatus("Data cleared."); });
+          });
+        });
+        el.appendChild(label); el.appendChild(clr);
+      }).catch(function () {});
+    }, 150);
+  }
+  function fmtSize(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
+  var DATA_API = dataApi();
+  Object.keys(DATA_API).forEach(function (k) { API[k] = DATA_API[k]; });
+  refreshData();
 
   // ---- the Components reference (same renderer as the dash) -----------------------
   var SAMPLES = [
@@ -1387,6 +1899,10 @@ const PAGE_JS = String.raw`(function () {
     ["checkbox", { type: "checkbox", label: "I agree" }],
     ["select", { type: "select", label: "Size", options: ["S", "M", "L"], value: "M" }],
     ["slider", { type: "slider", label: "Volume", min: 0, max: 10, value: 4 }],
+    ["toggle", { type: "toggle", label: "Dark mode", checked: true }],
+    ["radio", { type: "radio", label: "Plan", options: ["Free", "Pro", "Team"], value: "Pro", direction: "row" }],
+    ["progress", { type: "progress", label: "Upload", value: 64 }],
+    ["draggable", { type: "text", text: "Drag me (when connected)", draggable: true }],
     ["editor", { type: "editor", label: "Editor", value: "function hi() {\n  return 'hi';\n}", rows: 3 }],
     ["card", { type: "card", title: "Card" }]
   ];
@@ -1404,6 +1920,42 @@ const PAGE_JS = String.raw`(function () {
   });
 
   // ---- starter tools: added once, on a first visit with no tools --------------
+  // Which starters this browser has been offered: a JSON list of names (or, from
+  // the first release, a date - meaning the first ten).
+  var FIRST_STARTERS = ["dashboard_add", "dashboard_update", "dashboard_list", "dashboard_remove", "ask_user", "confirm", "bar_chart", "table", "cursor_click", "cursor_type"];
+  function starterName(s) { return s.filename.replace(/\.js$/, ""); }
+  function offeredStarters() {
+    var v = null;
+    try { v = localStorage.getItem(SEEDED_KEY); } catch (e) {}
+    if (!v) return null;
+    try { var j = JSON.parse(v); if (Array.isArray(j)) return j; } catch (e) {}
+    return FIRST_STARTERS;
+  }
+  function markOffered() { try { localStorage.setItem(SEEDED_KEY, JSON.stringify(STARTERS.map(starterName))); } catch (e) {} }
+  function newStarters() {
+    var offered = offeredStarters();
+    if (!offered) return [];
+    var have = tools.map(function (t) { return t.name; });
+    return STARTERS.filter(function (s) { var n = starterName(s); return offered.indexOf(n) < 0 && have.indexOf(n) < 0; });
+  }
+  function renderStarterOffer() {
+    var el = document.getElementById("starters");
+    var fresh = connected ? [] : newStarters();
+    el.innerHTML = "";
+    if (!fresh.length) return;
+    var t = document.createElement("span");
+    t.textContent = fresh.length + " new starter tool" + (fresh.length === 1 ? "" : "s") + ": " + fresh.map(starterName).join(", ") + " \u00b7 ";
+    var add = document.createElement("button"); add.type = "button"; add.className = "linkbtn"; add.textContent = "Add";
+    var skip = document.createElement("button"); skip.type = "button"; skip.className = "linkbtn"; skip.textContent = "Not now";
+    add.addEventListener("click", function () {
+      var chain = Promise.resolve(), n = 0;
+      fresh.forEach(function (s) { chain = chain.then(function () { return validateAndStore(s.source, s.filename, null).then(function (r) { if (r.ok) n++; }); }); });
+      chain.then(function () { markOffered(); render(); setStatus("Added " + n + " starter tool" + (n === 1 ? "" : "s") + "."); });
+    });
+    skip.addEventListener("click", function () { markOffered(); render(); });
+    el.appendChild(t); el.appendChild(add); el.appendChild(document.createTextNode(" \u00b7 ")); el.appendChild(skip);
+  }
+
   function seedStarters() {
     var seeded = null;
     try { seeded = localStorage.getItem(SEEDED_KEY); } catch (e) {}
@@ -1415,7 +1967,7 @@ const PAGE_JS = String.raw`(function () {
       });
     });
     chain.then(function () {
-      try { localStorage.setItem(SEEDED_KEY, new Date().toISOString()); } catch (e) {}
+      markOffered();
       render();
       if (added) setStatus("Added " + added + " starter tools for building an interactive dashboard - View them as examples, or delete the ones you do not need.");
     });
@@ -1431,7 +1983,7 @@ const PAGE_JS = String.raw`(function () {
 export const STARTER_TOOLS: { filename: string; source: string }[] = [
   {
     "filename": "dashboard_add.js",
-    "source": "/**\n * Add a component to the dashboard and return its id. Types: heading, text, code,\n * image (data URL), editor, button, input, textarea, checkbox, select, slider,\n * status, divider, row, card. Put it inside a row or card with spec.parent.\n * Example spec: {\"type\": \"card\", \"title\": \"Build\"} or {\"type\": \"button\", \"label\": \"Run\", \"parent\": \"c1\"}.\n * Make it interactive with \"on\": {\"click\": {\"tool\": \"increment\", \"args\": {\"id\": \"c2\"}}}\n * (or \"change\"): each click or change runs that tool in the browser, no agent needed.\n * @param {object} spec The component, e.g. {\"type\": \"text\", \"text\": \"Hello\"}\n */\nexport default async function dashboard_add(spec) {\n  return await ui.add(spec);\n}\n"
+    "source": "/**\n * Add a component to the dashboard and return its id. Types: heading, text, code,\n * image (data URL), editor, button, input, textarea, checkbox, toggle, radio,\n * select, slider, progress, status, divider, row, card. \"draggable\": true lets\n * people drag it (a 'drop' event). Put it inside a row or card with spec.parent.\n * Example spec: {\"type\": \"card\", \"title\": \"Build\"} or {\"type\": \"button\", \"label\": \"Run\", \"parent\": \"c1\"}.\n * Make it interactive with \"on\": {\"click\": {\"tool\": \"increment\", \"args\": {\"id\": \"c2\"}}}\n * (or \"change\"): each click or change runs that tool in the browser, no agent needed.\n * @param {object} spec The component, e.g. {\"type\": \"text\", \"text\": \"Hello\"}\n */\nexport default async function dashboard_add(spec) {\n  return await ui.add(spec);\n}\n"
   },
   {
     "filename": "dashboard_update.js",
@@ -1476,6 +2028,22 @@ export const STARTER_TOOLS: { filename: string; source: string }[] = [
   {
     "filename": "cursor_type.js",
     "source": "/**\n * Move your named cursor to a text box (input, textarea or editor) and type\n * into it, key by key. With replace=true the box is cleared first.\n * @param {string} id The text box\n * @param {string} text What to type\n * @param {boolean} [replace=false] Clear the box before typing\n */\nexport default async function cursor_type(id, text, replace = false) {\n  if (replace) await cursor.fill(id, \"\");\n  return await cursor.type(id, text);\n}\n"
+  },
+  {
+    "filename": "cursor_drag.js",
+    "source": "/**\n * Drag a component with your named cursor: before another component, into a\n * row or card, or a slider to a value. Reports a 'drop' (or 'change') event.\n * @param {string} id The component to drag (draggable components, or a slider)\n * @param {string|number} target A component id (drops before it, or into it if it is a row or card), or a number for a slider\n * @param {string} [position] 'before', 'after' or 'into' - overrides the default for a component target\n */\nexport default async function cursor_drag(id, target, position) {\n  if (typeof target === \"number\" || !position) return await cursor.drag(id, target);\n  return await cursor.drag(id, { [position]: target });\n}\n"
+  },
+  {
+    "filename": "kanban.js",
+    "source": "/**\n * Build a kanban board: a row of columns (cards), with the given tasks as\n * draggable items in the first column. People drag tasks with the mouse,\n * agents with cursor_drag; each move is a 'drop' event (see dashboard_events).\n * @param {string[]} columns Column names, e.g. [\"To do\", \"Doing\", \"Done\"]\n * @param {string[]} [tasks] Tasks to start with, in the first column\n */\nexport default async function kanban(columns, tasks) {\n  if (!columns.length) throw new Error(\"give at least one column\");\n  const board = await ui.add({ type: \"row\" });\n  const ids = {};\n  for (const name of columns) ids[name] = await ui.add({ type: \"card\", title: name, parent: board });\n  const items = [];\n  for (const t of tasks || []) items.push(await ui.add({ type: \"text\", text: String(t), draggable: true, parent: ids[columns[0]] }));\n  return { board, columns: ids, tasks: items };\n}\n"
+  },
+  {
+    "filename": "sql.js",
+    "source": "/**\n * Run SQL on this browser's SQLite database (it lasts across calls and\n * reloads). Statements that return rows (SELECT, WITH, PRAGMA, ... RETURNING)\n * give the rows; others give { changes, lastInsertRowid }. Without params,\n * several statements separated by ';' run in order.\n * @param {string} statement SQL, e.g. \"CREATE TABLE todo (id INTEGER PRIMARY KEY, text TEXT, done INTEGER DEFAULT 0)\"\n * @param {array} [params] Values for the ? placeholders\n */\nexport default async function sql(statement, params) {\n  if (/^\\s*(select|with|pragma|explain)\\b/i.test(statement) || /\\breturning\\b/i.test(statement)) return await db.query(statement, params);\n  return await db.execute(statement, params);\n}\n"
+  },
+  {
+    "filename": "storage.js",
+    "source": "/**\n * Keep small values in this browser across calls and reloads (a key-value\n * store). get returns the value (or null), set stores any JSON value, delete\n * removes a key, list returns the keys (optionally those starting with key).\n * @param {string} action get, set, delete or list\n * @param {string} [key] The key - for list, an optional prefix\n * @param {*} [value] For set: the value to store\n */\nexport default async function storage(action, key, value) {\n  if (action === \"list\") return await kv.list(key || \"\");\n  if (!key) throw new Error(\"give a key\");\n  if (action === \"get\") return await kv.get(key);\n  if (action === \"set\") return await kv.set(key, value);\n  if (action === \"delete\") return await kv.delete(key);\n  throw new Error(\"action must be get, set, delete or list\");\n}\n"
   }
 ];
 
@@ -1492,7 +2060,7 @@ export function renderSandboxPage(deviceId: string): string {
     '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
     '    <meta name="referrer" content="no-referrer" />',
     "    <title>Prime - Sandbox</title>",
-    '    <link rel="icon" href="' + FAVICON + '" />',
+    '    <link rel="icon" id="favicon" href="' + FAVICON + '" />',
     '    <link rel="preconnect" href="https://fonts.googleapis.com" />',
     '    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />',
     '    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />',
@@ -1508,14 +2076,16 @@ export function renderSandboxPage(deviceId: string): string {
     '    <ul id="list"></ul>',
     '    <div class="status" id="status"></div>',
     '    <div class="status" id="count"></div>',
+    '    <div class="status" id="starters"></div>',
+    '    <div class="status" id="data"></div>',
     '    <div class="connect-row"><button class="connect" id="connect" type="button">Connect</button><div class="conninfo" id="conninfo"></div></div>',
     '    <section id="dash" hidden>',
-    '      <div class="row-head section"><h2>Dash</h2><span class="status" id="clients"></span><span class="status" id="running"></span></div>',
+    '      <div class="row-head section dash-head"><h2>Dash</h2><span class="status" id="running"></span><button class="icon-btn" id="dashSize" type="button" title="Expand" aria-label="Expand"></button></div>',
     '      <div class="dash-area" id="dash-area"><div class="dash-empty">Connected. Tools called by MCP clients show their UI here.</div></div>',
     "    </section>",
     '    <details class="gallery" id="gallery">',
     "      <summary>Components</summary>",
-    '      <p class="gal-intro">Inside a tool, <code>ui.add({...})</code> returns a component id; <code>ui.update</code>, <code>ui.get</code>, <code>ui.remove</code>, <code>ui.clear</code>, <code>ui.list</code> and <code>ui.wait(id)</code> (the next click or change) work on it. Give a component <code>on: { click: { tool: \'name\', args: {...} } }</code> (or <code>change</code>) and every click or change runs that tool in the browser - it receives the details as <code>event</code>; <code>ui.events({ since, timeout })</code> returns what happened, for agents to react to. <code>cursor.move</code>, <code>click</code>, <code>type</code>, <code>fill</code>, <code>check</code>, <code>select</code> and <code>drag</code> drive this client\'s named cursor. Pass <code>parent</code> to put a component in a row or card. Tools have no network; images are data URLs.</p>',
+    '      <p class="gal-intro">Inside a tool, <code>ui.add({...})</code> returns a component id; <code>ui.update</code>, <code>ui.get</code>, <code>ui.remove</code>, <code>ui.clear</code>, <code>ui.list</code> and <code>ui.wait(id)</code> (the next click or change) work on it. Give a component <code>on: { click: { tool: \'name\', args: {...} } }</code> (or <code>change</code>) and every click or change runs that tool in the browser - it receives the details as <code>event</code>; <code>ui.events({ since, timeout })</code> returns what happened, for agents to react to. Add <code>draggable: true</code> and people can drag a component between others or into a row or card (a <code>drop</code> event). <code>cursor.move</code>, <code>hover</code>, <code>click</code>, <code>dblclick</code>, <code>type</code>, <code>fill</code>, <code>press</code>, <code>check</code>, <code>select</code>, <code>drag</code> and <code>scroll</code> drive this client\'s named cursor. Pass <code>parent</code> to put a component in a row or card. Tools have no network; images are data URLs. Tools also get <code>kv.get/set/delete/list</code> and <code>db.query/execute</code> (SQLite), kept in this browser.</p>',
     '      <div id="gallery-list"></div>',
     "    </details>",
     '    <input id="picker" type="file" accept=".js,.mjs,text/javascript" multiple style="display:none" />',
@@ -1645,6 +2215,6 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
   if (auth instanceof Response) return sandboxUnauthorized(base);
   const ws = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
   return new Response(request.method === "HEAD" ? null : renderSandboxPage(auth.deviceId), {
-    headers: { ...base, "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP + "; connect-src 'self' " + ws + "; worker-src blob:" },
+    headers: { ...base, "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP.replace("script-src 'unsafe-inline'", "script-src 'unsafe-inline' 'self' 'wasm-unsafe-eval'") + "; connect-src 'self' " + ws + "; worker-src blob:" },
   });
 }

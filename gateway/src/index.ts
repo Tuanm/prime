@@ -28,6 +28,7 @@ import { LANDING_HTML } from "./landing-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleSandbox, verifyTicket } from "./sandbox";
+import { sandboxAsset } from "./sandbox-assets";
 
 export { DeviceDO } from "./device-do";
 export { RegistryDO } from "./registry-do";
@@ -506,6 +507,7 @@ export default {
 
     // GET /mcp: the Sandbox page (this browser as a device). Exactly /mcp only:
     // MCP clients use /mcp/{deviceId}, which is untouched.
+    if (url.pathname === "/mcp" && request.method === "GET" && url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
     if (url.pathname === "/mcp") return handleSandbox(request, env, url);
 
     // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.
