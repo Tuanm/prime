@@ -86,6 +86,13 @@ id = "d36acd23e12945058bf9910182deeec7"
 
 # Tunables (mirror the Bun gateway flags). Override via vars / secret per env.
 [vars]
+# /admin sits behind Cloudflare Access, and the Worker verifies the Access JWT
+# itself: if the Access application is deleted or misconfigured, the admin is
+# closed rather than exposed. Set the team domain and the admin application's
+# AUD tag, then flip ADMIN_ACCESS to "enforce":
+#   ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
+#   ACCESS_AUD = "..."
+ADMIN_ACCESS = "warn"
 RATE_LIMIT_WINDOW_MS = "60000"
 RATE_LIMIT_MAX = "100"
 TIMEOUT_MS = "300000" # 5 min: long tool calls (record, wait_for, downloads)

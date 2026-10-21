@@ -185,6 +185,12 @@ export interface Env {
   // Object storage for file contents. Optional at the type level so the worker
   // can still be deployed - and /api/files answer 503 - before R2 is enabled.
   BUCKET?: R2Bucket;
+  // Cloudflare Access in front of /admin. ACCESS_TEAM_DOMAIN is the team
+  // domain (e.g. "tuanm.cloudflareaccess.com") and ACCESS_AUD the admin
+  // application's AUD tag; ADMIN_ACCESS is enforce (default), warn or off.
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  ADMIN_ACCESS?: string;
 }
 
 function num(env: Env, key: string, def: number): number {

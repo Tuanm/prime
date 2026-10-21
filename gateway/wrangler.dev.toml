@@ -42,5 +42,7 @@ database_name = "code-mcp-db"
 database_id = "00e3f87d-928a-47ba-b6f0-d1c607bade9f"
 
 [vars]
+# Local development has no Cloudflare Access in front of /admin.
+ADMIN_ACCESS = "off"
 ENVIRONMENT = "dev"
 VIRTUAL_DEVICE_IDS = "cloud"

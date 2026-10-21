@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { RUNTIME_JS, STARTER_TOOLS, handleSandboxDevicePage, renderSandboxPage, signTicket, verifyTicket } from "../src/sandbox";
+import { renderGatePage, gateResponse } from "../src/gate-ui";
+import { RUNTIME_JS, STARTER_TOOLS, renderSandboxPage, signTicket, verifyTicket } from "../src/sandbox";
 
 // Run the runtime's analyzer as the sandboxed iframe would, with a fake parent.
 function analyzer() {
@@ -108,34 +109,44 @@ describe("vendored sql.js", () => {
   });
 });
 
-describe("the token-gated page at /mcp/{device}", () => {
-  test("token mode asks for the token; the default (Basic) mode does not", () => {
-    const token = renderSandboxPage("demo", "token");
-    expect(token).toContain('id="gate"');
-    expect(token).toContain('id="gate-token"');
-    expect(token).toContain('type="password"');
-    expect(token).toContain('window.__MODE__ = "token"');
-    expect(token).toContain('"demo"');
-    const basic = renderSandboxPage("demo");
-    expect(basic).not.toContain('id="gate"');
-    expect(basic).toContain('window.__MODE__ = "basic"');
+describe("the sign-in form", () => {
+  test("the page itself carries no form any more", () => {
+    const page = renderSandboxPage("demo");
+    expect(page).not.toContain('id="gate-device"');
+    expect(page).not.toContain('id="gate-token"');
+    expect(page).not.toContain("__MODE__");
   });
 
-  test("its scripts parse", () => {
-    const js = [...renderSandboxPage("demo", "token").matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  test("the form asks for the pair, prepends a known device and posts to /api/session", () => {
+    const withDevice = renderGatePage({ title: "Sandbox", device: "demo", next: "/mcp/demo" });
+    expect(withDevice).toContain('id="gate-device"');
+    expect(withDevice).toContain('id="gate-token"');
+    expect(withDevice).toContain('value="demo"');
+    expect(withDevice).toContain("readonly");
+    expect(withDevice).toContain('fetch(\'/api/session\'');
+    expect(withDevice).toContain('window.location.replace("/mcp/demo")');
+    expect(withDevice).not.toContain("__FILES__");
+    const unknown = renderGatePage({ title: "Files", device: null, next: "/files" });
+    expect(unknown).toContain('id="gate-device"');
+    // (the stylesheet mentions [readonly]; the input itself must not carry it)
+    expect(unknown).not.toMatch(/id="gate-device"[^>]*readonly/);
+    expect(withDevice).toMatch(/id="gate-device"[^>]*readonly/);
+    expect(unknown).toContain('placeholder="device id"');
+  });
+
+  test("its script parses", () => {
+    const js = [...renderGatePage({ title: "Files", device: null, next: "/files" }).matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
     for (const script of js) expect(() => new Function(script)).not.toThrow();
   });
 
-  test("the route serves HTML for a valid id and 404 for a bad one", async () => {
-    const ok = handleSandboxDevicePage(new Request("https://gw.example/mcp/demo"), new URL("https://gw.example/mcp/demo"));
+  test("the response helper sets the page CSP and answers HEAD without a body", async () => {
+    const ok = gateResponse({ request: new Request("https://gw.example/files"), title: "Files", device: null, next: "/files" });
     expect(ok.status).toBe(200);
     expect(ok.headers.get("content-type")).toContain("text/html");
-    expect(ok.headers.get("content-security-policy")).toContain("connect-src 'self' wss://gw.example");
-    expect(await ok.text()).toContain('id="gate"');
-    const head = handleSandboxDevicePage(new Request("https://gw.example/mcp/demo", { method: "HEAD" }), new URL("https://gw.example/mcp/demo"));
+    expect(ok.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(await ok.text()).toContain('id="gate-token"');
+    const head = gateResponse({ request: new Request("https://gw.example/files", { method: "HEAD" }), title: "Files", device: null, next: "/files" });
     expect(head.status).toBe(200);
     expect(await head.text()).toBe("");
-    const bad = handleSandboxDevicePage(new Request("https://gw.example/mcp/a b"), new URL("https://gw.example/mcp/a%20b"));
-    expect(bad.status).toBe(404);
   });
 });
