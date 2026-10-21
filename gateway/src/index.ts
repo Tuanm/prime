@@ -30,6 +30,7 @@ import { handleFiles } from "./files-routes";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { ipBlockKey } from "./config";
+import { verifyAccessJwt } from "./access";
 import { sandboxAsset } from "./sandbox-assets";
 
 export { DeviceDO } from "./device-do";
@@ -384,6 +385,37 @@ export default {
     });
     if (filesResponse) return filesResponse;
 
+    // ---- Admin: only for someone Cloudflare Access let through ----
+    // The Access application at the edge is the first gate; this is the second.
+    // ADMIN_ACCESS=enforce (default) refuses everything without a valid Access
+    // JWT, so deleting or breaking the Access app closes the admin instead of
+    // exposing it. "warn" allows with a log line (used while rolling this out),
+    // "off" disables the check (local development and tests).
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/api/")) {
+      const mode = (env.ADMIN_ACCESS ?? "enforce").trim().toLowerCase();
+      if (mode !== "off") {
+        const team = (env.ACCESS_TEAM_DOMAIN ?? "").trim();
+        const aud = (env.ACCESS_AUD ?? "").trim();
+        let verdict: { ok: boolean; reason?: string; email?: string };
+        if (!team || !aud) verdict = { ok: false, reason: "ACCESS_TEAM_DOMAIN / ACCESS_AUD are not configured" };
+        else verdict = await verifyAccessJwt(request, { team, aud });
+        if (!verdict.ok) {
+          if (mode === "warn") {
+            console.warn("admin: Access check failed (" + verdict.reason + ") - allowed because ADMIN_ACCESS=warn");
+          } else {
+            return Response.json(
+              {
+                error: "admin requires Cloudflare Access",
+                reason: verdict.reason,
+                hint: "This page and its API only answer requests Cloudflare Access has authenticated. Configure ACCESS_TEAM_DOMAIN and ACCESS_AUD for this Worker, or set ADMIN_ACCESS=off for local development.",
+              },
+              { status: 403, headers: { "cache-control": "no-store" } },
+            );
+          }
+        }
+      }
+    }
+
     // ---- Admin UI ----
     // The page itself is gated by Cloudflare Access at the edge (policies:
     // allow the admin email + @tuanm.dev); the API below additionally requires
@@ -610,7 +642,7 @@ export default {
     // device token. Only for requests that want HTML - MCP clients get the 405
     // below, exactly as before.
     if ((request.method === "GET" || request.method === "HEAD") && /^\/mcp\/[^/]+$/.test(url.pathname) && (request.headers.get("accept") || "").includes("text/html")) {
-      return handleSandboxDevicePage(request, url);
+      return handleSandboxDevicePage(request, env, url);
     }
 
     // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.

@@ -151,8 +151,10 @@ async function main(): Promise<void> {
     check("disable a device -> 200", (await set(true)).status === 200);
     const other = basic("other", "other");
     check("disabled: files API -> 403", (await fetch(BASE + "/api/files", { headers: other })).status === 403);
-    check("disabled: /files page -> 403", (await fetch(BASE + "/files", { headers: other })).status === 403);
-    check("disabled: /mcp sandbox page -> 403", (await fetch(BASE + "/mcp", { headers: other })).status === 403);
+    const gateDisabled = await fetch(BASE + "/files", { headers: other });
+    check("disabled: /files page shows the sign-in form (no content)", gateDisabled.status === 200 && (await gateDisabled.text()).includes('id="gate-device"'));
+    const mcpDisabled = await fetch(BASE + "/mcp", { headers: other });
+    check("disabled: /mcp page shows the sign-in form", mcpDisabled.status === 200 && (await mcpDisabled.text()).includes('id="gate-token"'));
     check("disabled: upload -> 403", (await fetch(BASE + "/api/files?name=x&expiry_days=1", { method: "POST", headers: other, body: bytes(10) })).status === 403);
     check("disabled: WebSocket ticket -> 403", (await fetch(BASE + "/mcp?ticket=1", { method: "POST", headers: { ...other, "x-sandbox": "1" } })).status === 403);
     check("disabled device's own page is unaffected for others", (await fetch(BASE + "/api/files", { headers: DEMO })).status === 200);
@@ -320,8 +322,32 @@ async function main(): Promise<void> {
   check("the file survives that attempt", (await fetch(`${BASE}/api/files/${helloId}`, { headers: DEMO })).status === 200);
 
   // ---- pages ----
-  check("GET /files without auth -> 401", (await fetch(BASE + "/files")).status === 401);
-  checkIncludes("401 sends a Basic challenge", (await fetch(BASE + "/files")).headers.get("www-authenticate") ?? "", "Basic realm");
+  // The pages ask for the pair in their own form instead of a Basic-auth prompt,
+  // and send none of their content until it checks out.
+  const gate = await fetch(BASE + "/files");
+  const gateHtml = await gate.text();
+  check("GET /files without auth -> the sign-in form", gate.status === 200 && gateHtml.includes('id="gate-device"') && gateHtml.includes('id="gate-token"'));
+  check("...and no file content", !gateHtml.includes("__FILES__") && !gateHtml.includes("dropzone"));
+  const mcpGate = await fetch(BASE + "/mcp");
+  check("GET /mcp without auth -> the sign-in form", mcpGate.status === 200 && (await mcpGate.text()).includes('id="gate-device"'));
+  // signing in sets a cookie the pages then accept
+  const signIn = await fetch(BASE + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: "demo", token: "demo" }) });
+  const cookie = (signIn.headers.get("set-cookie") ?? "").split(";")[0];
+  check("POST /api/session -> 200 + HttpOnly cookie", signIn.status === 200 && /mcp_device=/.test(cookie) && /HttpOnly/.test(signIn.headers.get("set-cookie") ?? ""), String(signIn.status));
+  const withCookie = await fetch(BASE + "/files", { headers: { cookie } });
+  const withCookieHtml = await withCookie.text();
+  check("the cookie renders the real page", withCookie.status === 200 && withCookieHtml.includes("__FILES__"), String(withCookie.status));
+  check("...and the files API accepts it too", (await fetch(BASE + "/api/files", { headers: { cookie } })).status === 200);
+  check("a wrong pair -> 401", (await fetch(BASE + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: "demo", token: "nope" }) })).status === 401);
+  check("an unknown device -> 401", (await fetch(BASE + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: "ghost", token: "x" }) })).status === 401);
+  check("a disabled device -> 403", (await (async () => {
+    await fetch(BASE + "/admin/api/devices/other/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ disabled: true }) });
+    const r = await fetch(BASE + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: "other", token: "other" }) });
+    await fetch(BASE + "/admin/api/devices/other/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ disabled: false }) });
+    return r;
+  })()).status === 403);
+  const out = await fetch(BASE + "/api/session", { method: "DELETE", headers: { cookie } });
+  check("DELETE /api/session clears it", out.status === 200 && /Max-Age=0/.test(out.headers.get("set-cookie") ?? ""));
   const page = await fetch(BASE + "/files", { headers: DEMO });
   const pageHtml = await page.text();
   check("GET /files -> 200", page.status === 200);

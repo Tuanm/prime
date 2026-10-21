@@ -998,6 +998,34 @@ async function s33_blocked_address(): Promise<void> {
   }
 }
 
+async function s34_admin_access(): Promise<void> {
+  // /admin must refuse everything unless Cloudflare Access vouched for the
+  // request: no Access JWT, no admin - so a deleted Access app closes it.
+  const enforcing = await startWrangler(8813, ["ADMIN_ACCESS=enforce", "ACCESS_TEAM_DOMAIN=team.example.com", "ACCESS_AUD=aud-1"]);
+  try {
+    const page = await fetch(enforcing.base + "/admin");
+    if (page.status !== 403) return bad("s34_admin_page_closed", "status=" + page.status);
+    const api = await fetch(enforcing.base + "/admin/api/devices");
+    const body = (await api.json()) as { error?: string; hint?: string };
+    if (api.status !== 403 || body.error !== "admin requires Cloudflare Access") {
+      return bad("s34_admin_api_closed", "status=" + api.status + " body=" + JSON.stringify(body).slice(0, 160));
+    }
+    // Not even with a made-up token.
+    const fake = await fetch(enforcing.base + "/admin/api/devices", { headers: { "cf-access-jwt-assertion": "a.b.c" } });
+    if (fake.status !== 403) return bad("s34_bad_token_closed", "status=" + fake.status);
+  } finally {
+    await stopWrangler(enforcing.proc);
+  }
+  const open = await startWrangler(8814, ["ADMIN_ACCESS=off"]);
+  try {
+    if ((await fetch(open.base + "/admin")).status !== 200) return bad("s34_off_page", "not 200");
+    if ((await fetch(open.base + "/admin/api/devices")).status !== 200) return bad("s34_off_api", "not 200");
+    ok("s34_admin_access");
+  } finally {
+    await stopWrangler(open.proc);
+  }
+}
+
 async function main(): Promise<void> {
   console.log("Waiting for plain wrangler at", plainBase, "...");
   await waitReady(plainBase);
@@ -1024,6 +1052,7 @@ async function main(): Promise<void> {
     ["s21", s21_long_call],
     ["s22", s22_admin_registry],
     ["s33", s33_blocked_address],
+    ["s34", s34_admin_access],
     ["s23", s23_online_status_persists],
     ["s24", s24_admin_clients],
     ["s25", s25_sse_e2e],
