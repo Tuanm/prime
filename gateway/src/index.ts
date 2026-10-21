@@ -27,7 +27,7 @@ import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
-import { handleSandbox, verifyTicket } from "./sandbox";
+import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { sandboxAsset } from "./sandbox-assets";
 
@@ -527,6 +527,13 @@ export default {
     // MCP clients use /mcp/{deviceId}, which is untouched.
     if (url.pathname === "/mcp" && request.method === "GET" && url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
     if (url.pathname === "/mcp") return handleSandbox(request, env, url);
+
+    // GET /mcp/{deviceId} in a browser: the Sandbox page, which asks for the
+    // device token. Only for requests that want HTML - MCP clients get the 405
+    // below, exactly as before.
+    if ((request.method === "GET" || request.method === "HEAD") && /^\/mcp\/[^/]+$/.test(url.pathname) && (request.headers.get("accept") || "").includes("text/html")) {
+      return handleSandboxDevicePage(request, url);
+    }
 
     // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.
     // Return a clear 405 instead of a bare 404 so opening the URL in a browser
