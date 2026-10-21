@@ -5,6 +5,8 @@
 // opaque origin and no network (GET /mcp?frame=runtime), never in the page.
 
 import { validDeviceId } from "./config";
+import { gateResponse } from "./gate-ui";
+import { sessionFrom } from "./session";
 import { FAVICON, UI_CSS } from "./ui-css";
 import { authorizeDevice } from "./files-routes";
 import type { Env } from "./config";
@@ -214,14 +216,9 @@ const SANDBOX_CSS = `
       .uc.hovered { outline: 1px dashed #111; outline-offset: 3px; }
       #status:empty, #starters:empty, #data:empty, #running:empty { display: none; }
       .linkbtn:disabled { color: #bbb; cursor: default; text-decoration: none; }
-      #gate { z-index: 60; }
       /* Bodies that already pad themselves (the gate, the source dialog, the
          page's confirmations) must not pad the action bar a second time. */
       .dlg.dlg-confirm .dlg-bar, .dlg.dlg-wide .dlg-bar { padding: 12px 0 0; }
-      #gate[hidden] { display: none; }
-      .gate-input { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 9px 10px; border: 1px solid #111; background: #fff; color: #111; margin: 4px 0 2px; }
-      .gate-input:focus { outline: none; box-shadow: 0 0 0 1px #111; }
-      #gate .dlg-bar { justify-content: flex-end; }
       .linkbtn { font: inherit; font-size: 11px; background: none; border: 0; padding: 0; color: #111; text-decoration: underline; cursor: pointer; }
       .dlg.dlg-confirm { width: 420px; max-width: calc(100vw - 32px); }
       .dlg.dlg-confirm .dlg-body { padding: 14px 16px 16px; }
@@ -454,16 +451,6 @@ const RUNTIME_JS = String.raw`(function () {
 const PAGE_JS = String.raw`(function () {
   "use strict";
   var DEVICE = window.__DEVICE__;
-  // "basic": the browser signed in with HTTP Basic (/mcp). "token": the page was
-  // opened at /mcp/{device} and asks for the device token itself.
-  var MODE = window.__MODE__ || "basic";
-  var TOKEN_KEY = "code-mcp.sandbox.token." + DEVICE;
-  var deviceToken = MODE === "token" ? sessionStorage.getItem(TOKEN_KEY) : null;
-  function authHeaders() {
-    var h = { "x-sandbox": "1" };
-    if (MODE === "token" && deviceToken) h.authorization = "Basic " + btoa(DEVICE + ":" + deviceToken);
-    return h;
-  }
   var KEY = "code-mcp.sandbox.tools." + DEVICE;
   var MAX_TOOLS = 50;
   var tools = load();
@@ -739,12 +726,9 @@ const PAGE_JS = String.raw`(function () {
     conn.userClosed = false;
     clearTimeout(conn.timer);
     if (first) setConn("connecting");
-    fetch("/mcp?ticket=1", { method: "POST", headers: authHeaders(), credentials: "same-origin", cache: "no-store" })
+    fetch("/mcp?ticket=1", { method: "POST", headers: { "x-sandbox": "1" }, credentials: "same-origin", cache: "no-store" })
       .then(function (r) {
-        if (r.status === 401) {
-          if (MODE === "token") { forgetToken(); throw new Error("the device token was refused - enter it again"); }
-          throw new Error("signed out - reload the page and sign in again");
-        }
+        if (r.status === 401) throw new Error("signed out - reload the page and sign in again");
         if (r.status === 403) throw new Error("this device is disabled - an admin has to activate it again");
         if (!r.ok) throw new Error("ticket request failed (HTTP " + r.status + ")");
         return r.json();
@@ -2453,44 +2437,7 @@ const PAGE_JS = String.raw`(function () {
   }
   seedStarters();
 
-  // ---- token mode: ask for the device token (same page, same styles) ----------
-  var gate = document.getElementById("gate");
-  function forgetToken() {
-    deviceToken = null;
-    try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
-    if (gate) { gate.hidden = false; var inp = document.getElementById("gate-token"); if (inp) { inp.value = ""; inp.focus(); } }
-  }
-  function showGateError(msg) { var el = document.getElementById("gate-err"); if (el) { el.textContent = msg || ""; } }
-  function unlock(token) {
-    return fetch("/mcp?ticket=1", { method: "POST", headers: { "x-sandbox": "1", authorization: "Basic " + btoa(DEVICE + ":" + token) }, credentials: "same-origin", cache: "no-store" })
-      .then(function (r) {
-        if (r.status === 401) { showGateError("That token is not right for " + DEVICE + "."); return false; }
-        if (r.status === 403) { showGateError("Device " + DEVICE + " is disabled."); return false; }
-        if (!r.ok) { showGateError("Could not check the token (HTTP " + r.status + ")."); return false; }
-        deviceToken = token;
-        try { sessionStorage.setItem(TOKEN_KEY, token); } catch (e) {}
-        gate.hidden = true;
-        showGateError("");
-        setStatus("");
-        return true;
-      })
-      .catch(function (e) { showGateError("Network error: " + (e && e.message || e)); return false; });
-  }
-  if (MODE === "token" && gate) {
-    if (!deviceToken) gate.hidden = false;
-    var form = document.getElementById("gate-form");
-    var submit = document.getElementById("gate-go");
-    form.addEventListener("submit", function (e) {
-      e.preventDefault();
-      var v = (document.getElementById("gate-token").value || "").trim();
-      if (!v) { showGateError("Enter the device token."); return; }
-      submit.disabled = true;
-      unlock(v).then(function (ok) { submit.disabled = false; if (ok) document.getElementById("gate-token").blur(); });
-    });
-    if (!deviceToken) setTimeout(function () { var i = document.getElementById("gate-token"); if (i) i.focus(); }, 50);
-  }
-
-  window.__sandbox = { analyze: analyze, tools: function () { return tools; }, comps: function () { return comps; }, state: function () { return conn.state; }, mode: MODE, locked: function () { var g = document.getElementById("gate"); return !!(g && !g.hidden); } };
+  window.__sandbox = { analyze: analyze, tools: function () { return tools; }, comps: function () { return comps; }, state: function () { return conn.state; } };
   render();
 })();`;
 
@@ -2575,7 +2522,7 @@ function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-export function renderSandboxPage(deviceId: string, mode: "basic" | "token" = "basic"): string {
+export function renderSandboxPage(deviceId: string): string {
   return [
     "<!doctype html>",
     '<html lang="en">',
@@ -2613,15 +2560,7 @@ export function renderSandboxPage(deviceId: string, mode: "basic" | "token" = "b
     '      <div id="gallery-list"></div>',
     "    </details>",
     '    <input id="picker" type="file" accept=".js,.mjs,text/javascript" multiple style="display:none" />',
-    mode === "token"
-      ? '    <div class="overlay" id="gate" hidden><form class="dlg dlg-confirm" id="gate-form" role="dialog" aria-labelledby="gate-title">' +
-        '<div class="dlg-head"><span id="gate-title">Device token</span><span class="dlg-id">' + esc(deviceId) + '</span></div>' +
-        '<div class="dlg-body"><div class="dlg-msg">This page manages the Sandbox of device <b>' + esc(deviceId) + '</b>. Enter its device token to continue - the same token you gave the gateway admin page.</div>' +
-        '<input id="gate-token" class="gate-input" type="password" autocomplete="current-password" spellcheck="false" placeholder="device token" aria-label="device token" />' +
-        '<div class="dlg-msg err" id="gate-err"></div>' +
-        '<div class="dlg-bar"><button class="btn" id="gate-go" type="submit">Unlock</button></div></div></form></div>'
-      : "",
-    "    <script>window.__DEVICE__ = " + JSON.stringify(deviceId).replace(/</g, "\\u003c") + "; window.__MODE__ = " + JSON.stringify(mode) + "; window.__STARTERS__ = " + JSON.stringify(STARTER_TOOLS).replace(/</g, "\\u003c") + ";</script>",
+    "    <script>window.__DEVICE__ = " + JSON.stringify(deviceId).replace(/</g, "\\u003c") + "; window.__STARTERS__ = " + JSON.stringify(STARTER_TOOLS).replace(/</g, "\\u003c") + ";</script>",
     "    <script>" + PAGE_JS + "</script>",
     "  </body>",
     "</html>",
@@ -2726,11 +2665,18 @@ function refusal(res: Response, base: Record<string, string>): Response {
 /** GET /mcp/{deviceId} opened in a browser: the same Sandbox page, which asks
  *  for the device token instead of relying on HTTP Basic. MCP clients keep the
  *  405 they already got: this only answers requests that ask for HTML. */
-export function handleSandboxDevicePage(request: Request, url: URL): Response {
+export async function handleSandboxDevicePage(request: Request, env: Env, url: URL): Promise<Response> {
   const deviceId = url.pathname.slice("/mcp/".length);
   if (!validDeviceId(deviceId)) return new Response("not found", { status: 404, headers: { "cache-control": "no-store" } });
+  // Same sign-in as /mcp: the device id is known from the path, only its token
+  // is asked for, and nothing of the page is sent before it checks out.
+  const auth = await authorizeDevice(env, request);
+  if (auth instanceof Response) {
+    const error = auth.status === 403 ? ((await auth.json().catch(() => ({}))) as { error?: string }).error : undefined;
+    return gateResponse({ request, title: "Sandbox", device: deviceId, next: url.pathname, error });
+  }
   const ws = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
-  return new Response(request.method === "HEAD" ? null : renderSandboxPage(deviceId, "token"), {
+  return new Response(request.method === "HEAD" ? null : renderSandboxPage(deviceId), {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "x-content-type-options": "nosniff",
@@ -2748,8 +2694,10 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
     // browser mint a ticket with its remembered Basic credentials.
     if (request.headers.get("x-sandbox") !== "1") return Response.json({ error: "missing x-sandbox header" }, { status: 400, headers: base });
     const auth = await authorizeDevice(env, request);
-    const token = basicPassword(request);
     if (auth instanceof Response) return refusal(auth, base);
+    // The ticket is signed with the device's token: either the Basic password a
+    // script sends, or the one the page's sign-in form stored in its cookie.
+    const token = basicPassword(request) ?? sessionFrom(request)?.token ?? null;
     if (!token) return sandboxUnauthorized(base);
     let online = false;
     try {
@@ -2773,7 +2721,10 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
     });
   }
   const auth = await authorizeDevice(env, request);
-  if (auth instanceof Response) return refusal(auth, base);
+  if (auth instanceof Response) {
+    const error = auth.status === 403 ? ((await auth.json().catch(() => ({}))) as { error?: string }).error : undefined;
+    return gateResponse({ request, title: "Sandbox", device: null, next: "/mcp", error });
+  }
   const ws = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
   return new Response(request.method === "HEAD" ? null : renderSandboxPage(auth.deviceId), {
     headers: { ...base, "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP.replace("script-src 'unsafe-inline'", "script-src 'unsafe-inline' 'self' 'wasm-unsafe-eval'") + "; connect-src 'self' " + ws + "; worker-src blob:" },
