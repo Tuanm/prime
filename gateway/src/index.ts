@@ -29,6 +29,7 @@ import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
+import { ipBlockKey } from "./config";
 import { sandboxAsset } from "./sandbox-assets";
 
 export { DeviceDO } from "./device-do";
@@ -110,6 +111,39 @@ function markAnonymous(headers: Headers, request: Request, cfg: GatewayConfig, e
   headers.set("x-anon-rate-window-ms", String(cfg.rateWindowMs));
   const cip = clientIp(request);
   headers.set("x-client-ip", cip && cip !== "unknown" ? cip : "unknown");
+}
+
+// Cached set of blocked address keys (see ipBlockKey). Same short TTL as the
+// device map, invalidated by the admin block routes.
+let blockedCache: { at: number; set: Set<string> } | null = null;
+
+async function effectiveBlockedSet(env: Env): Promise<Set<string>> {
+  if (blockedCache && Date.now() - blockedCache.at < MAP_CACHE_TTL_MS) return blockedCache.set;
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const set = new Set<string>();
+  try {
+    const r = await reg.fetch("https://registry/blocked");
+    if (r.ok) {
+      const j = (await r.json()) as { ips?: string[] };
+      for (const key of j.ips || []) if (typeof key === "string" && key) set.add(key);
+    }
+  } catch {}
+  blockedCache = { at: Date.now(), set };
+  return set;
+}
+
+function invalidateBlockedCache(): void {
+  blockedCache = null;
+}
+
+/** A device's tunnel origin, plus the address key blocking would use. */
+async function originFor(env: Env, stub: DurableObjectStub): Promise<Response> {
+  const r = await stub.fetch("https://device/origin");
+  const body = (await r.json().catch(() => ({}))) as { online?: boolean; origin?: { ip?: string } | null };
+  const origin = body.origin && typeof body.origin === "object" ? body.origin : null;
+  const key = origin ? ipBlockKey(String(origin.ip || "")) : null;
+  const blocked = key ? (await effectiveBlockedSet(env)).has(key) : false;
+  return Response.json({ online: !!body.online, origin, block_key: key, blocked });
 }
 
 /** Drop this device's live tunnel. Called when it is disabled, removed or
@@ -277,6 +311,18 @@ export default {
     const cfg = loadConfig(env);
     const url = new URL(request.url);
 
+    // ---- Blocked addresses ----
+    // A blocked address reaches nothing: not the MCP relay, not a tunnel, not
+    // the file API. /admin is exempt on purpose - it is already gated by
+    // Cloudflare Access, and blocking the operator's own address there would
+    // leave no way to unblock it.
+    if (!url.pathname.startsWith("/admin")) {
+      const blockKey = ipBlockKey(clientIp(request));
+      if (blockKey && (await effectiveBlockedSet(env)).has(blockKey)) {
+        return Response.json({ error: "blocked" }, { status: 403, headers: { "cache-control": "no-store" } });
+      }
+    }
+
     // ---- Landing page (also published to GitHub Pages) ----
     if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/" || url.pathname === "/index.html")) {
       return new Response(request.method === "HEAD" ? null : LANDING_HTML, {
@@ -356,11 +402,38 @@ export default {
     if (url.pathname.startsWith("/admin/api/")) {
       const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
 
+      // ---- blocked addresses ----
+      if (url.pathname === "/admin/api/blocked") {
+        if (request.method === "GET") return reg.fetch("https://registry/blocked");
+        let blockBody: unknown;
+        try {
+          blockBody = await request.json();
+        } catch {
+          return Response.json({ error: "invalid json" }, { status: 400 });
+        }
+        const ip = typeof (blockBody as { ip?: unknown })?.ip === "string" ? String((blockBody as { ip: string }).ip) : "";
+        const blockIt = (blockBody as { blocked?: unknown })?.blocked !== false;
+        invalidateBlockedCache();
+        return reg.fetch(new Request("https://registry/blocked", {
+          method: blockIt ? "POST" : "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ip }),
+        }));
+      }
+
       // ---- anonymous devices, by opaque ref ----
       // The admin can see and act on them but never sees their id or code: the
       // ref is resolved to the real device here, server-side.
       if (request.method === "GET" && url.pathname === "/admin/api/anonymous") {
         return reg.fetch("https://registry/anon/list");
+      }
+      // Where an anonymous device's tunnel comes from (the admin's View dialog).
+      const anonOriginRoute = /^\/admin\/api\/anonymous\/([a-f0-9]{24})\/origin$/.exec(url.pathname);
+      if (anonOriginRoute && request.method === "GET") {
+        const resolved = await reg.fetch("https://registry/anon/resolve?ref=" + anonOriginRoute[1]);
+        if (!resolved.ok) return Response.json({ error: "not found" }, { status: 404 });
+        const { deviceId } = (await resolved.json()) as { deviceId: string };
+        return originFor(env, env.DEVICES.get(env.DEVICES.idFromName(deviceId)));
       }
       const anonRoute = /^\/admin\/api\/anonymous\/([a-f0-9]{24})(\/(state|clients|tools))?$/.exec(url.pathname);
       if (anonRoute) {
@@ -444,6 +517,11 @@ export default {
         const res = await reg.fetch(upstream);
         if (rotated && res.ok) await kickDeviceTunnel(env, rotated);
         return res;
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/origin")) {
+        const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/origin".length);
+        if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+        return originFor(env, env.DEVICES.get(env.DEVICES.idFromName(deviceId)));
       }
       if (request.method === "GET" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/clients")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/clients".length);

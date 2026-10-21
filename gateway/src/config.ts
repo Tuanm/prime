@@ -271,6 +271,36 @@ export function anonConfig(env: Env): AnonConfig {
 
 /** Anonymous ids: "anon-" + 16 hex. Never produced by the admin UI's own ids. */
 export const ANON_ID_RE = /^anon-[a-f0-9]{16}$/;
+
+/**
+ * The key a blocked address is stored under. IPv4 is exact; IPv6 is blocked by
+ * its /64, because a single IPv6 host can pick a fresh address from its prefix
+ * at will - blocking one address would be pointless. IPv4-mapped IPv6 collapses
+ * to plain IPv4. Null when the address cannot be parsed.
+ */
+export function ipBlockKey(raw: string): string | null {
+  const ip = (raw || "").trim().toLowerCase();
+  if (!ip || ip === "unknown") return null;
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(ip);
+  const v4 = mapped ? mapped[1] : ip;
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v4);
+  if (octets) {
+    const parts = octets.slice(1).map(Number);
+    if (parts.some((n) => n > 255)) return null;
+    return "ipv4:" + parts.join(".");
+  }
+  if (!ip.includes(":")) return null;
+  // Expand "::" so the first four hextets can be read.
+  const [head, tail] = ip.split("::");
+  const headParts = head ? head.split(":").filter(Boolean) : [];
+  const tailParts = tail !== undefined ? tail.split(":").filter(Boolean) : [];
+  const missing = 8 - headParts.length - tailParts.length;
+  const groups = [...headParts, ...Array(tail !== undefined ? Math.max(0, missing) : 0).fill("0"), ...tailParts];
+  if (groups.length < 4) return null;
+  const hextets = groups.slice(0, 4).map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? g.replace(/^0+(?=[0-9a-f])/, "") || "0" : null));
+  if (hextets.some((h) => h === null)) return null;
+  return "ipv6:" + hextets.join(":") + "::/64";
+}
 /** The device code: digits and upper-case letters. */
 export const ANON_TOKEN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 export const ANON_TOKEN_LENGTH = 6;
