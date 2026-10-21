@@ -123,6 +123,39 @@ try {
   const TOTAL = starterNames.length + 10;
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === TOTAL, "custom tools saved (" + TOTAL + " in total)");
 
+  // ---- /mcp/{device}: the same page, asking for the device token ----
+  {
+    const noAuth = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+    const gp = await noAuth.newPage();
+    const gerr: string[] = []; gp.on("pageerror", (e) => gerr.push(e.message));
+    await gp.goto(B + "/mcp/" + ID, { waitUntil: "networkidle" });
+    ok((await gp.textContent("h1")) === "Sandbox" && (await gp.isVisible("#gate")), "GET /mcp/{device} serves the Sandbox page with a token gate");
+    await gp.fill("#gate-token", "definitely-wrong");
+    await gp.click("#gate-go");
+    await gp.waitForFunction(() => /not right/.test(document.getElementById("gate-err").textContent || ""), null, { timeout: 15000 });
+    ok(await gp.isVisible("#gate"), "a wrong token is refused and the gate stays");
+    await gp.fill("#gate-token", TOKEN);
+    await gp.click("#gate-go");
+    await gp.waitForFunction(() => window.__sandbox.locked() === false, null, { timeout: 15000 });
+    ok(!(await gp.isVisible("#gate")), "the right token unlocks the page");
+    await gp.click("#connect");
+    await gp.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 25000 });
+    ok(true, "with the token entered, Connect works (the ticket carries the token)");
+    await gp.reload({ waitUntil: "networkidle" });
+    await gp.waitForFunction(() => window.__sandbox.locked() === false, null, { timeout: 15000 });
+    ok(true, "the token is remembered for the tab (a reload does not ask again)");
+    await gp.click("#connect");
+    await gp.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 25000 });
+    await gp.click("#connect");
+    await gp.waitForFunction(() => window.__sandbox.state() === "idle", null, { timeout: 25000 });
+    ok(gerr.length === 0, "no page errors on the gated page " + gerr.join(" | "));
+    await noAuth.close();
+    const asJson = await fetch(B + "/mcp/" + ID, { headers: { accept: "application/json" } });
+    ok(asJson.status === 405, "MCP clients still get 405 for GET /mcp/{device} (only HTML requests get the page), got " + asJson.status);
+    const badId = await fetch(B + "/mcp/bad%20id", { headers: { accept: "text/html" } });
+    ok(badId.status === 404, "an invalid device id -> 404, got " + badId.status);
+  }
+
   // ---- connect ----
   await page.click("#connect");
   await page.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 20000 });
