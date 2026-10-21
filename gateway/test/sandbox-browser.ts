@@ -79,8 +79,14 @@ try {
   const errors = []; page.on("pageerror", (e) => errors.push(e.message));
   let nativeDialogs = 0;
   page.on("dialog", (d) => { nativeDialogs++; d.dismiss(); });
-  await page.goto(B + "/mcp", { waitUntil: "networkidle" });
-  await page.waitForFunction(() => window.__sandbox.tools().length >= 12, null, { timeout: 15000 });
+  // The pages ask in their own form now; the browser's Basic credentials are only
+  // sent after a 401 challenge, which these pages no longer issue.
+  await page.goto(B + "/mcp", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#gate-device");
+  await page.fill("#gate-device", ID);
+  await page.fill("#gate-token", TOKEN);
+  await page.click("#gate-go");
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.tools().length >= 12, null, { timeout: 20000 });
   const starterNames = await page.evaluate(() => window.__sandbox.tools().map((t) => t.name));
   ok(starterNames.includes("bar_chart") && starterNames.includes("ask_user") && starterNames.includes("dashboard_add"), "first visit: starter tools added (" + starterNames.length + ")");
   // the user can delete starters, and they do not come back
@@ -91,14 +97,14 @@ try {
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === starterNames.length && !(await page.isVisible(".dlg-confirm")), "Delete asks in the page's own dialog; Cancel keeps the tool");
   await firstRow.locator(".menu-btn").click(); await firstRow.locator(".menu button", { hasText: "Delete" }).click();
   await page.click(".dlg-confirm .btn.danger");
-  await page.reload({ waitUntil: "networkidle" }); await sleep(800);
+  await page.reload({ waitUntil: "domcontentloaded" }); await sleep(800);
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === starterNames.length - 1, "a deleted starter stays deleted after reload");
   await page.evaluate(() => { localStorage.removeItem("code-mcp.sandbox.tools.demo"); });
-  await page.reload({ waitUntil: "networkidle" }); await sleep(800);
+  await page.reload({ waitUntil: "domcontentloaded" }); await sleep(800);
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === 0, "deleting every tool does not bring the starters back");
   await page.evaluate(() => { localStorage.removeItem("code-mcp.sandbox.seeded.demo"); });
-  await page.reload({ waitUntil: "networkidle" });
-  await page.waitForFunction(() => window.__sandbox.tools().length >= 12);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.tools().length >= 12);
 
   const custom = {
     "add.js": "/**\n * Add two numbers.\n * @param {number} a First\n * @param {number} [b=1] Second\n */\nexport default async function add(a, b = 1) {\n  console.log('adding', a, b);\n  return a + b;\n}\n",
@@ -123,42 +129,75 @@ try {
   const TOTAL = starterNames.length + 10;
   ok((await page.evaluate(() => window.__sandbox.tools().length)) === TOTAL, "custom tools saved (" + TOTAL + " in total)");
 
-  // ---- /mcp/{device}: the same page, asking for the device token ----
+  // ---- the sign-in form: /mcp, /mcp/{device} and /files ----
   {
-    const noAuth = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+    const noAuth = await browser.newContext({ viewport: { width: 1100, height: 900 } });
     const gp = await noAuth.newPage();
     const gerr: string[] = []; gp.on("pageerror", (e) => gerr.push(e.message));
-    await gp.goto(B + "/mcp/" + ID, { waitUntil: "networkidle" });
-    ok((await gp.textContent("h1")) === "Sandbox" && (await gp.isVisible("#gate")), "GET /mcp/{device} serves the Sandbox page with a token gate");
+
+    // /mcp/{device}: the id is known, so only the token is asked for.
+    await gp.goto(B + "/mcp/" + ID, { waitUntil: "domcontentloaded" });
+    await gp.waitForSelector("#gate-device");
+    ok((await gp.textContent("h1")) === "Sandbox" && (await gp.isVisible("#gate-device")), "GET /mcp/{device} shows the sign-in form");
+    ok((await gp.inputValue("#gate-device")) === ID && (await gp.getAttribute("#gate-device", "readonly")) !== null, "the device id is filled in and read-only");
+    ok((await gp.evaluate(() => typeof (window as any).__sandbox)) === "undefined", "no page content (its script never ran) before signing in");
     await gp.fill("#gate-token", "definitely-wrong");
     await gp.click("#gate-go");
-    await gp.waitForFunction(() => /not right/.test(document.getElementById("gate-err").textContent || ""), null, { timeout: 15000 });
-    ok(await gp.isVisible("#gate"), "a wrong token is refused and the gate stays");
+    await gp.waitForFunction(() => /do not match/.test(document.getElementById("gate-err")?.textContent || ""), null, { timeout: 15000 });
+    ok(true, "a wrong token is refused with the form still up");
     await gp.fill("#gate-token", TOKEN);
     await gp.click("#gate-go");
-    await gp.waitForFunction(() => window.__sandbox.locked() === false, null, { timeout: 15000 });
-    ok(!(await gp.isVisible("#gate")), "the right token unlocks the page");
+    await gp.waitForFunction(() => typeof (window as any).__sandbox === "object", null, { timeout: 20000 });
+    ok(!(await gp.isVisible("#gate-device")) && (await gp.evaluate(() => window.__sandbox.tools().length)) > 0, "the right token loads the page");
     await gp.click("#connect");
     await gp.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 25000 });
-    ok(true, "with the token entered, Connect works (the ticket carries the token)");
-    await gp.reload({ waitUntil: "networkidle" });
-    await gp.waitForFunction(() => window.__sandbox.locked() === false, null, { timeout: 15000 });
-    ok(true, "the token is remembered for the tab (a reload does not ask again)");
+    ok(true, "signed in, Connect works (the cookie carries the credential)");
+    await gp.reload({ waitUntil: "domcontentloaded" });
+    await gp.waitForFunction(() => typeof (window as any).__sandbox === "object", null, { timeout: 20000 });
+    ok(!(await gp.isVisible("#gate-device")), "a reload does not ask again (the cookie is still valid)");
     await gp.click("#connect");
     await gp.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 25000 });
     await gp.click("#connect");
     await gp.waitForFunction(() => window.__sandbox.state() === "idle", null, { timeout: 25000 });
-    ok(gerr.length === 0, "no page errors on the gated page " + gerr.join(" | "));
+
+    // /mcp: the same form, both fields empty. A fresh context, because the one
+    // above is signed in already (its cookie would skip the form).
+    const freshCtx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+    const gp2 = await freshCtx.newPage();
+    await gp2.goto(B + "/mcp", { waitUntil: "domcontentloaded" });
+    await gp2.waitForSelector("#gate-device");
+    ok((await gp2.inputValue("#gate-device")) === "" && (await gp2.getAttribute("#gate-device", "readonly")) === null, "/mcp asks for the device id and the token");
+    await gp2.fill("#gate-device", ID);
+    await gp2.fill("#gate-token", TOKEN);
+    await gp2.click("#gate-go");
+    await gp2.waitForFunction(() => typeof (window as any).__sandbox === "object", null, { timeout: 20000 });
+    ok((await gp2.textContent("h1")) === "Sandbox", "signing in on /mcp loads the Sandbox page");
+    await freshCtx.close();
+
+    // /files: same form; its content only after signing in.
+    const fe = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+    const fp = await fe.newPage();
+    await fp.goto(B + "/files", { waitUntil: "domcontentloaded" });
+    await fp.waitForSelector("#gate-device");
+    ok((await fp.textContent("h1")) === "Files" && (await fp.evaluate(() => typeof (window as any).__FILES__)) === "undefined", "/files asks first and sends no file data");
+    await fp.fill("#gate-device", ID);
+    await fp.fill("#gate-token", TOKEN);
+    await fp.click("#gate-go");
+    await fp.waitForFunction(() => Array.isArray((window as any).__FILES__), null, { timeout: 20000 });
+    ok((await fp.textContent("h1")) === "Files" && (await fp.isVisible("#list")), "signing in on /files loads the file list");
+    await fe.close();
+
+    ok(gerr.length === 0, "no page errors on the forms " + gerr.join(" | "));
     await noAuth.close();
     const asJson = await fetch(B + "/mcp/" + ID, { headers: { accept: "application/json" } });
-    ok(asJson.status === 405, "MCP clients still get 405 for GET /mcp/{device} (only HTML requests get the page), got " + asJson.status);
+    ok(asJson.status === 405, "MCP clients still get 405 for GET /mcp/{device} (only HTML requests get the form), got " + asJson.status);
     const badId = await fetch(B + "/mcp/bad%20id", { headers: { accept: "text/html" } });
     ok(badId.status === 404, "an invalid device id -> 404, got " + badId.status);
   }
 
   // ---- connect ----
   await page.click("#connect");
-  await page.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 20000 });
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "connected", null, { timeout: 20000 });
   ok(await page.isVisible("#dash") && (await page.textContent("#connect")) === "Disconnect", "Connect: connected, dash shown, button says Disconnect");
   ok(await page.isDisabled("#addBtn"), "while connected, + is disabled");
   const fav = await page.getAttribute("#favicon", "href");
@@ -490,9 +529,9 @@ try {
   const dataLine = await page.waitForFunction(() => { const t = document.getElementById("data").textContent; return /Data: 2 keys/.test(t) && /SQLite 1 table/.test(t) ? t : null; }, null, { timeout: 5000 }).then((h) => h.jsonValue()).catch(() => page.textContent("#data"));
   ok(/Data: 2 keys/.test(dataLine) && /SQLite 1 table/.test(dataLine), "the Data line shows the keys and tables: " + dataLine.slice(0, 70));
   // reload the page (the tab restarts), reconnect: the data is still there
-  await page.reload({ waitUntil: "networkidle" });
+  await page.reload({ waitUntil: "domcontentloaded" });
   await page.click("#connect");
-  await page.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 20000 });
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "connected", null, { timeout: 20000 });
   const rows2 = JSON.parse(text(await call(beta, "sql", { statement: "SELECT count(*) AS n, sum(done) AS done FROM todo" })));
   ok(rows2[0].n === 2 && rows2[0].done === 2, "after a reload the SQLite database is still there");
   ok(text(await call(beta, "storage", { action: "get", key: "settings/lang" })) === "vi", "and so is kv (a string comes back as plain text)");
@@ -508,7 +547,7 @@ try {
 
   // ---- disconnect ----
   await page.click("#connect");
-  await page.waitForFunction(() => window.__sandbox.state() === "idle");
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "idle");
   ok(!(await page.isDisabled("#addBtn")), "Disconnect: editing unlocked");
   // ---- the dash persists across Disconnect and reloads ----
   const snapshot = async () => page.evaluate(() => [...document.querySelectorAll("#dash-area [data-cid]")].map((el) => {
@@ -523,7 +562,7 @@ try {
   await page.fill('[data-cid="' + pField + '"] input', "typed while offline");
   await sleep(600);
   const beforeReload = await snapshot();
-  await page.reload({ waitUntil: "networkidle" });
+  await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForFunction((n) => document.querySelectorAll("#dash-area [data-cid]").length >= n, beforeReload.length, { timeout: 10000 });
   const afterReload = await snapshot();
   ok(JSON.stringify(afterReload) === JSON.stringify(beforeReload), "after a reload the dash is rebuilt exactly: ids, nesting, order (incl. the kanban drags) and values");
@@ -533,7 +572,7 @@ try {
   await page.waitForFunction((id) => document.querySelector('[data-cid="' + id + '"]').textContent === "12", pCounter, { timeout: 10000 }).catch(() => {});
   ok((await page.textContent('[data-cid="' + pCounter + '"]')) === "12", "restored handlers work: 11 -> 12");
   await page.click("#connect");
-  await page.waitForFunction(() => window.__sandbox.state() === "connected", null, { timeout: 20000 });
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "connected", null, { timeout: 20000 });
   const relisted = JSON.parse(text(await call(beta, "dashboard_list", {})));
   ok(relisted.length === afterReload.length && relisted.find((c) => c.id === pField).value === "typed while offline" && relisted.find((c) => c.id === pBoard.tasks[1]).parent === pBoard.columns["Done"] && relisted.find((c) => c.id === pCounter).text === "12", "reconnected, clients see the same dash with the same ids and values");
   const kept = JSON.parse(text(await call(beta, "sql", { statement: "SELECT count(*) AS n FROM todo" })));
@@ -544,10 +583,10 @@ try {
   await call(alpha, "dashboard_remove", {}); await call(beta, "dashboard_remove", {});
   for (const c of JSON.parse(text(await call(beta, "dashboard_list", {})))) { try { await call(beta, "dashboard_remove", { id: c.id }); } catch {} }
   await page.click("#connect");
-  await page.waitForFunction(() => window.__sandbox.state() === "idle");
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "idle");
   await sleep(600);
   ok((await page.locator("#dash-area [data-cid]").count()) === 0 && !(await page.isVisible("#dash")), "emptied by tools; disconnected and empty, the dash hides");
-  await page.reload({ waitUntil: "networkidle" }); await sleep(500);
+  await page.reload({ waitUntil: "domcontentloaded" }); await sleep(500);
   ok((await page.locator("#dash-area [data-cid]").count()) === 0, "and it stays empty after a reload");
   await page.click("#data .linkbtn"); await page.click(".dlg-confirm .btn.danger");
   await page.waitForFunction(() => document.getElementById("data").textContent === "", null, { timeout: 5000 });
@@ -563,7 +602,7 @@ try {
   ok(squatter.ok, "(another device connects as " + ID + ")");
   await sleep(500);
   await page.click("#connect");
-  await page.waitForFunction(() => window.__sandbox.state() === "idle" && /already connected/.test(document.getElementById("status").textContent), null, { timeout: 15000 });
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "idle" && /already connected/.test(document.getElementById("status").textContent), null, { timeout: 15000 });
   ok(true, "Connect while " + ID + " is online elsewhere: refused with a clear message");
   squatter.ws.close();
   ok(!(await page.getAttribute("#favicon", "href")).includes("%2316a34a"), "disconnected: the tab icon is back to black");
@@ -573,13 +612,13 @@ try {
     const t = JSON.parse(localStorage.getItem("code-mcp.sandbox.tools.demo")).filter((x) => ["kanban", "cursor_drag", "dashboard_events", "increment"].indexOf(x.name) < 0);
     localStorage.setItem("code-mcp.sandbox.tools.demo", JSON.stringify(t));
   });
-  await page.reload({ waitUntil: "networkidle" }); await sleep(500);
+  await page.reload({ waitUntil: "domcontentloaded" }); await sleep(500);
   const offer = await page.textContent("#starters");
   ok(/4 new starter tools/.test(offer) && offer.includes("kanban") && offer.includes("cursor_drag"), "an older browser is offered the new starters: " + offer.slice(0, 90));
   await page.click("#starters .linkbtn:has-text('Add')"); await sleep(1500);
   const names3 = await page.evaluate(() => window.__sandbox.tools().map((t) => t.name));
   ok(["kanban", "cursor_drag", "dashboard_events", "increment"].every((n) => names3.includes(n)) && (await page.textContent("#starters")) === "", "Add installs them and the offer goes away");
-  await page.reload({ waitUntil: "networkidle" }); await sleep(500);
+  await page.reload({ waitUntil: "domcontentloaded" }); await sleep(500);
   ok((await page.textContent("#starters")) === "", "and it does not come back");
   ok(errors.length === 0, "no page errors " + errors.join(" | "));
   ok(nativeDialogs === 0, "no native browser dialogs (" + nativeDialogs + ")");

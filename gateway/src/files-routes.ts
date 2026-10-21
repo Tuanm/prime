@@ -16,6 +16,8 @@ import { renderDownloadPage, renderFilesPage, type FileView } from "./files-ui";
 import { clientIp, type RateLimiter } from "./rate-limit";
 import { timingSafeEq } from "./config";
 import { effectiveDisabledSet } from "./device-state";
+import { gateResponse } from "./gate-ui";
+import { clearSessionCookie, sessionCookie, sessionFrom } from "./session";
 
 const NO_STORE = { "cache-control": "no-store" } as const;
 
@@ -104,9 +106,11 @@ export async function authorizeDevice(env: Env, request: Request): Promise<Devic
   const basic = parseBasicAuth(request);
   const headerId = request.headers.get("x-device-id");
   const headerToken = request.headers.get("x-device-token");
+  // The pages sign in through their own dialog, which leaves a cookie.
+  const session = basic || (headerId && headerToken) ? null : sessionFrom(request);
 
-  const deviceId = basic?.deviceId ?? headerId ?? "";
-  const token = basic?.token ?? headerToken ?? "";
+  const deviceId = basic?.deviceId ?? headerId ?? session?.deviceId ?? "";
+  const token = basic?.token ?? headerToken ?? session?.token ?? "";
   if (!validDeviceId(deviceId)) return unauthorized();
   if (!token) return unauthorized();
 
@@ -231,6 +235,37 @@ export interface FilesRouteContext {
  */
 export async function handleFiles(ctx: FilesRouteContext): Promise<Response | null> {
   const { request, env, url, cfg, limiter } = ctx;
+
+  // ---- page sign-in ------------------------------------------------------
+  // The pages no longer rely on the browser's Basic-auth prompt: the form posts
+  // here, the pair is checked once, and an HttpOnly cookie carries it for the
+  // session. Signing out clears it.
+  if (url.pathname === "/api/session") {
+    const secure = url.protocol === "https:";
+    if (request.method === "DELETE") {
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "content-type": "application/json; charset=utf-8", "set-cookie": clearSessionCookie(secure), ...NO_STORE },
+      });
+    }
+    if (request.method !== "POST") return jsonError(405, "method not allowed", { allow: "POST, DELETE" });
+    if (!limiter.allow(clientIp(request))) return jsonError(429, "rate limited");
+    let body: { device?: unknown; token?: unknown };
+    try {
+      body = (await request.json()) as { device?: unknown; token?: unknown };
+    } catch {
+      return jsonError(400, "invalid json");
+    }
+    const deviceId = typeof body.device === "string" ? body.device.trim() : "";
+    const token = typeof body.token === "string" ? body.token : "";
+    if (!validDeviceId(deviceId) || !token) return jsonError(401, "unauthorized");
+    const expected = (await deviceMap(env)).get(deviceId);
+    if (expected === undefined || !timingSafeEq(token, expected)) return jsonError(401, "unauthorized");
+    if ((await effectiveDisabledSet(env)).has(deviceId)) return jsonError(403, "device disabled");
+    return new Response(JSON.stringify({ ok: true, device: deviceId }), {
+      headers: { "content-type": "application/json; charset=utf-8", "set-cookie": sessionCookie(deviceId, token, secure), ...NO_STORE },
+    });
+  }
+
   const isApi = url.pathname === "/api/files" || url.pathname.startsWith("/api/files/");
   const isPage = url.pathname === "/files" || url.pathname.startsWith("/files/");
   if (!isApi && !isPage) return null;
@@ -330,7 +365,11 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
 
   if (url.pathname === "/files") {
     const auth = await authorizeDevice(env, request);
-    if (auth instanceof Response) return auth;
+    if (auth instanceof Response) {
+      // Nothing of the page is sent before the pair checks out: just the form.
+      const error = auth.status === 403 ? ((await auth.json().catch(() => ({}))) as { error?: string }).error : undefined;
+      return gateResponse({ request, title: "Files", device: null, next: url.pathname, error });
+    }
     const stub = filesStub(env, auth.deviceId);
     const { body } = await doJson(stub, "/list");
     const files = ((body.files ?? []) as FileRecord[]).map((record) => pageView(fileView(record, origin)));
@@ -799,3 +838,4 @@ function renderUnavailablePage(): string {
 
 export { filesStub, doJson };
 export type { FileUsage };
+
