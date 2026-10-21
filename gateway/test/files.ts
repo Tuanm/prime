@@ -346,6 +346,11 @@ async function main(): Promise<void> {
     await fetch(BASE + "/admin/api/devices/other/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ disabled: false }) });
     return r;
   })()).status === 403);
+  // A session belongs to one device: it opens that device's pages only.
+  const otherCookie = (((await (await fetch(BASE + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: "demo", token: "demo" }) })).headers.get("set-cookie")) ?? "").split(";")[0]);
+  const otherPage = await fetch(BASE + "/mcp/other", { headers: { cookie: otherCookie, accept: "text/html" } });
+  const otherHtml = await otherPage.text();
+  check("a session for one device does not open another device's sandbox page", otherPage.status === 200 && otherHtml.includes('id="gate-device"') && otherHtml.includes('value="other"') && !otherHtml.includes('id="connect"'));
   const out = await fetch(BASE + "/api/session", { method: "DELETE", headers: { cookie } });
   check("DELETE /api/session clears it", out.status === 200 && /Max-Age=0/.test(out.headers.get("set-cookie") ?? ""));
   const page = await fetch(BASE + "/files", { headers: DEMO });

@@ -2675,6 +2675,12 @@ export async function handleSandboxDevicePage(request: Request, env: Env, url: U
     const error = auth.status === 403 ? ((await auth.json().catch(() => ({}))) as { error?: string }).error : undefined;
     return gateResponse({ request, title: "Sandbox", device: deviceId, next: url.pathname, error });
   }
+  // A session belongs to one device: being signed in as another must not open
+  // this device's page (its Connect would be refused anyway, but the page is
+  // that device's own).
+  if (auth.deviceId !== deviceId) {
+    return gateResponse({ request, title: "Sandbox", device: deviceId, next: url.pathname, error: "signed in as " + auth.deviceId });
+  }
   const ws = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
   return new Response(request.method === "HEAD" ? null : renderSandboxPage(deviceId), {
     headers: {
