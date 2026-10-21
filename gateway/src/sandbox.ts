@@ -2650,6 +2650,16 @@ function sandboxUnauthorized(base: Record<string, string>): Response {
   });
 }
 
+/** A refusal from authorizeDevice as-is (a disabled device is 403, not 401),
+ *  with the browser's Basic challenge only when it really is an auth failure. */
+function refusal(res: Response, base: Record<string, string>): Response {
+  if (res.status !== 401) return res;
+  const headers = new Headers(res.headers);
+  headers.set("www-authenticate", 'Basic realm="Prime sandbox", charset="UTF-8"');
+  headers.set("cache-control", "no-store");
+  return new Response(res.body, { status: 401, headers });
+}
+
 /** GET/HEAD /mcp (page, runtime frame); POST /mcp?ticket=1 (WebSocket ticket). */
 export async function handleSandbox(request: Request, env: Env, url: URL): Promise<Response> {
   if (request.method === "POST" && url.searchParams.has("ticket")) {
@@ -2659,7 +2669,8 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
     if (request.headers.get("x-sandbox") !== "1") return Response.json({ error: "missing x-sandbox header" }, { status: 400, headers: base });
     const auth = await authorizeDevice(env, request);
     const token = basicPassword(request);
-    if (auth instanceof Response || !token) return sandboxUnauthorized(base);
+    if (auth instanceof Response) return refusal(auth, base);
+    if (!token) return sandboxUnauthorized(base);
     let online = false;
     try {
       const r = await env.DEVICES.get(env.DEVICES.idFromName(auth.deviceId)).fetch("https://device/online");
@@ -2682,7 +2693,7 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
     });
   }
   const auth = await authorizeDevice(env, request);
-  if (auth instanceof Response) return sandboxUnauthorized(base);
+  if (auth instanceof Response) return refusal(auth, base);
   const ws = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
   return new Response(request.method === "HEAD" ? null : renderSandboxPage(auth.deviceId), {
     headers: { ...base, "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP.replace("script-src 'unsafe-inline'", "script-src 'unsafe-inline' 'self' 'wasm-unsafe-eval'") + "; connect-src 'self' " + ws + "; worker-src blob:" },
