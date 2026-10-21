@@ -82,6 +82,15 @@ describe("admin View dialog", () => {
       expect(look.radius).toBe("0px");
       expect(look.font.toLowerCase()).toContain("mono");
       expect(await page.evaluate(() => Array.from(document.querySelectorAll(".dlg-bar")).every((el) => getComputedStyle(el).display === "flex"))).toBe(true);
+      const inset = await page.evaluate(() => {
+        const dlg = document.querySelector(".dlg") as HTMLElement;
+        const btn = Array.from(document.querySelectorAll(".dlg-bar .btn")).find((el) => el.textContent === "Block") as HTMLElement;
+        const a = dlg.getBoundingClientRect(), b = btn.getBoundingClientRect();
+        return { right: Math.round(a.right - b.right), bottom: Math.round(a.bottom - b.bottom), left: Math.round(b.left - a.left) };
+      });
+      expect(inset.right).toBeGreaterThanOrEqual(10);
+      expect(inset.bottom).toBeGreaterThanOrEqual(10);
+      expect(inset.left).toBeGreaterThanOrEqual(10);
       await page.click('.dlg-bar .btn:has-text("Block")');
       await page.waitForFunction(() => /\(blocked\)/.test(document.querySelector(".dlg-body")?.textContent || ""), null, { timeout: 15_000 });
       expect(admin.blocked()).toBe(true);

@@ -215,6 +215,9 @@ const SANDBOX_CSS = `
       #status:empty, #starters:empty, #data:empty, #running:empty { display: none; }
       .linkbtn:disabled { color: #bbb; cursor: default; text-decoration: none; }
       #gate { z-index: 60; }
+      /* Bodies that already pad themselves (the gate, the source dialog, the
+         page's confirmations) must not pad the action bar a second time. */
+      .dlg.dlg-confirm .dlg-bar, .dlg.dlg-wide .dlg-bar { padding: 12px 0 0; }
       #gate[hidden] { display: none; }
       .gate-input { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 9px 10px; border: 1px solid #111; background: #fff; color: #111; margin: 4px 0 2px; }
       .gate-input:focus { outline: none; box-shadow: 0 0 0 1px #111; }
