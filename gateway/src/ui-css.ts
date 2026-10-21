@@ -247,11 +247,13 @@ export const UI_CSS = `      * {
         font-weight: 400;
       }
       /* Dialog action buttons: same black/white, 1px-line design as the rest. */
+      /* The body carries no padding of its own - rows do - so the action bar
+         pads itself to line up with them instead of touching the border. */
       .dlg-bar {
         display: flex;
         justify-content: flex-end;
         gap: 8px;
-        margin-top: 14px;
+        padding: 12px;
       }
       .btn {
         font: inherit;
