@@ -249,11 +249,17 @@ export const UI_CSS = `      * {
       /* Dialog action buttons: same black/white, 1px-line design as the rest. */
       /* The body carries no padding of its own - rows do - so the action bar
          pads itself to line up with them instead of touching the border. */
+      /* Sticky: a long dialog scrolls behind the bar instead of hiding the
+         buttons below the fold, so the action is always in reach. */
       .dlg-bar {
+        position: sticky;
+        bottom: 0;
         display: flex;
         justify-content: flex-end;
         gap: 8px;
         padding: 12px;
+        background: #fff;
+        border-top: 1px solid #eee;
       }
       .btn {
         font: inherit;

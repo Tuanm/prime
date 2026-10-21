@@ -5,9 +5,9 @@ import { ADMIN_HTML } from "../src/admin-ui";
 const origin = { ip: "203.0.113.7", country: "NL", region: "North Holland", city: "Amsterdam", asn: 12876, as: "Scaleway", colo: "AMS", ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", at: "2026-10-21T09:41:45.779Z" };
 
 /** The admin page from a real origin, with /admin/api/** answered by fixed data. */
-async function openAdmin(): Promise<{ page: Page; close: () => Promise<void>; blocked: () => boolean }> {
+async function openAdmin(size = { width: 1000, height: 760 }): Promise<{ page: Page; close: () => Promise<void>; blocked: () => boolean }> {
   const browser: Browser = await chromium.launch();
-  const page = await (await browser.newContext({ viewport: { width: 1000, height: 760 } })).newPage();
+  const page = await (await browser.newContext({ viewport: size })).newPage();
   let blocked = false;
   await page.route("**/admin/api/**", (route) => {
     const url = new URL(route.request().url());
@@ -99,6 +99,46 @@ describe("admin View dialog", () => {
       await page.waitForFunction(() => !/\(blocked\)/.test(document.querySelector(".dlg-body")?.textContent || ""), null, { timeout: 15_000 });
       expect(admin.blocked()).toBe(false);
       expect(await page.isVisible('.dlg-bar .btn:has-text("Block")')).toBe(true);
+    } finally {
+      await admin.close();
+    }
+  }, 60_000);
+
+  test("in a short window the dialog scrolls and the button stays in reach", async () => {
+    const admin = await openAdmin({ width: 900, height: 360 });
+    try {
+      const { page } = admin;
+      const row = await rowWith(page, "ui-dev");
+      await row.locator(".menu-btn").click();
+      await row.locator(".menu button", { hasText: "View" }).click();
+      await page.waitForFunction(() => /203\.0\.113\.7/.test(document.querySelector(".dlg-body")?.textContent || ""), null, { timeout: 15_000 });
+      const state = await page.evaluate(() => {
+        const body = document.querySelector(".dlg-body") as HTMLElement;
+        const btn = Array.from(document.querySelectorAll(".dlg-bar .btn")).find((el) => el.textContent === "Block") as HTMLElement;
+        const dlg = document.querySelector(".dlg") as HTMLElement;
+        const b = btn.getBoundingClientRect(), d = dlg.getBoundingClientRect();
+        return {
+          scrolls: body.scrollHeight > body.clientHeight + 1,
+          scrollTop: body.scrollTop,
+          inDialog: b.bottom <= d.bottom + 1 && b.top >= d.top,
+          inViewport: b.bottom <= window.innerHeight + 1,
+          visible: btn.offsetParent !== null && b.height > 0,
+        };
+      });
+      expect(state.scrolls).toBe(true); // the rows really overflow
+      expect(state.scrollTop).toBe(0); // and it has not been scrolled
+      expect(state.visible).toBe(true);
+      expect(state.inDialog).toBe(true); // the bar sits at the bottom of the dialog
+      expect(state.inViewport).toBe(true); // ...which is on screen
+      // ...and it stays put while the rows scroll behind it
+      await page.evaluate(() => { (document.querySelector(".dlg-body") as HTMLElement).scrollTop = 400; });
+      const after = await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll(".dlg-bar .btn")).find((el) => el.textContent === "Block") as HTMLElement;
+        const dlg = document.querySelector(".dlg") as HTMLElement;
+        const b = btn.getBoundingClientRect(), d = dlg.getBoundingClientRect();
+        return b.bottom <= d.bottom + 1 && b.bottom <= window.innerHeight + 1;
+      });
+      expect(after).toBe(true);
     } finally {
       await admin.close();
     }
