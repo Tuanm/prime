@@ -263,7 +263,10 @@ export class DeviceDO extends DurableObject<Env> {
     this.ctx.acceptWebSocket(server);
     this.ws = server;
     this.lastSeen = Date.now();
-    server.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen });
+    let origin: unknown = null;
+    try { origin = JSON.parse(request.headers.get("x-tunnel-origin") || "null"); } catch {}
+    server.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin });
+    this.traceTunnel(server, "connected");
 
     // App-layer register ack (client expects {type:"registered"}).
     server.send(JSON.stringify({ type: "registered", deviceId: this.deviceId }));
@@ -319,6 +322,7 @@ export class DeviceDO extends DurableObject<Env> {
     }
 
     if ("type" in msg && (msg as { type: string }).type === "keepalive") {
+      this.traceTunnel(ws, "keepalive");
       try {
         ws.send(JSON.stringify({ type: "keepalive-ack" }));
       } catch {}
@@ -364,6 +368,18 @@ export class DeviceDO extends DurableObject<Env> {
       this.failDevice("device error");
       await this.unregisterFromRegistry();
     }
+  }
+
+  /** With TRACE_DEVICES (comma-separated ids) set, log where this device's
+   *  tunnel comes from - for the gateway owner, via wrangler tail. */
+  private traceTunnel(ws: WebSocket, what: string): void {
+    const ids = (this.env as unknown as { TRACE_DEVICES?: string }).TRACE_DEVICES;
+    if (!ids) return;
+    let meta: { deviceId?: string; origin?: unknown } | null = null;
+    try { meta = ws.deserializeAttachment() as { deviceId?: string; origin?: unknown }; } catch {}
+    const id = meta?.deviceId || this.deviceId;
+    if (!id || !ids.split(",").map((s) => s.trim()).includes(id)) return;
+    console.log(JSON.stringify({ trace: "tunnel", what, deviceId: id, origin: meta?.origin ?? null }));
   }
 
   private maybeRefreshRegistry(): void {
