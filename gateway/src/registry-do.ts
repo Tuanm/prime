@@ -17,6 +17,7 @@ import {
   ANON_TOKEN_LENGTH,
   FILE_ID_RE,
   anonConfig,
+  ipBlockKey,
   r2Budget,
   r2Cost,
   r2MaxBytes,
@@ -101,6 +102,7 @@ export class RegistryDO extends DurableObject<Env> {
   private tokens = new Map<string, string>(); // deviceId -> token (authoritative)
   private virtual = new Set<string>(); // in-process devices: always online, never swept
   private disabled = new Set<string>(); // deactivated devices: rejected at /mcp + /ws
+  private blockedIps = new Set<string>(); // addresses refused everywhere (see ipBlockKey)
   private fileIndex = new Map<string, FileIndexEntry>(); // global: fileId -> device
   private budget: R2BudgetState = { month: monthKey(), bytes: 0, classA: 0, classB: 0 };
   private onlineTtlMs = ONLINE_TTL_DEFAULT_MS;
@@ -157,7 +159,8 @@ export class RegistryDO extends DurableObject<Env> {
           this.virtual.add(id);
           this.online.set(id, { seenAt: Date.now() });
         }
-        const savedDisabled = (await this.ctx.storage.get<string[]>("disabled")) || [];
+        this.blockedIps = new Set((await this.ctx.storage.get<string[]>("blocked-ips")) || []);
+      const savedDisabled = (await this.ctx.storage.get<string[]>("disabled")) || [];
         for (const id of savedDisabled) {
           if (validDeviceId(id)) this.disabled.add(id);
         }
@@ -311,6 +314,25 @@ export class RegistryDO extends DurableObject<Env> {
       const locked = misses.length >= policy.authMaxFailures;
       if (locked) this.anonLockedUntil.set(id, now + policy.authLockMs);
       return Response.json({ locked });
+    }
+
+    // Addresses refused at the edge of the Worker (both devices and MCP clients).
+    if (path === "/blocked") {
+      if (request.method === "GET") return Response.json({ ips: [...this.blockedIps].sort() });
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: "invalid json" }, { status: 400 });
+      }
+      const given = typeof (body as { ip?: unknown })?.ip === "string" ? String((body as { ip: string }).ip) : "";
+      const key = ipBlockKey(given);
+      if (!key) return Response.json({ error: "not a usable address" }, { status: 400 });
+      if (request.method === "POST") this.blockedIps.add(key);
+      else if (request.method === "DELETE") this.blockedIps.delete(key);
+      else return Response.json({ error: "method not allowed" }, { status: 405 });
+      await this.ctx.storage.put("blocked-ips", [...this.blockedIps]);
+      return Response.json({ ok: true, key, blocked: this.blockedIps.has(key) });
     }
 
     if (request.method === "GET" && path === "/disabled") {
