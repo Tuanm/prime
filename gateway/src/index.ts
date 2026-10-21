@@ -702,6 +702,16 @@ export default {
       // registry (the DO reads x-expected-token first, then its env copy).
       const headers = new Headers(request.headers);
       headers.delete("x-ticket-nonce");
+      // Where this tunnel comes from (kept by the DO for the life of the tunnel):
+      // the gateway owner can see which machine holds a device.
+      headers.delete("x-tunnel-origin");
+      {
+        const cf = (request as unknown as { cf?: Record<string, unknown> }).cf || {};
+        headers.set("x-tunnel-origin", JSON.stringify({
+          ip: clientIp(request), country: cf.country, region: cf.region, city: cf.city,
+          asn: cf.asn, as: cf.asOrganization, colo: cf.colo, ua: (request.headers.get("user-agent") || "").slice(0, 120), at: new Date().toISOString(),
+        }));
+      }
       if (ticketNonce) headers.set("x-ticket-nonce", ticketNonce);
       headers.set("x-device-id", deviceId);
       if (expected !== undefined) headers.set("x-expected-token", expected);
