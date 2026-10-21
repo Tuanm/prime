@@ -13,7 +13,7 @@ import { parseArgs, flag } from "../src/args.ts";
 import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/client.ts";
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
-import { apiBase, assetNameFor, currentInstall, repoSlug, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
+import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
@@ -309,6 +309,29 @@ describe("bounded concurrency", () => {
 });
 
 describe("update helpers", () => {
+  test("a transient Windows file lock is retried; a real error is not", () => {
+    const busy = (code: string) => { const e = new Error(code) as NodeJS.ErrnoException; e.code = code; return e; };
+    let calls = 0;
+    const flaky = () => { calls++; if (calls < 3) throw busy("EBUSY"); return "installed"; };
+    expect(withFileRetry(flaky, { sleep: () => {} })).toBe("installed");
+    expect(calls).toBe(3);
+    // EPERM and EACCES are the same story on Windows.
+    for (const code of ["EPERM", "EACCES"]) {
+      let n = 0;
+      expect(withFileRetry(() => { n++; if (n < 2) throw busy(code); return n; }, { sleep: () => {} })).toBe(2);
+    }
+    // A real error (missing file, read-only fs) is thrown immediately.
+    let real = 0;
+    expect(() => withFileRetry(() => { real++; throw busy("ENOENT"); }, { sleep: () => {} })).toThrow("ENOENT");
+    expect(real).toBe(1);
+    // It gives up after the attempts allowed, and waits in between.
+    let tries = 0; const waits: number[] = [];
+    expect(() => withFileRetry(() => { tries++; throw busy("EBUSY"); }, { attempts: 4, delayMs: 10, sleep: (ms) => waits.push(ms) })).toThrow("EBUSY");
+    expect(tries).toBe(4);
+    expect(waits).toEqual([10, 20, 40]);
+    expect(withFileRetry(() => "ok", { sleep: () => {} })).toBe("ok");
+  });
+
   test("release source: the renamed repository; empty overrides are ignored", () => {
     const saved = { repo: process.env.MCP_CLI_REPO, api: process.env.MCP_CLI_API_BASE };
     try {
