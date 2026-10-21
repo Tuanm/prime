@@ -30,9 +30,6 @@ const SANDBOX_CSS = `
       .dlg.dlg-wide .dlg-msg { padding: 10px 0 0; }
       .src { width: 100%; height: 340px; box-sizing: border-box; font: inherit; font-size: 12px; line-height: 1.5; padding: 10px 12px; border: 1px solid #ddd; background: #fafafa; resize: none; white-space: pre; tab-size: 2; }
       .src:focus { outline: none; border-color: #111; }
-      .dlg-bar { display: flex; justify-content: flex-end; margin-top: 10px; }
-      .btn { font: inherit; font-size: 12px; font-weight: 600; padding: 6px 16px; background: #111; color: #fff; border: 1px solid #111; cursor: pointer; }
-      .btn:disabled { opacity: 0.4; cursor: default; }
       .connect:disabled { opacity: 0.5; cursor: default; }
       .connect.on { background: #fff; color: #111; }
       .connect.on:hover { background: #f2f2f2; }
@@ -223,9 +220,6 @@ const SANDBOX_CSS = `
       .gate-input:focus { outline: none; box-shadow: 0 0 0 1px #111; }
       #gate .dlg-bar { justify-content: flex-end; }
       .linkbtn { font: inherit; font-size: 11px; background: none; border: 0; padding: 0; color: #111; text-decoration: underline; cursor: pointer; }
-      .btn.secondary { background: #fff; color: #111; }
-      .btn.danger { background: #b91c1c; border-color: #b91c1c; }
-      .dlg-bar .btn + .btn { margin-left: 8px; }
       .dlg.dlg-confirm { width: 420px; max-width: calc(100vw - 32px); }
       .dlg.dlg-confirm .dlg-body { padding: 14px 16px 16px; }
       .dlg.dlg-confirm .dlg-msg { padding: 0 0 12px; color: #111; }

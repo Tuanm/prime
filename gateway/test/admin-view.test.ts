@@ -70,6 +70,18 @@ describe("admin View dialog", () => {
       expect(body).toContain("AMS edge");
       expect(body).toContain("ipv4:203.0.113.7");
       expect(body).not.toContain("(blocked)");
+      // The button must look like the rest of the page (not a native control).
+      const look = await page.evaluate(() => {
+        const b = Array.from(document.querySelectorAll(".dlg-bar .btn")).find((el) => el.textContent === "Block") as HTMLElement;
+        const s = getComputedStyle(b);
+        return { bg: s.backgroundColor, color: s.color, border: s.borderTopWidth + " " + s.borderTopColor, radius: s.borderRadius, font: s.fontFamily };
+      });
+      expect(look.bg).toBe("rgb(185, 28, 28)");
+      expect(look.color).toBe("rgb(255, 255, 255)");
+      expect(look.border).toBe("1px rgb(185, 28, 28)");
+      expect(look.radius).toBe("0px");
+      expect(look.font.toLowerCase()).toContain("mono");
+      expect(await page.evaluate(() => Array.from(document.querySelectorAll(".dlg-bar")).every((el) => getComputedStyle(el).display === "flex"))).toBe(true);
       await page.click('.dlg-bar .btn:has-text("Block")');
       await page.waitForFunction(() => /\(blocked\)/.test(document.querySelector(".dlg-body")?.textContent || ""), null, { timeout: 15_000 });
       expect(admin.blocked()).toBe(true);

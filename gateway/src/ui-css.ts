@@ -246,6 +246,46 @@ export const UI_CSS = `      * {
         color: #666;
         font-weight: 400;
       }
+      /* Dialog action buttons: same black/white, 1px-line design as the rest. */
+      .dlg-bar {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .btn {
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.2;
+        padding: 7px 16px;
+        background: #111;
+        color: #fff;
+        border: 1px solid #111;
+        cursor: pointer;
+      }
+      .btn:hover:not(:disabled) {
+        background: #000;
+      }
+      .btn.secondary {
+        background: #fff;
+        color: #111;
+      }
+      .btn.secondary:hover:not(:disabled) {
+        background: #f2f2f2;
+      }
+      .btn.danger {
+        background: #b91c1c;
+        border-color: #b91c1c;
+      }
+      .btn.danger:hover:not(:disabled) {
+        background: #991b1b;
+        border-color: #991b1b;
+      }
+      .btn:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
       .dlg-close {
         border: 1px solid #111;
         background: #fff;
