@@ -154,6 +154,9 @@ ${UI_CSS}    </style>
           btn.textContent = "⋮";
           var menu = document.createElement("span");
           menu.className = "menu";
+          var viewItem = document.createElement("button");
+          viewItem.type = "button";
+          viewItem.textContent = "View";
           var toolsItem = document.createElement("button");
           toolsItem.type = "button";
           toolsItem.textContent = "Tools";
@@ -174,6 +177,7 @@ ${UI_CSS}    </style>
           stateItem.type = "button";
           stateItem.textContent = dev.disabled ? "Activate" : "Deactivate";
           if (!dev.disabled) stateItem.className = "danger";
+          menu.appendChild(viewItem);
           menu.appendChild(toolsItem);
           menu.appendChild(clientsItem);
           menu.appendChild(saveItem);
@@ -214,6 +218,12 @@ ${UI_CSS}    </style>
             clientsItem.disabled = virtual || !online; // Clients needs a live tunnel
             saveItem.disabled = !isDirty(); // Save only after the user edits
           }
+
+          viewItem.addEventListener("click", function () {
+            closeMenus();
+            var id = idInput.value.trim() || dev.deviceId;
+            showViewDialog(id, "/admin/api/devices/" + encodeURIComponent(id) + "/origin");
+          });
 
           toolsItem.addEventListener("click", function () {
             closeMenus();
@@ -346,6 +356,68 @@ ${UI_CSS}    </style>
           var min = Math.floor(sec / 60);
           if (min < 60) return min + "m ago";
           return Math.floor(min / 60) + "h ago";
+        }
+
+        // Where a device connects from: address, location, network, user agent -
+        // and one button to block that address (or lift the block).
+        function showViewDialog(label, originPath) {
+          var d = openDialog("View", esc(label));
+          function row(name, value) {
+            var el = document.createElement("div");
+            el.className = "dlg-tool";
+            var n = document.createElement("div");
+            n.className = "t-name";
+            n.textContent = name;
+            var v = document.createElement("div");
+            v.className = "t-desc";
+            v.textContent = value;
+            el.appendChild(n);
+            el.appendChild(v);
+            return el;
+          }
+          function paint(info) {
+            d.bodyEl.innerHTML = "";
+            var o = info.origin;
+            if (!o) {
+              d.bodyEl.appendChild(row("Status", info.online ? "connected (no origin recorded)" : "not connected"));
+              d.bodyEl.appendChild(row("Note", "The address is known only while the device is connected - open View again while it is online."));
+            } else {
+              d.bodyEl.appendChild(row("Status", info.online ? "connected" : "not connected"));
+              d.bodyEl.appendChild(row("IP address", String(o.ip || "unknown")));
+              var where = [o.city, o.region, o.country].filter(Boolean).join(", ");
+              if (where) d.bodyEl.appendChild(row("Location", where + (o.colo ? " - " + String(o.colo) + " edge" : "")));
+              if (o.as) d.bodyEl.appendChild(row("Network", String(o.as) + (o.asn ? " (AS" + String(o.asn) + ")" : "")));
+              if (o.ua) d.bodyEl.appendChild(row("User agent", String(o.ua)));
+              if (o.at) d.bodyEl.appendChild(row("Connected at", new Date(String(o.at)).toLocaleString()));
+              if (info.block_key) d.bodyEl.appendChild(row("Block key", String(info.block_key) + (info.blocked ? "  (blocked)" : "")));
+            }
+            var bar = document.createElement("div");
+            bar.className = "dlg-bar";
+            if (o && info.block_key) {
+              var btn = document.createElement("button");
+              btn.type = "button";
+              btn.className = "btn" + (info.blocked ? "" : " danger");
+              btn.textContent = info.blocked ? "Unblock" : "Block";
+              btn.title = info.blocked
+                ? "Let this address connect again"
+                : "Refuse every request from this address (device or MCP client); the admin page stays reachable";
+              btn.addEventListener("click", function () {
+                btn.disabled = true;
+                api("/admin/api/blocked", { method: "POST", body: JSON.stringify({ ip: String(o.ip), blocked: !info.blocked }) })
+                  .then(function () { setStatus((info.blocked ? "unblocked " : "blocked ") + String(o.ip)); loadView(); load(); })
+                  .catch(function (e) { btn.disabled = false; setStatus("block failed: " + e.message, true); });
+              });
+              bar.appendChild(btn);
+            }
+            d.bodyEl.appendChild(bar);
+          }
+          function loadView() {
+            fetch(originPath)
+              .then(function (r) { return r.json().catch(function () { return {}; }); })
+              .then(paint)
+              .catch(function (e) { d.bodyEl.innerHTML = '<div class="dlg-msg err">' + esc((e && e.message) || "failed to load") + "</div>"; });
+          }
+          loadView();
         }
 
         // List the device's tools, relayed through the gateway tunnel.
@@ -516,6 +588,7 @@ ${UI_CSS}    </style>
             menu.appendChild(b);
             return b;
           }
+          var viewItem = item("View");
           var toolsItem = item("Tools");
           var clientsItem = item("Clients");
           var stateItem = item(dev.disabled ? "Activate" : "Deactivate", !dev.disabled);
@@ -540,6 +613,10 @@ ${UI_CSS}    </style>
             toolsItem.disabled = !dev.online || dev.disabled;
             clientsItem.disabled = !dev.online;
             if (!wasOpen) menu.classList.add("open");
+          });
+          viewItem.addEventListener("click", function () {
+            closeMenus();
+            showViewDialog(label, "/admin/api/anonymous/" + dev.ref + "/origin");
           });
           toolsItem.addEventListener("click", function () {
             closeMenus();

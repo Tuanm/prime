@@ -94,9 +94,10 @@ export class DeviceDO extends DurableObject<Env> {
     if (sockets.length > 0) {
       this.ws = sockets[0];
       const meta = this.ws.deserializeAttachment?.() as
-        | { deviceId?: string; lastSeen?: number }
+        | { deviceId?: string; lastSeen?: number; origin?: unknown }
         | undefined;
       if (meta?.deviceId) this.deviceId = meta.deviceId;
+      if (meta?.origin !== undefined) this.tunnelOrigin = meta.origin;
       if (meta?.lastSeen) this.lastSeen = meta.lastSeen;
     }
   }
@@ -141,6 +142,19 @@ export class DeviceDO extends DurableObject<Env> {
         for (const [k, exp] of all) if (exp < Date.now()) await this.ctx.storage.delete(k);
       }
       return this.handleUpgrade(request, url, authToken);
+    }
+
+    // Internal: where this device's tunnel comes from (IP, country, city, ASN,
+    // user agent, when). Empty when nothing is connected.
+    if (request.method === "GET" && url.pathname === "/origin") {
+      let origin: unknown = this.tunnelOrigin;
+      if (origin === null) {
+        try {
+          const meta = this.ws?.deserializeAttachment?.() as { origin?: unknown } | undefined;
+          origin = meta?.origin ?? null;
+        } catch {}
+      }
+      return Response.json({ online: !!this.ws, origin: origin ?? null });
     }
 
     // Internal: drop this device's tunnel (the admin disabled it, removed it, or
@@ -286,6 +300,7 @@ export class DeviceDO extends DurableObject<Env> {
     this.lastSeen = Date.now();
     let origin: unknown = null;
     try { origin = JSON.parse(request.headers.get("x-tunnel-origin") || "null"); } catch {}
+    this.tunnelOrigin = origin;
     server.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin });
     this.traceTunnel(server, "connected");
 
@@ -315,7 +330,8 @@ export class DeviceDO extends DurableObject<Env> {
     // keepalive every 25s keeps this cheap).
     this.maybeRefreshRegistry();
     try {
-      ws.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen });
+      // Rewriting the attachment must not drop the tunnel's origin.
+      ws.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin: this.tunnelOrigin });
     } catch {}
     this.scheduleKeepaliveCheck();
 
@@ -399,7 +415,8 @@ export class DeviceDO extends DurableObject<Env> {
     let meta: { deviceId?: string; origin?: unknown } | null = null;
     try { meta = ws.deserializeAttachment() as { deviceId?: string; origin?: unknown }; } catch {}
     const id = meta?.deviceId || this.deviceId;
-    if (!id || !ids.split(",").map((s) => s.trim()).includes(id)) return;
+    const wanted = ids.split(",").map((s) => s.trim());
+    if (!id || !(wanted.includes("*") || wanted.includes(id))) return;
     console.log(JSON.stringify({ trace: "tunnel", what, deviceId: id, origin: meta?.origin ?? null }));
   }
 
@@ -426,6 +443,8 @@ export class DeviceDO extends DurableObject<Env> {
     return v;
   }
 
+  /** Where the current tunnel came from (IP, geo, UA): kept with the socket. */
+  private tunnelOrigin: unknown = null;
   private issuedSessions = new WeakMap<Request, string>();
   private sessionNames = new Map<string, string>();
 

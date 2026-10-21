@@ -940,6 +940,64 @@ async function s32_download_relay(): Promise<void> {
   } finally { ws.close(); await Bun.sleep(200); }
 }
 
+
+async function s33_blocked_address(): Promise<void> {
+  // Blocking is by address: a blocked one reaches nothing (relay, files API,
+  // WebSocket upgrade), while another address keeps working and /admin stays
+  // reachable so the operator can undo it.
+  const g = await startWrangler(8811, ["ADMIN_TOKEN=" + ADM]);
+  try {
+    const reg = await fetch(g.base + "/admin/api/devices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "blk-dev", token: "blk-tok" }),
+    });
+    if (reg.status !== 200) return bad("s33_register", "status=" + reg.status);
+    const relay = (ip: string) =>
+      fetch(g.base + "/mcp/blk-dev?token=blk-tok", {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": ip },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+      });
+    // No tunnel, but authenticated: 503 - not 401/403.
+    if ((await relay("203.0.113.7")).status !== 503) return bad("s33_baseline", "expected 503");
+    const block = await fetch(g.base + "/admin/api/blocked", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ip: "203.0.113.7" }),
+    });
+    const blockBody = (await block.json()) as { key?: string; blocked?: boolean };
+    if (block.status !== 200 || blockBody.key !== "ipv4:203.0.113.7" || blockBody.blocked !== true) {
+      return bad("s33_block", "status=" + block.status + " body=" + JSON.stringify(blockBody));
+    }
+    await Bun.sleep(2200);
+    const blocked = await relay("203.0.113.7");
+    if (blocked.status !== 403) return bad("s33_blocked_relay", "status=" + blocked.status);
+    const body = (await blocked.json()) as { error?: string };
+    if (body.error !== "blocked") return bad("s33_blocked_body", JSON.stringify(body));
+    const up = await fetch(g.base + "/ws/blk-dev?token=blk-tok", {
+      headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": "AAAAAAAAAAAAAAAAAAAAAA==", "sec-websocket-version": "13", "cf-connecting-ip": "203.0.113.7" },
+    });
+    if (up.status !== 403) return bad("s33_blocked_ws", "status=" + up.status);
+    const files = await fetch(g.base + "/api/files", { headers: { authorization: "Basic " + btoa("blk-dev:blk-tok"), "cf-connecting-ip": "203.0.113.7" } });
+    if (files.status !== 403) return bad("s33_blocked_files", "status=" + files.status);
+    if ((await relay("198.51.100.9")).status !== 503) return bad("s33_other_ip", "another address was affected");
+    const admin = await fetch(g.base + "/admin", { headers: { "cf-connecting-ip": "203.0.113.7" } });
+    if (admin.status !== 200) return bad("s33_admin_exempt", "status=" + admin.status);
+    const un = await fetch(g.base + "/admin/api/blocked", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ip: "203.0.113.7", blocked: false }),
+    });
+    if (un.status !== 200) return bad("s33_unblock", "status=" + un.status);
+    await Bun.sleep(2200);
+    if ((await relay("203.0.113.7")).status !== 503) return bad("s33_after_unblock", "still blocked");
+    ok("s33_blocked_address");
+  } finally {
+    await stopWrangler(g.proc);
+  }
+}
+
 async function main(): Promise<void> {
   console.log("Waiting for plain wrangler at", plainBase, "...");
   await waitReady(plainBase);
@@ -965,6 +1023,7 @@ async function main(): Promise<void> {
     ["s20", s20_per_device_unknown_id_401],
     ["s21", s21_long_call],
     ["s22", s22_admin_registry],
+    ["s33", s33_blocked_address],
     ["s23", s23_online_status_persists],
     ["s24", s24_admin_clients],
     ["s25", s25_sse_e2e],
