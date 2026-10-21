@@ -244,8 +244,38 @@ async function download(url: string, what: string): Promise<Uint8Array> {
 export function removeStaleWindowsBinary(execPath: string = process.execPath): void {
   if (process.platform !== "win32") return;
   try {
-    rmSync(`${execPath}.old`, { force: true });
+    withFileRetry(() => rmSync(`${execPath}.old`, { force: true }), { attempts: 4 });
   } catch {}
+}
+
+/**
+ * Windows keeps a handle on a binary that just ran - the loader, Defender
+ * scanning it, the shell's indexer - so renaming or replacing it fails with
+ * EBUSY/EPERM/EACCES for a moment. Retry those briefly; anything else (ENOENT,
+ * EROFS, EXDEV, ...) is a real answer and is thrown at once.
+ */
+const TRANSIENT_FS_CODES = new Set(["EBUSY", "EPERM", "EACCES", "ENOTEMPTY"]);
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function withFileRetry<T>(
+  fn: () => T,
+  opts: { attempts?: number; delayMs?: number; sleep?: (ms: number) => void } = {},
+): T {
+  const attempts = Math.max(1, opts.attempts ?? 12);
+  const base = opts.delayMs ?? 40;
+  const sleep = opts.sleep ?? sleepSync;
+  for (let i = 0; ; i++) {
+    try {
+      return fn();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (i >= attempts - 1 || !code || !TRANSIENT_FS_CODES.has(code)) throw err;
+      sleep(Math.min(1_000, base * 2 ** i));
+    }
+  }
 }
 
 function installBytes(target: string, bytes: Uint8Array, mode: number): void {
@@ -269,11 +299,13 @@ function installBytes(target: string, bytes: Uint8Array, mode: number): void {
     if (process.platform === "win32" && existsSync(target)) {
       const aside = `${target}.old`;
       try {
-        rmSync(aside, { force: true });
+        withFileRetry(() => rmSync(aside, { force: true }));
       } catch {}
-      renameSync(target, aside);
+      withFileRetry(() => renameSync(target, aside));
     }
-    renameSync(tmp, target); // atomic within the same filesystem
+    // Atomic within the same filesystem; retried while Windows still holds the
+    // file it is replacing.
+    withFileRetry(() => renameSync(tmp, target));
   } catch (err) {
     try {
       rmSync(tmp, { force: true });
