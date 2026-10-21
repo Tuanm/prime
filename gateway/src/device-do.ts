@@ -143,6 +143,27 @@ export class DeviceDO extends DurableObject<Env> {
       return this.handleUpgrade(request, url, authToken);
     }
 
+    // Internal: drop this device's tunnel (the admin disabled it, removed it, or
+    // gave it a new token). Detach first, so webSocketClose cannot unregister a
+    // tunnel that a reconnecting device installs straight after.
+    if (request.method === "POST" && url.pathname === "/disconnect") {
+      // A hibernated object has no this.ws in memory, but its sockets still
+      // exist: close everything the hibernation API knows about.
+      const live = [ ...(this.ctx.getWebSockets?.() ?? []) ];
+      if (this.ws && !live.includes(this.ws)) live.push(this.ws);
+      this.ws = null;
+      for (const socket of live) {
+        try {
+          socket.close(4001, "device disabled or credential changed");
+        } catch {}
+      }
+      if (live.length) {
+        this.failDevice("device disabled or credential changed");
+        await this.unregisterFromRegistry();
+      }
+      return Response.json({ ok: true, hadTunnel: live.length > 0 });
+    }
+
     // Internal (the entry asks before issuing a Sandbox ticket): is a live
     // tunnel attached? Stale sockets do not count - a reconnect may replace them.
     if (request.method === "GET" && url.pathname === "/online") {

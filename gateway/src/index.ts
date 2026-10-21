@@ -28,6 +28,7 @@ import { LANDING_HTML } from "./landing-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleSandbox, verifyTicket } from "./sandbox";
+import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { sandboxAsset } from "./sandbox-assets";
 
 export { DeviceDO } from "./device-do";
@@ -111,25 +112,17 @@ function markAnonymous(headers: Headers, request: Request, cfg: GatewayConfig, e
   headers.set("x-client-ip", cip && cip !== "unknown" ? cip : "unknown");
 }
 
-// Cached set of disabled (deactivated) deviceIds. Same TTL/caching model as the
-// device map; invalidated by admin /state mutations.
-let disabledCache: { at: number; set: Set<string> } | null = null;
-
-async function effectiveDisabledSet(env: Env): Promise<Set<string>> {
-  if (disabledCache && Date.now() - disabledCache.at < MAP_CACHE_TTL_MS) return disabledCache.set;
-  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  const set = new Set<string>();
+/** Drop this device's live tunnel. Called when it is disabled, removed or
+ *  given a new token: an open socket authenticated with the old credential must
+ *  not stay connected. */
+async function kickDeviceTunnel(env: Env, deviceId: string): Promise<boolean> {
   try {
-    const r = await reg.fetch("https://registry/disabled");
-    if (r.ok) {
-      const j = (await r.json()) as { disabled?: string[] };
-      for (const id of j.disabled || []) {
-        if (validDeviceId(id)) set.add(id);
-      }
-    }
-  } catch {}
-  disabledCache = { at: Date.now(), set };
-  return set;
+    const r = await env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch(new Request("https://device/disconnect", { method: "POST" }));
+    if (!r.ok) return false;
+    return ((await r.json()) as { hadTunnel?: boolean }).hadTunnel === true;
+  } catch {
+    return false;
+  }
 }
 
 // Per-device auth mode must be driven ONLY by real (tunnel) device tokens.
@@ -377,12 +370,13 @@ export default {
         const action = anonRoute[3] || "";
         if (request.method === "DELETE" && action === "") {
           mapCache = null;
-          disabledCache = null;
+          invalidateDisabledCache();
           await reg.fetch(new Request("https://registry/remove", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ deviceId }),
           }));
+          await kickDeviceTunnel(env, deviceId);
           return Response.json({ ok: true });
         }
         if (request.method === "POST" && action === "state") {
@@ -394,13 +388,14 @@ export default {
           }
           const disabled = !!(body as { disabled?: unknown })?.disabled;
           mapCache = null;
-          disabledCache = null;
+          invalidateDisabledCache();
           await reg.fetch(new Request("https://registry/setstate", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ deviceId, disabled }),
           }));
-          return Response.json({ ok: true, disabled });
+          const dropped = disabled ? await kickDeviceTunnel(env, deviceId) : false;
+          return Response.json({ ok: true, disabled, tunnelDropped: dropped });
         }
         if (request.method === "GET" && action === "clients") {
           return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch("https://device/clients");
@@ -426,12 +421,29 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/admin/api/devices") {
         mapCache = null;
+        // A new token must invalidate a tunnel opened with the old one: compare
+        // with the current map before the upsert lands.
+        let rotated: string | null = null;
+        try {
+          const body = (await request.clone().json()) as { deviceId?: unknown; token?: unknown };
+          const id = typeof body.deviceId === "string" ? body.deviceId : "";
+          const token = typeof body.token === "string" ? body.token : "";
+          if (validDeviceId(id) && token) {
+            const r = await reg.fetch("https://registry/map");
+            if (r.ok) {
+              const before = ((await r.json()) as { map?: Record<string, string> }).map?.[id];
+              if (before !== undefined && before !== token) rotated = id;
+            }
+          }
+        } catch {}
         const upstream = new Request("https://registry/upsert", {
           method: "POST",
           headers: { "content-type": request.headers.get("content-type") || "application/json" },
           body: request.body,
         });
-        return reg.fetch(upstream);
+        const res = await reg.fetch(upstream);
+        if (rotated && res.ok) await kickDeviceTunnel(env, rotated);
+        return res;
       }
       if (request.method === "GET" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/clients")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/clients".length);
@@ -450,27 +462,33 @@ export default {
         }
         const disabled = !!(body as { disabled?: unknown })?.disabled;
         mapCache = null;
-        disabledCache = null;
-        return reg.fetch(
+        invalidateDisabledCache();
+        const res = await reg.fetch(
           new Request("https://registry/setstate", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ deviceId, disabled }),
           }),
         );
+        const dropped = disabled ? await kickDeviceTunnel(env, deviceId) : false;
+        if (!res.ok) return res;
+        const current = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        return Response.json({ ...current, ok: true, disabled, tunnelDropped: dropped });
       }
       if (request.method === "DELETE" && url.pathname.startsWith("/admin/api/devices/")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length);
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
         mapCache = null;
-        disabledCache = null;
-        return reg.fetch(
+        invalidateDisabledCache();
+        const res = await reg.fetch(
           new Request("https://registry/remove", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ deviceId }),
           }),
         );
+        await kickDeviceTunnel(env, deviceId);
+        return res;
       }
       return Response.json({ error: "not found" }, { status: 404 });
     }
