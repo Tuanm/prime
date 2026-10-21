@@ -15,6 +15,7 @@ import type { FileRecord, FileUsage } from "./files-do";
 import { renderDownloadPage, renderFilesPage, type FileView } from "./files-ui";
 import { clientIp, type RateLimiter } from "./rate-limit";
 import { timingSafeEq } from "./config";
+import { effectiveDisabledSet } from "./device-state";
 
 const NO_STORE = { "cache-control": "no-store" } as const;
 
@@ -115,6 +116,14 @@ export async function authorizeDevice(env: Env, request: Request): Promise<Devic
   // requires a real per-device credential.
   if (expected === undefined) return unauthorized();
   if (!timingSafeEq(token, expected)) return unauthorized();
+  // Deactivated devices are cut off everywhere, not just at the MCP relay: the
+  // pages, the files API and WebSocket tickets all use this credential.
+  if ((await effectiveDisabledSet(env)).has(deviceId)) {
+    return new Response(JSON.stringify({ error: "device disabled" }), {
+      status: 403,
+      headers: { "content-type": "application/json; charset=utf-8", ...NO_STORE },
+    });
+  }
 
   return { deviceId };
 }

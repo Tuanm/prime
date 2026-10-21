@@ -241,14 +241,26 @@ try {
   check("a malformed ref is not routed anywhere", badRef.status === 404, String(badRef.status));
   check("...and did not disable anything", (await mcp(B, id1, { token: tok1, ip: "10.7.7.0" })).status === 200);
 
+  check("its tunnel is live just before deactivating", dev1.readyState === 1, "readyState=" + dev1.readyState);
+  let disabledBody: any = {};
   const off = await fetch(B + "/admin/api/anonymous/" + ref1 + "/state", { method: "POST", headers: ADMIN_JSON, body: JSON.stringify({ disabled: true }) });
+  disabledBody = await off.clone().json().catch(() => ({}));
   check("Deactivate by ref", off.ok);
+  // Deactivating also drops the tunnel that is already open, so the device cannot
+  // keep serving with the credential the admin just cut off. (The response says
+  // the Durable Object closed a socket; miniflare may deliver the close frame to
+  // the client only on its next wake, so the visible proof is the reconnect the
+  // checks below need.)
+  check("deactivating drops its live tunnel", disabledBody.tunnelDropped === true, JSON.stringify(disabledBody));
   await Bun.sleep(2200);
   check("a deactivated device -> 403 on /mcp", (await mcp(B, id1, { token: tok1, ip: "10.7.7.1" })).status === 403);
   check("...and on its tunnel", (await upgradeStatus(B + "/ws/" + id1, { "x-device-token": tok1 })) === 403);
   check("...admin Tools too", (await fetch(B + "/admin/api/anonymous/" + ref1 + "/tools", { method: "POST" })).status === 403);
   await fetch(B + "/admin/api/anonymous/" + ref1 + "/state", { method: "POST", headers: ADMIN_JSON, body: JSON.stringify({ disabled: false }) });
   await Bun.sleep(2200);
+  // The tunnel was closed, so the device reconnects before it can serve again.
+  const dev1b = await device(B, id1, tok1);
+  sockets.push(dev1b);
   check("Activate restores it", (await mcp(B, id1, { token: tok1, ip: "10.7.7.2" })).status === 200);
 
   // ---- file storage is for registered devices only ----

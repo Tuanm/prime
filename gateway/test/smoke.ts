@@ -373,8 +373,36 @@ async function s22_admin_registry(): Promise<void> {
     if (r.status !== 200) return bad("s22_admin_register", "status=" + r.status + " body=" + (await r.text()));
     const ws = await connectWs(g.base + "/ws/admin-dev?token=admin-tok");
     await recvJson(ws, (m) => m.type === "registered");
-    ws.close();
-    await Bun.sleep(200);
+    // Disabling the device must drop the tunnel that is already open, not just
+    // refuse new requests: an operator cuts a device off, it stays cut off.
+    const disableClose = new Promise<string>((resolve) => {
+      const t = setTimeout(() => resolve("still open"), 8000);
+      ws.addEventListener("close", (e) => { clearTimeout(t); resolve("closed:" + (e as { code?: number }).code); }, { once: true });
+    });
+    r = await fetch(g.base + "/admin/api/devices/admin-dev/state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ disabled: true }),
+    });
+    if (r.status !== 200) return bad("s22_admin_disable", "status=" + r.status + " body=" + (await r.text()));
+    const why = await disableClose;
+    if (why !== "closed:4001") return bad("s22_disable_drops_tunnel", why);
+    ok("s22_disable_drops_tunnel");
+    // ...and the relay refuses it while disabled.
+    r = await fetch(g.base + "/mcp/admin-dev?auth=" + GW, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-device-token": "admin-tok" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    });
+    if (r.status !== 403) return bad("s22_disabled_relay_403", "status=" + r.status + " body=" + (await r.text()));
+    ok("s22_disabled_relay_403");
+    r = await fetch(g.base + "/admin/api/devices/admin-dev/state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ disabled: false }),
+    });
+    if (r.status !== 200) return bad("s22_admin_enable", "status=" + r.status);
+    await Bun.sleep(150);
     // 4. delete -> the device is rejected again
     r = await fetch(g.base + "/admin/api/devices/admin-dev", { method: "DELETE" });
     if (r.status !== 200) return bad("s22_admin_delete", "status=" + r.status + " body=" + (await r.text()));
@@ -385,6 +413,32 @@ async function s22_admin_registry(): Promise<void> {
       w2.close();
     } catch {}
     if (stillOpen) return bad("s22_admin_delete_blocks", "ws still opened after delete");
+    // 5. a new token drops a tunnel opened with the old one, and the new one works
+    r = await fetch(g.base + "/admin/api/devices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "rot-dev", token: "tok-a" }),
+    });
+    if (r.status !== 200) return bad("s22_rot_register", "status=" + r.status + " body=" + (await r.text()));
+    const wsR = await connectWs(g.base + "/ws/rot-dev?token=tok-a");
+    await recvJson(wsR, (m) => m.type === "registered");
+    const rotateClose = new Promise<string>((resolve) => {
+      const t = setTimeout(() => resolve("still open"), 8000);
+      wsR.addEventListener("close", (e) => { clearTimeout(t); resolve("closed:" + (e as { code?: number }).code); }, { once: true });
+    });
+    r = await fetch(g.base + "/admin/api/devices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "rot-dev", token: "tok-b" }),
+    });
+    if (r.status !== 200) return bad("s22_rot_update", "status=" + r.status);
+    const whyRot = await rotateClose;
+    if (whyRot !== "closed:4001") return bad("s22_rotate_drops_tunnel", whyRot);
+    ok("s22_rotate_drops_tunnel");
+    const wsR2 = await connectWs(g.base + "/ws/rot-dev?token=tok-b");
+    await recvJson(wsR2, (m) => m.type === "registered");
+    wsR2.close();
+    ok("s22_rotate_new_token_works");
     ok("s22_admin_registry");
   } finally {
     await stopWrangler(g.proc);

@@ -140,6 +140,26 @@ async function main(): Promise<void> {
   check("unregistered device -> 401", (await fetch(BASE + "/api/files", { headers: basic("ghost", "ghost") })).status === 401);
   check("valid credentials -> 200", (await fetch(BASE + "/api/files", { headers: DEMO })).status === 200);
 
+  // ---- a disabled (deactivated) device is refused everywhere ----
+  {
+    const set = (disabled: boolean) =>
+      fetch(BASE + "/admin/api/devices/other/state", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ disabled }),
+      });
+    check("disable a device -> 200", (await set(true)).status === 200);
+    const other = basic("other", "other");
+    check("disabled: files API -> 403", (await fetch(BASE + "/api/files", { headers: other })).status === 403);
+    check("disabled: /files page -> 403", (await fetch(BASE + "/files", { headers: other })).status === 403);
+    check("disabled: /mcp sandbox page -> 403", (await fetch(BASE + "/mcp", { headers: other })).status === 403);
+    check("disabled: upload -> 403", (await fetch(BASE + "/api/files?name=x&expiry_days=1", { method: "POST", headers: other, body: bytes(10) })).status === 403);
+    check("disabled: WebSocket ticket -> 403", (await fetch(BASE + "/mcp?ticket=1", { method: "POST", headers: { ...other, "x-sandbox": "1" } })).status === 403);
+    check("disabled device's own page is unaffected for others", (await fetch(BASE + "/api/files", { headers: DEMO })).status === 200);
+    check("re-enable -> 200", (await set(false)).status === 200);
+    check("re-enabled: files API -> 200", (await fetch(BASE + "/api/files", { headers: other })).status === 200);
+  }
+
   // ---- upload ----
   const created = await upload(small, "name=hello.txt&expiry_days=1");
   check("upload -> 201", created.status === 201, JSON.stringify(created.body));
