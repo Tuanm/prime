@@ -145,9 +145,9 @@ async function main(): Promise<void> {
     const r = await fetch(BASE + from, { redirect: "manual" });
     check("GET " + from + " redirects to " + to, r.status === 308 && (r.headers.get("location") ?? "").endsWith(to), r.status + " " + (r.headers.get("location") ?? ""));
   }
-  // ...and a POST is redirected without being turned into a GET.
+  // A POST is not redirected (that path belongs to MCP clients, not pages).
   const posted = await fetch(BASE + "/mcp/", { method: "POST", redirect: "manual", body: "{}" });
-  check("a POST to /mcp/ keeps its method (308)", posted.status === 308, String(posted.status));
+  check("a POST to /mcp/ is not redirected", posted.status !== 308, String(posted.status));
 
   // ---- a disabled (deactivated) device is refused everywhere ----
   {
