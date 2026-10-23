@@ -93,7 +93,7 @@ id = "d36acd23e12945058bf9910182deeec7"
 ACCESS_TEAM_DOMAIN = "tuanm.cloudflareaccess.com"
 # The Access application's AUD tag (Zero Trust -> Access -> Applications ->
 # the admin app -> Application Audience): every accepted assertion must carry it.
-#   ACCESS_AUD = "..."
+ACCESS_AUD = "1416ea5492b03aeef025037c2a9df886289e1748d8f10f876922baea9adafcc8"
 # Until those are set, enforce keeps /admin closed to everyone (it refuses any
 # request without a verified Access assertion) - fail closed, never open.
 ADMIN_ACCESS = "enforce"

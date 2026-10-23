@@ -12,7 +12,10 @@ import { authorizeDevice } from "./files-routes";
 import type { Env } from "./config";
 
 const SANDBOX_CSS = `
-      body { width: 720px; }
+      /* 720px is the comfortable desktop width; on a phone it must not force a
+         horizontal scroll (the shared stylesheet's media query comes earlier, so
+         this rule would otherwise win). */
+      body { width: min(720px, calc(100vw - 24px)); }
       .cols { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
       .tname { width: 150px; flex: none; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .targs { width: 150px; flex: none; font-size: 12px; color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -253,6 +256,19 @@ const SANDBOX_CSS = `
       .gal-item { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; padding: 12px 0; border-bottom: 1px solid #eee; align-items: start; }
       .gal-name { font-size: 11px; color: #666; padding-top: 4px; }
       .gal-code { grid-column: 2; font-size: 10.5px; color: #888; background: none; border: 0; padding: 0; word-break: break-all; }
+      @media (max-width: 560px) {
+        body { width: auto; margin: 20px 12px; }
+        h1 { font-size: 17px; }
+        .sub { margin-bottom: 16px; }
+        .cols { flex-wrap: wrap; row-gap: 2px; }
+        .tname, .targs { width: 100%; }
+        .tdesc { flex-basis: 100%; }
+        .connect-row { flex-wrap: wrap; gap: 10px; }
+        .dlg.dlg-wide { width: calc(100vw - 24px); }
+        .src { height: 220px; }
+        pre, table, .code pre { max-width: 100%; overflow-x: auto; }
+        .uslide { width: 200px; }
+      }
 `;
 
 const RUNTIME_JS = String.raw`(function () {
