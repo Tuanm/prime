@@ -11,8 +11,8 @@ export const LANDING_HTML = String.raw`<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Code MCP</title>
-    <meta name="description" content="Give AI agents your machine's files and shell as MCP tools - from anywhere. Download the mcp CLI and connect in one command." />
+    <title>Device Connect</title>
+    <meta name="description" content="Connect this machine as a device and use its files and shell as MCP tools - from anywhere." />
     <link rel="icon" href="__FAVICON__" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -62,9 +62,9 @@ export const LANDING_HTML = String.raw`<!doctype html>
     </style>
   </head>
   <body>
-    <h1>Code MCP</h1>
-    <div class="sub">your machine as MCP tools, anywhere</div>
-    <p class="desc">Give AI agents this machine's files and shell as MCP tools - from anywhere. Download <b>mcp</b>, run <code>mcp connect</code>, and add the URL it prints to Claude Code, Codex or any MCP client.</p>
+    <h1>Device Connect</h1>
+    <div class="sub">this machine as MCP tools, anywhere</div>
+    <p class="desc">Connect this machine's files and shell as MCP tools - from anywhere. Download <b>mcp</b>, run <code>mcp connect</code>, and add the URL it prints to Claude Code, Codex or any MCP client.</p>
 
     <div class="cg" id="cg">
       <button type="button" class="main" id="connect">Connect</button>
@@ -82,13 +82,6 @@ export const LANDING_HTML = String.raw`<!doctype html>
       <li><code>mcp service install</code> keeps it running at every login.</li>
       <li><code>mcp serve</code> exposes every connected device to a local MCP client.</li>
     </ul>
-
-    <p class="meta" id="meta"><a href="https://github.com/Tuanm/prime/releases">All releases</a></p>
-    <div class="foot">
-      <a href="https://github.com/Tuanm/prime" aria-label="Source on GitHub">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-      </a>
-    </div>
 
     <script>
       (function () {
@@ -190,7 +183,8 @@ export const LANDING_HTML = String.raw`<!doctype html>
           if (a) targetEl.textContent = "mcp " + release.version + " for " + name(current) + " \u00b7 " + mb(a.size);
           else if (release) targetEl.textContent = "No " + name(current) + " build in mcp " + release.version + " - see all releases.";
           else targetEl.textContent = "For " + name(current);
-          document.getElementById("meta").innerHTML = release
+          var metaEl = document.getElementById("meta");
+          if (metaEl) metaEl.innerHTML = release
             ? '<a href="' + release.url + '">mcp ' + release.version + '</a> \u00b7 <a href="' + RELEASES + '">all releases</a>'
             : '<a href="' + RELEASES + '">All releases</a>';
           if (guide.classList.contains("show")) showGuide();
@@ -298,3 +292,6 @@ export const LANDING_HTML = String.raw`<!doctype html>
   </body>
 </html>
 `.replace("__FAVICON__", FAVICON);
+
+/** The page's own stylesheet, reused by the front page so both look alike. */
+export const LANDING_CSS = LANDING_HTML.slice(LANDING_HTML.indexOf("<style>") + 7, LANDING_HTML.indexOf("</style>"));

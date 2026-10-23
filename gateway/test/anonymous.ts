@@ -144,7 +144,8 @@ try {
   check("GET / serves the front page", landing.status === 200 && (landing.headers.get("content-type") ?? "").startsWith("text/html") && landingText.includes("Prime") && landingText.includes('href="/sandbox"'), String(landing.status));
   const product = await fetch(B + "/mcp");
   const productText = await product.text();
-  check("GET /mcp serves the product page", product.status === 200 && productText.includes("code-mcp") && productText.includes('href="https://github.com/Tuanm/prime'), String(product.status));
+  check("GET /mcp serves the Device Connect page", product.status === 200 && productText.includes("<title>Device Connect</title>") && !productText.includes('class="meta"'), String(product.status));
+  check("the front page carries the releases footer", landingText.includes("All releases") && landingText.includes("Source on GitHub") && !landingText.includes("See the overview"), String(landing.status));
   check("HEAD / answers without a body", (await fetch(B + "/", { method: "HEAD" })).status === 200);
   check("POST / is not the landing page", (await fetch(B + "/", { method: "POST" })).status !== 200);
 
