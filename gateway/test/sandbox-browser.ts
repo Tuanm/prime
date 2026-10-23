@@ -160,6 +160,25 @@ try {
     await gp.click("#connect");
     await gp.waitForFunction(() => window.__sandbox.state() === "idle", null, { timeout: 25000 });
 
+    // A browser that refuses the cookie must be told, not sent round the form again.
+    {
+      const hostile = await browser.newContext({ viewport: { width: 1000, height: 800 } });
+      const hp = await hostile.newPage();
+      // Behave like a browser that drops the cookie: the sign-in is accepted,
+      // but the session probe that follows does not see one.
+      await hostile.route("**/api/session", async (route) => {
+        if (route.request().method() === "GET") return route.fulfill({ status: 401, contentType: "application/json", body: '{"error":"no session"}' });
+        await route.continue();
+      });
+      await hp.goto(B + "/files", { waitUntil: "domcontentloaded" });
+      await hp.fill("#gate-device", ID);
+      await hp.fill("#gate-token", TOKEN);
+      await hp.click("#gate-go");
+      await hp.waitForFunction(() => /not keeping the session cookie/.test(document.getElementById("gate-err")?.textContent || ""), null, { timeout: 15000 });
+      ok(true, "a browser that drops the cookie is told so instead of looping back to the form");
+      await hostile.close();
+    }
+
     // /mcp: the same form, both fields empty. A fresh context, because the one
     // above is signed in already (its cookie would skip the form).
     const freshCtx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
