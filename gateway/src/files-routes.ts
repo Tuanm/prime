@@ -242,6 +242,19 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
   // session. Signing out clears it.
   if (url.pathname === "/api/session") {
     const secure = url.protocol === "https:";
+    // The form asks this right after signing in: if the browser refused to keep
+    // the cookie (a setting, or the page is in an embedded frame) it says so
+    // instead of reloading into the form again and again.
+    if (request.method === "GET") {
+      const session = sessionFrom(request);
+      if (!session) return jsonError(401, "no session");
+      const expected = (await deviceMap(env)).get(session.deviceId);
+      if (expected === undefined || !timingSafeEq(session.token, expected)) return jsonError(401, "no session");
+      if ((await effectiveDisabledSet(env)).has(session.deviceId)) return jsonError(403, "device disabled");
+      return new Response(JSON.stringify({ ok: true, device: session.deviceId }), {
+        headers: { "content-type": "application/json; charset=utf-8", ...NO_STORE },
+      });
+    }
     if (request.method === "DELETE") {
       return new Response(JSON.stringify({ ok: true }), {
         headers: { "content-type": "application/json; charset=utf-8", "set-cookie": clearSessionCookie(secure), ...NO_STORE },

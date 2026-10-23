@@ -360,6 +360,10 @@ async function main(): Promise<void> {
   const otherPage = await fetch(BASE + "/mcp/other", { headers: { cookie: otherCookie, accept: "text/html" } });
   const otherHtml = await otherPage.text();
   check("a session for one device does not open another device's sandbox page", otherPage.status === 200 && otherHtml.includes('id="gate-device"') && otherHtml.includes('value="other"') && !otherHtml.includes('id="connect"'));
+  check("GET /api/session without a cookie -> 401", (await fetch(BASE + "/api/session")).status === 401);
+  const probe = await fetch(BASE + "/api/session", { headers: { cookie } });
+  const probeBody = (await probe.json()) as { ok?: boolean; device?: string };
+  check("GET /api/session with the cookie -> who is signed in", probe.status === 200 && probeBody.ok === true && probeBody.device === "demo", JSON.stringify(probeBody));
   const out = await fetch(BASE + "/api/session", { method: "DELETE", headers: { cookie } });
   check("DELETE /api/session clears it", out.status === 200 && /Max-Age=0/.test(out.headers.get("set-cookie") ?? ""));
   const page = await fetch(BASE + "/files", { headers: DEMO });
