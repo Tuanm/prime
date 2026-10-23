@@ -753,7 +753,7 @@ const PAGE_JS = String.raw`(function () {
         if (conn.userClosed) return;
         if (t.online && first) {
           setConn("idle");
-          setStatus("Device " + DEVICE + " is already connected from somewhere else (for example code-mcp or 'mcp connect'). Stop it there, then Connect.", true);
+          setStatus("Device " + DEVICE + " is already connected from somewhere else (for example code-mcp or 'prime connect'). Stop it there, then Connect.", true);
           return;
         }
         conn.mcpUrl = t.mcp_url;

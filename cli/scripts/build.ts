@@ -1,10 +1,10 @@
-// Build the `mcp` CLI.
+// Build the `prime` CLI.
 //
 //   bun scripts/build.ts              full cross-platform compile + JS bundle
 //   bun scripts/build.ts --host-only  just this machine's binary (fast, for tests)
 //   bun scripts/build.ts --bundle-only  just the portable JS bundle
 //
-// The code-mcp device server ("mcp code-mcp" / "mcp connect") is built in from
+// The code-mcp device server ("prime code-mcp" / "prime connect") is built in from
 // src/code-mcp.ts in this package - so an artifact is reproducible
 // from the commit it was built at. Every artifact is smoke-tested to run it.
 //
@@ -32,12 +32,12 @@ interface BuildTarget {
 }
 
 const TARGETS: BuildTarget[] = [
-  { target: "bun-darwin-arm64", out: "mcp-darwin-arm64" },
-  { target: "bun-darwin-x64", out: "mcp-darwin-x64" },
-  { target: "bun-linux-x64", out: "mcp-linux-x64" },
-  { target: "bun-linux-arm64", out: "mcp-linux-arm64" },
-  { target: "bun-windows-x64", out: "mcp-windows-x64.exe" },
-  { target: "bun-windows-arm64", out: "mcp-windows-arm64.exe" },
+  { target: "bun-darwin-arm64", out: "prime-darwin-arm64" },
+  { target: "bun-darwin-x64", out: "prime-darwin-x64" },
+  { target: "bun-linux-x64", out: "prime-linux-x64" },
+  { target: "bun-linux-arm64", out: "prime-linux-arm64" },
+  { target: "bun-windows-x64", out: "prime-windows-x64.exe" },
+  { target: "bun-windows-arm64", out: "prime-windows-arm64.exe" },
 ];
 
 const args = new Set(process.argv.slice(2));
@@ -75,10 +75,10 @@ mkdirSync(DIST, { recursive: true });
 
 // The JS bundle is the lightweight option: ~100 KB, needs Bun at runtime.
 if (!args.has("--no-bundle")) {
-  const out = `${DIST}/mcp.js`;
+  const out = `${DIST}/prime.js`;
   // No `banner`: src/index.ts already starts with a shebang and Bun preserves
   // it, so adding one here produces a second "#!/usr/bin/env bun" on line 3 -
-  // which is a syntax error, not a comment. `bun dist/mcp.js` then exits 1
+  // which is a syntax error, not a comment. `bun dist/prime.js` then exits 1
   // without running anything (and still "starts fast", which is how the bug
   // survived a timing-only check).
   const result = await Bun.build({
@@ -86,7 +86,7 @@ if (!args.has("--no-bundle")) {
     target: "bun",
     minify: true,
     outdir: DIST,
-    naming: "mcp.js",
+    naming: "prime.js",
     define: { "process.env.MCP_CLI_VERSION": JSON.stringify(VERSION) },
   });
   if (!result.success) {
@@ -96,7 +96,7 @@ if (!args.has("--no-bundle")) {
   // Guard: a bundle that does not actually run must fail the build, not ship.
   const smoke = Bun.spawnSync(["bun", out, "--version"], { stdout: "pipe", stderr: "pipe" });
   const printed = smoke.stdout.toString().trim();
-  if (smoke.exitCode !== 0 || !printed.startsWith("mcp ")) {
+  if (smoke.exitCode !== 0 || !printed.startsWith("prime ")) {
     console.error(`FAILED bundle smoke test: exit=${smoke.exitCode} stdout=${JSON.stringify(printed)} stderr=${smoke.stderr.toString().trim().slice(0, 200)}`);
     process.exit(1);
   }
@@ -116,7 +116,7 @@ const selected = hostOnly ? TARGETS.filter((t) => t.target === hostTarget) : TAR
 
 if (selected.length === 0) {
   // Fall back to the compiler's own default target when the host pair is unusual.
-  const out = `${DIST}/mcp`;
+  const out = `${DIST}/prime`;
   rmSync(out, { force: true });
   await $`bun build --compile --minify --bytecode --format=esm ${DEFINE} --outfile ${out} ${ENTRY}`;
   console.log(`compile ${out}  ${(statSync(out).size / 1024 / 1024).toFixed(1)} MB`);
@@ -136,7 +136,7 @@ for (const { target, out } of selected) {
     await $`bun build --compile --minify --bytecode --format=esm ${DEFINE} --target=${target} --outfile ${path} ${ENTRY}`.quiet();
     console.log(`compile ${path}  ${(statSync(path).size / 1024 / 1024).toFixed(1)} MB  (${target})`);
     // Also expose the host build under its bare name, so a local run yields a
-    // binary literally called `mcp` (the name it is installed as).
+    // binary literally called `prime` (the name it is installed as).
     if (target === hostTarget) {
       const codeMcp = codeMcpSmoke([path]);
       if (codeMcp) {
@@ -144,7 +144,7 @@ for (const { target, out } of selected) {
         process.exitCode = 1;
         continue;
       }
-      const bare = `${DIST}/mcp${process.platform === "win32" ? ".exe" : ""}`;
+      const bare = `${DIST}/prime${process.platform === "win32" ? ".exe" : ""}`;
       copyFileSync(path, bare);
       chmodSync(bare, 0o755);
       console.log(`install ${bare}  (same binary, no platform suffix)`);

@@ -1,4 +1,4 @@
-# mcp - Prime gateway CLI
+# prime - the CLI
 
 A small, fast command line client for the [Prime gateway](../README.md). It talks
 to devices through the gateway's MCP relay and lets you list, inspect and call
@@ -10,14 +10,14 @@ their MCP tools from a terminal or a script.
 - **Scriptable**: typed exit codes, JSON output, stdin batching.
 
 ```text
-mcp connect                                   # THIS machine as an anonymous device
-claude mcp add gateway -- mcp serve           # every device's tools in Claude Code
-mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
-mcp devices connect my-laptop                 # later: defaults already stored
-mcp devices list
-mcp tools list my-laptop
-mcp tools view my-laptop.snapshot
-mcp tools call my-laptop.click '{"selector":"#submit"}'
+prime connect                                   # THIS machine as an anonymous device
+claude mcp add gateway -- prime serve           # every device's tools in Claude Code
+prime devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
+prime devices connect my-laptop                 # later: defaults already stored
+prime devices list
+prime tools list my-laptop
+prime tools view my-laptop.snapshot
+prime tools call my-laptop.click '{"selector":"#submit"}'
 ```
 
 ## Install
@@ -28,17 +28,17 @@ bun run build          # every platform → dist/
 bun run build:host     # just this machine (fast)
 ```
 
-`bun run build` writes `dist/mcp` (the host build, under the bare name it is
+`bun run build` writes `dist/prime` (the host build, under the bare name it is
 installed as) plus one binary per platform:
 
 | Artifact | Size | Needs Bun at runtime |
 | --- | --- | --- |
-| `dist/mcp` (host) | 59.4 MB | no - runtime is embedded |
-| `dist/mcp-darwin-arm64` | 59.4 MB | no |
-| `dist/mcp-darwin-x64` | 66.2 MB | no |
-| `dist/mcp-linux-x64` / `-linux-arm64` | 77.6 / 77.5 MB | no |
-| `dist/mcp-windows-x64.exe` / `-windows-arm64.exe` | ~95 / ~84 MB | no |
-| `dist/mcp.js` | ~240 KB (includes code-mcp) | yes |
+| `dist/prime` (host) | 59.4 MB | no - runtime is embedded |
+| `dist/prime-darwin-arm64` | 59.4 MB | no |
+| `dist/prime-darwin-x64` | 66.2 MB | no |
+| `dist/prime-linux-x64` / `-linux-arm64` | 77.6 / 77.5 MB | no |
+| `dist/prime-windows-x64.exe` / `-windows-arm64.exe` | ~95 / ~84 MB | no |
+| `dist/prime.js` | ~240 KB (includes code-mcp) | yes |
 
 The compiled binaries are large because `bun build --compile` embeds the
 whole Bun runtime; that is the price of shipping one file that runs anywhere
@@ -46,29 +46,29 @@ with no install step. If Bun (>= 1.2, for the built-in YAML parser) is already
 present, the ~240 KB bundle (most of it the embedded code-mcp) is the leaner choice:
 
 ```bash
-install -m 755 dist/mcp.js ~/.local/bin/mcp
+install -m 755 dist/prime.js ~/.local/bin/prime
 ```
 
 ## Commands
 
 ```text
-mcp connect [--gateway <url>] [--new] [--no-start] [-- <code-mcp flags>]
-mcp serve [<device-id>...] [--port <n> [--host <addr>]]
-mcp devices connect <device-id> [options]
-mcp devices disconnect <device-id>
-mcp devices status <device-id>
-mcp devices list [--no-probe]
-mcp tools list <device-id>
-mcp tools view <device-id>.<tool-id>
-mcp tools call <device-id>.<tool-id> [<json>] [options]
-mcp tools call <device-id>.<tool-id> <json> <device-id>.<tool-id> <json> ...
-... | mcp tools call
-mcp update [--check]
-mcp service install [code-mcp options]   # code-mcp as a user service
-mcp service uninstall
-mcp service status
-mcp help [connect|serve|service|devices|tools|code-mcp]
-mcp code-mcp [code-mcp options]          # the bundled device server, with the config's options
+prime connect [--gateway <url>] [--new] [--no-start] [-- <code-mcp flags>]
+prime serve [<device-id>...] [--port <n> [--host <addr>]]
+prime devices connect <device-id> [options]
+prime devices disconnect <device-id>
+prime devices status <device-id>
+prime devices list [--no-probe]
+prime tools list <device-id>
+prime tools view <device-id>.<tool-id>
+prime tools call <device-id>.<tool-id> [<json>] [options]
+prime tools call <device-id>.<tool-id> <json> <device-id>.<tool-id> <json> ...
+... | prime tools call
+prime update [--check]
+prime service install [code-mcp options]   # code-mcp as a user service
+prime service uninstall
+prime service status
+prime help [connect|serve|service|devices|tools|code-mcp]
+prime code-mcp [code-mcp options]          # the bundled device server, with the config's options
 ```
 
 When no gateway is given or configured anywhere, every command uses the
@@ -77,9 +77,9 @@ managed gateway `https://prime.tuanm.workers.dev` (precedence: `--gateway` >
 
 Aliases, as specified:
 
-- `mcp` on its own is `mcp --help`.
-- `mcp call ...` is `mcp tools call ...`.
-- `mcp upgrade` is `mcp update`.
+- `prime` on its own is `prime --help`.
+- `prime call ...` is `prime tools call ...`.
+- `prime upgrade` is `prime update`.
 
 Every subcommand supports `--help`, and global flags are available everywhere:
 `--json`, `--no-color`, `--config <path>`, `--verbose`, `--quiet`.
@@ -87,18 +87,18 @@ Every subcommand supports `--help`, and global flags are available everywhere:
 ### connect - this machine as an anonymous device
 
 ```bash
-mcp connect                                # default gateway: prime.tuanm.workers.dev
-mcp connect --gateway https://gw.example.dev
-mcp connect --new                          # force a fresh device
-mcp connect --no-start --json              # just print/save the credentials
-mcp connect -- --enable-memory             # extra flags for code-mcp
+prime connect                                # default gateway: prime.tuanm.workers.dev
+prime connect --gateway https://gw.example.dev
+prime connect --new                          # force a fresh device
+prime connect --no-start --json              # just print/save the credentials
+prime connect -- --enable-memory             # extra flags for code-mcp
 ```
 
-`mcp connect` asks the gateway for an anonymous device
+`prime connect` asks the gateway for an anonymous device
 (`POST /api/devices/anonymous`), saves `{gateway, id, token}` in the config file
 (marked `anonymous: true`), prints the device id, the 6-character device code and
 the connect URL, and then runs the **bundled code-mcp** in the foreground as that
-device (`mcp code-mcp --gateway <origin> --id <id> --port <free port> --bind
+device (`prime code-mcp --gateway <origin> --id <id> --port <free port> --bind
 127.0.0.1`). Ctrl-C stops it; the command exits with code-mcp's status. The
 device code is handed over in the `MCP_CODE_MCP_GATEWAY_TOKEN` environment
 variable rather than on the command line, so `ps` never shows it; the child turns
@@ -124,22 +124,22 @@ environment, so code-mcp's own subprocesses never inherit it.
   retry; 503 means the gateway's device limit is reached; 403 means anonymous
   devices are disabled there (exit 3); a gateway that requires a gateway token
   answers 401 (pass `--gateway-token`, exit 3).
-- The device is an ordinary config entry, so `mcp tools list <id>`,
-  `mcp call <id>.bash ...` and `mcp serve` use it directly.
+- The device is an ordinary config entry, so `prime tools list <id>`,
+  `prime call <id>.bash ...` and `prime serve` use it directly.
 - The connect URL and code grant shell access to this machine: keep them secret.
   Anonymous devices get a lower request budget and cannot use file storage.
 
 ### serve - every device as one MCP server
 
 ```bash
-claude mcp add gateway -- mcp serve          # Claude Code (stdio)
-codex mcp add gateway -- mcp serve           # Codex (stdio)
-mcp serve laptop staging                     # only these devices
-mcp serve --port 7800                        # Streamable HTTP on http://127.0.0.1:7800/mcp
+claude mcp add gateway -- prime serve          # Claude Code (stdio)
+codex mcp add gateway -- prime serve           # Codex (stdio)
+prime serve laptop staging                     # only these devices
+prime serve --port 7800                        # Streamable HTTP on http://127.0.0.1:7800/mcp
 ```
 
-`mcp serve` aggregates the tools of every configured device (the same devices
-and credentials `mcp tools list` / `mcp call` use, or just the ids given) into
+`prime serve` aggregates the tools of every configured device (the same devices
+and credentials `prime tools list` / `prime call` use, or just the ids given) into
 **one** MCP server.
 
 - **stdio** (default): newline-delimited JSON-RPC 2.0 - `initialize`,
@@ -166,12 +166,12 @@ and credentials `mcp tools list` / `mcp call` use, or just the ids given) into
 ### code-mcp - the bundled device server
 
 The CLI embeds the code-mcp device server (documented in
-[SERVER.md](SERVER.md)), which exposes a machine's files and shell. `mcp connect` runs it for you;
-`mcp code-mcp [options]` runs it directly (`mcp code-mcp --help` lists its
+[SERVER.md](SERVER.md)), which exposes a machine's files and shell. `prime connect` runs it for you;
+`prime code-mcp [options]` runs it directly (`prime code-prime --help` lists its
 options), e.g. as a registered device:
 
 ```bash
-mcp code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
+prime code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 ```
 
 Its options can live in the config, in a `code-mcp:` section (code-mcp's option
@@ -190,21 +190,21 @@ code-mcp:
   enable-memory: true
 ```
 
-With that, a bare `mcp code-mcp` starts the device. A device `id` needs a
+With that, a bare `prime code-mcp` starts the device. A device `id` needs a
 gateway: when `id` is set and `gateway` is not, the CLI's gateway is used
 (`defaults.gateway`, else `https://prime.tuanm.workers.dev`). Values from the config are
 handed to code-mcp inside the process, so a token there never shows up in `ps`.
 An unknown key or a wrongly typed value is an error naming the config file.
-`mcp code-mcp` refuses to start while the code-mcp **service** is running - one
+`prime code-mcp` refuses to start while the code-mcp **service** is running - one
 code-mcp per machine and config.
 
 ### service - code-mcp as a user service
 
 ```bash
-mcp service install                          # the config's code-mcp section as is
-mcp service install --port 7788 --enable-memory   # ...with overrides
-mcp service status [--json]
-mcp service uninstall
+prime service install                          # the config's code-mcp section as is
+prime service install --port 7788 --enable-memory   # ...with overrides
+prime service status [--json]
+prime service uninstall
 ```
 
 `install` registers code-mcp with the OS so it starts at login and comes back
@@ -220,11 +220,11 @@ current options.
 | macOS | launchd agent `~/Library/LaunchAgents/dev.prime-gateway.code-mcp.plist` | `~/Library/Logs/prime-gateway/code-mcp.log` | `KeepAlive` (not after a clean stop) |
 | Windows | Scheduled Task `\prime-gateway\code-mcp`, at logon, no admin rights, no window | `code-mcp.log` next to the config | a one-minute watchdog trigger |
 
-The service runs `mcp code-mcp --service --config <config>` and reads its
+The service runs `prime code-mcp --service --config <config>` and reads its
 options at every start: the config's `code-mcp:` section, overridden by the
 options given to `install` (stored in `service.yaml` next to the config, mode
 0600). No credential is written into the service definition or onto a command
-line. To apply a config change, run `mcp service install` again; `uninstall`
+line. To apply a config change, run `prime service install` again; `uninstall`
 stops it and removes the definition and `service.yaml`. `--config <path>`
 selects another config for all three commands.
 
@@ -249,10 +249,10 @@ back to the environment, the device's existing entry, then the defaults section 
 so a full connect once makes every later device a one-liner.
 
 ```bash
-mcp devices connect staging --token dev-token --gateway https://gw.example.dev --gateway-token gw-token
-mcp devices connect laptop                       # inherits gateway + gateway token
-mcp devices connect laptop --no-verify           # save without probing
-mcp devices connect laptop --set-default         # also update the defaults section
+prime devices connect staging --token dev-token --gateway https://gw.example.dev --gateway-token gw-token
+prime devices connect laptop                       # inherits gateway + gateway token
+prime devices connect laptop --no-verify           # save without probing
+prime devices connect laptop --set-default         # also update the defaults section
 ```
 
 Re-running `connect` **merges**: omitting `--token` keeps the token already
@@ -279,17 +279,17 @@ is no `cat` in `cmd.exe` and no single-quote syntax either, which is why
 **1. Inline** - one reference and its arguments:
 
 ```bash
-mcp tools call my-laptop.click '{"selector":"#submit"}'
-mcp tools call my-laptop.snapshot '{}'
-mcp tools call my-laptop.snapshot          # no arguments => {}
+prime tools call my-laptop.click '{"selector":"#submit"}'
+prime tools call my-laptop.snapshot '{}'
+prime tools call my-laptop.snapshot          # no arguments => {}
 ```
 
 **2. Key/value** - no JSON quoting at all, which is the form that behaves
 identically in cmd.exe, PowerShell and bash:
 
 ```bash
-mcp tools call my-laptop.click --arg selector=#submit
-mcp tools call my-device.bash --arg cwd=C:/work --arg command="echo hi"
+prime tools call my-laptop.click --arg selector=#submit
+prime tools call my-device.bash --arg cwd=C:/work --arg command="echo hi"
 ```
 
 Values parse as JSON scalars when they look like one, so `n=5` is a number,
@@ -299,7 +299,7 @@ else stays a string. Repeat `--arg` once per argument.
 **3. Paired** - several tools in one command, executed in order:
 
 ```bash
-mcp tools call laptop.snapshot '{}' phone.screenshot '{"full":true}'
+prime tools call laptop.snapshot '{}' phone.screenshot '{"full":true}'
 ```
 
 Calls run **sequentially by default** so side-effecting tools (clicks, typing)
@@ -308,22 +308,22 @@ independent, with at most `--concurrency` (default 8) in flight - firing every
 call at once would trip the gateway's per-IP rate limit and its per-device
 pending cap, turning a large batch into a pile of failures.
 
-**4. File** - the portable replacement for `cat x.json | mcp tools call`:
+**4. File** - the portable replacement for `cat x.json | prime tools call`:
 
 ```bash
-mcp tools call --file calls.json       # or -f
-mcp tools call @calls.json             # same thing, positional
-mcp tools call -f a.json -f b.json     # repeatable; the files' calls merge in order
-mcp tools call --file -                # "-" means stdin
+prime tools call --file calls.json       # or -f
+prime tools call @calls.json             # same thing, positional
+prime tools call -f a.json -f b.json     # repeatable; the files' calls merge in order
+prime tools call --file -                # "-" means stdin
 ```
 
 **5. stdin** - explicitly, or automatically when stdin is not a terminal:
 
 ```bash
-type calls.json | mcp tools call         # cmd.exe
-Get-Content calls.json | mcp tools call  # PowerShell
-cat calls.json | mcp tools call          # bash
-mcp tools call --stdin < calls.json
+type calls.json | prime tools call         # cmd.exe
+Get-Content calls.json | prime tools call  # PowerShell
+cat calls.json | prime tools call          # bash
+prime tools call --stdin < calls.json
 ```
 
 ```json
@@ -419,7 +419,7 @@ Per field, precedence is:
 The gateway additionally falls back to `https://prime.tuanm.workers.dev`
 when none of these sets one.
 
-Devices created by `mcp connect` are stored like any other, with their own
+Devices created by `prime connect` are stored like any other, with their own
 gateway and `anonymous: true`:
 
 ```yaml
@@ -473,7 +473,7 @@ harness, so the CLI's own startup is a few ms less than the figures below):
 | --- | --- | --- | --- | --- |
 | compiled + `--bytecode` | **11.2 ms** | 13.2 ms | 16.1 ms | 60.9 MB |
 | compiled, no bytecode | 16.7 ms | 19.9 ms | 22.2 ms | 59.4 MB |
-| `bun dist/mcp.js` | 18.4 ms | 20.6 ms | 22.2 ms | 36.4 KB |
+| `bun dist/prime.js` | 18.4 ms | 20.6 ms | 22.2 ms | 36.4 KB |
 
 **`--bytecode` is worth 33% of cold start** for ~1.5 MB of binary, which is why
 the build uses it. It requires the entry module to avoid top-level `await` -
@@ -524,7 +524,7 @@ Design choices behind those numbers:
   parsed with Bun's built-in `Bun.YAML.parse`, and the CLI writes YAML with a
   small emitter. Nothing to resolve, nothing to load.
 - **One round trip per command.** MCP servers *should* require `initialize`
-  before other requests, but current code-mcp devices do not. `--handshake auto`
+  before other requests, but current code-prime devices do not. `--handshake auto`
   (the default) therefore calls directly and only handshakes if the server
   actually complains - see `--handshake always|never` to force it.
 - **Connection reuse within a batch.** A batch spanning several devices creates
@@ -566,15 +566,15 @@ The CLI ships as a self-contained binary with no package manager behind it, so
 it updates itself:
 
 ```bash
-mcp update              # install the newest release (alias: mcp upgrade)
-mcp update --check      # only report whether one exists
-mcp update --json       # machine-readable result
+prime update              # install the newest release (alias: prime upgrade)
+prime update --check      # only report whether one exists
+prime update --json       # machine-readable result
 ```
 
 ```text
   current   26.10.3
   latest    26.10.4
-  installed 26.10.4 -> /Users/you/.local/bin/mcp
+  installed 26.10.4 -> /Users/you/.local/bin/prime
 ```
 
 It lists the repo's releases, keeps the `cli-v*` tags, picks the highest by
@@ -589,16 +589,16 @@ trustworthy.
 | --- | --- |
 | Already newest | Reports "already up to date", changes nothing |
 | `--check` | Never writes, and works from a source checkout |
-| Not writable (e.g. `/usr/local/bin`) | Explains and suggests `sudo mcp update` or `--to <path>` |
+| Not writable (e.g. `/usr/local/bin`) | Explains and suggests `sudo prime update` or `--to <path>` |
 | Windows, binary in use | Renames the running `.exe` to `<path>.old` (Windows allows a rename, not an overwrite), installs the new one in its place, and removes `.old` on the next run |
 | Source checkout (`.ts`) | Refuses, so your working tree is never overwritten |
-| `--to install/mcp.js` | Installs the JS bundle instead of a native binary |
+| `--to install/prime.js` | Installs the JS bundle instead of a native binary |
 
 Other flags: `--force` reinstalls the current version, and
 `--release-version <v>` installs one specific version.
 
 One caveat: a release built before this command existed cannot update itself.
-Install that one release by hand (below), and `mcp update` takes over from there.
+Install that one release by hand (below), and `prime update` takes over from there.
 
 ## Releasing
 
@@ -610,13 +610,13 @@ git tag cli-v26.10.3
 git push origin cli-v26.10.3
 ```
 
-The tag supplies the version baked into the binaries, so `mcp --version` in a
+The tag supplies the version baked into the binaries, so `prime --version` in a
 release reports the release it came from.
 
 ### Versioning
 
 Versions are dates: **26.10.3** is 2026-10-03. For a 60 MB binary with no
-auto-update, `mcp --version` telling you *how stale* the download is matters more
+auto-update, `prime --version` telling you *how stale* the download is matters more
 than a compatibility signal.
 
 The one subtlety is that the version also lands in `package.json` and a Release
@@ -638,7 +638,7 @@ release. Each release carries the five platform binaries, the JS bundle, and a
 bun run test          # unit + feature tests (offline; fake gateway in-process)
 bun test:e2e          # end-to-end: boots a local wrangler gateway + mock devices
 bun run typecheck     # tsc with tsconfig.typecheck.json
-bun test:service      # mcp service against this OS's real service manager
+bun test:service      # prime service against this OS's real service manager
 ```
 
 ### The bundled code-mcp
@@ -648,18 +648,18 @@ so a binary is built from exactly the device server of the commit it was built
 at.
 
 - code-mcp is a script with top-level side effects, so it is never imported
-  statically: only `mcp code-mcp` loads it, via `await import("#code-mcp")` (a
+  statically: only `prime code-mcp` loads it, via `await import("#code-mcp")` (a
   `package.json` subpath import, a static string so `bun build` embeds it). It is
   excluded from `tsc` (mapped to `src/code-mcp.stub.d.ts`) because it is written
   to its own conventions, not this package's strict settings. It uses top-level
   `await`, which is why binaries are compiled with `--bytecode --format=esm`.
-- The build smoke-tests `code-mcp --help` on the bundle and the host binary from
+- The build smoke-tests `code-prime --help` on the bundle and the host binary from
   a directory outside the repository, so a build that lost it fails.
 
 The end-to-end suite compiles the host binary and drives it against a real local
 gateway, covering both credentials, the tunnel relay, every input form, exit
 codes, handshake modes, dotted device ids, sequential ordering, `--parallel`
-overlap, timeouts, and the offline path - and the anonymous flow: `mcp connect`
+overlap, timeouts, and the offline path - and the anonymous flow: `prime connect`
 registering and reusing a device, running the embedded code-mcp (from a
-directory without `src/`), real code-mcp tools through the connect URL, and
-`mcp serve` over stdio and HTTP.
+directory without `src/`), real code-prime tools through the connect URL, and
+`prime serve` over stdio and HTTP.

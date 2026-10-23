@@ -26,8 +26,8 @@ describe("code-mcp config section", () => {
     expect(c.codeMcp).toEqual({ port: "7777", bind: "127.0.0.1", "enable-memory": true, id: "demo" });
   });
 
-  test("survives every save - 'mcp connect' must not drop it", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+  test("survives every save - 'prime connect' must not drop it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prime-svc-"));
     const path = join(dir, "config.yaml");
     const config = emptyConfig();
     config.codeMcp = { port: "7777", token: 'we"ird\\tok', "enable-memory": true };
@@ -68,9 +68,9 @@ describe("code-mcp options", () => {
   });
 });
 
-describe("mcp code-mcp argv", () => {
+describe("prime code-mcp argv", () => {
   test("host flags are split off; config + overrides + command line merge for the service", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const dir = mkdtempSync(join(tmpdir(), "prime-svc-"));
     const config = join(dir, "config.yaml");
     const c = emptyConfig();
     c.codeMcp = { port: "7777", token: "cfg-token", bind: "127.0.0.1" };
@@ -98,8 +98,8 @@ describe("default gateway for a device id", () => {
     expect(withDefaultGateway({ token: "t" }, undefined)).toEqual({ token: "t" });
   });
 
-  test("'mcp code-mcp' applies it", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+  test("'prime code-mcp' applies it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prime-svc-"));
     const config = join(dir, "config.yaml");
     const c = emptyConfig();
     c.codeMcp = { id: "demo", token: "demo" };
@@ -115,7 +115,7 @@ describe("network settings for the service", () => {
   });
 
   test("they are saved privately with the overrides and read back", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const dir = mkdtempSync(join(tmpdir(), "prime-svc-"));
     const path = join(dir, "service.yaml");
     saveOverrides(path, { port: "7777" }, { HTTPS_PROXY: 'http://u:p"q@proxy:8080', NODE_EXTRA_CA_CERTS: "C:\\corp\\root.pem" });
     expect(loadServiceEnv(path)).toEqual({ HTTPS_PROXY: 'http://u:p"q@proxy:8080', NODE_EXTRA_CA_CERTS: "C:\\corp\\root.pem" });
@@ -124,7 +124,7 @@ describe("network settings for the service", () => {
   });
 
   test("only known variables are ever applied from the file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-svc-"));
+    const dir = mkdtempSync(join(tmpdir(), "prime-svc-"));
     const path = join(dir, "service.yaml");
     Bun.write(path, 'env:\n  HTTPS_PROXY: "http://p"\n  LD_PRELOAD: "/evil.so"\n');
     return Bun.sleep(10).then(() => expect(loadServiceEnv(path)).toEqual({ HTTPS_PROXY: "http://p" }));
@@ -140,7 +140,7 @@ describe("network settings for the service", () => {
 
 describe("service definitions", () => {
   const spec: ServiceSpec = {
-    command: ["/opt/my tools/mcp", "code-mcp", "--service", "--config", "/home/u/.prime-gateway/config.yaml"],
+    command: ["/opt/my tools/prime", "code-mcp", "--service", "--config", "/home/u/.prime-gateway/config.yaml"],
     configPath: "/home/u/.prime-gateway/config.yaml",
     logPath: "/home/u/Library/Logs/prime-gateway/code-mcp.log",
     pathEnv: "/usr/local/bin:/usr/bin:/odd/100%/$HOME",
@@ -149,7 +149,7 @@ describe("service definitions", () => {
 
   test("systemd: quoted ExecStart, % and $ escaped there, PATH kept literal", () => {
     const unit = renderSystemdUnit(spec);
-    expect(unit).toContain('ExecStart="/opt/my tools/mcp" "code-mcp" "--service" "--config" "/home/u/.prime-gateway/config.yaml"');
+    expect(unit).toContain('ExecStart="/opt/my tools/prime" "code-mcp" "--service" "--config" "/home/u/.prime-gateway/config.yaml"');
     expect(unit).toContain('Environment="PATH=/usr/local/bin:/usr/bin:/odd/100%%/$HOME"');
     expect(unit).toContain("Restart=on-failure");
     // Not quoted: systemd rejects a quoted WorkingDirectory as a bad setting.
@@ -166,12 +166,12 @@ describe("service definitions", () => {
   });
 
   test("Windows: CommandLineToArgvW quoting and a headless, per-user, logon task", () => {
-    expect(windowsQuote("C:\\Program Files\\mcp.exe")).toBe('"C:\\Program Files\\mcp.exe"');
+    expect(windowsQuote("C:\\Program Files\\prime.exe")).toBe('"C:\\Program Files\\prime.exe"');
     expect(windowsQuote("plain")).toBe("plain");
     expect(windowsQuote('say "hi"')).toBe('"say \\"hi\\""');
     expect(windowsQuote("C:\\dir with space\\")).toBe('"C:\\dir with space\\\\"');
-    const script = renderWindowsInstallScript({ ...spec, command: ["C:\\Users\\o'brien\\mcp.exe", "code-mcp", "--service"] });
-    expect(script).toContain("--headless C:\\Users\\o''brien\\mcp.exe code-mcp --service");
+    const script = renderWindowsInstallScript({ ...spec, command: ["C:\\Users\\o'brien\\prime.exe", "code-mcp", "--service"] });
+    expect(script).toContain("--headless C:\\Users\\o''brien\\prime.exe code-mcp --service");
     expect(script).toContain("-AtLogOn -User $user");
     expect(script).toContain("-LogonType Interactive -RunLevel Limited");
     expect(script).toContain("-RestartCount 999");

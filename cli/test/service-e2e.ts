@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-// End-to-end test of 'mcp service' against the REAL service manager of this OS
+// End-to-end test of 'prime service' against the REAL service manager of this OS
 // (systemd user units / launchd / Task Scheduler), with the compiled binary.
 //
-//   bun test/service-e2e.ts            (refuses if a code-mcp service is already installed)
+//   bun test/service-e2e.ts            (refuses if a code-prime service is already installed)
 //
 // Everything runs against an isolated config (CODE_MCP_GATEWAY_CONFIG), and the
 // service is always uninstalled at the end.
@@ -14,7 +14,7 @@ import { launchdPlistPath, systemdUnitPath } from "../src/service.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const IS_WINDOWS = process.platform === "win32";
-const BIN = process.env.MCP_BIN || join(ROOT, "dist", "mcp-service-e2e" + (IS_WINDOWS ? ".exe" : ""));
+const BIN = process.env.MCP_BIN || join(ROOT, "dist", "prime-service-e2e" + (IS_WINDOWS ? ".exe" : ""));
 const SECRET = "svc-" + crypto.randomUUID().replace(/-/g, "");
 const BASE_PORT = 17000 + Math.floor(Math.random() * 2000);
 const CONFIG_PORT = String(BASE_PORT);
@@ -34,11 +34,11 @@ function check(name: string, cond: unknown, detail = "") {
   }
 }
 
-const dir = mkdtempSync(join(tmpdir(), "mcp-service-e2e-"));
+const dir = mkdtempSync(join(tmpdir(), "prime-service-e2e-"));
 const CONFIG = join(dir, "config.yaml");
 const ENV = { ...process.env, CODE_MCP_GATEWAY_CONFIG: CONFIG, NO_COLOR: "1" };
 
-async function mcp(args: string[], timeoutMs = 120_000) {
+async function prime(args: string[], timeoutMs = 120_000) {
   const proc = Bun.spawn([BIN, ...args], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
@@ -114,9 +114,9 @@ if (!process.env.MCP_BIN) {
   }
 }
 
-const before = await mcp(["service", "status", "--json"]);
+const before = await prime(["service", "status", "--json"]);
 if (JSON.parse(before.out || "{}").installed === true) {
-  console.error("A code-mcp service is already installed on this machine; refusing to touch it. Run this test where none is installed.");
+  console.error("A code-prime service is already installed on this machine; refusing to touch it. Run this test where none is installed.");
   process.exit(1);
 }
 
@@ -133,7 +133,7 @@ writeFileSync(CONFIG, [
 
 try {
   // ---- install: config options + a command-line override ----
-  const install = await mcp(["service", "install", "--port", OVERRIDE_PORT]);
+  const install = await prime(["service", "install", "--port", OVERRIDE_PORT]);
   check("service install succeeds", install.code === 0, "code=" + install.code + " out=" + install.out.slice(0, 300) + " err=" + install.err.slice(0, 600));
   const tools = await waitFor(() => listTools(OVERRIDE_PORT), 30_000);
   check("the service answers on the overriding port", Array.isArray(tools) && tools.includes("read"), JSON.stringify(tools));
@@ -152,11 +152,11 @@ try {
   check("...privately (0600)", IS_WINDOWS || (statSync(overrides).mode & 0o777) === 0o600, (statSync(overrides).mode & 0o777).toString(8));
 
   // ---- status, and the foreground command refuses to compete ----
-  const status = await mcp(["service", "status", "--json"]);
+  const status = await prime(["service", "status", "--json"]);
   const statusJson = JSON.parse(status.out || "{}");
   check("service status reports running", statusJson.installed === true && statusJson.running === true, status.out);
-  const refused = await mcp(["code-mcp"], 20_000);
-  check("'mcp code-mcp' refuses while the service runs", refused.code === 2 && refused.err.includes("service is running"), "code=" + refused.code + " err=" + refused.err.slice(0, 300));
+  const refused = await prime(["code-mcp"], 20_000);
+  check("'prime code-mcp' refuses while the service runs", refused.code === 2 && refused.err.includes("service is running"), "code=" + refused.code + " err=" + refused.err.slice(0, 300));
 
   // ---- a crash is restarted ----
   const pids = servicePids();
@@ -172,47 +172,47 @@ try {
   check("...as a new process", servicePids().every((p) => !pids.includes(p)));
 
   // ---- reinstall without options: the old override is gone ----
-  const reinstall = await mcp(["service", "install"]);
+  const reinstall = await prime(["service", "install"]);
   check("reinstall succeeds", reinstall.code === 0, reinstall.err.slice(0, 400));
   const onConfigPort = await waitFor(() => listTools(CONFIG_PORT), 30_000);
   check("reinstalling without options goes back to the config's port", Array.isArray(onConfigPort));
   check("...and the old port is released", await closed(OVERRIDE_PORT, 10_000));
 
   // ---- uninstall ----
-  const uninstall = await mcp(["service", "uninstall"]);
+  const uninstall = await prime(["service", "uninstall"]);
   check("service uninstall succeeds", uninstall.code === 0 && uninstall.out.includes("uninstalled"), "code=" + uninstall.code + " " + uninstall.out + uninstall.err);
   check("the service stops", await closed(CONFIG_PORT, 15_000));
   check("no service process is left", (await waitFor(async () => (servicePids().length === 0 ? true : undefined), 10_000)) === true, processLines().filter((l) => l.includes(CONFIG)).join(" | "));
   check("the definition is removed", definitionText().trim().length === 0);
   check("the overrides file is removed", !existsSync(overrides));
-  const after = JSON.parse((await mcp(["service", "status", "--json"])).out || "{}");
+  const after = JSON.parse((await prime(["service", "status", "--json"])).out || "{}");
   check("status reports not installed", after.installed === false && after.running === false, JSON.stringify(after));
-  const again = await mcp(["service", "uninstall"]);
-  check("uninstalling twice is harmless", again.code === 0 && again.out.includes("no code-mcp service"), again.out + again.err);
+  const again = await prime(["service", "uninstall"]);
+  check("uninstalling twice is harmless", again.code === 0 && again.out.includes("no code-prime service"), again.out + again.err);
 
-  // ---- with no service, 'mcp code-mcp' runs on the config's options ----
+  // ---- with no service, 'prime code-mcp' runs on the config's options ----
   const fg = Bun.spawn([BIN, "code-mcp"], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const fgTools = await waitFor(() => listTools(CONFIG_PORT), 30_000);
-  check("'mcp code-mcp' uses the config's port, token and options", Array.isArray(fgTools) && fgTools.includes("remember"), JSON.stringify(fgTools));
+  check("'prime code-mcp' uses the config's port, token and options", Array.isArray(fgTools) && fgTools.includes("remember"), JSON.stringify(fgTools));
   check("...without the credential on its command line", !processLines().some((l) => l.includes(SECRET)));
   fg.kill();
   await fg.exited;
   const override = Bun.spawn([BIN, "code-mcp", "--port", OVERRIDE_PORT], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  check("'mcp code-mcp --port' overrides the config", Array.isArray(await waitFor(() => listTools(OVERRIDE_PORT), 30_000)));
+  check("'prime code-mcp --port' overrides the config", Array.isArray(await waitFor(() => listTools(OVERRIDE_PORT), 30_000)));
   override.kill();
   await override.exited;
 
   // ---- a bad config fails at install, before anything is installed ----
   writeFileSync(CONFIG, 'code-mcp:\n  prot: "1"\n');
-  const typo = await mcp(["service", "install"]);
+  const typo = await prime(["service", "install"]);
   check("a typo in the config fails the install with a clear error", typo.code === 2 && typo.err.includes('unknown code-mcp option "prot"'), typo.err.slice(0, 300));
-  check("...and installs nothing", JSON.parse((await mcp(["service", "status", "--json"])).out || "{}").installed === false);
+  check("...and installs nothing", JSON.parse((await prime(["service", "status", "--json"])).out || "{}").installed === false);
 } catch (err) {
   fail++;
   failures.push("harness: " + ((err as Error).stack || err));
   console.log("FAIL harness: " + ((err as Error).stack || err));
 } finally {
-  await mcp(["service", "uninstall"]);
+  await prime(["service", "uninstall"]);
   rmSync(dir, { recursive: true, force: true });
   if (!process.env.MCP_BIN) rmSync(BIN, { force: true });
 }

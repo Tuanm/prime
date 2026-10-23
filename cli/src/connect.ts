@@ -1,4 +1,4 @@
-// `mcp connect` - connect THIS machine to a gateway as an anonymous device.
+// `prime connect` - connect THIS machine to a gateway as an anonymous device.
 //
 //   1. resolve the gateway (--gateway > environment > config defaults > managed default)
 //   2. reuse the anonymous device saved for that gateway, unless --new
@@ -113,7 +113,7 @@ export function parseAnonymousResponse(gateway: string, status: number, headers:
     case 403:
       throw new AuthError(
         `anonymous devices are disabled on ${gateway}` + (detail.error && !/disabled/.test(detail.error) ? ` (${detail.error})` : ""),
-        "Ask the gateway operator for a registered device id and token, then: mcp devices connect <id> --token <token>",
+        "Ask the gateway operator for a registered device id and token, then: prime devices connect <id> --token <token>",
       );
     case 404:
     case 405:
@@ -128,7 +128,7 @@ export function parseAnonymousResponse(gateway: string, status: number, headers:
       if (wait !== undefined) {
         throw new CliError(
           `too many anonymous devices created from this network (429); retry in ${formatDuration(wait)}`,
-          "Reuse the device you already have (run 'mcp connect' without --new), or wait and retry.",
+          "Reuse the device you already have (run 'prime connect' without --new), or wait and retry.",
         );
       }
       throw new CliError("rate limited by the gateway (429)", "Too many requests from this network; retry in a minute.");
@@ -241,7 +241,7 @@ export function rememberAnonymous(config: Config, gateway: string, device: { dev
     ...(gatewayToken ? { gateway_token: gatewayToken } : {}),
     token: device.token,
     connected_at: now,
-    note: "anonymous device created by 'mcp connect'",
+    note: "anonymous device created by 'prime connect'",
     anonymous: true,
   };
 }
@@ -260,18 +260,18 @@ export function freePort(host = "127.0.0.1"): Promise<number> {
   });
 }
 
-/** Flags that `mcp connect` sets itself and must not be overridden after "--". */
+/** Flags that `prime connect` sets itself and must not be overridden after "--". */
 const RESERVED_CODE_MCP_FLAGS = ["--gateway", "--id", "--gateway-token"];
 
 export async function connectCommand(ctx: Ctx, passthrough: string[]): Promise<void> {
   const extra = ctx.parsed.positionals.slice(1, ctx.parsed.positionals.length - passthrough.length);
   if (extra.length > 0) {
-    throw new UsageError(`unexpected argument "${extra[0]}"`, "Usage: mcp connect [--gateway <url>] [--new] [-- <code-mcp flags>]");
+    throw new UsageError(`unexpected argument "${extra[0]}"`, "Usage: prime connect [--gateway <url>] [--new] [-- <code-mcp flags>]");
   }
   for (const arg of passthrough) {
     const name = arg.split("=")[0]!;
     if (RESERVED_CODE_MCP_FLAGS.includes(name)) {
-      throw new UsageError(`${name} cannot be passed to code-mcp: 'mcp connect' sets it`, "Use 'mcp connect --gateway <url>' to choose the gateway.");
+      throw new UsageError(`${name} cannot be passed to code-mcp: 'prime connect' sets it`, "Use 'prime connect --gateway <url>' to choose the gateway.");
     }
   }
 
@@ -296,7 +296,7 @@ export async function connectCommand(ctx: Ctx, passthrough: string[]): Promise<v
         device = { deviceId: saved.deviceId, token, connectUrl: connectUrlFor(gateway, saved.deviceId, token) };
         reused = true;
         if (probe.verdict === "online") {
-          ctx.note(yellow(`warning: ${saved.deviceId} is already online - another 'mcp connect' may be running; this one will take over the tunnel.`));
+          ctx.note(yellow(`warning: ${saved.deviceId} is already online - another 'prime connect' may be running; this one will take over the tunnel.`));
         } else if (probe.verdict === "unknown") {
           ctx.note(dim(`note: could not verify the saved device (HTTP ${probe.status}${probe.detail ? `: ${probe.detail}` : ""}); using it anyway.`));
         }
@@ -311,12 +311,12 @@ export async function connectCommand(ctx: Ctx, passthrough: string[]): Promise<v
       case "disabled":
         throw new AuthError(
           `the saved device ${saved.deviceId} is disabled by the gateway operator (403)`,
-          "Run 'mcp connect --new' to register a different device, or ask the operator to re-enable it.",
+          "Run 'prime connect --new' to register a different device, or ask the operator to re-enable it.",
         );
       case "locked":
         throw new CliError(
           `the saved device ${saved.deviceId} is temporarily locked after too many failed attempts (429)`,
-          "Retry in about 10 minutes, or run 'mcp connect --new'.",
+          "Retry in about 10 minutes, or run 'prime connect --new'.",
         );
     }
   }
@@ -352,7 +352,7 @@ export async function connectCommand(ctx: Ctx, passthrough: string[]): Promise<v
     ctx.out("");
     ctx.out(dim("  Use it from any MCP client (keep the URL secret - it grants shell access):"));
     ctx.out(dim(`    claude mcp add --transport http ${device.deviceId} "${device.connectUrl}"`));
-    ctx.out(dim(`    mcp tools list ${device.deviceId}      mcp serve   (all devices as one MCP server)`));
+    ctx.out(dim(`    prime tools list ${device.deviceId}      prime serve   (all devices as one MCP server)`));
   }
   if (!start) return;
 
@@ -365,7 +365,7 @@ export async function connectCommand(ctx: Ctx, passthrough: string[]): Promise<v
 /**
  * The child that runs code-mcp as the device. The device code travels in the
  * environment (GATEWAY_TOKEN_ENV), never on the command line where ps would
- * show it; "mcp code-mcp" turns it back into --gateway-token in-process.
+ * show it; "prime code-mcp" turns it back into --gateway-token in-process.
  */
 export function codeMcpLaunch(
   gateway: string,
@@ -386,7 +386,7 @@ export function codeMcpLaunch(
     // The parent pid lets the child stop itself if this process is killed
     // outright (on Windows, killing a process never takes its children).
     // RAW: connect's device runs with exactly these arguments - not the config's
-    // code-mcp section, and not refused when the code-mcp service is running.
+    // code-mcp section, and not refused when the code-prime service is running.
     // NODE_USE_SYSTEM_CA: trust the OS certificate store as well (where an
     // organisation installs its root certificate), unless the user set it.
     env: { NODE_USE_SYSTEM_CA: "1", ...process.env, [GATEWAY_TOKEN_ENV]: device.token, [PARENT_PID_ENV]: String(process.pid), [RAW_ENV]: "1" },

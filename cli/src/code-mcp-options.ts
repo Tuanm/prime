@@ -1,5 +1,5 @@
 // code-mcp's command-line options, as the "code-mcp:" config section and as
-// arguments to 'mcp code-mcp' / 'mcp service install'.
+// arguments to 'prime code-mcp' / 'prime service install'.
 //
 // The list mirrors code-mcp's own parseArgs table (src/code-mcp.ts). It is
 // validated here so a typo in config.yaml fails with a message about the config

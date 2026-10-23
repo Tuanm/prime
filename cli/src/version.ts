@@ -1,7 +1,7 @@
 // Version validation.
 //
 // The CLI uses CalVer-style dates: 26.10.3 means 2026-10-03. A date reads well
-// for a self-contained binary that cannot auto-update - `mcp --version` tells a
+// for a self-contained binary that cannot auto-update - `prime --version` tells a
 // user immediately how stale their download is.
 //
 // But the same string also lands in package.json and a GitHub Release tag, both
@@ -50,7 +50,7 @@ function parseVersion(version: string): ParsedVersion | undefined {
  *
  * SemVer says build metadata is ignored for ordering, so 26.10.3+1 and 26.10.3
  * would compare equal - which would make a same-day rerelease invisible to
- * `mcp update`. That is exactly how this project does a second release in one
+ * `prime update`. That is exactly how this project does a second release in one
  * day, so build metadata is used as a *tiebreak* after the SemVer rules apply.
  * Anything still equal is reported as equal.
  */

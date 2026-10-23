@@ -1,4 +1,4 @@
-// Self-update: `mcp update` (alias `mcp upgrade`).
+// Self-update: `prime update` (alias `prime upgrade`).
 //
 // The CLI ships as a self-contained binary with no package manager behind it, so
 // this is the only way to move forward without re-downloading by hand.
@@ -86,9 +86,9 @@ export function archName(arch: string): string | undefined {
   return undefined;
 }
 
-/** The release asset this machine would install, e.g. mcp-26.10.3-darwin-arm64. */
+/** The release asset this machine would install, e.g. prime-26.10.3-darwin-arm64. */
 export function assetNameFor(version: string, kind: "binary" | "bundle", platform: string, arch: string): string {
-  if (kind === "bundle") return `mcp-${version}.js`;
+  if (kind === "bundle") return `prime-${version}.js`;
   const os = osName(platform);
   const cpu = archName(arch);
   if (!os || !cpu) {
@@ -97,7 +97,7 @@ export function assetNameFor(version: string, kind: "binary" | "bundle", platfor
       "Download the JS bundle from the release page and run it with Bun instead.",
     );
   }
-  return `mcp-${version}-${os}-${cpu}${os === "windows" ? ".exe" : ""}`;
+  return `prime-${version}-${os}-${cpu}${os === "windows" ? ".exe" : ""}`;
 }
 
 /** Does this destination path want the JS bundle rather than a native binary? */
@@ -151,7 +151,7 @@ export function repoSlug(): string {
  * Where this process was installed from.
  *
  * A compiled binary reports its own path in `process.execPath`, but its
- * `argv[1]` is a virtual `/$bunfs/...` entrypoint. Under `bun mcp.js` it is the
+ * `argv[1]` is a virtual `/$bunfs/...` entrypoint. Under `bun prime.js` it is the
  * other way round: execPath is the Bun runtime and argv[1] is the script.
  */
 export function currentInstall(script: string = process.argv[1] ?? "", execPath: string = process.execPath): InstallTarget {
@@ -285,7 +285,7 @@ function installBytes(target: string, bytes: Uint8Array, mode: number): void {
   } catch {
     throw new CliError(
       `${dir} is not writable`,
-      `Re-run with the privileges that own it, e.g. sudo mcp update, or install elsewhere with --to <path>.`,
+      `Re-run with the privileges that own it, e.g. sudo prime update, or install elsewhere with --to <path>.`,
     );
   }
 
@@ -320,7 +320,7 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
   const installation = currentInstall();
   const target = options.to ?? installation.path;
 
-  // Refuse to clobber a source checkout: `mcp update` replaces a binary or the
+  // Refuse to clobber a source checkout: `prime update` replaces a binary or the
   // published .js bundle, not your working tree. Only when it would actually
   // write - `--check` is read-only and must work anywhere.
   if (!options.check && !options.to && installation.kind === "source") {
@@ -371,7 +371,7 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
   if (options.check) return outcome;
   if (!updateAvailable && !options.force) return outcome;
 
-  // The destination decides: `--to install/mcp.js` asks for the bundle even when
+  // The destination decides: `--to install/prime.js` asks for the bundle even when
   // this process is a compiled binary.
   const kind = kindForTarget(target, installation.kind);
   const assetName = assetNameFor(chosen.version, kind, process.platform, process.arch);
@@ -423,7 +423,7 @@ export function renderUpdate(outcome: UpdateOutcome): string {
     lines.push(`  installed ${green(outcome.installed_version ?? outcome.latest)} -> ${outcome.target}`);
     if (outcome.kind === "bundle") lines.push(dim("  (run it with: bun " + outcome.target + ")"));
   } else if (outcome.update_available) {
-    lines.push(`  ${yellow("update available")} ${dim("run 'mcp update' without --check to install it")}`);
+    lines.push(`  ${yellow("update available")} ${dim("run 'prime update' without --check to install it")}`);
   } else {
     lines.push(`  ${green("already up to date")}`);
   }

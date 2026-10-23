@@ -1,13 +1,13 @@
 name: Release CLI
 
-# Cuts a GitHub Release containing the mcp binaries for every supported
+# Cuts a GitHub Release containing the prime binaries for every supported
 # platform, plus the portable JS bundle and a checksum file.
 #
-#   git tag cli-v26.10.3 && git push origin cli-v26.10.3
+#   git tag prime-v26.10.3 && git push origin prime-v26.10.3
 #
 # Versions are dates (26.10.3 = 2026-10-03), which tells a user how stale their
 # download is. They must still be valid SemVer, so the day is not zero-padded.
-# A second release on the same day uses build metadata: cli-v26.10.3+1.
+# A second release on the same day uses build metadata: prime-v26.10.3+1.
 #
 # The tag drives the version baked into the binaries; a manual run builds the
 # same artifacts and uploads them as workflow artifacts without publishing a
@@ -16,7 +16,7 @@ name: Release CLI
 on:
   push:
     tags:
-      - "cli-v*"
+      - "prime-v*"
   workflow_dispatch:
     inputs:
       version:
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build mcp for all platforms
+    name: Build prime for all platforms
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,7 +44,7 @@ jobs:
         with:
           bun-version: latest
 
-      # A tag like cli-v26.10.3 publishes version 26.10.3; the binaries report it.
+      # A tag like prime-v26.10.3 publishes version 26.10.3; the binaries report it.
       - name: Resolve version
         id: version
         env:
@@ -56,7 +56,7 @@ jobs:
           if [ -n "${INPUT_VERSION:-}" ]; then
             VERSION="${INPUT_VERSION:-}"
           elif [ "${REF_TYPE:-}" = "tag" ]; then
-            VERSION="${REF_NAME#cli-v}"
+            VERSION="${REF_NAME#prime-v}"
           else
             VERSION="$(node -p "require('./cli/package.json').version")"
           fi
@@ -68,7 +68,7 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building mcp $VERSION"
+          echo "Building prime $VERSION"
 
       - name: Install CLI dependencies
         working-directory: cli
@@ -94,33 +94,33 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          rm -f mcp-e2e
+          rm -f prime-e2e
           # Release names carry the version; the raw build names do not.
-          for file in mcp-*; do
+          for file in prime-*; do
             case "$file" in
               # Explicit per platform: a "*.exe" pattern would fold the x64 and
               # Arm Windows builds into one name and silently drop one of them.
-              mcp-windows-x64.exe)   mv "$file" "mcp-$VERSION-windows-x64.exe" ;;
-              mcp-windows-arm64.exe) mv "$file" "mcp-$VERSION-windows-arm64.exe" ;;
-              mcp-darwin-arm64)   mv "$file" "mcp-$VERSION-darwin-arm64" ;;
-              mcp-darwin-x64)     mv "$file" "mcp-$VERSION-darwin-x64" ;;
-              mcp-linux-x64)      mv "$file" "mcp-$VERSION-linux-x64" ;;
-              mcp-linux-arm64)    mv "$file" "mcp-$VERSION-linux-arm64" ;;
+              prime-windows-x64.exe)   mv "$file" "prime-$VERSION-windows-x64.exe" ;;
+              prime-windows-arm64.exe) mv "$file" "prime-$VERSION-windows-arm64.exe" ;;
+              prime-darwin-arm64)   mv "$file" "prime-$VERSION-darwin-arm64" ;;
+              prime-darwin-x64)     mv "$file" "prime-$VERSION-darwin-x64" ;;
+              prime-linux-x64)      mv "$file" "prime-$VERSION-linux-x64" ;;
+              prime-linux-arm64)    mv "$file" "prime-$VERSION-linux-arm64" ;;
             esac
           done
-          mv mcp.js "mcp-$VERSION.js"
-          rm -f mcp
+          mv prime.js "prime-$VERSION.js"
+          rm -f prime
           # Checksums, so a download can be verified before it is made executable.
-          sha256sum mcp-* > SHA256SUMS
+          sha256sum prime-* > SHA256SUMS
           ls -la
           cat SHA256SUMS
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mcp-${{ steps.version.outputs.version }}
+          name: prime-${{ steps.version.outputs.version }}
           path: |
-            cli/dist/mcp-*
+            cli/dist/prime-*
             cli/dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
@@ -139,29 +139,29 @@ jobs:
           # to a file beats a multi-line --notes argument, which is one quoting
           # mistake away from mangling the release body.
           cat > RELEASE_NOTES.md <<'NOTES'
-          Standalone `mcp` CLI for the Prime gateway.
+          Standalone `prime` CLI for the Prime gateway.
 
           ## Install
 
           Download the file for your platform, make it executable and put it on your PATH:
 
           ```bash
-          chmod +x mcp-<version>-darwin-arm64
-          sudo mv mcp-<version>-darwin-arm64 /usr/local/bin/mcp
-          mcp --version
+          chmod +x prime-<version>-darwin-arm64
+          sudo mv prime-<version>-darwin-arm64 /usr/local/bin/prime
+          prime --version
           ```
 
           | Platform | Artifact |
           | --- | --- |
-          | macOS (Apple silicon) | `mcp-<version>-darwin-arm64` |
-          | macOS (Intel) | `mcp-<version>-darwin-x64` |
-          | Linux (x64 / arm64) | `mcp-<version>-linux-x64` / `mcp-<version>-linux-arm64` |
-          | Windows (x64 / Arm) | `mcp-<version>-windows-x64.exe` / `mcp-<version>-windows-arm64.exe` |
+          | macOS (Apple silicon) | `prime-<version>-darwin-arm64` |
+          | macOS (Intel) | `prime-<version>-darwin-x64` |
+          | Linux (x64 / arm64) | `prime-<version>-linux-x64` / `prime-<version>-linux-arm64` |
+          | Windows (x64 / Arm) | `prime-<version>-windows-x64.exe` / `prime-<version>-windows-arm64.exe` |
 
           The binaries are self-contained (the Bun runtime is embedded), so no runtime
           installation is needed. They are large for that reason. If Bun >= 1.2 is already
-          installed, `mcp-<version>.js` is a ~240 KB alternative (code-mcp included) that runs with
-          `bun mcp-<version>.js`.
+          installed, `prime-<version>.js` is a ~240 KB alternative (code-mcp included) that runs with
+          `bun prime-<version>.js`.
 
           Verify a download against `SHA256SUMS`:
 
@@ -169,8 +169,8 @@ jobs:
           shasum -a 256 -c SHA256SUMS --ignore-missing
           ```
 
-          Run `mcp --help` for commands, or see
+          Run `prime --help` for commands, or see
           [cli/README.md](https://github.com/${{ github.repository }}/blob/main/cli/README.md)
           for configuration, exit codes and the cross-platform input forms.
           NOTES
-          gh release create "$TAG" --title "mcp $VERSION" --notes-file RELEASE_NOTES.md mcp-* SHA256SUMS
+          gh release create "$TAG" --title "prime $VERSION" --notes-file RELEASE_NOTES.md prime-* SHA256SUMS

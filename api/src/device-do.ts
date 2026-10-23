@@ -224,8 +224,8 @@ export class DeviceDO extends DurableObject<Env> {
       const sid = this.issuedSessions.get(request);
       if (!sid || response.status !== 200) return response;
       const withSid = new Response(response.body, response);
-      withSid.headers.set("mcp-session-id", sid);
-      withSid.headers.append("access-control-expose-headers", "mcp-session-id");
+      withSid.headers.set("prime-session-id", sid);
+      withSid.headers.append("access-control-expose-headers", "prime-session-id");
       return withSid;
     }
 
@@ -454,7 +454,7 @@ export class DeviceDO extends DurableObject<Env> {
     const ip = request.headers.get("x-client-ip") || "unknown";
     const m = (body || {}) as { method?: string; params?: { clientInfo?: { name?: unknown } } };
     const given = m.method === "initialize" && typeof m.params?.clientInfo?.name === "string" ? m.params.clientInfo.name.slice(0, 64) : "";
-    let sid = request.headers.get("mcp-session-id") || "";
+    let sid = request.headers.get("prime-session-id") || "";
     if (!sid && m.method === "initialize") {
       sid = crypto.randomUUID();
       this.issuedSessions.set(request, sid);
@@ -682,7 +682,7 @@ export class DeviceDO extends DurableObject<Env> {
 
   private async handleMessages(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const sessionId = url.searchParams.get("session") || request.headers.get("mcp-session-id") || "";
+    const sessionId = url.searchParams.get("session") || request.headers.get("prime-session-id") || "";
     if (!sessionId || !this.sseSessions.has(sessionId)) {
       return Response.json({ error: "unknown session" }, { status: 400 });
     }

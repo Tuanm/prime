@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // CI only: a root certificate installed in the OS certificate store - the way
 // an organisation's IT deploys a TLS-inspection root - is trusted by code-mcp's
-// tunnel when NODE_USE_SYSTEM_CA=1 (what 'mcp service' and 'mcp connect' set),
+// tunnel when NODE_USE_SYSTEM_CA=1 (what 'prime service' and 'prime connect' set),
 // and not without it. Needs administrator rights to edit the store, so it runs
 // only with CODE_MCP_SYSTEM_CA_TEST=1 (set in CI).
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";

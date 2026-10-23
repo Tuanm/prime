@@ -1,7 +1,7 @@
 // The public landing page: GET / on the gateway, and index.html on GitHub Pages
 // (api/scripts/build-site.ts writes it out). One source for both.
 //
-// The page finds the newest mcp release through the GitHub API at load time,
+// The page finds the newest prime release through the GitHub API at load time,
 // so it never needs a rebuild for a new release.
 
 import { FAVICON } from "./ui-css";
@@ -64,7 +64,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
   <body>
     <h1>Device Connect</h1>
     <div class="sub">this machine as MCP tools, anywhere</div>
-    <p class="desc">Connect this machine's files and shell as MCP tools - from anywhere. Download <b>mcp</b>, run <code>mcp connect</code>, and add the URL it prints to Claude Code, Codex or any MCP client.</p>
+    <p class="desc">Connect this machine's files and shell as MCP tools - from anywhere. Download <b>prime</b>, run <code>prime connect</code>, and add the URL it prints to Claude Code, Codex or any MCP client.</p>
 
     <div class="cg" id="cg">
       <button type="button" class="main" id="connect">Connect</button>
@@ -78,9 +78,9 @@ export const LANDING_HTML = String.raw`<!doctype html>
     <div class="guide" id="guide"></div>
 
     <ul class="more">
-      <li><code>mcp connect</code> registers this machine as a device and serves its tools until you stop it.</li>
-      <li><code>mcp service install</code> keeps it running at every login.</li>
-      <li><code>mcp serve</code> exposes every connected device to a local MCP client.</li>
+      <li><code>prime connect</code> registers this machine as a device and serves its tools until you stop it.</li>
+      <li><code>prime service install</code> keeps it running at every login.</li>
+      <li><code>prime serve</code> exposes every connected device to a local MCP client.</li>
     </ul>
 
     <script>
@@ -135,7 +135,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
           }).catch(function () {});
         }
 
-        // ---- the newest mcp release ------------------------------------------
+        // ---- the newest prime release ------------------------------------------
         fetch("https://api.github.com/repos/" + REPO + "/releases?per_page=30", { headers: { accept: "application/vnd.github+json" } })
           .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
           .then(function (list) {
@@ -153,7 +153,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
 
         function assetName(p) {
           if (!release) return "";
-          return p.id === "bundle" ? "mcp-" + release.version + ".js" : "mcp-" + release.version + "-" + p.id + (p.ext || "");
+          return p.id === "bundle" ? "prime-" + release.version + ".js" : "prime-" + release.version + "-" + p.id + (p.ext || "");
         }
         function asset(p) { return release ? release.assets[assetName(p)] : undefined; }
         function mb(n) { return (n / 1048576).toFixed(n < 1048576 ? 2 : 1) + " MB"; }
@@ -180,8 +180,8 @@ export const LANDING_HTML = String.raw`<!doctype html>
         function render() {
           renderMenu();
           var a = asset(current);
-          if (a) targetEl.textContent = "mcp " + release.version + " for " + name(current) + " \u00b7 " + mb(a.size);
-          else if (release) targetEl.textContent = "No " + name(current) + " build in mcp " + release.version + " - see all releases.";
+          if (a) targetEl.textContent = "prime " + release.version + " for " + name(current) + " \u00b7 " + mb(a.size);
+          else if (release) targetEl.textContent = "No " + name(current) + " build in prime " + release.version + " - see all releases.";
           else targetEl.textContent = "For " + name(current);
           var metaEl = document.getElementById("meta");
           if (metaEl) metaEl.innerHTML = release
@@ -215,16 +215,16 @@ export const LANDING_HTML = String.raw`<!doctype html>
         function para(html) { var p = document.createElement("p"); p.innerHTML = html; return p; }
 
         function showGuide() {
-          var file = assetName(current) || "mcp";
+          var file = assetName(current) || "prime";
           guide.innerHTML = "";
           guide.appendChild(para("<b>Then, in a terminal:</b>"));
           if (current.os === "win") {
             guide.appendChild(block(
-              '$dir = "$env:LOCALAPPDATA\\Programs\\mcp"\n' +
+              '$dir = "$env:LOCALAPPDATA\\Programs\\prime"\n' +
               'New-Item -ItemType Directory -Force $dir | Out-Null\n' +
-              'Move-Item -Force "$HOME\\Downloads\\' + file + '" "$dir\\mcp.exe"\n' +
-              '& "$dir\\mcp.exe" connect'));
-            guide.appendChild(para('<span class="hint">PowerShell. Add <code>%LOCALAPPDATA%\\Programs\\mcp</code> to your PATH to run <code>mcp</code> from anywhere.</span>'));
+              'Move-Item -Force "$HOME\\Downloads\\' + file + '" "$dir\\prime.exe"\n' +
+              '& "$dir\\prime.exe" connect'));
+            guide.appendChild(para('<span class="hint">PowerShell. Add <code>%LOCALAPPDATA%\\Programs\\prime</code> to your PATH to run <code>prime</code> from anywhere.</span>'));
           } else if (current.os === "bun") {
             guide.appendChild(block("bun ~/Downloads/" + file + " connect"));
             guide.appendChild(para('<span class="hint">Needs <a href="https://bun.sh">Bun</a>.</span>'));
@@ -233,12 +233,12 @@ export const LANDING_HTML = String.raw`<!doctype html>
             // A browser download is quarantined; Gatekeeper would refuse to run it.
             if (current.os === "mac") lines.push("xattr -d com.apple.quarantine " + file + " 2>/dev/null");
             lines.push("chmod +x " + file);
-            lines.push("mkdir -p ~/.local/bin && mv " + file + " ~/.local/bin/mcp");
-            lines.push("~/.local/bin/mcp connect");
+            lines.push("mkdir -p ~/.local/bin && mv " + file + " ~/.local/bin/prime");
+            lines.push("~/.local/bin/prime connect");
             guide.appendChild(block(lines.join("\n")));
-            guide.appendChild(para('<span class="hint">Add <code>~/.local/bin</code> to your PATH to run <code>mcp</code> from anywhere.</span>'));
+            guide.appendChild(para('<span class="hint">Add <code>~/.local/bin</code> to your PATH to run <code>prime</code> from anywhere.</span>'));
           }
-          guide.appendChild(para("<code>mcp connect</code> prints a device id, a 6-character device code and a <b>connect URL</b>. Add that URL to your MCP client, e.g.:"));
+          guide.appendChild(para("<code>prime connect</code> prints a device id, a 6-character device code and a <b>connect URL</b>. Add that URL to your MCP client, e.g.:"));
           guide.appendChild(block("claude mcp add --transport http my-machine '<connect URL>'"));
           guide.appendChild(para('<span class="hint">Keep the URL and code private: they give access to this machine\'s files and shell.</span>'));
           guide.classList.add("show");

@@ -231,7 +231,7 @@ try {
 
   // ---- MCP clients ----
   const raw = await fetch(B + "/mcp/" + ID, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-device-token": TOKEN }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "1" } } }) });
-  ok(raw.status === 200 && /^[0-9a-f-]{36}$/.test(raw.headers.get("mcp-session-id") || ""), "initialize through the gateway returns an Mcp-Session-Id");
+  ok(raw.status === 200 && /^[0-9a-f-]{36}$/.test(raw.headers.get("prime-session-id") || ""), "initialize through the gateway returns an Mcp-Session-Id");
   const alpha = await mcpClient("agent-alpha");
   const beta = await mcpClient("agent-beta");
   const listed = (await alpha.listTools()).tools.map((t) => t.name);

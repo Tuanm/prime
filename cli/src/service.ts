@@ -1,11 +1,11 @@
-// 'mcp service install|uninstall|status' - run the bundled code-mcp as a user
+// 'prime service install|uninstall|status' - run the bundled code-mcp as a user
 // service that starts with the session and restarts on failure:
 //
 //   Linux    systemd user unit   ~/.config/systemd/user/code-mcp.service
 //   macOS    launchd agent       ~/Library/LaunchAgents/dev.prime-gateway.code-mcp.plist
 //   Windows  Scheduled Task      \prime-gateway\code-mcp (at logon, no admin needed)
 //
-// The service runs "mcp code-mcp --service --config <path>": options are read at
+// The service runs "prime code-mcp --service --config <path>": options are read at
 // every start from the config's "code-mcp:" section plus the overrides given to
 // 'service install' (kept in service.yaml beside the config, 0600). So no
 // credential is ever written into the service definition or onto a command
@@ -76,7 +76,7 @@ export function loadOverrides(path: string): OptionMap {
   try {
     raw = Bun.YAML.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    throw new CliError("invalid YAML in " + path + ": " + (err instanceof Error ? err.message : String(err)), "Re-run 'mcp service install' to rewrite it.");
+    throw new CliError("invalid YAML in " + path + ": " + (err instanceof Error ? err.message : String(err)), "Re-run 'prime service install' to rewrite it.");
   }
   const section = raw && typeof raw === "object" ? (raw as Record<string, unknown>)["code-mcp"] : undefined;
   if (!section || typeof section !== "object") return {};
@@ -89,7 +89,7 @@ export function loadOverrides(path: string): OptionMap {
 }
 
 /**
- * Network settings carried from the shell that ran 'mcp service install' to
+ * Network settings carried from the shell that ran 'prime service install' to
  * the service. A service starts with almost no environment, so without these a
  * machine behind a proxy, or one whose network inspects TLS, connects fine from
  * a terminal and fails from the service ("TLS handshake failed"). Bun reads the
@@ -129,14 +129,14 @@ export function loadServiceEnv(path: string): Record<string, string> {
 
 export function saveOverrides(path: string, options: OptionMap, env: Record<string, string> = {}): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  let text = "# Options given to 'mcp service install'. They override the code-mcp\n";
+  let text = "# Options given to 'prime service install'. They override the code-mcp\n";
   text += "# section of config.yaml for the service only. Holds secrets: keep it private.\n";
   const keys = Object.keys(options);
   text += keys.length === 0 ? "code-mcp: {}\n" : "code-mcp:\n" + keys.map((k) => "  " + k + ": " + yamlScalar(options[k]!) + "\n").join("");
   // Proxy URLs can hold credentials: this file is 0600, the service definition is not.
   const envKeys = Object.keys(env);
   if (envKeys.length > 0) {
-    text += "# Network settings from the shell that ran 'mcp service install'.\n";
+    text += "# Network settings from the shell that ran 'prime service install'.\n";
     text += "env:\n" + envKeys.map((k) => "  " + k + ": " + yamlScalar(env[k]!) + "\n").join("");
   }
   writeFileSync(path, text, { mode: 0o600 });
@@ -160,7 +160,7 @@ export function systemdEnvQuote(assignment: string): string {
 export function renderSystemdUnit(spec: ServiceSpec): string {
   const envLine = (k: string, v: string) => "Environment=" + systemdEnvQuote(k + "=" + v);
   return [
-    "# Installed by 'mcp service install'. Remove with 'mcp service uninstall'.",
+    "# Installed by 'prime service install'. Remove with 'prime service uninstall'.",
     "[Unit]",
     "Description=code-mcp (Prime gateway device server)",
     "Wants=network-online.target",
@@ -190,7 +190,7 @@ export function renderLaunchdPlist(spec: ServiceSpec): string {
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-    "<!-- Installed by 'mcp service install'. Remove with 'mcp service uninstall'. -->",
+    "<!-- Installed by 'prime service install'. Remove with 'prime service uninstall'. -->",
     '<plist version="1.0">',
     "<dict>",
     "  <key>Label</key>" + s(LAUNCHD_LABEL),
@@ -266,7 +266,7 @@ export function renderWindowsInstallScript(spec: ServiceSpec): string {
       "-ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew",
     "$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited",
     "Register-ScheduledTask " + TASK_REF + " -Action $action -Trigger $trigger -Settings $settings -Principal $principal " +
-      "-Description 'code-mcp (installed by mcp service install)' -Force | Out-Null",
+      "-Description 'code-mcp (installed by prime service install)' -Force | Out-Null",
     "Start-ScheduledTask " + TASK_REF,
   ].join("\n");
 }
@@ -355,10 +355,10 @@ export function serviceStatus(platform: Platform = process.platform as Platform,
     const running = installed && pidAlive(pidFilePath(configPath));
     return { installed, running, where, detail: installed ? (running ? "running" : "not running") : undefined };
   }
-  throw new CliError("'mcp service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
+  throw new CliError("'prime service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
 }
 
-/** The spec for this machine: the running mcp, its config, the current PATH. */
+/** The spec for this machine: the running prime, its config, the current PATH. */
 export function serviceSpecFor(platform: Platform, configPath: string): ServiceSpec {
   const logPath = defaultLogPath(platform, configPath);
   const command = [...selfCommand(), "code-mcp", "--service", "--config", configPath];
@@ -382,7 +382,7 @@ export function removeLegacyService(platform: Platform): void {
 export function installService(platform: Platform, spec: ServiceSpec): string {
   removeLegacyService(platform);
   if (platform === "linux") {
-    if (!Bun.which("systemctl")) throw new CliError("systemctl not found: 'mcp service' needs systemd on Linux");
+    if (!Bun.which("systemctl")) throw new CliError("systemctl not found: 'prime service' needs systemd on Linux");
     const unit = systemdUnitPath();
     mkdirSync(dirname(unit), { recursive: true });
     writeFileSync(unit, renderSystemdUnit(spec), { mode: 0o644 });
@@ -419,7 +419,7 @@ export function installService(platform: Platform, spec: ServiceSpec): string {
     must(powershell(renderWindowsInstallScript(spec)), "registering the Scheduled Task");
     return "Task Scheduler " + TASK_PATH + TASK_NAME;
   }
-  throw new CliError("'mcp service' is not supported on " + platform);
+  throw new CliError("'prime service' is not supported on " + platform);
 }
 
 /** Stop and remove. Returns what was there (false: nothing was installed). */
@@ -448,5 +448,5 @@ export function uninstallService(platform: Platform, configPath: string): boolea
   if (platform === "win32") {
     return powershell(renderWindowsUninstallScript(configPath)).out.trim() === "removed";
   }
-  throw new CliError("'mcp service' is not supported on " + platform);
+  throw new CliError("'prime service' is not supported on " + platform);
 }

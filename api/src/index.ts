@@ -739,8 +739,8 @@ export default {
       const xdt = request.headers.get("x-device-token");
       if (xdt) headers.set("x-device-token", xdt);
       // The MCP session (issued by the DO on initialize) tells clients apart.
-      const sid = request.headers.get("mcp-session-id");
-      if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) headers.set("mcp-session-id", sid);
+      const sid = request.headers.get("prime-session-id");
+      if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) headers.set("prime-session-id", sid);
       // Preserve auth params for the DO's own device-auth check.
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);

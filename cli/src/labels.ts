@@ -40,7 +40,7 @@ export function splitLabel(label: string, knownDeviceIds: string[]): ResolvedLab
   if (index === -1) {
     throw new UsageError(
       `"${trimmed}" is not a <device-id>.<tool-id> reference`,
-      "Use the form <device-id>.<tool-id>, e.g. 'mcp tools view my-device.snapshot'.",
+      "Use the form <device-id>.<tool-id>, e.g. 'prime tools view my-device.snapshot'.",
     );
   }
   throw new UsageError(`invalid tool reference "${trimmed}"`);

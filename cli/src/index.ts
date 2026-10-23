@@ -1,16 +1,16 @@
 #!/usr/bin/env bun
-// mcp - command line client for the Prime gateway.
+// prime - command line client for the Prime gateway.
 //
 // Command surface:
-//   mcp connect [--gateway <url>]     this machine as an anonymous device (runs code-mcp)
-//   mcp serve [--port <n>]           all devices' tools as one MCP server
-//   mcp devices connect|disconnect|status|list
-//   mcp tools   list|view|call
-//   mcp code-mcp [flags]             (advanced) the bundled code-mcp device server
-//   mcp service install|uninstall|status   code-mcp as a user service
-//   mcp help [topic]
+//   prime connect [--gateway <url>]     this machine as an anonymous device (runs code-mcp)
+//   prime serve [--port <n>]           all devices' tools as one MCP server
+//   prime devices connect|disconnect|status|list
+//   prime tools   list|view|call
+//   prime code-mcp [flags]             (advanced) the bundled code-mcp device server
+//   prime service install|uninstall|status   code-mcp as a user service
+//   prime help [topic]
 //
-// Aliases: `mcp` (bare) shows help; `mcp call ...` === `mcp tools call ...`.
+// Aliases: `prime` (bare) shows help; `prime call ...` === `prime tools call ...`.
 
 import { bool, flag, parseArgs, str, type FlagSpec } from "./args.ts";
 import { runCodeMcp } from "./code-mcp-host.ts";
@@ -96,7 +96,7 @@ function showHelp(text: string | undefined, topic: string, sub?: string): void {
     process.stdout.write(`${text.trimEnd()}\n`);
     return;
   }
-  process.stderr.write(`${red("mcp:")} unknown command "${[topic, sub].filter(Boolean).join(" ")}"\n`);
+  process.stderr.write(`${red("prime:")} unknown command "${[topic, sub].filter(Boolean).join(" ")}"\n`);
   process.stderr.write(`${TOPIC_HINT}\n`);
   process.exitCode = EXIT.USAGE;
 }
@@ -123,7 +123,7 @@ async function main(argv: string[]): Promise<void> {
       showHelp(helpFor("service", undefined), "service");
       return;
     }
-    // mcp's own flags here: --json, and the global --config (the config file
+    // prime's own flags here: --json, and the global --config (the config file
     // the service will read). Everything else belongs to code-mcp.
     const json = rest.includes("--json");
     let config: string | undefined;
@@ -150,11 +150,11 @@ async function main(argv: string[]): Promise<void> {
     throw new UsageError(`unknown service command "${sub}"`, "Valid: install, uninstall, status.");
   }
   if (argv[0] === "--version" || argv[0] === "version") {
-    process.stdout.write(`mcp ${VERSION}\n`);
+    process.stdout.write(`prime ${VERSION}\n`);
     return;
   }
 
-  // Aliases: `mcp call ...` === `mcp tools call ...`, `mcp upgrade` === `mcp update`.
+  // Aliases: `prime call ...` === `prime tools call ...`, `prime upgrade` === `prime update`.
   if (argv[0] === "call") argv = ["tools", "call", ...argv.slice(1)];
   if (argv[0] === "upgrade") argv = ["update", ...argv.slice(1)];
 
@@ -171,7 +171,7 @@ async function main(argv: string[]): Promise<void> {
   const wantHelp = rest.includes("--help") || rest.includes("-h") || sub === undefined;
 
   if (topic === "connect" || topic === "serve") {
-    // Only mcp's own flags count: "mcp connect -- --help" is code-mcp's.
+    // Only mcp's own flags count: "prime connect -- --help" is code-mcp's.
     const own = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
     if (own.includes("--help") || own.includes("-h")) {
       showHelp(helpFor(topic, undefined), topic);
@@ -185,7 +185,7 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
   }
-  // update has no subcommands: a bare "mcp update" is the install itself (it
+  // update has no subcommands: a bare "prime update" is the install itself (it
   // used to print help, while its own hint says to run exactly that).
   if (topic === "update" && (rest.includes("--help") || rest.includes("-h"))) {
     showHelp(helpFor(topic, undefined), topic);
@@ -267,13 +267,13 @@ function reportError(err: unknown, jsonWanted: boolean): void {
   if (jsonWanted) {
     process.stdout.write(`${JSON.stringify({ error: { message, ...(hint ? { hint } : {}), exit_code: code } }, null, 2)}\n`);
   } else {
-    process.stderr.write(`${red("mcp:")} ${message}\n`);
+    process.stderr.write(`${red("prime:")} ${message}\n`);
     if (hint) process.stderr.write(`${dim(`  ${hint}`)}\n`);
   }
   process.exitCode = code;
 }
 
-// `mcp tools list | head` closes the pipe early; that is not an error.
+// `prime tools list | head` closes the pipe early; that is not an error.
 for (const stream of [process.stdout, process.stderr]) {
   stream.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EPIPE") process.exit(0);

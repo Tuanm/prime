@@ -1,6 +1,6 @@
 # Prime — Cloudflare Worker
 
-**Production gateway for exposing code-mcp devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
+**Production gateway for exposing code-prime devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
 
 ## Overview
 
@@ -190,7 +190,7 @@ curl -X POST https://prime.tuanm.workers.dev/api/devices/anonymous
 
 The gateway picks an unused id and a 6-character code (digits and upper-case
 letters). The device then connects like any other (`/ws/{id}` with
-`X-Device-Token`), and MCP clients use `connect_url`. `mcp connect` (the CLI)
+`X-Device-Token`), and MCP clients use `connect_url`. `prime connect` (the CLI)
 does all of this and runs the bundled code-mcp as the device.
 
 - **Lower limits:** `ANON_RATE_LIMIT_MAX` (30/min per client IP) instead of

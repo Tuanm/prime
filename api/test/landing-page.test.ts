@@ -20,7 +20,7 @@ describe("landing page", () => {
   });
 
   test("offers exactly the platforms the CLI is built for", () => {
-    // The page builds asset names as mcp-<version>-<id>[.exe]: the ids must be
+    // The page builds asset names as prime-<version>-<id>[.exe]: the ids must be
     // the CLI's build targets, or Connect would point at a file that does not exist.
     const build = readFileSync(join(import.meta.dir, "..", "..", "cli", "scripts", "build.ts"), "utf8");
     const targets = [...build.matchAll(/out: "mcp-([a-z0-9-]+?)(\.exe)?"/g)].map((m) => m[1]).sort();

@@ -1,4 +1,4 @@
-// Tests for "mcp connect", "mcp serve" and the bundled code-mcp. Offline: the
+// Tests for "prime connect", "prime serve" and the bundled code-mcp. Offline: the
 // gateway is a fake started in-process with Bun.serve. Run: bun test
 //
 // The CLI is spawned as "bun src/index.ts ..." so argument parsing, config
@@ -49,12 +49,12 @@ describe("bundled code-mcp", () => {
     }
   });
 
-  test("'mcp code-mcp --help' runs code-mcp; normal commands never start it", () => {
+  test("'prime code-prime --help' runs code-mcp; normal commands never start it", () => {
     const help = Bun.spawnSync(["bun", ENTRY, "code-mcp", "--help"], { stdout: "pipe", stderr: "pipe" });
     expect(help.exitCode).toBe(0);
     expect(help.stdout.toString()).toContain("--gateway-token");
     const version = Bun.spawnSync(["bun", ENTRY, "--version"], { stdout: "pipe", stderr: "pipe" });
-    expect(version.stdout.toString()).toMatch(/^mcp /);
+    expect(version.stdout.toString()).toMatch(/^prime /);
     expect(version.stderr.toString()).not.toContain("MCP server");
   });
 
@@ -70,7 +70,7 @@ describe("bundled code-mcp", () => {
     const args = ["--gateway", "g", "--id", "d"];
     expect(codeMcpArgv(args, { [GATEWAY_TOKEN_ENV]: "SECR3T" })).toEqual([...args, "--gateway-token", "SECR3T"]);
     expect(codeMcpArgv(args, {})).toEqual(args);
-    // An explicit flag (direct "mcp code-mcp" use) wins over the environment.
+    // An explicit flag (direct "prime code-mcp" use) wins over the environment.
     expect(codeMcpArgv([...args, "--gateway-token", "mine"], { [GATEWAY_TOKEN_ENV]: "SECR3T" })).toEqual([...args, "--gateway-token", "mine"]);
     expect(codeMcpArgv([...args, "--gateway-token=mine"], { [GATEWAY_TOKEN_ENV]: "SECR3T" })).toEqual([...args, "--gateway-token=mine"]);
   });
@@ -105,13 +105,13 @@ describe("bundled code-mcp", () => {
   test("the injected token reaches code-mcp but not its environment", async () => {
     // A preload stands in for code-mcp: it records what the real script
     // would see (argv and env) at import time, then stops the process.
-    const dir = mkdtempSync(join(tmpdir(), "mcp-host-"));
+    const dir = mkdtempSync(join(tmpdir(), "prime-host-"));
     const probe = join(dir, "probe.ts");
     await Bun.write(
       probe,
       `const real = Bun.argv; Bun.plugin({ name: "probe", setup(b) { b.onLoad({ filter: /code-mcp\\.ts$/ }, () => ({ loader: "js", contents: "console.log(JSON.stringify({ argv: Bun.argv.slice(2), env: process.env.${GATEWAY_TOKEN_ENV} ?? null })); process.exit(0);" })); } }); void real;`,
     );
-    // As 'mcp connect' launches it: raw, exactly these arguments.
+    // As 'prime connect' launches it: raw, exactly these arguments.
     const proc = Bun.spawnSync(["bun", "--preload", probe, ENTRY, "code-mcp", "--gateway", "g", "--id", "d"], {
       env: { ...process.env, [GATEWAY_TOKEN_ENV]: "SECR3T", [RAW_ENV]: "1" },
       stdout: "pipe",
@@ -129,7 +129,7 @@ describe("bundled code-mcp", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    // On a machine where the code-mcp service is running, refusing is the
+    // On a machine where the code-prime service is running, refusing is the
     // specified behaviour (one code-mcp per machine) - that is the outcome then.
     if (own.stdout.toString().trim() === "" && own.stderr.toString().includes("service is running")) {
       expect(own.exitCode).toBe(2);
@@ -375,7 +375,7 @@ beforeEach(() => {
 });
 
 function freshConfig(): string {
-  return join(mkdtempSync(join(tmpdir(), "mcp-features-")), "config.yaml");
+  return join(mkdtempSync(join(tmpdir(), "prime-features-")), "config.yaml");
 }
 
 async function cli(args: string[], config: string, stdin?: string): Promise<{ code: number; out: string; err: string }> {
@@ -389,9 +389,9 @@ async function cli(args: string[], config: string, stdin?: string): Promise<{ co
   return { code: await proc.exited, out, err };
 }
 
-// ---- mcp connect -------------------------------------------------------------------------
+// ---- prime connect -------------------------------------------------------------------------
 
-describe("mcp connect (fake gateway)", () => {
+describe("prime connect (fake gateway)", () => {
   test("registers once, saves the device, and reuses it on later runs", async () => {
     const config = freshConfig();
     const before = fake.created;
@@ -438,7 +438,7 @@ describe("mcp connect (fake gateway)", () => {
     expect(devices[j.device]?.anonymous).toBe(true);
   });
 
-  test("the saved device works with 'mcp tools list'", async () => {
+  test("the saved device works with 'prime tools list'", async () => {
     const config = freshConfig();
     const j = JSON.parse((await cli(["connect", "--gateway", GATEWAY, "--no-start", "--json"], config)).out) as { device: string };
     fake.devices.get(j.device)!.online = true;
@@ -475,7 +475,7 @@ describe("mcp connect (fake gateway)", () => {
   });
 });
 
-// ---- mcp serve ----------------------------------------------------------------------------
+// ---- prime serve ----------------------------------------------------------------------------
 
 /** A config with one online device (2 tools), one with a dotted id, one offline. */
 function serveFixture(): string {
@@ -497,7 +497,7 @@ function serveFixture(): string {
   return config;
 }
 
-describe("mcp serve over stdio", () => {
+describe("prime serve over stdio", () => {
   test("speaks newline-delimited JSON-RPC and nothing else on stdout", async () => {
     const config = serveFixture();
     const input =
@@ -558,7 +558,7 @@ describe("mcp serve over stdio", () => {
   });
 });
 
-describe("mcp serve over HTTP", () => {
+describe("prime serve over HTTP", () => {
   test("POST /mcp answers JSON-RPC, GET is 405, notifications are 202", async () => {
     const config = serveFixture();
     const proc = Bun.spawn(["bun", ENTRY, "serve", "--port", "0"], {

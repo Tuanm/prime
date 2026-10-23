@@ -1,5 +1,5 @@
 // End-to-end test: a real local gateway (wrangler dev) + mock devices, driven by
-// the COMPILED mcp binary. Run: bun test/e2e.ts
+// the COMPILED prime binary. Run: bun test/e2e.ts
 //
 // This is the test that proves the CLI works against the real gateway protocol:
 // auth on both credentials, the tunnel relay, JSON-RPC error mapping, and every
@@ -17,16 +17,16 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const REPO = join(ROOT, "..");
 // The JS entry, not node_modules/.bin/wrangler: on Windows that is a shell shim
 // node cannot run.
-const WRANGLER = join(REPO, "gateway", "node_modules", "wrangler", "bin", "wrangler.js");
+const WRANGLER = join(REPO, "api", "node_modules", "wrangler", "bin", "wrangler.js");
 const IS_WINDOWS = process.platform === "win32";
 const EXE = IS_WINDOWS ? ".exe" : "";
 const PORT = 8811;
 const BASE = `http://127.0.0.1:${PORT}`;
 const GATEWAY_TOKEN = "gw-e2e-secret";
 const DEVICE_TOKEN = "dev-e2e-secret";
-const CONFIG_DIR = mkdtempSync(join(tmpdir(), "mcp-e2e-"));
+const CONFIG_DIR = mkdtempSync(join(tmpdir(), "prime-e2e-"));
 const CONFIG = join(CONFIG_DIR, "config.yaml");
-const BIN = join(ROOT, "dist", "mcp-e2e" + EXE);
+const BIN = join(ROOT, "dist", "prime-e2e" + EXE);
 
 let pass = 0;
 let fail = 0;
@@ -53,7 +53,7 @@ interface RunResult {
   ms: number;
 }
 
-const BUNDLE = join(ROOT, "dist", "mcp.js");
+const BUNDLE = join(ROOT, "dist", "prime.js");
 
 async function cli(
   args: string[],
@@ -171,14 +171,14 @@ function processCommandLines(): string[] {
 }
 
 async function startGateway(): Promise<{ kill: () => void }> {
-  rmSync(join(REPO, "gateway", ".wrangler", `state-${PORT}`), { recursive: true, force: true });
+  rmSync(join(REPO, "api", ".wrangler", `state-${PORT}`), { recursive: true, force: true });
   const proc = spawn(
     "node",
     [
       WRANGLER, "dev", "--local",
-      "-c", join(REPO, "gateway", "wrangler.dev.toml"),
+      "-c", join(REPO, "api", "wrangler.dev.toml"),
       "--port", String(PORT), "--ip", "127.0.0.1",
-      "--persist-to", join(REPO, "gateway", ".wrangler", `state-${PORT}`),
+      "--persist-to", join(REPO, "api", ".wrangler", `state-${PORT}`),
       "--var", `GATEWAY_TOKEN:${GATEWAY_TOKEN}`,
       "--var", `DEVICE_TOKEN:${DEVICE_TOKEN}`,
       "--var", "ADMIN_TOKEN:admin-e2e",
@@ -188,7 +188,7 @@ async function startGateway(): Promise<{ kill: () => void }> {
       "--var", "RATE_LIMIT_MAX:100000",
       "--var", "KEEPALIVE_TIMEOUT_MS:20000",
     ],
-    { cwd: join(REPO, "gateway"), stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: join(REPO, "api"), stdio: ["ignore", "pipe", "pipe"] },
   );
   for (let i = 0; i < 240; i++) {
     try {
@@ -218,13 +218,13 @@ console.log(`binary: ${(statSync(BIN).size / 1024 / 1024).toFixed(1)} MB`);
 
 // The JS bundle is a second, independently built artifact. Building it must
 // prove it runs, not merely that it bytes-out: a duplicate shebang makes
-// `bun dist/mcp.js` exit 1 before executing anything, which a timing-only or
+// `bun dist/prime.js` exit 1 before executing anything, which a timing-only or
 // size-only check happily misses.
 console.log("Building the JS bundle...");
 const bundleBuild = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only"], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
 check(
   "bundle builds and self-checks",
-  bundleBuild.exitCode === 0 && bundleBuild.stdout.toString().includes("runs: mcp "),
+  bundleBuild.exitCode === 0 && bundleBuild.stdout.toString().includes("runs: prime "),
   `exit=${bundleBuild.exitCode} ${bundleBuild.stdout.toString().trim()} ${bundleBuild.stderr.toString().trim().slice(0, 200)}`,
 );
 
@@ -237,22 +237,22 @@ const dotted = await startMockDevice("alpha.v2", DEVICE_TOKEN);
 try {
   // ---- help / aliases ------------------------------------------------------
   const bare = await cli([]);
-  check("bare 'mcp' prints help", bare.code === 0 && bare.out.includes("USAGE"), `code=${bare.code}`);
+  check("bare 'prime' prints help", bare.code === 0 && bare.out.includes("USAGE"), `code=${bare.code}`);
 
   const version = await cli(["--version"]);
-  check("--version", /^mcp \d+\.\d+\.\d+/.test(version.out.trim()), version.out.trim());
+  check("--version", /^prime \d+\.\d+\.\d+/.test(version.out.trim()), version.out.trim());
 
   const helpRoot = await cli(["--help"]);
   check("--help lists commands", helpRoot.out.includes("devices connect") && helpRoot.out.includes("tools call"));
 
   const helpDevices = await cli(["devices", "--help"]);
-  check("devices --help", helpDevices.code === 0 && helpDevices.out.includes("mcp devices connect"));
+  check("devices --help", helpDevices.code === 0 && helpDevices.out.includes("prime devices connect"));
 
   const helpToolsList = await cli(["tools", "list", "--help"]);
-  check("tools list --help", helpToolsList.code === 0 && helpToolsList.out.includes("mcp tools list <device-id>"));
+  check("tools list --help", helpToolsList.code === 0 && helpToolsList.out.includes("prime tools list <device-id>"));
 
   const helpHelp = await cli(["help", "tools"]);
-  check("mcp help tools", helpHelp.code === 0 && helpHelp.out.includes("mcp tools call"));
+  check("prime help tools", helpHelp.code === 0 && helpHelp.out.includes("prime tools call"));
 
   const unknown = await cli(["frobnicate"]);
   check("unknown command exits 2", unknown.code === 2 && unknown.err.includes("unknown command"));
@@ -310,7 +310,7 @@ try {
   );
 
   const view = await cli(["tools", "view", "alpha.echo"]);
-  check("tools view shows schema and example", view.code === 0 && view.out.includes("Text to echo") && view.out.includes("mcp tools call alpha.echo"), view.out);
+  check("tools view shows schema and example", view.code === 0 && view.out.includes("Text to echo") && view.out.includes("prime tools call alpha.echo"), view.out);
 
   const viewDottedTool = await cli(["tools", "view", "alpha.file.read"]);
   check(
@@ -390,7 +390,7 @@ try {
 
   // alias
   const alias = await cli(["call", "alpha.echo", '{"text":"aliased"}']);
-  check("'mcp call' aliases 'mcp tools call'", alias.code === 0 && alias.out.includes("echo:aliased"), alias.err);
+  check("'prime call' aliases 'prime tools call'", alias.code === 0 && alias.out.includes("echo:aliased"), alias.err);
 
   // separators and ordering
   callLogs["alpha"]!.length = 0;
@@ -449,7 +449,7 @@ try {
   // ---- cross-platform input forms ------------------------------------------
   // Windows has no 'cat' and cmd.exe has no single-quote syntax, so file and
   // key/value input must work without any shell help.
-  const callDir = mkdtempSync(join(tmpdir(), "mcp-calls-"));
+  const callDir = mkdtempSync(join(tmpdir(), "prime-calls-"));
   const writeSpec = (name: string, content: string): string => {
     const path = join(callDir, name);
     writeFileSync(path, content);
@@ -604,7 +604,7 @@ try {
 
   // ---- the JS bundle must behave identically ----
   const bundleVersion = await cli(["--version"], { via: "bundle" });
-  check("bundle --version", bundleVersion.code === 0 && bundleVersion.out.trim().startsWith("mcp "), `code=${bundleVersion.code} err=${bundleVersion.err}`);
+  check("bundle --version", bundleVersion.code === 0 && bundleVersion.out.trim().startsWith("prime "), `code=${bundleVersion.code} err=${bundleVersion.err}`);
 
   const bundleCall = await cli(["tools", "call", "alpha.echo", '{"text":"bundle"}'], { via: "bundle" });
   check("bundle performs a real call through the gateway", bundleCall.code === 0 && bundleCall.out.includes("echo:bundle"), `code=${bundleCall.code} out=${bundleCall.out} err=${bundleCall.err}`);
@@ -620,12 +620,12 @@ try {
   // Derived, not hard-coded, so a version bump cannot break the suite: the
   // "current" release is whatever the test binary reports, and the newest is
   // a date no real release will reach.
-  const CURRENT_VERSION = (await cli(["--version"])).out.trim().replace(/^mcp /, "");
+  const CURRENT_VERSION = (await cli(["--version"])).out.trim().replace(/^prime /, "");
   const FAKE_VERSION = "99.12.31";
   const fakeOs = process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : "windows";
   const fakeArch = process.arch === "arm64" ? "arm64" : "x64";
-  const fakeAsset = `mcp-${FAKE_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`;
-  const fakeBundle = `mcp-${FAKE_VERSION}.js`;
+  const fakeAsset = `prime-${FAKE_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`;
+  const fakeBundle = `prime-${FAKE_VERSION}.js`;
   const fakeBinaryBytes = new TextEncoder().encode(`#!/bin/sh\necho fake-${FAKE_VERSION}\n`);
   const fakeBundleBytes = new TextEncoder().encode(`console.log('fake ${FAKE_VERSION}');\n`);
   const digest = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
@@ -659,8 +659,8 @@ try {
             prerelease: true,
             html_url: "",
             assets: [
-              { name: `mcp-${CURRENT_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`, browser_download_url: `${UPDATE_BASE}/asset`, size: fakeBinaryBytes.length },
-              { name: `mcp-${CURRENT_VERSION}.js`, browser_download_url: `${UPDATE_BASE}/bundle`, size: fakeBundleBytes.length },
+              { name: `prime-${CURRENT_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`, browser_download_url: `${UPDATE_BASE}/asset`, size: fakeBinaryBytes.length },
+              { name: `prime-${CURRENT_VERSION}.js`, browser_download_url: `${UPDATE_BASE}/bundle`, size: fakeBundleBytes.length },
               { name: "SHA256SUMS", browser_download_url: `${UPDATE_BASE}/sums-old`, size: 0 },
             ],
           },
@@ -673,7 +673,7 @@ try {
       if (path === "/asset") return new Response(fakeBinaryBytes);
       if (path === "/bundle") return new Response(fakeBundleBytes);
       if (path === "/sums-old") {
-        return new Response(`${digest(fakeBinaryBytes)}  mcp-${CURRENT_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}\n${digest(fakeBundleBytes)}  mcp-${CURRENT_VERSION}.js\n`);
+        return new Response(`${digest(fakeBinaryBytes)}  prime-${CURRENT_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}\n${digest(fakeBundleBytes)}  prime-${CURRENT_VERSION}.js\n`);
       }
       if (path === "/sums") {
         const binaryHash = corruptChecksums ? "0".repeat(64) : digest(fakeBinaryBytes);
@@ -684,7 +684,7 @@ try {
   });
 
   const updateEnv = { MCP_CLI_API_BASE: UPDATE_BASE };
-  const installDir = mkdtempSync(join(tmpdir(), "mcp-update-"));
+  const installDir = mkdtempSync(join(tmpdir(), "prime-update-"));
 
   const checkRun = await cli(["update", "--check", "--json"], { env: updateEnv });
   const checkJson = JSON.parse(checkRun.out) as { latest: string; update_available: boolean };
@@ -694,7 +694,7 @@ try {
     checkRun.out.trim(),
   );
 
-  const installTarget = join(installDir, "mcp");
+  const installTarget = join(installDir, "prime");
   const installRun = await cli(["update", "--to", installTarget, "--json"], { env: updateEnv });
   const installJson = JSON.parse(installRun.out) as { updated: boolean; installed_version: string; asset: string };
   check(
@@ -736,7 +736,7 @@ try {
   const readOnlyDir = join(installDir, "readonly");
   mkdirSync(readOnlyDir);
   chmodSync(readOnlyDir, 0o500);
-  const notWritable = await cli(["update", "--to", join(readOnlyDir, "mcp")], { env: updateEnv });
+  const notWritable = await cli(["update", "--to", join(readOnlyDir, "prime")], { env: updateEnv });
   chmodSync(readOnlyDir, 0o700);
   check(
     "an unwritable destination is refused with a sudo hint",
@@ -745,7 +745,7 @@ try {
   );
   }
 
-  const bundleTarget = join(installDir, "mcp.js");
+  const bundleTarget = join(installDir, "prime.js");
   const bundleUpdate = await cli(["update", "--to", bundleTarget, "--json"], { env: updateEnv });
   check(
     "--to a .js path installs the bundle asset",
@@ -753,11 +753,11 @@ try {
     bundleUpdate.out.trim(),
   );
 
-  // A bare "mcp update" (what the CLI tells users to run) must install, not
+  // A bare "prime update" (what the CLI tells users to run) must install, not
   // print help. Run a copy of the binary so it can replace itself.
   const selfDir = join(installDir, "self");
   mkdirSync(selfDir);
-  const selfBin = join(selfDir, "mcp" + EXE);
+  const selfBin = join(selfDir, "prime" + EXE);
   copyFileSync(BIN, selfBin);
   if (!IS_WINDOWS) chmodSync(selfBin, 0o755);
   // Async: the fake release server runs in this process, so a blocking spawn
@@ -772,13 +772,13 @@ try {
   // moved aside to .old and the new build takes its place.
   if (IS_WINDOWS) {
     check(
-      "a bare 'mcp update' on Windows replaces the running .exe (old one moved aside)",
+      "a bare 'prime update' on Windows replaces the running .exe (old one moved aside)",
       bareUpdate.exitCode === 0 && digest(new Uint8Array(readFileSync(selfBin))) === digest(fakeBinaryBytes) &&
         existsSync(selfBin + ".old") && digest(new Uint8Array(readFileSync(selfBin + ".old"))) === digest(new Uint8Array(readFileSync(BIN))),
       `code=${bareUpdate.exitCode} out=${bareUpdate.stdout.slice(0, 160)} err=${bareUpdate.stderr.slice(0, 200)}`,
     );
   } else check(
-    "a bare 'mcp update' installs the newest release (it used to print help)",
+    "a bare 'prime update' installs the newest release (it used to print help)",
     bareUpdate.exitCode === 0 && digest(new Uint8Array(readFileSync(selfBin))) === digest(fakeBinaryBytes),
     `code=${bareUpdate.exitCode} out=${bareUpdate.stdout.slice(0, 160)} err=${bareUpdate.stderr.slice(0, 160)}`,
   );
@@ -786,10 +786,10 @@ try {
   updateServer.stop(true);
   rmSync(installDir, { recursive: true, force: true });
 
-  // ---- anonymous device: mcp connect + bundled code-mcp + mcp serve ---------
+  // ---- anonymous device: prime connect + bundled code-mcp + prime serve ---------
   // The real flow, with the compiled binary: register an anonymous device, run
   // the embedded code-mcp as that device, call its real tools through the
-  // gateway, then aggregate it with 'mcp serve' over stdio and HTTP.
+  // gateway, then aggregate it with 'prime serve' over stdio and HTTP.
   const ANON_CONFIG = join(CONFIG_DIR, "anon.yaml");
   const anonEnv = { CODE_MCP_GATEWAY_CONFIG: ANON_CONFIG };
   const gwHeaders = { "content-type": "application/json", authorization: `Bearer ${GATEWAY_TOKEN}` };
@@ -810,7 +810,7 @@ try {
   const noToken = await cli(["connect", "--gateway", BASE, "--no-start", "--new"], { env: { CODE_MCP_GATEWAY_CONFIG: join(CONFIG_DIR, "anon-notoken.yaml") } });
   check("connect without the required gateway token exits 3", noToken.code === 3 && noToken.err.includes("--gateway-token"), `code=${noToken.code} err=${noToken.err}`);
 
-  // Foreground run: the binary re-executes itself as "mcp code-mcp ...".
+  // Foreground run: the binary re-executes itself as "prime code-mcp ...".
   const runner = Bun.spawn([BIN, "connect", "--gateway", BASE, "--gateway-token", GATEWAY_TOKEN], {
     env: { ...process.env, ...anonEnv, NO_COLOR: "1" },
     cwd: tmpdir(), // no src/ here: only the embedded code-mcp can run
@@ -862,9 +862,9 @@ try {
     );
 
     const anonCall = await cli(["call", `${anon.device}.ls`, JSON.stringify({ cwd: tmpdir(), path: "." })], { env: anonEnv });
-    check("'mcp call' reaches the anonymous device from the saved config", anonCall.code === 0, `code=${anonCall.code} err=${anonCall.err}`);
+    check("'prime call' reaches the anonymous device from the saved config", anonCall.code === 0, `code=${anonCall.code} err=${anonCall.err}`);
 
-    // mcp serve over stdio
+    // prime serve over stdio
     const serveInput = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } },
       { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -880,18 +880,18 @@ try {
     } catch {}
     const servedById = new Map(servedParsed.map((m) => [m.id, m]));
     check(
-      "mcp serve (stdio) prints only JSON-RPC and answers each request",
+      "prime serve (stdio) prints only JSON-RPC and answers each request",
       served.code === 0 && servedParsed.length === 4 && servedParsed.length === servedLines.length && servedParsed.every((m) => (m as { jsonrpc?: string }).jsonrpc === "2.0"),
       `code=${served.code} out=${served.out.slice(0, 300)} err=${served.err.slice(0, 300)}`,
     );
     check(
-      "mcp serve exposes <device>__<tool> names",
+      "prime serve exposes <device>__<tool> names",
       ((servedById.get(2)?.result?.tools ?? []) as { name: string }[]).some((t) => t.name === `${anon.device}__ls`),
       JSON.stringify(servedById.get(2)).slice(0, 300),
     );
-    check("mcp serve (stdio) routes a tool call to the device", JSON.stringify(servedById.get(3)?.result ?? {}).includes("via-serve"), JSON.stringify(servedById.get(3)).slice(0, 300));
+    check("prime serve (stdio) routes a tool call to the device", JSON.stringify(servedById.get(3)?.result ?? {}).includes("via-serve"), JSON.stringify(servedById.get(3)).slice(0, 300));
 
-    // mcp serve over Streamable HTTP
+    // prime serve over Streamable HTTP
     const SERVE_PORT = 8857;
     const httpServe = Bun.spawn([BIN, "serve", "--port", String(SERVE_PORT)], {
       env: { ...process.env, ...anonEnv, NO_COLOR: "1" },
@@ -914,7 +914,7 @@ try {
         body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: `${anon.device}__${shellTool}`, arguments: { cwd: tmpdir(), command: "echo via-http" } } }),
       });
       const httpBody = await httpCall.text();
-      check("mcp serve --port: GET is 405 and POST /mcp routes a tool call", up && httpCall.status === 200 && httpBody.includes("via-http"), `up=${up} status=${httpCall.status} body=${httpBody.slice(0, 300)}`);
+      check("prime serve --port: GET is 405 and POST /mcp routes a tool call", up && httpCall.status === 200 && httpBody.includes("via-http"), `up=${up} status=${httpCall.status} body=${httpBody.slice(0, 300)}`);
     } finally {
       httpServe.kill();
       await httpServe.exited;

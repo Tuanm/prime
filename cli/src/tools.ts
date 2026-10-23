@@ -1,4 +1,4 @@
-// `mcp tools ...` - list, view and call device tools.
+// `prime tools ...` - list, view and call device tools.
 
 import { bool, num, str, strList } from "./args.ts";
 import { type HandshakeMode, GatewayClient } from "./client.ts";
@@ -79,7 +79,7 @@ function editDistance(a: string, b: string, max: number): number {
 
 export async function toolsList(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2);
-  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: mcp tools list <device-id>");
+  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: prime tools list <device-id>");
   if (positionals.length > 1) throw new UsageError(`unexpected argument "${positionals[1]}"`);
   const deviceId = positionals[0]!;
   const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
@@ -101,7 +101,7 @@ export async function toolsList(ctx: Ctx): Promise<void> {
 export async function toolsView(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2);
   if (positionals.length === 0) {
-    throw new UsageError("missing <device-id>.<tool-id>", "Usage: mcp tools view <device-id>.<tool-id>");
+    throw new UsageError("missing <device-id>.<tool-id>", "Usage: prime tools view <device-id>.<tool-id>");
   }
   const { deviceId, toolName } = resolveLabel(ctx, positionals[0]!);
   const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
@@ -112,7 +112,7 @@ export async function toolsView(ctx: Ctx): Promise<void> {
     const near = suggest(toolName, tools.map((t) => t.name));
     throw new UsageError(
       `${deviceId} has no tool named "${toolName}"`,
-      near.length > 0 ? `Did you mean: ${near.join(", ")}?` : `Run 'mcp tools list ${deviceId}' to see all ${tools.length} tools.`,
+      near.length > 0 ? `Did you mean: ${near.join(", ")}?` : `Run 'prime tools list ${deviceId}' to see all ${tools.length} tools.`,
     );
   }
 
@@ -154,7 +154,7 @@ export async function toolsView(ctx: Ctx): Promise<void> {
   const skeleton = Object.fromEntries([...required].map((name) => [name, placeholderFor(properties[name])]));
   ctx.out("");
   ctx.out(dim("EXAMPLE"));
-  ctx.out(`  mcp tools call ${deviceId}.${tool.name} '${JSON.stringify(skeleton)}'`);
+  ctx.out(`  prime tools call ${deviceId}.${tool.name} '${JSON.stringify(skeleton)}'`);
 }
 
 function placeholderFor(prop: unknown): unknown {
@@ -205,9 +205,9 @@ function stripBom(text: string): string {
  * convention every other CLI uses.
  *
  * A path is used instead of shell redirection because Windows has no `cat`:
- *   mcp tools call --file tool_call.json
- *   mcp tools call @tool_call.json
- *   type tool_calls.json | mcp tools call
+ *   prime tools call --file tool_call.json
+ *   prime tools call @tool_call.json
+ *   type tool_calls.json | prime tools call
  */
 async function readSpecSource(path: string): Promise<{ text: string; source: string }> {
   if (path === "-") return { text: await readStdin(), source: "stdin" };
@@ -322,7 +322,7 @@ function parsePositionalCalls(rest: string[]): { label: string; args: unknown }[
 const DEFAULT_CONCURRENCY = 8;
 
 const CALL_USAGE =
-  "Usage: mcp tools call <device-id>.<tool-id> '<json>' | --file calls.json | @calls.json | ... | mcp tools call";
+  "Usage: prime tools call <device-id>.<tool-id> '<json>' | --file calls.json | @calls.json | ... | prime tools call";
 
 /**
  * Collect the requested calls from whichever source the user chose.
@@ -344,7 +344,7 @@ async function collectCallRequests(ctx: Ctx): Promise<CallRequest[]> {
     if (rest.length > 0) {
       throw new UsageError(
         "--file cannot be combined with positional tool references",
-        "Use either 'mcp tools call --file calls.json' or 'mcp tools call dev.tool <json>'.",
+        "Use either 'prime tools call --file calls.json' or 'prime tools call dev.tool <json>'.",
       );
     }
     const specs = await Promise.all(files.map((path) => readSpecSource(path)));
@@ -381,7 +381,7 @@ async function collectCallRequests(ctx: Ctx): Promise<CallRequest[]> {
   }
 
   if (argPairs.length > 0) {
-    throw new UsageError("--arg requires a tool reference", "e.g. mcp tools call dev.tool --arg name=value");
+    throw new UsageError("--arg requires a tool reference", "e.g. prime tools call dev.tool --arg name=value");
   }
   if (explicitStdin && process.stdin.isTTY) {
     throw new UsageError("--stdin was given but stdin is a terminal", "Pipe a file into it, or use --file <path>.");

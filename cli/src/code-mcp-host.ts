@@ -2,7 +2,7 @@
 //
 // code-mcp.ts is a script, not a library: importing it parses Bun.argv, starts
 // an HTTP server and (with --gateway) dials the gateway. It must therefore never
-// be imported statically. The only way in is the hidden "mcp code-mcp"
+// be imported statically. The only way in is the hidden "prime code-mcp"
 // subcommand, which rewrites argv and then imports it dynamically.
 //
 // The specifier "#code-mcp" is a package.json subpath import that points at
@@ -21,7 +21,7 @@ import { DEFAULT_GATEWAY } from "./target.ts";
 import { type ServiceStatus, loadOverrides, loadServiceEnv, overridesPath, pidFilePath, serviceStatus } from "./service.ts";
 
 /**
- * Environment variable carrying the device credential from "mcp connect" to the
+ * Environment variable carrying the device credential from "prime connect" to the
  * code-mcp child. A command-line flag would be visible to every local user via
  * ps; the environment of a process is not (only to its owner and root).
  */
@@ -39,10 +39,10 @@ export function codeMcpArgv(args: string[], env: Record<string, string | undefin
 }
 
 /**
- * The pid of the "mcp connect" that launched this code-mcp. Killing a process
+ * The pid of the "prime connect" that launched this code-mcp. Killing a process
  * does not kill its children - on Windows never (only a console Ctrl-C reaches
  * both), on POSIX not for SIGKILL - so without this an orphaned code-mcp would
- * keep the device online after "mcp connect" is gone.
+ * keep the device online after "prime connect" is gone.
  */
 export const PARENT_PID_ENV = "MCP_CODE_MCP_PARENT_PID";
 const PARENT_POLL_MS = 1_000;
@@ -58,7 +58,7 @@ export function processAlive(pid: number): boolean {
 }
 
 /** Exit when the launching process disappears. Returns the timer (for tests). */
-export function watchParent(pid: number, exit: () => void = () => process.exit(0), who = "'mcp connect'"): ReturnType<typeof setInterval> {
+export function watchParent(pid: number, exit: () => void = () => process.exit(0), who = "'prime connect'"): ReturnType<typeof setInterval> {
   const timer = setInterval(() => {
     if (!processAlive(pid)) {
       clearInterval(timer);
@@ -71,13 +71,13 @@ export function watchParent(pid: number, exit: () => void = () => process.exit(0
 }
 
 /**
- * Set by 'mcp connect' on its child: run code-mcp with exactly the given
+ * Set by 'prime connect' on its child: run code-mcp with exactly the given
  * arguments. The config's code-mcp section (and the running-service check) are
- * for people running 'mcp code-mcp' themselves, not for connect's own device.
+ * for people running 'prime code-mcp' themselves, not for connect's own device.
  */
 export const RAW_ENV = "MCP_CODE_MCP_RAW";
 
-/** Flags of 'mcp code-mcp' itself; everything else belongs to code-mcp. */
+/** Flags of 'prime code-mcp' itself; everything else belongs to code-mcp. */
 export interface HostFlags {
   service: boolean;
   config?: string;
@@ -103,7 +103,7 @@ export function splitHostFlags(args: string[]): { host: HostFlags; rest: string[
 }
 
 /**
- * The argv code-mcp gets from 'mcp code-mcp': the config's code-mcp section,
+ * The argv code-mcp gets from 'prime code-mcp': the config's code-mcp section,
  * then (for the service) the overrides from 'service install', then the
  * command line - later layers win.
  */
@@ -144,7 +144,7 @@ function redirectOutput(path: string): void {
   console.info = line;
   console.warn = line;
   console.error = line;
-  write(`\n--- code-mcp service started ${new Date().toISOString()} (pid ${process.pid}) ---\n`);
+  write(`\n--- code-prime service started ${new Date().toISOString()} (pid ${process.pid}) ---\n`);
 }
 
 /** Set on the relaunched service process, so it does not relaunch again. */
@@ -183,7 +183,7 @@ async function relaunchWithServiceEnv(args: string[], configPath: string): Promi
   process.exit(child.signalCode ? 1 : (code ?? 1));
 }
 
-/** Status check that never blocks 'mcp code-mcp' on a broken service manager. */
+/** Status check that never blocks 'prime code-mcp' on a broken service manager. */
 function serviceStatusSafe(configPath: string): ServiceStatus | undefined {
   try {
     return serviceStatus(undefined, configPath);
@@ -207,8 +207,8 @@ export async function runCodeMcp(args: string[]): Promise<void> {
     const status = serviceStatusSafe(configPath);
     if (status?.running) {
       throw new UsageError(
-        `the code-mcp service is running (${status.where})`,
-        "It already serves these options. Stop it first with 'mcp service uninstall', or check it with 'mcp service status'.",
+        `the code-prime service is running (${status.where})`,
+        "It already serves these options. Stop it first with 'prime service uninstall', or check it with 'prime service status'.",
       );
     }
   }
@@ -220,7 +220,7 @@ export async function runCodeMcp(args: string[]): Promise<void> {
   delete process.env[SERVICE_ENV_APPLIED];
   if (host.service) {
     if (host.log) redirectOutput(host.log);
-    // Lets 'service status' (and 'mcp code-mcp') tell that the service is up.
+    // Lets 'service status' (and 'prime code-mcp') tell that the service is up.
     const pidFile = pidFilePath(configPath);
     try {
       writeFileSync(pidFile, String(process.pid));
@@ -257,7 +257,7 @@ async function runRaw(args: string[]): Promise<void> {
 
 /**
  * The argv that re-runs this CLI: the compiled binary itself, or the Bun
- * runtime plus the script (src/index.ts or dist/mcp.js).
+ * runtime plus the script (src/index.ts or dist/prime.js).
  */
 export function selfCommand(): string[] {
   const main = Bun.main;

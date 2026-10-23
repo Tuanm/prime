@@ -1,7 +1,7 @@
 name: Landing page (GitHub Pages)
 
 # The same page the api serves at / (api/src/landing-page.ts). It looks
-# up the newest mcp release at load time, so releases need no redeploy here.
+# up the newest prime release at load time, so releases need no redeploy here.
 on:
   push:
     branches: [main]

@@ -1,12 +1,12 @@
 {
-  "name": "prime-gateway-cli",
+  "name": "prime",
   "version": "26.10.21",
   "private": true,
   "description": "mcp - command line client for the Prime gateway: devices and MCP tools",
   "type": "module",
   "module": "src/index.ts",
   "bin": {
-    "mcp": "./src/index.ts"
+    "prime": "./src/index.ts"
   },
   "imports": {
     "#code-mcp": "./src/code-mcp.ts"

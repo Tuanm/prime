@@ -82,7 +82,7 @@ jobs:
         run: bun test/sandbox-browser.ts
 
   cli:
-    name: mcp CLI (typecheck, unit, end-to-end)
+    name: prime CLI (typecheck, unit, end-to-end)
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
@@ -130,7 +130,7 @@ jobs:
   # The same CLI suites on Windows, x64 and Arm: the release ships .exe builds
   # for both, so they must actually run there - not just cross-compile.
   cli-windows:
-    name: mcp CLI on ${{ matrix.os }}
+    name: prime CLI on ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
@@ -186,10 +186,10 @@ jobs:
         working-directory: cli
         run: bun scripts/build.ts --host-only
 
-  # 'mcp service' against each OS's real service manager: a systemd user unit,
+  # 'prime service' against each OS's real service manager: a systemd user unit,
   # a launchd agent, a Scheduled Task - installed, exercised, uninstalled.
   cli-service:
-    name: mcp service on ${{ matrix.os }}
+    name: prime service on ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}

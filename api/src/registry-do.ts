@@ -578,7 +578,7 @@ export class RegistryDO extends DurableObject<Env> {
   /**
    * Delete anonymous devices nobody is using: never connected within
    * ANON_UNUSED_TTL_MS of creation, or offline for ANON_IDLE_TTL_MS. Without
-   * this, abandoned `mcp connect` runs would fill the device cap for good.
+   * this, abandoned `prime connect` runs would fill the device cap for good.
    */
   private async gcAnon(): Promise<void> {
     if (this.anon.size === 0) return;

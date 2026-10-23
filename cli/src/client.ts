@@ -250,7 +250,7 @@ export class GatewayClient {
       case 401:
         return new AuthError(
           "unauthorized" + (detail ? `: ${detail}` : ""),
-          "Check --gateway-token (gateway credential) and --token (device credential). Run 'mcp devices connect' to update them.",
+          "Check --gateway-token (gateway credential) and --token (device credential). Run 'prime devices connect' to update them.",
         );
       case 404:
         return new CliError(

@@ -21,7 +21,7 @@ import { DEFAULT_GATEWAY, normalizeGateway, resolveGateway, resolveTarget, asser
 
 describe("config", () => {
   test("round-trips through YAML", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-cli-"));
+    const dir = mkdtempSync(join(tmpdir(), "prime-cli-"));
     const path = join(dir, "config.yaml");
     const config = emptyConfig();
     config.defaults = { gateway: "https://gw.example.dev", gateway_token: "gw-tok", timeout_ms: 1000 };
@@ -32,7 +32,7 @@ describe("config", () => {
 
   // Windows has no POSIX modes (the per-user profile ACL protects the file).
   test.skipIf(process.platform === "win32")("creates the file 0600", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-cli-"));
+    const dir = mkdtempSync(join(tmpdir(), "prime-cli-"));
     const path = join(dir, "config.yaml");
     saveConfig(path, emptyConfig());
     expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -350,11 +350,11 @@ describe("update helpers", () => {
   });
 
   test("a compiled binary is recognised on every platform, Windows included", () => {
-    // The Windows form was once mistaken for a source checkout, so 'mcp update'
+    // The Windows form was once mistaken for a source checkout, so 'prime update'
     // refused to run from any Windows .exe.
-    expect(currentInstall("/$bunfs/root/mcp", "/usr/local/bin/mcp")).toEqual({ path: "/usr/local/bin/mcp", kind: "binary" });
-    expect(currentInstall("B:/~BUN/root/mcp.exe", "C:\\tools\\mcp.exe")).toEqual({ path: "C:\\tools\\mcp.exe", kind: "binary" });
-    expect(currentInstall("B:\\~BUN\\root\\mcp.exe", "C:\\tools\\mcp.exe").kind).toBe("binary");
+    expect(currentInstall("/$bunfs/root/mcp", "/usr/local/bin/prime")).toEqual({ path: "/usr/local/bin/prime", kind: "binary" });
+    expect(currentInstall("B:/~BUN/root/prime.exe", "C:\\tools\\prime.exe")).toEqual({ path: "C:\\tools\\prime.exe", kind: "binary" });
+    expect(currentInstall("B:\\~BUN\\root\\prime.exe", "C:\\tools\\prime.exe").kind).toBe("binary");
   });
 
   test("compareVersions follows SemVer, with build metadata as a tiebreak", () => {
@@ -378,10 +378,10 @@ describe("update helpers", () => {
   });
 
   test("assetNameFor matches the release's naming", () => {
-    expect(assetNameFor("26.10.4", "binary", "darwin", "arm64")).toBe("mcp-26.10.4-darwin-arm64");
-    expect(assetNameFor("26.10.4", "binary", "linux", "x64")).toBe("mcp-26.10.4-linux-x64");
-    expect(assetNameFor("26.10.4", "binary", "win32", "x64")).toBe("mcp-26.10.4-windows-x64.exe");
-    expect(assetNameFor("26.10.4", "bundle", "darwin", "arm64")).toBe("mcp-26.10.4.js");
+    expect(assetNameFor("26.10.4", "binary", "darwin", "arm64")).toBe("prime-26.10.4-darwin-arm64");
+    expect(assetNameFor("26.10.4", "binary", "linux", "x64")).toBe("prime-26.10.4-linux-x64");
+    expect(assetNameFor("26.10.4", "binary", "win32", "x64")).toBe("prime-26.10.4-windows-x64.exe");
+    expect(assetNameFor("26.10.4", "bundle", "darwin", "arm64")).toBe("prime-26.10.4.js");
     expect(() => assetNameFor("26.10.4", "binary", "aix", "ppc")).toThrow(/no prebuilt binary/);
   });
 
@@ -405,10 +405,10 @@ describe("update helpers", () => {
 
   test("parseChecksums reads the sha256sum format", () => {
     const sums = parseChecksums(
-      "aa".repeat(32) + "  mcp-26.10.4-darwin-arm64\n" + "bb".repeat(32) + " *mcp-26.10.4.js\n" + "not a line\n",
+      "aa".repeat(32) + "  prime-26.10.4-darwin-arm64\n" + "bb".repeat(32) + " *prime-26.10.4.js\n" + "not a line\n",
     );
-    expect(sums.get("mcp-26.10.4-darwin-arm64")).toBe("aa".repeat(32));
-    expect(sums.get("mcp-26.10.4.js")).toBe("bb".repeat(32)); // "*" binary marker handled
+    expect(sums.get("prime-26.10.4-darwin-arm64")).toBe("aa".repeat(32));
+    expect(sums.get("prime-26.10.4.js")).toBe("bb".repeat(32)); // "*" binary marker handled
     expect(sums.size).toBe(2);
   });
 });

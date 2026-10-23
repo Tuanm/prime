@@ -1,12 +1,12 @@
-// `mcp serve` - every tool of every known device, as ONE MCP server.
+// `prime serve` - every tool of every known device, as ONE MCP server.
 //
 // Transports:
 //   stdio (default)  newline-delimited JSON-RPC 2.0 on stdin/stdout - what
-//                    Claude Code / Codex spawn: claude mcp add gateway -- mcp serve
+//                    Claude Code / Codex spawn: claude mcp add gateway -- prime serve
 //                    Nothing but JSON-RPC is ever written to stdout; notes go to stderr.
 //   --port <n>       Streamable HTTP: POST /mcp (JSON responses), GET -> 405.
 //
-// Devices come from the same place as "mcp tools list"/"mcp call": the config
+// Devices come from the same place as "prime tools list"/"prime call": the config
 // file (or the ids given as arguments), each resolved with the usual
 // flag > environment > device entry > defaults precedence. Tool names are
 // namespaced "<device>__<tool>" (see namespaceTools) and calls are routed back
@@ -186,14 +186,14 @@ export class AggregateServer {
     const listed = await pool(ids, 8, async (deviceId) => {
       try {
         const tools = await this.listDevice(deviceId);
-        if (this.state.get(deviceId) !== "online") this.opts.note(`mcp serve: ${deviceId} online (${tools.length} tools)`);
+        if (this.state.get(deviceId) !== "online") this.opts.note(`prime serve: ${deviceId} online (${tools.length} tools)`);
         this.state.set(deviceId, "online");
         return tools;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const previous = this.state.get(deviceId);
-        if (previous === undefined) this.opts.note(`mcp serve: skipping ${deviceId}: ${message}`);
-        else if (previous === "online") this.opts.note(`mcp serve: ${deviceId} went offline: ${message}`);
+        if (previous === undefined) this.opts.note(`prime serve: skipping ${deviceId}: ${message}`);
+        else if (previous === "online") this.opts.note(`prime serve: ${deviceId} went offline: ${message}`);
         this.state.set(deviceId, "offline");
         return [];
       }
@@ -253,7 +253,7 @@ export class AggregateServer {
           // Transport failure (offline, timeout, auth): a tool-level error the
           // model can read and react to, rather than a protocol failure.
           const message = err instanceof Error ? err.message : String(err);
-          return rpcResult(id, { content: [{ type: "text", text: `mcp serve: ${target.deviceId}: ${message}` }], isError: true });
+          return rpcResult(id, { content: [{ type: "text", text: `prime serve: ${target.deviceId}: ${message}` }], isError: true });
         }
       }
       default:
@@ -303,7 +303,7 @@ async function serveStdio(server: AggregateServer, note: (t: string) => void): P
       .then((response) => {
         if (response !== undefined) write(response);
       })
-      .catch((err) => note(`mcp serve: internal error: ${err instanceof Error ? err.message : String(err)}`))
+      .catch((err) => note(`prime serve: internal error: ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => pending.delete(job));
     pending.add(job);
   };
@@ -373,7 +373,7 @@ export async function serveCommand(ctx: Ctx, version: string): Promise<void> {
   if (!isLoopback(host) && !bool(ctx.parsed, "allow-remote")) {
     throw new UsageError(
       `refusing to listen on non-loopback address ${host}`,
-      "mcp serve has no authentication and exposes every device's tools (shell included). Add --allow-remote if you really mean it.",
+      "prime serve has no authentication and exposes every device's tools (shell included). Add --allow-remote if you really mean it.",
     );
   }
 
@@ -391,7 +391,7 @@ export async function serveCommand(ctx: Ctx, version: string): Promise<void> {
     note,
   });
   if (deviceIds.length === 0) {
-    note("mcp serve: no devices configured - serving an empty tool list (add one with 'mcp connect' or 'mcp devices connect').");
+    note("prime serve: no devices configured - serving an empty tool list (add one with 'prime connect' or 'prime devices connect').");
   }
 
   if (stdio) {
@@ -404,9 +404,9 @@ export async function serveCommand(ctx: Ctx, version: string): Promise<void> {
   const http = startHttp(server, host, port);
   const where = `http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${http.port}/mcp`;
   if (!isLoopback(host)) {
-    process.stderr.write(`WARNING: mcp serve is listening on ${host} WITHOUT authentication - anyone who can reach it can run every device's tools.\n`);
+    process.stderr.write(`WARNING: prime serve is listening on ${host} WITHOUT authentication - anyone who can reach it can run every device's tools.\n`);
   }
-  process.stderr.write(`mcp serve: listening on ${where} (${deviceIds.length} device${deviceIds.length === 1 ? "" : "s"}); Ctrl-C to stop\n`);
+  process.stderr.write(`prime serve: listening on ${where} (${deviceIds.length} device${deviceIds.length === 1 ? "" : "s"}); Ctrl-C to stop\n`);
   void server.tools().catch(() => {});
   await new Promise<void>((resolve) => {
     const stop = () => {

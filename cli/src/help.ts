@@ -5,13 +5,13 @@
 
 import { bold, cyan, dim } from "./output.ts";
 
-const ROOT = `mcp - command line client for prime-gateway
+const ROOT = `prime - command line client for the Prime gateway
 
 Connects to devices exposed through the Prime gateway and drives their
 MCP tools. Credentials and defaults live in ~/.prime-gateway/config.yaml.
 
 USAGE
-  mcp [command] [options]
+  prime [command] [options]
 
 COMMANDS
   connect [--gateway <url>] [--new]       Connect THIS machine as an anonymous device
@@ -34,24 +34,24 @@ COMMANDS
 
 ADVANCED
   code-mcp [code-mcp options]             Run the bundled code-mcp device server with
-                                          the config's code-mcp options ('mcp help code-mcp')
+                                          the config's code-mcp options ('prime help code-mcp')
 
 ALIASES
-  mcp                     Same as 'mcp --help'
-  mcp call                Same as 'mcp tools call'
-  mcp upgrade             Same as 'mcp update'
+  prime                   Same as 'prime --help'
+  prime call                Same as 'prime tools call'
+  prime upgrade             Same as 'prime update'
 
 EXAMPLES
-  mcp connect                                    # this machine, on the default gateway
-  claude mcp add gateway -- mcp serve            # all devices as one MCP server
-  mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
-  mcp devices connect my-laptop                  # uses defaults from config
-  mcp devices list
-  mcp tools list my-laptop
-  mcp tools view my-laptop.snapshot
-  mcp tools call my-laptop.click '{"selector":"#submit"}'
-  echo '{"name":"my-laptop.snapshot","arguments":{}}' | mcp tools call
-  mcp call my-laptop.snapshot '{}' my-laptop.click '{"selector":"#ok"}'
+  prime connect                                    # this machine, on the default gateway
+  claude mcp add gateway -- prime serve            # all devices as one MCP server
+  prime devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
+  prime devices connect my-laptop                  # uses defaults from config
+  prime devices list
+  prime tools list my-laptop
+  prime tools view my-laptop.snapshot
+  prime tools call my-laptop.click '{"selector":"#submit"}'
+  echo '{"name":"my-laptop.snapshot","arguments":{}}' | prime tools call
+  prime call my-laptop.snapshot '{}' my-laptop.click '{"selector":"#ok"}'
 
 CONFIG
   Precedence per field: --flag > environment > device entry > defaults section.
@@ -64,19 +64,19 @@ EXIT CODES
   0 success   1 error   2 usage   3 authentication   4 device offline   5 timeout
 `;
 
-const DEVICES = `mcp devices - manage device connections
+const DEVICES = `prime devices - manage device connections
 
 USAGE
-  mcp devices connect <device-id> [options]
-  mcp devices disconnect <device-id>
-  mcp devices status <device-id> [--json]
-  mcp devices list [--no-probe] [--json]
+  prime devices connect <device-id> [options]
+  prime devices disconnect <device-id>
+  prime devices status <device-id> [--json]
+  prime devices list [--no-probe] [--json]
 
 ${bold("connect")}
   Stores <device-id> (and any credentials given) in the config file, then probes
   the device. Unspecified fields fall back to environment variables, the device's
   existing entry, then the defaults section - so after one full connect, later
-  devices need only 'mcp devices connect <device-id>'.
+  devices need only 'prime devices connect <device-id>'.
 
   Options:
     --token <token>          Device token (sent as X-Device-Token)
@@ -99,14 +99,14 @@ ${bold("list")}
   probes for an instant, offline listing.
 `;
 
-const TOOLS = `mcp tools - list, inspect and call device tools
+const TOOLS = `prime tools - list, inspect and call device tools
 
 USAGE
-  mcp tools list <device-id> [--json]
-  mcp tools view <device-id>.<tool-id> [--json]
-  mcp tools call <device-id>.<tool-id> [<arguments-json>] [options]
-  mcp tools call <device-id>.<tool-id> <args> <device-id>.<tool-id> <args> ...
-  ... | mcp tools call
+  prime tools list <device-id> [--json]
+  prime tools view <device-id>.<tool-id> [--json]
+  prime tools call <device-id>.<tool-id> [<arguments-json>] [options]
+  prime tools call <device-id>.<tool-id> <args> <device-id>.<tool-id> <args> ...
+  ... | prime tools call
 
 ${bold("list")}
   Lists the tools a device exposes: name and one-line description.
@@ -119,13 +119,13 @@ ${bold("call")}
   Five input forms, so every platform has one that needs no shell tricks.
   cmd.exe has no 'cat' and no single-quote syntax, hence --file and --arg:
 
-    1. inline     mcp tools call dev.tool '{"a":1}'
-    2. key/value  mcp tools call dev.tool --arg a=1 --arg b=text
-    3. paired     mcp tools call dev1.t1 '{}' dev2.t2 '{"b":2}'
-    4. file       mcp tools call --file calls.json       (-f, or '-' for stdin)
-                  mcp tools call @calls.json
-    5. stdin      mcp tools call --stdin
-                  type calls.json | mcp tools call
+    1. inline     prime tools call dev.tool '{"a":1}'
+    2. key/value  prime tools call dev.tool --arg a=1 --arg b=text
+    3. paired     prime tools call dev1.t1 '{}' dev2.t2 '{"b":2}'
+    4. file       prime tools call --file calls.json       (-f, or '-' for stdin)
+                  prime tools call @calls.json
+    5. stdin      prime tools call --stdin
+                  type calls.json | prime tools call
 
   Specification file or stdin - one object, or an array of them:
     { "name": "<device>.<tool>", "arguments": { ... } }
@@ -155,10 +155,10 @@ ${bold("call")}
   4 offline, 5 timeout).
 `;
 
-const CONNECT = `mcp connect - connect THIS machine to the gateway as an anonymous device
+const CONNECT = `prime connect - connect THIS machine to the gateway as an anonymous device
 
 USAGE
-  mcp connect [--gateway <url>] [--new] [--no-start] [--json] [-- <code-mcp flags>]
+  prime connect [--gateway <url>] [--new] [--no-start] [--json] [-- <code-mcp flags>]
 
 Creates an anonymous device on the gateway (POST /api/devices/anonymous), saves
 its id and device code in the config file, prints them with the connect URL,
@@ -166,13 +166,13 @@ then runs the bundled code-mcp in the foreground as that device - your files
 and shell become MCP tools reachable through the gateway. Ctrl-C stops it.
 
 The device is saved per gateway and reused on every later run (the gateway
-caps the total number of devices), so 'mcp connect' always comes back as the
+caps the total number of devices), so 'prime connect' always comes back as the
 same device. If the gateway no longer knows it (an unused anonymous device is
 deleted after about an hour, one offline for 7 days is deleted too), a new one
 is registered automatically and the note says so.
 
-The saved device is an ordinary config entry: 'mcp tools list <id>',
-'mcp call <id>.<tool>' and 'mcp serve' use it like any other device.
+The saved device is an ordinary config entry: 'prime tools list <id>',
+'prime call <id>.<tool>' and 'prime serve' use it like any other device.
 
 OPTIONS
   --gateway <url>          Gateway origin. Default: the saved default gateway,
@@ -194,19 +194,19 @@ ERRORS
   403  anonymous devices are disabled on this gateway (exit 3)
 `;
 
-const SERVE = `mcp serve - every device's tools as ONE MCP server
+const SERVE = `prime serve - every device's tools as ONE MCP server
 
 USAGE
-  mcp serve [<device-id>...] [options]                stdio (default)
-  mcp serve [<device-id>...] --port <n> [--host <a>]  Streamable HTTP on /mcp
+  prime serve [<device-id>...] [options]                stdio (default)
+  prime serve [<device-id>...] --port <n> [--host <a>]  Streamable HTTP on /mcp
 
 Aggregates the tools of the configured devices (the same devices and
-credentials 'mcp tools list' / 'mcp call' use; or only the ids given) behind a
+credentials 'prime tools list' / 'prime call' use; or only the ids given) behind a
 single MCP server, for MCP clients:
 
-  claude mcp add gateway -- mcp serve
-  codex mcp add gateway -- mcp serve
-  mcp serve --port 7800        then point a client at http://127.0.0.1:7800/mcp
+  claude mcp add gateway -- prime serve
+  codex mcp add gateway -- prime serve
+  prime serve --port 7800        then point a client at http://127.0.0.1:7800/mcp
 
 Tool names are <device>__<tool> (characters outside [a-zA-Z0-9_-] become "_",
 collisions and over-long names get a short stable hash suffix), and each
@@ -231,18 +231,18 @@ OPTIONS
                            (default gateway: https://prime.tuanm.workers.dev)
 `;
 
-const CODE_MCP = `mcp code-mcp - run the bundled code-mcp device server   (advanced)
+const CODE_MCP = `prime code-mcp - run the bundled code-mcp device server   (advanced)
 
 USAGE
-  mcp code-mcp [code-mcp flags]
-  mcp code-mcp --help          code-mcp's own flag reference
+  prime code-mcp [code-mcp flags]
+  prime code-prime --help          code-mcp's own flag reference
 
 The CLI embeds code-mcp (src/code-mcp.ts in this package), the MCP server that
-exposes this machine's files and shell as tools. 'mcp connect' runs it for
+exposes this machine's files and shell as tools. 'prime connect' runs it for
 you; use this command for anything else code-mcp supports, e.g. a registered
 device:
 
-  mcp code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
+  prime code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 
 OPTIONS FROM THE CONFIG
   The code-mcp section of ~/.prime-gateway/config.yaml holds code-mcp's
@@ -258,20 +258,20 @@ OPTIONS FROM THE CONFIG
 
   Values from the config never appear on a command line (ps).
 
-  Refuses to start while the code-mcp service is running ('mcp service').
+  Refuses to start while the code-prime service is running ('prime service').
 `;
 
-const SERVICE = `mcp service - run code-mcp as a user service
+const SERVICE = `prime service - run code-mcp as a user service
 
 USAGE
-  mcp service install [code-mcp options]   install (or reinstall) and start it
-  mcp service uninstall                    stop and remove it
-  mcp service status [--json]              is it installed / running?
+  prime service install [code-mcp options]   install (or reinstall) and start it
+  prime service uninstall                    stop and remove it
+  prime service status [--json]              is it installed / running?
 
-The service runs 'mcp code-mcp' with the code-mcp section of
+The service runs 'prime code-mcp' with the code-mcp section of
 ~/.prime-gateway/config.yaml, overridden by the options given to
 'service install' (kept in service.yaml next to the config). Options are read
-at every start, so to apply a config change, run 'mcp service install' again.
+at every start, so to apply a config change, run 'prime service install' again.
 No credential is written into the service definition or onto a command line.
 
   Linux    systemd user unit  ~/.config/systemd/user/code-mcp.service
@@ -285,16 +285,16 @@ It starts at login and is restarted if it crashes. On Linux it stops at logout
 unless lingering is on: loginctl enable-linger USER.
 
 EXAMPLES
-  mcp service install                         # config's code-mcp section as is
-  mcp service install --port 7788 --enable-memory
-  mcp service status
-  mcp service uninstall
+  prime service install                         # config's code-mcp section as is
+  prime service install --port 7788 --enable-memory
+  prime service status
+  prime service uninstall
 `;
 
-const UPDATE = `mcp update - install the newest release   (alias: mcp upgrade)
+const UPDATE = `prime update - install the newest release   (alias: prime upgrade)
 
 USAGE
-  mcp update [--check] [--force] [--release-version <v>] [--to <path>] [--json]
+  prime update [--check] [--force] [--release-version <v>] [--to <path>] [--json]
 
 Checks the GitHub releases for a newer 'cli-v<version>' tag and, if there is
 one, downloads the asset for this platform, verifies it against the release's
@@ -302,7 +302,7 @@ SHA256SUMS, and swaps it in.
 
   current   26.10.3
   latest    26.10.4
-  installed 26.10.4 -> /Users/you/.local/bin/mcp
+  installed 26.10.4 -> /Users/you/.local/bin/prime
 
 OPTIONS
   --check                    Report whether an update exists; install nothing
@@ -324,7 +324,7 @@ NOTES
   trustworthy.
 
   If the install directory is not writable, re-run with the privileges that own
-  it (for example: sudo mcp update), or use --to for a directory you own.
+  it (for example: sudo prime update), or use --to for a directory you own.
 
 ENVIRONMENT
   GITHUB_TOKEN        Raises the GitHub API rate limit (optional)
@@ -346,7 +346,7 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "serve") return SERVE;
   if (topic === "code-mcp") return CODE_MCP;
   if (topic === "service") return SERVICE;
-  if (topic === "help") return `${ROOT}\n${dim("Usage: mcp help [connect|serve|service|devices|tools|call|update|code-mcp]")}`;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|call|update|code-mcp]")}`;
   void sub;
   return undefined;
 }
@@ -354,22 +354,22 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
 /** One-line usage hint shown when a command is invoked incorrectly. */
 export function usageLine(topic: string, sub?: string): string {
   if (topic === "devices") {
-    if (sub === "connect") return "Usage: mcp devices connect <device-id> [--token <t>] [--gateway <url>]";
-    if (sub === "disconnect") return "Usage: mcp devices disconnect <device-id>";
-    if (sub === "status") return "Usage: mcp devices status <device-id>";
-    if (sub === "list") return "Usage: mcp devices list";
-    return "Usage: mcp devices <connect|disconnect|status|list> [args]";
+    if (sub === "connect") return "Usage: prime devices connect <device-id> [--token <t>] [--gateway <url>]";
+    if (sub === "disconnect") return "Usage: prime devices disconnect <device-id>";
+    if (sub === "status") return "Usage: prime devices status <device-id>";
+    if (sub === "list") return "Usage: prime devices list";
+    return "Usage: prime devices <connect|disconnect|status|list> [args]";
   }
-  if (topic === "update" || topic === "upgrade") return "Usage: mcp update [--check] [--force] [--to <path>]";
-  if (topic === "connect") return "Usage: mcp connect [--gateway <url>] [--new] [-- <code-mcp flags>]";
-  if (topic === "serve") return "Usage: mcp serve [<device-id>...] [--port <n>] [--host <addr>]";
+  if (topic === "update" || topic === "upgrade") return "Usage: prime update [--check] [--force] [--to <path>]";
+  if (topic === "connect") return "Usage: prime connect [--gateway <url>] [--new] [-- <code-mcp flags>]";
+  if (topic === "serve") return "Usage: prime serve [<device-id>...] [--port <n>] [--host <addr>]";
   if (topic === "tools" || topic === "call") {
-    if (sub === "list") return "Usage: mcp tools list <device-id>";
-    if (sub === "view") return "Usage: mcp tools view <device-id>.<tool-id>";
-    if (sub === "call") return "Usage: mcp tools call <device-id>.<tool-id> [<arguments-json>]";
-    return "Usage: mcp tools <list|view|call> [args]";
+    if (sub === "list") return "Usage: prime tools list <device-id>";
+    if (sub === "view") return "Usage: prime tools view <device-id>.<tool-id>";
+    if (sub === "call") return "Usage: prime tools call <device-id>.<tool-id> [<arguments-json>]";
+    return "Usage: prime tools <list|view|call> [args]";
   }
-  return "Usage: mcp [command] [options]";
+  return "Usage: prime [command] [options]";
 }
 
-export const TOPIC_HINT = `Run '${cyan("mcp --help")}' for the command list.`;
+export const TOPIC_HINT = `Run '${cyan("prime --help")}' for the command list.`;

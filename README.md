@@ -7,10 +7,10 @@
 | What you get | In one line |
 | --- | --- |
 | **[File sharing](#file-sharing)** | Devices park temporary files and hand out a link - optionally protected by a key, always expiring. |
-| **[MCP device management](#mcp-device-management)** | Any machine becomes an MCP device: connect it once, then reach its tools from any MCP client, anywhere. |
+| **[MCP device management](#prime-device-management)** | Any machine becomes an MCP device: connect it once, then reach its tools from any MCP client, anywhere. |
 | **[Browser sandbox](#browser-sandbox)** | A locked-down browser tab where tools you write run with a real UI - and no access to your pages, cookies or data. |
 | **[Access control](#access-control)** | Per-device tokens, an admin page, anonymous devices, and a switch to cut a device or an address off. |
-| **[One server for every device](#one-server-for-every-device)** | `mcp serve` presents every device's tools as a single MCP server to a client that only knows one. |
+| **[One server for every device](#one-server-for-every-device)** | `prime serve` presents every device's tools as a single MCP server to a client that only knows one. |
 | **[Local use](#local-use-no-account)** | The same server runs on its own, without the hosted service, for one machine. |
 
 ---
@@ -38,17 +38,17 @@ same thing with a form.
 
 ## MCP device management
 
-Run `mcp connect` on a machine and it becomes a **device**: a named endpoint whose tools
+Run `prime connect` on a machine and it becomes a **device**: a named endpoint whose tools
 (file read/write, shell, search, jobs, preview, memory) any MCP client can call through
 `POST /mcp/<deviceId>`. No ports, no tunnels, no firewall rules - the device connects out
 and stays connected.
 
 ```bash
-mcp connect                                     # this machine, as an anonymous device
-mcp service install --id my-laptop --token t    # ...or a registered one, at every login
-mcp devices list                                # what is connected
-mcp tools list my-laptop                        # the tools it exposes
-mcp tools call my-laptop.bash '{"command":"git status"}'
+prime connect                                     # this machine, as an anonymous device
+prime service install --id my-laptop --token t    # ...or a registered one, at every login
+prime devices list                                # what is connected
+prime tools list my-laptop                        # the tools it exposes
+prime tools call my-laptop.bash '{"command":"git status"}'
 ```
 
 - **Registered or anonymous.** An anonymous device is created on the spot with a code you
@@ -124,11 +124,11 @@ those origin lines printed to the platform console - off by default.
 
 ## One server for every device
 
-`mcp serve` presents every device's tools as one MCP server, so a client that knows a
+`prime serve` presents every device's tools as one MCP server, so a client that knows a
 single server sees all machines:
 
 ```bash
-claude mcp add devices -- mcp serve
+claude mcp add devices -- prime serve
 ```
 
 ## Local use (no account)
@@ -142,26 +142,26 @@ bun cli/src/code-mcp.ts --gateway --id my-laptop --token t # ...or as a device o
 
 ## CLI
 
-`mcp` is a fast, dependency-free command line client: connect this machine, run the
+`prime` is a fast, dependency-free command line client: connect this machine, run the
 server as a user service, list and inspect devices and tools, and call tools from inline
 JSON, paired arguments or stdin.
 
 ```text
-mcp connect                                    # this machine, as an anonymous device
-mcp service install --id my-laptop --token t   # ...or a registered one, at every login
-mcp devices connect my-laptop --token t   # save credentials for a registered device
-mcp tools list my-laptop
-mcp tools call my-laptop.read '{"path":"README.md"}'
+prime connect                                    # this machine, as an anonymous device
+prime service install --id my-laptop --token t   # ...or a registered one, at every login
+prime devices connect my-laptop --token t   # save credentials for a registered device
+prime tools list my-laptop
+prime tools call my-laptop.read '{"path":"README.md"}'
 ```
 
 Credentials and defaults live in `~/.prime-gateway/config.yaml`; flags override
 environment variables, which override the device entry, which overrides the defaults
-section. `mcp --help` lists everything, and `mcp call` is an alias for `mcp tools call`.
+section. `prime --help` lists everything, and `prime call` is an alias for `prime tools call`.
 
 ## Documentation
 
 - [cli/SERVER.md](cli/SERVER.md) - the device server: tools, flags, behaviour
-- [cli/README.md](cli/README.md) - the `mcp` CLI: install, commands, configuration, exit codes
+- [cli/README.md](cli/README.md) - the `prime` CLI: install, commands, configuration, exit codes
 - [api/README.md](api/README.md) - internals, deployment, tunables, tests
 - [MCP specification](https://modelcontextprotocol.io) - the protocol all of this speaks
 
@@ -171,10 +171,10 @@ section. `mcp --help` lists everything, and `mcp call` is an alias for `mcp tool
 cd api && npm test                         # unit, smoke, files, anonymous devices (local wrangler)
 cd api && npm run typecheck
 cd cli && bun run test && bun test/e2e.ts      # CLI unit + end-to-end, against a local instance
-cd cli && bun test/service-e2e.ts              # mcp service on this OS's real service manager
-cd code-mcp && python -m unittest discover -s tests
+cd cli && bun test/service-e2e.ts              # prime service on this OS's real service manager
+cd cli && python3 -m unittest discover -s tests
 ```
 
 CI runs each component's suites when it, or something it depends on, changes: the api
-on Linux; the CLI on Linux and Windows (x64, Arm) plus `mcp service` on Linux, macOS and
+on Linux; the CLI on Linux and Windows (x64, Arm) plus `prime service` on Linux, macOS and
 Windows; the device server on Linux, macOS and Windows.

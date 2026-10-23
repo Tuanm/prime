@@ -1,4 +1,4 @@
-// `mcp devices ...` - connect, disconnect, status, list.
+// `prime devices ...` - connect, disconnect, status, list.
 
 import { bool, num } from "./args.ts";
 import { GatewayClient } from "./client.ts";
@@ -41,7 +41,7 @@ async function probe(
 export async function devicesConnect(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2); // drop "devices connect"
   if (positionals.length === 0) {
-    throw new UsageError("missing <device-id>", "Usage: mcp devices connect <device-id> [--token <t>] [--gateway <url>]");
+    throw new UsageError("missing <device-id>", "Usage: prime devices connect <device-id> [--token <t>] [--gateway <url>]");
   }
   if (positionals.length > 1) throw new UsageError(`unexpected argument "${positionals[1]}"`);
   const deviceId = assertDeviceId(positionals[0]!);
@@ -86,12 +86,12 @@ export async function devicesConnect(ctx: Ctx): Promise<void> {
   }
   ctx.out(`  status    ${red("offline")}`);
   if (result.error) ctx.note(dim(`  ${result.error}`));
-  ctx.note(dim(`  Saved anyway - start the device, then: mcp devices status ${deviceId}`));
+  ctx.note(dim(`  Saved anyway - start the device, then: prime devices status ${deviceId}`));
 }
 
 export async function devicesDisconnect(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2);
-  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: mcp devices disconnect <device-id>");
+  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: prime devices disconnect <device-id>");
   const deviceId = assertDeviceId(positionals[0]!);
   const existed = deviceId in ctx.config.devices;
   if (existed) {
@@ -107,7 +107,7 @@ export async function devicesDisconnect(ctx: Ctx): Promise<void> {
 
 export async function devicesStatus(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2);
-  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: mcp devices status <device-id>");
+  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: prime devices status <device-id>");
   const deviceId = assertDeviceId(positionals[0]!);
   const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
 
@@ -151,7 +151,7 @@ export async function devicesList(ctx: Ctx): Promise<void> {
       return;
     }
     ctx.out(dim(`No devices configured in ${ctx.configPath}`));
-    ctx.out(dim("Add one with: mcp devices connect <device-id> --token <token> --gateway <url>"));
+    ctx.out(dim("Add one with: prime devices connect <device-id> --token <token> --gateway <url>"));
     return;
   }
 
