@@ -92,7 +92,9 @@ id = "d36acd23e12945058bf9910182deeec7"
 # AUD tag, then flip ADMIN_ACCESS to "enforce":
 #   ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
 #   ACCESS_AUD = "..."
-ADMIN_ACCESS = "warn"
+# Until those are set, enforce keeps /admin closed to everyone (it refuses any
+# request without a verified Access assertion) - fail closed, never open.
+ADMIN_ACCESS = "enforce"
 RATE_LIMIT_WINDOW_MS = "60000"
 RATE_LIMIT_MAX = "100"
 TIMEOUT_MS = "300000" # 5 min: long tool calls (record, wait_for, downloads)
