@@ -1,88 +1,71 @@
-# Code MCP
+# Prime
 
-**Give AI agents your machine's files and shell as MCP tools - locally, or from anywhere through a gateway.**
+**A toolkit that turns a machine, a file and a browser into tools - with limits you set.**
 
-[![CI](https://github.com/Tuanm/code-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuanm/code-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/Tuanm/prime/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuanm/prime/actions/workflows/ci.yml)
 
-**Get started:** [code-mcp.tuanm.workers.dev](https://code-mcp.tuanm.workers.dev) (also on [GitHub Pages](https://tuanm.github.io/code-mcp/)) - download `mcp` for your platform and run `mcp connect`.
-
-| Folder | What it is |
+| What you get | In one line |
 | --- | --- |
-| [`code-mcp/`](code-mcp) | **code-mcp**, the MCP server that runs on a machine and exposes its files and shell as tools - in TypeScript (Bun). It serves locally, or connects out to a gateway as a *device*. |
-| [`gateway/`](gateway) | **Prime**, a Cloudflare Worker that relays MCP clients to devices anywhere: per-device authentication, anonymous devices, an admin page, temporary file storage. |
-| [`cli/`](cli) | **`mcp`**, the command line client: connect this machine as a device (it embeds code-mcp), run code-mcp as a user service, list and call device tools, and serve every device's tools as one MCP server. |
-```text
-MCP client --POST /mcp/{device}--> gateway/ <--WebSocket-- code-mcp/ (run by mcp connect / mcp service)
-```
+| **[File sharing](#file-sharing)** | Devices park temporary files and hand out a link - optionally protected by a key, always expiring. |
+| **[MCP device management](#mcp-device-management)** | Any machine becomes an MCP device: connect it once, then reach its tools from any MCP client, anywhere. |
+| **[Browser sandbox](#browser-sandbox)** | A locked-down browser tab where tools you write run with a real UI - and no access to your pages, cookies or data. |
+| **[Access control](#access-control)** | Per-device tokens, an admin page, anonymous devices, and a switch to cut a device or an address off. |
+| **[One server for every device](#one-server-for-every-device)** | `mcp serve` presents every device's tools as a single MCP server to a client that only knows one. |
+| **[Local use](#local-use-no-account)** | The same server runs on its own, without the hosted service, for one machine. |
 
-## Gateway properties
+---
 
-| Property | How it is achieved |
-| --- | --- |
-| **Global & auto-scaling** | Runs on Cloudflare Workers; every isolate routes to the same Durable Object per `deviceId` |
-| **Secure** | Per-device tokens on both the device WebSocket and the MCP relay; `/devices` is never public; unknown ids return 401 (no existence oracle); admin UI behind Cloudflare Access |
-| **Long tool calls** | Durable Objects have unlimited wall time while the client is connected; `TIMEOUT_MS` defaults to 300 s |
-| **Zero servers** | No VM to patch or scale; Durable Objects hibernate when idle (WebSocket Hibernation API) |
+## File sharing
 
-## How it works
-```mermaid
-flowchart LR
-    C[MCP client] -->|"POST /mcp/{deviceId}"| W
-    D[Device<br/>code-mcp] -->|"wss /ws/{deviceId}?token=…"| W
-    subgraph Worker [Cloudflare Worker]
-        W[entry<br/>auth + routing]
-        DO[DeviceDO<br/>per deviceId<br/>WS + pending registry]
-        R[RegistryDO<br/>online deviceIds]
-    end
-    W -->|stub.fetch| DO
-    W -->|idFromName| R
-    DO <-->|"WebSocket<br/>register / keepalive / JSON-RPC"| D
-    R -.->|"GET /devices<br/>(admin token)"| C
-```
+Devices can leave a file behind and share a link to it:
 
-- A device connects once via WebSocket; its tunnel and pending requests are owned by one Durable Object, so any isolate can serve `/mcp` requests for it.
-- Authentication happens **before** any Durable Object is created — unauthenticated probes cost nothing and reveal nothing.
-- `GET /devices` is hidden (404) when no admin token is configured, and admin-gated (401) otherwise.
-
-## Quick start
 ```bash
-cd gateway
-npm install
-npx wrangler secret put DEVICE_TOKENS    # JSON map, e.g. {"my-device":"my-secret"}
-npx wrangler secret put ADMIN_TOKEN      # optional: gates GET /devices
-npx wrangler deploy
+curl -u my-laptop:t --data-binary @report.pdf \
+  "https://<service>/api/files?name=report.pdf&expiry_days=7"
 ```
 
-| Endpoint | Purpose |
-| --- | --- |
-| `wss://<worker>/ws/<deviceId>?token=<deviceToken>` | Device connects to its tunnel |
-| `POST <worker>/mcp/<deviceId>?token=<deviceToken>` | MCP client relays a JSON-RPC call |
-| `POST <worker>/api/files?name=&expiry_days=&key=` | Upload a temporary file (device Basic auth; streamed into R2) |
-| `GET <worker>/api/files/{id}` | Download it (supports `Range`) |
-| `GET <worker>/files` | File management page (device Basic auth) |
-| `GET <worker>/mcp` | Sandbox: the browser as a device with JavaScript tools (device Basic auth) |
+The answer carries the file's id and its `/files/<id>` link; the `/files` page does the
+same thing with a form.
 
-## Temporary files
+- **Protected links.** A file can carry a key, passed as the `X-File-Key` request header -
+  never in the URL - so it cannot leak through access logs or a `Referer`.
+- **Limits, by design.** 200 MiB per file, 7 days, 5 files and 500 MiB per device. Expired
+  files are deleted automatically and never listed.
+- **A page to manage them.** `/files` lists what the device holds, with upload, download,
+  rename, protection and delete.
+- **Even an MCP client can download** through a short-lived, single-use ticket, for clients
+  that cannot send Basic auth (`GET /mcp/<deviceId>/download/<ticket>`).
 
-Devices can park temporary files on the gateway and share a link:
+## MCP device management
+
+Run `mcp connect` on a machine and it becomes a **device**: a named endpoint whose tools
+(file read/write, shell, search, jobs, preview, memory) any MCP client can call through
+`POST /mcp/<deviceId>`. No ports, no tunnels, no firewall rules - the device connects out
+and stays connected.
+
 ```bash
-curl -u demo:demo --data-binary @report.pdf \
-  "https://code-mcp.tuanm.workers.dev/api/files?name=report.pdf&expiry_days=7"
+mcp connect                                     # this machine, as an anonymous device
+mcp service install --id my-laptop --token t    # ...or a registered one, at every login
+mcp devices list                                # what is connected
+mcp tools list my-laptop                        # the tools it exposes
+mcp tools call my-laptop.bash '{"command":"git status"}'
 ```
 
-Auth is HTTP Basic with the device's own `deviceId`/`token` (the pair
-registered at `/admin`). A protected file's key is passed as the
-`X-File-Key` **request header**, never in the URL, so it cannot end up in an
-access log or a `Referer`. Limits: 200 MiB per file, 7 days, 5 files and
-500 MiB per device. Expired files are deleted automatically and never listed.
-Requires an R2 bucket bound as `BUCKET` - see
-[gateway/README.md](gateway/README.md#temporary-files).
+- **Registered or anonymous.** An anonymous device is created on the spot with a code you
+  can keep; a registered one lives in the admin page with its own token and a stable id.
+- **One tunnel per device.** Connecting a second time replaces the old connection, so a
+  dead laptop never blocks the next connect.
+- **Long calls.** A tool may run for minutes: the connection survives, and a call that
+  outlives its client is cleaned up instead of leaking.
+- **Works everywhere.** The service runs on Cloudflare Workers, so there is no server to
+  patch or scale, and a device keeps its id when it reconnects from elsewhere.
 
-## Sandbox: this browser as a device
+## Browser sandbox
 
-`GET /mcp` (HTTP Basic with a registered device's id and token, like `/files`)
-turns the browser tab into that device. Instead of files, it holds **tools**:
-JavaScript files, one tool each, kept in the browser's storage.
+`/sandbox` turns a browser tab into a device whose tools are JavaScript you write in the page.
+Your pages, cookies and local storage are not reachable from those tools - a call runs in its
+own sandboxed frame, with no network and no credentials:
+
 ```js
 /**
  * Add two numbers.            <- the tool's description
@@ -92,106 +75,106 @@ JavaScript files, one tool each, kept in the browser's storage.
 export default async function add(a, b = 1) { return a + b; }
 ```
 
-- **Manage**: `+` adds a .js file; Save validates it (syntax, a single default
-  async function, no imports, `@param` tags matching the parameters, supported
-  types, unique name). View (edit), Download, Deactivate/Activate, Delete. On a
-  first visit with no tools, starter tools for building a dashboard are added
-  (`dashboard_add/update/list/remove/events`, `ask_user`, `confirm`,
-  `bar_chart`, `table`, `increment` - a handler example - `cursor_click`,
-  `cursor_type`, `cursor_drag`, `kanban`, `sql`, `storage`); browsers with an
-  older set are offered the new ones - delete what you do not need.
-- **Connect** opens the device's tunnel (WSS, authorised by a 30-second,
-  single-use ticket - the token never goes in a URL). Tools are locked while
-  connected. MCP clients reach it at `/mcp/{deviceId}` like any device and see
-  exactly two tools: `search` (find tools, with their schemas) and `call`
-  (`{name, arguments}`).
-- **Dash**: tools build UI with `ui.add({type, ...})` - heading, text, code,
-  image, badge, alert, stat, status, progress, divider; button, input,
-  textarea, editor, checkbox, toggle, radio, select, slider; table (sortable,
-  selectable rows) and list; row, column, grid, card, tabs, accordion, modal and
-  drawer; plus `ui.toast` - rendered by the page in its own style, enough for a
-  whole web app (the `example_app` starter builds one), and drive a **named cursor per MCP client** (`cursor.click`, `type`,
-  `fill`, `check`, `select`, `drag`). `ui.wait(id)` waits for the person at the
-  browser to click or change something. The page's *Components* section shows
-  every component with its `ui.add` call.
-- **Event handlers**: `on: { click: { tool, args } }` (or `change`) on a
-  component runs that sandbox tool on every click or change - by the person or
-  by a cursor - with the details as `event`, so a dashboard stays interactive
-  without an agent. `ui.events({ since, timeout })` returns what happened (who
-  clicked what, which handler ran) for agents to react to. Every control is
-  drawn by the page - no native select, checkbox, range or dialogs - with
-  keyboard support.
-- **More interaction**: toggle, radio and progress components; `draggable: true`
-  lets people drag a component between others or into a row or card (a
-  `drop` event); cursors also `hover`, `dblclick`, `press` keys and `scroll`, and
-  glide along a curve. The person's own pointer shows as "you", a spinner
-  marks a client whose call is running, the tab icon turns green while
-  connected, and the dash can be expanded to the whole page.
-- **Data for tools**: `kv.get/set/delete/list` (JSON values) and
-  `db.query/execute` - SQLite (sql.js, vendored) running in the page - kept in
-  the browser's IndexedDB per device, across calls and reloads. The page shows
-  what is stored and can clear it.
-- **Persistent dash**: the dash - components, nesting and order, values,
-  handlers - is saved to IndexedDB after every change and rebuilt on load, so it
-  survives Disconnect, reloads and browser restarts (handlers keep working
-  while disconnected; they run in the browser). A button clears it.
-- **Isolation**: each call runs in its own iframe sandboxed by attribute and
-  CSP - an opaque origin with no storage, cookies or credentials, no network,
-  no access to the page - and is stopped after 120 s. Clients are told apart by
-  the `Mcp-Session-Id` the gateway now issues on `initialize`; devices receive
-  `client: {id, name}` with each request (the id is a salted hash, not an IP).
-- One tunnel per device: if the device is already connected elsewhere (e.g.
-  code-mcp), Connect says so instead of replacing it. Closing the tab
-  disconnects (the dash and data stay).
+- **Tools in the page.** Add, save, edit, download, deactivate or delete .js tools; saving
+  validates syntax, a single default async function, `@param` tags and supported types.
+  Starter tools for building a dashboard are offered on the first visit.
+- **An interface, not just a log.** Tools build UI with `ui.add(...)` - headings, text,
+  code, images, badges, stats, progress, buttons, inputs, tables, lists, grids, cards,
+  tabs, modals - and drive a named cursor per MCP client (`click`, `type`, `fill`,
+  `select`, `drag`, `hover`, `scroll`). `ui.wait(id)` waits for the person to act.
+- **Interactive without an agent.** `on: { click: { tool, args } }` handlers run in the
+  browser, and `ui.events()` tells the agent what happened afterwards.
+- **State that survives.** `kv.*` (JSON) and `db.*` (SQLite via sql.js) live in IndexedDB
+  per device, and the whole dash is rebuilt on reload, across calls and restarts.
+- **Isolated by construction.** Each call runs in a sandboxed, credential-less iframe with
+  no network and a 120 s cap; clients are told apart by session, not by IP.
 
-## code-mcp
+## Access control
 
-`code-mcp/` holds the device server, `code-mcp.ts` (Bun - the one the CLI embeds). See [code-mcp/README.md](code-mcp/README.md).
+- **Per-device tokens** on both the device connection and every relayed request; unknown
+  ids answer 401, so ids cannot be enumerated.
+- **An admin page** (`/admin`) lists devices and anonymous devices, shows where each one
+  connects from (address, location, network, user agent) and can hand out tokens.
+- **Cut-offs that are immediate.** Disable a device and its tunnel is dropped; rotate its
+  token and the old one stops working; block an address and it reaches nothing, not even
+  the pages. The admin page itself is authenticated before it is served.
+- **Access to the admin page** is delegated to the identity provider in front of the
+  deployment, and the service verifies that assertion itself - so a misconfigured or
+  removed identity layer closes the page instead of exposing it.
+
+## What the service stores
+
+**The service keeps no logs of clients or devices.** There is no request log, no connection
+log, no per-device history, and Workers Logs are off. A request is answered and forgotten.
+
+What it does keep, because the features need it:
+
+- **The device registry**: id, token, and whether the device is online, disabled or blocked.
+- **Anonymous devices**: the opaque reference the admin page shows, their token, and when
+  they were created or last seen.
+- **Temporary files** and their metadata, and a monthly R2 spend counter - all deleted with
+  the file.
+- **Sandbox session names** for the browser page, so a connected tool can be told apart.
+- **Blocked addresses**, only when an operator blocks one on purpose.
+
+Where a device connects **from** (address, country, network, user agent) is held only while
+its tunnel is open, so the admin page can show it; it is not written to storage and gone
+when the device disconnects. For debugging, an operator can set `TRACE_DEVICES` to have
+those origin lines printed to the platform console - off by default.
+
+## One server for every device
+
+`mcp serve` presents every device's tools as one MCP server, so a client that knows a
+single server sees all machines:
+
 ```bash
-bun code-mcp/code-mcp.ts --port 7777 --token secret           # a local MCP server
-bun code-mcp/code-mcp.ts --gateway --id my-laptop --token t   # a device on the gateway
+claude mcp add devices -- mcp serve
+```
+
+## Local use (no account)
+
+The same server runs on its own for one machine - no service, no account:
+
+```bash
+bun code-mcp/code-mcp.ts --port 7777 --token secret        # HTTP MCP at http://127.0.0.1:7777/mcp
+bun code-mcp/code-mcp.ts --gateway --id my-laptop --token t # ...or as a device on the service
 ```
 
 ## CLI
 
-`cli/` builds `mcp`, a fast, dependency-free command line client: connect this
-machine as a device, run code-mcp as a service, list and inspect tools, and
-call one or many tools from inline JSON, paired arguments or stdin.
+`mcp` is a fast, dependency-free command line client: connect this machine, run the
+server as a user service, list and inspect devices and tools, and call tools from inline
+JSON, paired arguments or stdin.
+
 ```text
 mcp connect                                    # this machine, as an anonymous device
 mcp service install --id my-laptop --token t   # ...or a registered one, at every login
-mcp devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
+mcp devices connect my-laptop --token t   # save credentials for a registered device
 mcp tools list my-laptop
 mcp tools call my-laptop.read '{"path":"README.md"}'
-claude mcp add devices -- mcp serve            # every device's tools as one MCP server
 ```
 
-Credentials and defaults live in `~/.code-mcp-gateway/config.yaml`; flags override
-environment variables, which override the device entry, which overrides the
-defaults section. `mcp --help` lists everything, and `mcp call` is an alias for
-`mcp tools call`.
+Credentials and defaults live in `~/.prime-gateway/config.yaml`; flags override
+environment variables, which override the device entry, which overrides the defaults
+section. `mcp --help` lists everything, and `mcp call` is an alias for `mcp tools call`.
 
 ## Documentation
 
-- [code-mcp/README.md](code-mcp/README.md) - code-mcp: tools, flags, the implementation
+- [code-mcp/README.md](code-mcp/README.md) - the device server: tools, flags, behaviour
 - [cli/README.md](cli/README.md) - the `mcp` CLI: install, commands, configuration, exit codes
-- [gateway/README.md](gateway/README.md) — architecture, security model, deploy, tunables, test
-- [gateway/src](gateway/src) — entry point, DeviceDO, RegistryDO, config
-- [MCP specification](https://modelcontextprotocol.io) — the JSON-RPC protocol this gateway transports
+- [gateway/README.md](gateway/README.md) - internals, deployment, tunables, tests
+- [MCP specification](https://modelcontextprotocol.io) - the protocol all of this speaks
 
 ## Development
+
 ```bash
-cd gateway && npm test            # unit, smoke, file storage, anonymous devices (local wrangler)
+cd gateway && npm test                         # unit, smoke, files, anonymous devices (local wrangler)
 cd gateway && npm run typecheck
-cd cli && bun run test && bun test/e2e.ts      # CLI unit + end-to-end, against a local gateway
+cd cli && bun run test && bun test/e2e.ts      # CLI unit + end-to-end, against a local instance
 cd cli && bun test/service-e2e.ts              # mcp service on this OS's real service manager
-cd code-mcp && python -m unittest discover -s tests   # launcher tests
+cd code-mcp && python -m unittest discover -s tests
 ```
 
-CI runs each component's suites when it, or something it depends on, changes:
-the gateway on Linux; the CLI on Linux and Windows (x64, Arm) plus `mcp service`
-on Linux, macOS and Windows; code-mcp on Linux, macOS and Windows.
-
-Device-issued files can also be downloaded through authenticated
-`GET /mcp/{deviceId}/download/{ticket}` with `X-Device-Token` and gateway
-credentials. See [download protocol and curl usage](gateway/README.md#ticket-based-file-downloads).
+CI runs each component's suites when it, or something it depends on, changes: the service
+on Linux; the CLI on Linux and Windows (x64, Arm) plus `mcp service` on Linux, macOS and
+Windows; code-mcp on Linux, macOS and Windows.
