@@ -328,7 +328,9 @@ export default {
     // "/files/", "/mcp/" and "/mcp/{device}/" used to answer 404/405 with no
     // page at all - easy to land on by typing or pasting a trailing slash.
     // Redirect them to the canonical path (308 keeps a POST a POST).
-    if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
+    // Only reads: a POST to /mcp/ is an MCP client's mistake and keeps its
+    // existing answer ("invalid deviceId"), not a redirect.
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname.length > 1 && url.pathname.endsWith("/")) {
       const to = new URL(url);
       to.pathname = url.pathname.replace(/\/+$/, "") || "/";
       return new Response(null, { status: 308, headers: { location: to.toString(), "cache-control": "no-store" } });
