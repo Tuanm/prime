@@ -756,7 +756,7 @@ const PAGE_JS = String.raw`(function () {
           setStatus("Device " + DEVICE + " is already connected from somewhere else (for example code-mcp or 'prime connect'). Stop it there, then Connect.", true);
           return;
         }
-        conn.mcpUrl = t.mcp_url;
+        conn.mcpUrl = t.device_url || t.mcp_url;
         openSocket(t.ws_url);
       })
       .catch(function (err) {
@@ -2729,7 +2729,7 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
     const ticket = await signTicket(auth.deviceId, token);
     const wsBase = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
     return Response.json(
-      { device_id: auth.deviceId, online, ticket, ws_url: wsBase + "/ws/" + encodeURIComponent(auth.deviceId) + "?ticket=" + encodeURIComponent(ticket), mcp_url: url.origin + "/mcp/" + encodeURIComponent(auth.deviceId), expires_in_ms: TICKET_TTL_MS },
+      { device_id: auth.deviceId, online, ticket, ws_url: wsBase + "/device/ws/" + encodeURIComponent(auth.deviceId) + "?ticket=" + encodeURIComponent(ticket), device_url: url.origin + "/device/" + encodeURIComponent(auth.deviceId), expires_in_ms: TICKET_TTL_MS },
       { headers: base },
     );
   }

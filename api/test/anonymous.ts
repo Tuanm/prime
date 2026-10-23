@@ -83,7 +83,7 @@ async function upgradeStatus(url: string, headers: Record<string, string>): Prom
 
 /** A device that answers tools/list with one tool and echoes tools/call. */
 async function device(base: string, id: string, token: string): Promise<WebSocket> {
-  const ws = await connectWs(base.replace(/^http/, "ws") + "/ws/" + id, { "x-device-token": token });
+  const ws = await connectWs(base.replace(/^http/, "ws") + "/device/ws/" + id, { "x-device-token": token });
   ws.send(JSON.stringify({ type: "register", deviceId: id }));
   ws.addEventListener("message", (e) => {
     const env = JSON.parse(String(e.data));
@@ -106,7 +106,7 @@ async function mcp(base: string, id: string, opts: { token?: string; header?: st
   const q = opts.token !== undefined ? "?token=" + encodeURIComponent(opts.token) : "";
   const headers: Record<string, string> = { "content-type": "application/json", "cf-connecting-ip": opts.ip || "10.0.0.1" };
   if (opts.header) headers["x-device-token"] = opts.header;
-  const r = await fetch(base + "/mcp/" + id + q, { method: "POST", headers, body: rpc("tools/list") });
+  const r = await fetch(base + "/device/" + id + q, { method: "POST", headers, body: rpc("tools/list") });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
 
@@ -160,8 +160,8 @@ try {
   const tok1: string = a1.body.token;
   check("the id is generated in the anon- namespace", ANON_ID.test(id1), id1);
   check("the code is 6 digits/upper-case letters", CODE.test(tok1), tok1);
-  check("connect_url is {gateway}/mcp/{id}?token={code}", a1.body.connect_url === B + "/mcp/" + id1 + "?token=" + tok1, a1.body.connect_url);
-  check("ws_url points at the device tunnel", a1.body.ws_url === "ws://127.0.0.1:8840/ws/" + id1, a1.body.ws_url);
+  check("connect_url is {gateway}/mcp/{id}?token={code}", a1.body.connect_url === B + "/device/" + id1 + "?token=" + tok1, a1.body.connect_url);
+  check("ws_url points at the device tunnel", a1.body.ws_url === "ws://127.0.0.1:8840/device/ws/" + id1, a1.body.ws_url);
   check("it reports its lower rate limit", a1.body.rate_limit?.max === 5 && a1.body.rate_limit?.window_ms === 60000, JSON.stringify(a1.body.rate_limit));
   check("the response is not cacheable", a1.headers.get("cache-control") === "no-store");
   check("GET on the registration path -> 405", (await fetch(B + "/api/devices/anonymous")).status === 405);
@@ -195,7 +195,7 @@ try {
   const refs = anonList.devices.map((d: any) => d.ref);
 
   // ---- the device connects and is reachable with its code ----
-  check("the tunnel refuses a wrong code", (await upgradeStatus(B + "/ws/" + id1, { "x-device-token": "WRONG1" })) === 401);
+  check("the tunnel refuses a wrong code", (await upgradeStatus(B + "/device/ws/" + id1, { "x-device-token": "WRONG1" })) === 401);
   const dev1 = await device(B, id1, tok1);
   sockets.push(dev1);
   const viaQuery = await mcp(B, id1, { token: tok1 });
@@ -208,12 +208,12 @@ try {
   const burst: number[] = [];
   for (let i = 0; i < 7; i++) burst.push((await mcp(B, id1, { token: tok1, ip: "10.9.9.9" })).status);
   check("an anonymous device gets 5 requests per IP per window", burst.slice(0, 5).every((s) => s === 200) && burst.slice(5).every((s) => s === 429), burst.join(","));
-  const hint = await fetch(B + "/mcp/" + id1 + "?token=" + tok1, { method: "POST", headers: { "cf-connecting-ip": "10.9.9.9", "content-type": "application/json" }, body: rpc("ping") });
+  const hint = await fetch(B + "/device/" + id1 + "?token=" + tok1, { method: "POST", headers: { "cf-connecting-ip": "10.9.9.9", "content-type": "application/json" }, body: rpc("ping") });
   check("...and the 429 says why", /anonymous devices allow 5/.test(JSON.stringify(await hint.json())));
   check("another client IP is unaffected", (await mcp(B, id1, { token: tok1, ip: "10.9.9.8" })).status === 200);
   const regBurst: number[] = [];
   for (let i = 0; i < 12; i++) {
-    const r = await fetch(B + "/mcp/reg1?token=reg1-secret", { method: "POST", headers: { "cf-connecting-ip": "10.9.9.9", "content-type": "application/json" }, body: rpc("ping") });
+    const r = await fetch(B + "/device/reg1?token=reg1-secret", { method: "POST", headers: { "cf-connecting-ip": "10.9.9.9", "content-type": "application/json" }, body: rpc("ping") });
     regBurst.push(r.status);
   }
   check("a registered device is not held to the anonymous limit", !regBurst.includes(429), regBurst.join(","));
@@ -225,7 +225,7 @@ try {
   await Bun.sleep(2200); // past the entry's 2s registry cache
   const lockedRight = await mcp(B, id2, { token: tok2, ip: "10.5.5.9" });
   check("after 4 misses even the right code is refused (locked)", lockedRight.status === 429, String(lockedRight.status));
-  check("the lock also holds the tunnel", (await upgradeStatus(B + "/ws/" + id2, { "x-device-token": tok2 })) === 429);
+  check("the lock also holds the tunnel", (await upgradeStatus(B + "/device/ws/" + id2, { "x-device-token": tok2 })) === 429);
   const lockedRow = ((await (await fetch(B + "/admin/api/anonymous")).json()) as any).devices.find((d: any) => d.locked);
   check("the admin sees it as locked", Boolean(lockedRow));
   await Bun.sleep(4500);
@@ -260,7 +260,7 @@ try {
   check("deactivating drops its live tunnel", disabledBody.tunnelDropped === true, JSON.stringify(disabledBody));
   await Bun.sleep(2200);
   check("a deactivated device -> 403 on /mcp", (await mcp(B, id1, { token: tok1, ip: "10.7.7.1" })).status === 403);
-  check("...and on its tunnel", (await upgradeStatus(B + "/ws/" + id1, { "x-device-token": tok1 })) === 403);
+  check("...and on its tunnel", (await upgradeStatus(B + "/device/ws/" + id1, { "x-device-token": tok1 })) === 403);
   check("...admin Tools too", (await fetch(B + "/admin/api/anonymous/" + ref1 + "/tools", { method: "POST" })).status === 403);
   await fetch(B + "/admin/api/anonymous/" + ref1 + "/state", { method: "POST", headers: ADMIN_JSON, body: JSON.stringify({ disabled: false }) });
   await Bun.sleep(2200);
@@ -295,7 +295,7 @@ try {
   check("Delete by ref", del.ok);
   await Bun.sleep(2200);
   check("a deleted device -> 401 on /mcp", (await mcp(B, id1, { token: tok1, ip: "10.7.7.4" })).status === 401);
-  check("...and on its tunnel", (await upgradeStatus(B + "/ws/" + id1, { "x-device-token": tok1 })) === 401);
+  check("...and on its tunnel", (await upgradeStatus(B + "/device/ws/" + id1, { "x-device-token": tok1 })) === 401);
   check("its ref is gone", (await fetch(B + "/admin/api/anonymous/" + ref1 + "/tools", { method: "POST" })).status === 404);
   const freed = await create(B, "10.3.3.5");
   check("deleting frees a slot under the cap", freed.status === 201, String(freed.status));
@@ -307,12 +307,12 @@ try {
   openW = await startOpen();
   const O = openW.base;
   console.log("== open instance ==");
-  check("open mode: an unregistered device connects without a code", (await upgradeStatus(O + "/ws/free-host", {})) === 101);
+  check("open mode: an unregistered device connects without a code", (await upgradeStatus(O + "/device/ws/free-host", {})) === 101);
   const g1 = await create(O, "10.4.4.1");
   check("open mode: anonymous registration works", g1.status === 201);
   // Checked straight away: this instance collects unconnected devices after 2s.
-  check("creating one does not flip the gateway into per-device mode", (await upgradeStatus(O + "/ws/free-host-2", {})) === 101);
-  check("...but the anonymous device still needs its code", (await upgradeStatus(O + "/ws/" + g1.body.deviceId, { "x-device-token": "WRONG1" })) === 401);
+  check("creating one does not flip the gateway into per-device mode", (await upgradeStatus(O + "/device/ws/free-host-2", {})) === 101);
+  check("...but the anonymous device still needs its code", (await upgradeStatus(O + "/device/ws/" + g1.body.deviceId, { "x-device-token": "WRONG1" })) === 401);
   const g2 = await create(O, "10.4.4.1");
   const live = await device(O, g2.body.deviceId, g2.body.token);
   sockets.push(live);

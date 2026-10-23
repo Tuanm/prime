@@ -1,5 +1,5 @@
 // The front page: Prime, with the three things it does. The full product page
-// lives at /mcp; the pages themselves are /files (file sharing) and /sandbox
+// lives at /connect; the pages themselves are /files (file sharing) and /sandbox
 // (the browser sandbox).
 
 import { FAVICON } from "./ui-css";
@@ -35,10 +35,10 @@ __CSS__
     <p class="desc">A toolkit that turns a machine, a file and a browser into tools - with limits you set.</p>
 
     <div class="cards">
-      <a class="card" href="/mcp">
+      <a class="card" href="/connect">
         <div class="t">Devices</div>
         <div class="d">Any machine becomes a device: its files, shell and tools, reachable from any MCP client.</div>
-        <div class="u">/mcp</div>
+        <div class="u">/connect</div>
       </a>
       <a class="card" href="/files">
         <div class="t">File sharing</div>

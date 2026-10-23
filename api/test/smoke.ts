@@ -155,11 +155,11 @@ async function s1_devices_plain(): Promise<void> {
 }
 
 async function s4_duplicate_register_rejected(): Promise<void> {
-  const a = await connectWs(plainBase + "/ws/dup-id");
+  const a = await connectWs(plainBase + "/device/ws/dup-id");
   await recvJson(a, (m) => m.type === "registered");
   let httpStatus = 0;
   try {
-    const resp = await fetch(plainBase + "/ws/dup-id", {
+    const resp = await fetch(plainBase + "/device/ws/dup-id", {
       headers: { upgrade: "websocket", connection: "upgrade", "sec-websocket-key": "AAAAAAAAAAAAAAAAAAAAAA==", "sec-websocket-version": "13" },
     });
     httpStatus = resp.status;
@@ -175,11 +175,11 @@ async function s31_reconnect_replaces_stale(): Promise<void> {
   // blip) must let an authenticated reconnect of the SAME deviceId take over
   // immediately, instead of 409 until the keepalive alarm (default 90s) reaps
   // it - that is what keeps the device tunnel always live.
-  const a = await connectWs(plainBase + "/ws/replace-dev");
+  const a = await connectWs(plainBase + "/device/ws/replace-dev");
   await recvJson(a, (m) => m.type === "registered");
   // Send nothing on a; wait past TUNNEL_REPLACE_GRACE_MS (1000ms on plain).
   await Bun.sleep(1300);
-  const b = await connectWs(plainBase + "/ws/replace-dev");
+  const b = await connectWs(plainBase + "/device/ws/replace-dev");
   // If the stale socket was NOT taken over, this gets 409 and connectWs throws.
   await recvJson(b, (m) => m.type === "registered");
   a.close();
@@ -189,9 +189,9 @@ async function s31_reconnect_replaces_stale(): Promise<void> {
 }
 
 async function s5_register_message_takeover_blocked(): Promise<void> {
-  const victim = await connectWs(plainBase + "/ws/victim");
+  const victim = await connectWs(plainBase + "/device/ws/victim");
   await recvJson(victim, (m) => m.type === "registered");
-  const attacker = await connectWs(plainBase + "/ws/attacker");
+  const attacker = await connectWs(plainBase + "/device/ws/attacker");
   await recvJson(attacker, (m) => m.type === "registered");
   attacker.send(JSON.stringify({ type: "register", deviceId: "victim" }));
   const errMsg = await recvJson<any>(attacker, (m) => m.type === "error");
@@ -204,7 +204,7 @@ async function s5_register_message_takeover_blocked(): Promise<void> {
 }
 
 async function s6_e2e_rpc(): Promise<void> {
-  const dev = await connectWs(plainBase + "/ws/s6-dev");
+  const dev = await connectWs(plainBase + "/device/ws/s6-dev");
   await recvJson(dev, (m) => m.type === "registered");
   dev.addEventListener("message", (e) => {
     let env: any;
@@ -213,7 +213,7 @@ async function s6_e2e_rpc(): Promise<void> {
       dev.send(JSON.stringify({ id: env.id, response: { jsonrpc: "2.0", id: env.request.id, result: { echoed: env.request.params } } }));
     }
   });
-  const r = await fetch(plainBase + "/mcp/s6-dev", {
+  const r = await fetch(plainBase + "/device/s6-dev", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "echo", params: { hello: "world" } }),
@@ -227,9 +227,9 @@ async function s6_e2e_rpc(): Promise<void> {
 }
 
 async function s7_cross_device_response_blocked(): Promise<void> {
-  const dev1 = await connectWs(plainBase + "/ws/s7a");
+  const dev1 = await connectWs(plainBase + "/device/ws/s7a");
   await recvJson(dev1, (m) => m.type === "registered");
-  const dev2 = await connectWs(plainBase + "/ws/s7b");
+  const dev2 = await connectWs(plainBase + "/device/ws/s7b");
   await recvJson(dev2, (m) => m.type === "registered");
   let leakedId: string | null = null;
   dev1.addEventListener("message", (e) => {
@@ -237,7 +237,7 @@ async function s7_cross_device_response_blocked(): Promise<void> {
     try { env = JSON.parse(typeof e.data === "string" ? e.data : ""); } catch { return; }
     if (env?.id) leakedId = env.id;
   });
-  const reqPromise = fetch(plainBase + "/mcp/s7a", {
+  const reqPromise = fetch(plainBase + "/device/s7a", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "m" }),
@@ -256,10 +256,10 @@ async function s7_cross_device_response_blocked(): Promise<void> {
 }
 
 async function s8_timeout(): Promise<void> {
-  const dev = await connectWs(plainBase + "/ws/s8-dev");
+  const dev = await connectWs(plainBase + "/device/ws/s8-dev");
   await recvJson(dev, (m) => m.type === "registered");
   const t0 = Date.now();
-  const r = await fetch(plainBase + "/mcp/s8-dev", {
+  const r = await fetch(plainBase + "/device/s8-dev", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "m" }),
@@ -273,10 +273,10 @@ async function s8_timeout(): Promise<void> {
 }
 
 async function s9_body_too_large(): Promise<void> {
-  const dev = await connectWs(plainBase + "/ws/s9-dev");
+  const dev = await connectWs(plainBase + "/device/ws/s9-dev");
   await recvJson(dev, (m) => m.type === "registered");
   const big = "x".repeat(2048);
-  const r = await fetch(plainBase + "/mcp/s9-dev", {
+  const r = await fetch(plainBase + "/device/s9-dev", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "m", params: big }),
@@ -292,12 +292,12 @@ async function s10_pending_budget(): Promise<void> {
   // keepalive-alarm quirks cannot interfere with the budget assertion.
   const g = await startWrangler(8806, ["TIMEOUT_MS=8000", "MAX_PENDING_PER_DEVICE=2", "KEEPALIVE_TIMEOUT_MS=60000"]);
   try {
-    const dev = await connectWs(g.base + "/ws/s10-dev-" + RUN_SUFFIX);
+    const dev = await connectWs(g.base + "/device/ws/s10-dev-" + RUN_SUFFIX);
     await recvJson(dev, (m) => m.type === "registered");
-    const a = fetch(g.base + "/mcp/s10-dev-" + RUN_SUFFIX, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":1,"method":"m"}' });
-    const b = fetch(g.base + "/mcp/s10-dev-" + RUN_SUFFIX, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":2,"method":"m"}' });
+    const a = fetch(g.base + "/device/s10-dev-" + RUN_SUFFIX, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":1,"method":"m"}' });
+    const b = fetch(g.base + "/device/s10-dev-" + RUN_SUFFIX, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":2,"method":"m"}' });
     await Bun.sleep(300);
-    const c = await fetch(g.base + "/mcp/s10-dev-" + RUN_SUFFIX, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":3,"method":"m"}' });
+    const c = await fetch(g.base + "/device/s10-dev-" + RUN_SUFFIX, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":3,"method":"m"}' });
     if (c.status !== 503) return bad("s10_pending_budget", "3rd status=" + c.status);
     const cb = (await c.json()) as any;
     if (cb.error !== "device busy") return bad("s10_pending_budget", "3rd body=" + JSON.stringify(cb));
@@ -318,7 +318,7 @@ async function s11_origin_whitelist(): Promise<void> {
   let rejected = false;
   for (let attempt = 0; attempt < 2 && !rejected; attempt++) {
     try {
-      const ws = new WebSocket(plainBase + "/ws/x", { headers: { origin: "https://evil.example" } });
+      const ws = new WebSocket(plainBase + "/device/ws/x", { headers: { origin: "https://evil.example" } });
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(() => reject(new Error("origin ws neither opened nor failed (timeout)")), 15000);
         ws.addEventListener("open", () => { clearTimeout(t); reject(new Error("origin ws OPENED - whitelist bypassed!")); }, { once: true });
@@ -332,7 +332,7 @@ async function s11_origin_whitelist(): Promise<void> {
     }
   }
   // Allowed origin: must connect and register.
-  const ws = await connectWs(plainBase + "/ws/s11-dev");
+  const ws = await connectWs(plainBase + "/device/ws/s11-dev");
   await recvJson(ws, (m) => m.type === "registered");
   ws.close();
   await Bun.sleep(200);
@@ -371,7 +371,7 @@ async function s22_admin_registry(): Promise<void> {
       body: JSON.stringify({ deviceId: "admin-dev", token: "admin-tok" }),
     });
     if (r.status !== 200) return bad("s22_admin_register", "status=" + r.status + " body=" + (await r.text()));
-    const ws = await connectWs(g.base + "/ws/admin-dev?token=admin-tok");
+    const ws = await connectWs(g.base + "/device/ws/admin-dev?token=admin-tok");
     await recvJson(ws, (m) => m.type === "registered");
     // Disabling the device must drop the tunnel that is already open, not just
     // refuse new requests: an operator cuts a device off, it stays cut off.
@@ -394,7 +394,7 @@ async function s22_admin_registry(): Promise<void> {
     if (why !== "closed:4001") console.log("note: s22 close frame not delivered within 8s (" + why + ") - tunnelDropped was true");
     ok("s22_disable_drops_tunnel");
     // ...and the relay refuses it while disabled.
-    r = await fetch(g.base + "/mcp/admin-dev?auth=" + GW, {
+    r = await fetch(g.base + "/device/admin-dev?auth=" + GW, {
       method: "POST",
       headers: { "content-type": "application/json", "x-device-token": "admin-tok" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
@@ -413,7 +413,7 @@ async function s22_admin_registry(): Promise<void> {
     if (r.status !== 200) return bad("s22_admin_delete", "status=" + r.status + " body=" + (await r.text()));
     let stillOpen = false;
     try {
-      const w2 = await connectWs(g.base + "/ws/admin-dev?token=admin-tok", {}, 1);
+      const w2 = await connectWs(g.base + "/device/ws/admin-dev?token=admin-tok", {}, 1);
       stillOpen = true;
       w2.close();
     } catch {}
@@ -425,7 +425,7 @@ async function s22_admin_registry(): Promise<void> {
       body: JSON.stringify({ deviceId: "rot-dev", token: "tok-a" }),
     });
     if (r.status !== 200) return bad("s22_rot_register", "status=" + r.status + " body=" + (await r.text()));
-    const wsR = await connectWs(g.base + "/ws/rot-dev?token=tok-a");
+    const wsR = await connectWs(g.base + "/device/ws/rot-dev?token=tok-a");
     await recvJson(wsR, (m) => m.type === "registered");
     const rotateClose = new Promise<string>((resolve) => {
       const t = setTimeout(() => resolve("still open"), 8000);
@@ -443,14 +443,14 @@ async function s22_admin_registry(): Promise<void> {
     const whyRot = await rotateClose;
     if (whyRot !== "closed:4001") console.log("note: s22 rotate close frame not delivered within 8s (" + whyRot + ")");
     await Bun.sleep(2500);
-    const stale = await fetch(g.base + "/mcp/rot-dev?token=tok-a", {
+    const stale = await fetch(g.base + "/device/rot-dev?token=tok-a", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
     });
     if (stale.status !== 401) return bad("s22_rot_old_token_dead", "status=" + stale.status);
     ok("s22_rotate_drops_tunnel");
-    const wsR2 = await connectWs(g.base + "/ws/rot-dev?token=tok-b");
+    const wsR2 = await connectWs(g.base + "/device/ws/rot-dev?token=tok-b");
     await recvJson(wsR2, (m) => m.type === "registered");
     wsR2.close();
     ok("s22_rotate_new_token_works");
@@ -471,7 +471,7 @@ async function s23_online_status_persists(): Promise<void> {
     "KEEPALIVE_TIMEOUT_MS=5000",
   ]);
   try {
-    const dev = await connectWs(g.base + "/ws/live-dev?token=live-tok");
+    const dev = await connectWs(g.base + "/device/ws/live-dev?token=live-tok");
     await recvJson(dev, (m) => m.type === "registered");
     // online right after connect
     let r = await fetch(g.base + "/admin/api/devices");
@@ -504,7 +504,7 @@ async function s24_admin_clients(): Promise<void> {
     "KEEPALIVE_TIMEOUT_MS=5000",
   ]);
   try {
-    const dev = await connectWs(g.base + "/ws/client-dev?token=client-tok");
+    const dev = await connectWs(g.base + "/device/ws/client-dev?token=client-tok");
     await recvJson(dev, (m) => m.type === "registered");
     dev.addEventListener("message", (e) => {
       let env: any;
@@ -514,13 +514,13 @@ async function s24_admin_clients(): Promise<void> {
       }
     });
     // client: initialize (carries clientInfo.name) then a second request
-    let r = await fetch(g.base + "/mcp/client-dev?token=client-tok", {
+    let r = await fetch(g.base + "/device/client-dev?token=client-tok", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "test-client", version: "1" } } }),
     });
     if (r.status !== 200) return bad("s24_mcp", "status=" + r.status);
-    r = await fetch(g.base + "/mcp/client-dev?token=client-tok", {
+    r = await fetch(g.base + "/device/client-dev?token=client-tok", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }),
@@ -541,7 +541,7 @@ async function s24_admin_clients(): Promise<void> {
 }
 
 async function s14_keepalive_ack(): Promise<void> {
-  const ws = await connectWs(plainBase + "/ws/s14-dev");
+  const ws = await connectWs(plainBase + "/device/ws/s14-dev");
   await recvJson(ws, (m) => m.type === "registered");
   ws.send(JSON.stringify({ type: "keepalive" }));
   const ack = await recvJson<any>(ws, (m) => m.type === "keepalive-ack");
@@ -554,17 +554,17 @@ async function s14_keepalive_ack(): Promise<void> {
 async function s16_invalid_device_id_rejected(): Promise<void> {
   const badIds = ["foo/bar", "a b", "a$b", "a".repeat(129), ""];
   for (const id of badIds) {
-    const r = await fetch(plainBase + "/mcp/" + encodeURIComponent(id), { method: "POST", body: "{}" });
+    const r = await fetch(plainBase + "/device/" + encodeURIComponent(id), { method: "POST", body: "{}" });
     if (r.status !== 400) return bad("s16_post_mcp_bad_id[" + JSON.stringify(id) + "]", "status=" + r.status);
   }
   let failed = false;
-  try { await connectWs(plainBase + "/ws/" + encodeURIComponent("a b")); } catch { failed = true; }
+  try { await connectWs(plainBase + "/device/ws/" + encodeURIComponent("a b")); } catch { failed = true; }
   if (!failed) return bad("s16_ws_bad_id_rejected", "connect succeeded");
   ok("s16_invalid_device_id_rejected");
 }
 
 async function s17_devices_lists_online(): Promise<void> {
-  const ws = await connectWs(authBase + "/ws/s17-dev-" + RUN_SUFFIX + "?token=" + DEV);
+  const ws = await connectWs(authBase + "/device/ws/s17-dev-" + RUN_SUFFIX + "?token=" + DEV);
   await recvJson(ws, (m) => m.type === "registered");
   await Bun.sleep(600); // let the registry register propagate
   const r = await fetch(authBase + "/devices?auth=" + ADM);
@@ -576,7 +576,7 @@ async function s17_devices_lists_online(): Promise<void> {
 }
 
 async function s18_relay_token_forwarded(): Promise<void> {
-  const dev = await connectWs(plainBase + "/ws/s18-dev");
+  const dev = await connectWs(plainBase + "/device/ws/s18-dev");
   await recvJson(dev, (m) => m.type === "registered");
   let gotToken: string | null = null;
   dev.addEventListener("message", (e) => {
@@ -587,7 +587,7 @@ async function s18_relay_token_forwarded(): Promise<void> {
       dev.send(JSON.stringify({ id: env.id, response: { jsonrpc: "2.0", id: env.request.id, result: { token: gotToken } } }));
     }
   });
-  const r = await fetch(plainBase + "/mcp/s18-dev?token=relay-secret", {
+  const r = await fetch(plainBase + "/device/s18-dev?token=relay-secret", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "m" }),
@@ -618,28 +618,28 @@ async function a1_devices_token_gated(): Promise<void> {
 
 async function a2_gateway_auth(): Promise<void> {
   // No auth -> 401
-  let r = await fetch(authBase + "/mcp/somedev", { method: "POST", body: "{}" });
+  let r = await fetch(authBase + "/device/somedev", { method: "POST", body: "{}" });
   if (r.status !== 401) return bad("a2_no_auth_401", "status=" + r.status);
   // Wrong gateway token -> 401
-  r = await fetch(authBase + "/mcp/somedev", { method: "POST", body: "{}", headers: { authorization: "Bearer wrong" } });
+  r = await fetch(authBase + "/device/somedev", { method: "POST", body: "{}", headers: { authorization: "Bearer wrong" } });
   if (r.status !== 401) return bad("a2_wrong_auth_401", "status=" + r.status);
   // Correct gateway token but missing device token -> 401 (device auth required)
-  r = await fetch(authBase + "/mcp/somedev", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
+  r = await fetch(authBase + "/device/somedev", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
   if (r.status !== 401) return bad("a2_gw_only_401", "status=" + r.status);
   // Correct gateway + device tokens -> 503 (no device online) - auth passed
-  r = await fetch(authBase + "/mcp/somedev?token=" + DEV, { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
+  r = await fetch(authBase + "/device/somedev?token=" + DEV, { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
   if (r.status !== 503) return bad("a2_full_auth_503", "status=" + r.status);
   // Device token via query, gateway via query -> 503
-  r = await fetch(authBase + "/mcp/somedev?auth=" + GW + "&token=" + DEV, { method: "POST", body: "{}" });
+  r = await fetch(authBase + "/device/somedev?auth=" + GW + "&token=" + DEV, { method: "POST", body: "{}" });
   if (r.status !== 503) return bad("a2_query_full_auth_503", "status=" + r.status);
   ok("a2_gateway_auth");
 }
 
 async function a3_device_auth(): Promise<void> {
   let failed = false;
-  try { await connectWs(authBase + "/ws/abc"); } catch { failed = true; }
+  try { await connectWs(authBase + "/device/ws/abc"); } catch { failed = true; }
   if (!failed) return bad("a3_no_token_ws_rejected", "connect succeeded without token");
-  const ws = await connectWs(authBase + "/ws/a3-dev?auth=" + DEV);
+  const ws = await connectWs(authBase + "/device/ws/a3-dev?auth=" + DEV);
   const reg = await recvJson<any>(ws, (m) => m.type === "registered");
   if (reg.deviceId !== "a3-dev") return bad("a3_query_token_ws_ok", "reg=" + JSON.stringify(reg));
   ws.close();
@@ -663,21 +663,21 @@ async function s20_per_device_unknown_id_401(): Promise<void> {
   const g = await startWrangler(8804, ["DEVICE_TOKENS=" + JSON.stringify({ "known-dev": "tok-a", "other-dev": "tok-b" }), "GATEWAY_TOKEN=" + GW, "ADMIN_TOKEN=" + ADM]);
   try {
     // Unknown deviceId -> 401 (no existence oracle; no DO created)
-    let r = await fetch(g.base + "/mcp/ghost-dev", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
+    let r = await fetch(g.base + "/device/ghost-dev", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
     if (r.status !== 401) return bad("s20_unknown_id_401", "status=" + r.status + " body=" + (await r.text()));
     // Wrong token for a known device -> 401
-    r = await fetch(g.base + "/mcp/known-dev?token=wrong", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
+    r = await fetch(g.base + "/device/known-dev?token=wrong", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
     if (r.status !== 401) return bad("s20_wrong_token_401", "status=" + r.status);
     // Correct token, device offline -> 503 (auth passed)
-    r = await fetch(g.base + "/mcp/known-dev?token=tok-a", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
+    r = await fetch(g.base + "/device/known-dev?token=tok-a", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
     if (r.status !== 503) return bad("s20_correct_token_503", "status=" + r.status + " body=" + (await r.text()));
     // WS with unknown id -> 401
     let failed = false;
-    try { await connectWs(g.base + "/ws/ghost-dev?token=tok-a"); } catch { failed = true; }
+    try { await connectWs(g.base + "/device/ws/ghost-dev?token=tok-a"); } catch { failed = true; }
     if (!failed) return bad("s20_ws_unknown_id_rejected", "connect succeeded");
     // WS with wrong token -> 401
     failed = false;
-    try { await connectWs(g.base + "/ws/known-dev?token=wrong"); } catch { failed = true; }
+    try { await connectWs(g.base + "/device/ws/known-dev?token=wrong"); } catch { failed = true; }
     if (!failed) return bad("s20_ws_wrong_token_rejected", "connect succeeded");
     ok("s20_per_device_unknown_id_401");
   } finally {
@@ -689,7 +689,7 @@ async function s21_long_call(): Promise<void> {
   // Long tool calls: TIMEOUT_MS=8000 on a fresh instance; device sleeps 4s then replies.
   const g = await startWrangler(8805, ["TIMEOUT_MS=8000"]);
   try {
-    const dev = await connectWs(g.base + "/ws/long-dev");
+    const dev = await connectWs(g.base + "/device/ws/long-dev");
     await recvJson(dev, (m) => m.type === "registered");
     dev.addEventListener("message", (e) => {
       let env: any;
@@ -702,7 +702,7 @@ async function s21_long_call(): Promise<void> {
       }
     });
     const t0 = Date.now();
-    const r = await fetch(g.base + "/mcp/long-dev", {
+    const r = await fetch(g.base + "/device/long-dev", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "slow" }),
@@ -758,7 +758,7 @@ async function stopWrangler(proc: any): Promise<void> {
 
 async function s25_sse_e2e(): Promise<void> {
   await registerDevice(plainBase, "sse-dev", "sse-tok");
-  const dev = await connectWs(plainBase + "/ws/sse-dev?token=sse-tok");
+  const dev = await connectWs(plainBase + "/device/ws/sse-dev?token=sse-tok");
   await recvJson(dev, (m) => m.type === "registered");
   dev.addEventListener("message", (e) => {
     let env: any;
@@ -791,7 +791,7 @@ async function s25_sse_e2e(): Promise<void> {
 
 async function s28_sse_unknown_session(): Promise<void> {
   await registerDevice(plainBase, "sse-ghost", "sse-tok");
-  const dev = await connectWs(plainBase + "/ws/sse-ghost?token=sse-tok");
+  const dev = await connectWs(plainBase + "/device/ws/sse-ghost?token=sse-tok");
   await recvJson(dev, (m) => m.type === "registered");
   const r = await fetch(plainBase + "/messages/sse-ghost?session=does-not-exist&token=sse-tok", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "m" }) });
   if (r.status !== 400) return bad("s28_unknown_session", "status=" + r.status);
@@ -804,7 +804,7 @@ async function s28_sse_unknown_session(): Promise<void> {
 
 async function s29_sse_relay_token_forwarded(): Promise<void> {
   await registerDevice(plainBase, "sse-relay", "relay-secret");
-  const dev = await connectWs(plainBase + "/ws/sse-relay?token=relay-secret");
+  const dev = await connectWs(plainBase + "/device/ws/sse-relay?token=relay-secret");
   await recvJson(dev, (m) => m.type === "registered");
   let gotToken: string | null = null;
   dev.addEventListener("message", (e) => {
@@ -839,7 +839,7 @@ async function s29_sse_relay_token_forwarded(): Promise<void> {
 
 async function s30_sse_device_gone_closes_stream(): Promise<void> {
   await registerDevice(plainBase, "sse-drop", "sse-tok");
-  const dev = await connectWs(plainBase + "/ws/sse-drop?token=sse-tok");
+  const dev = await connectWs(plainBase + "/device/ws/sse-drop?token=sse-tok");
   await recvJson(dev, (m) => m.type === "registered");
   const sse = await openSse(plainBase + "/sse/sse-drop?token=sse-tok");
   const ep = await nextSse(sse);
@@ -858,7 +858,7 @@ async function s26_sse_auth(): Promise<void> {
   if (r0.status !== 401) return bad("s26_no_auth_401", "status=" + r0.status);
   // Full credentials -> stream opens; POST works.
   await registerDevice(authBase, "sse-auth-dev", DEV);
-  const dev = await connectWs(authBase + "/ws/sse-auth-dev?token=" + DEV);
+  const dev = await connectWs(authBase + "/device/ws/sse-auth-dev?token=" + DEV);
   await recvJson(dev, (m) => m.type === "registered");
   dev.addEventListener("message", (e) => {
     let env: any;
@@ -912,7 +912,7 @@ async function s32_download_relay(): Promise<void> {
   const name = "download-dev";
   const ticket = "a".repeat(64);
   await registerDevice(authBase, name, DEV);
-  const ws = await connectWs(authBase + "/ws/" + name + "?token=" + DEV);
+  const ws = await connectWs(authBase + "/device/ws/" + name + "?token=" + DEV);
   await recvJson(ws, (m) => m.type === "registered");
   const bytes = new Uint8Array(150000);
   for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
@@ -939,7 +939,7 @@ async function s32_download_relay(): Promise<void> {
     }
   });
   try {
-    const url = authBase + "/mcp/" + name + "/download/" + ticket;
+    const url = authBase + "/device/" + name + "/download/" + ticket;
     if ((await fetch(url)).status !== 401) throw new Error("missing gateway auth accepted");
     if ((await fetch(url, { headers: { authorization: "Bearer " + GW } })).status !== 401) throw new Error("missing device auth accepted");
     const headers = { authorization: "Bearer " + GW, "x-device-token": DEV };
@@ -949,7 +949,7 @@ async function s32_download_relay(): Promise<void> {
     if (r.status !== 200 || r.headers.has("set-cookie")) throw new Error("unsafe headers or status " + r.status);
     const got = new Uint8Array(await r.arrayBuffer());
     if (!forwarded || pulls !== 3 || Buffer.compare(Buffer.from(got), Buffer.from(bytes))) throw new Error("binary relay mismatch");
-    const zero = await fetch(authBase + "/mcp/" + name + "/download/" + "b".repeat(64), { headers });
+    const zero = await fetch(authBase + "/device/" + name + "/download/" + "b".repeat(64), { headers });
     if (zero.status !== 200 || zero.headers.get("content-length") !== "0" || (await zero.arrayBuffer()).byteLength !== 0) throw new Error("empty download header/body mismatch");
     ok("s32_download_relay");
   } finally { ws.close(); await Bun.sleep(200); }
@@ -969,7 +969,7 @@ async function s33_blocked_address(): Promise<void> {
     });
     if (reg.status !== 200) return bad("s33_register", "status=" + reg.status);
     const relay = (ip: string) =>
-      fetch(g.base + "/mcp/blk-dev?token=blk-tok", {
+      fetch(g.base + "/device/blk-dev?token=blk-tok", {
         method: "POST",
         headers: { "content-type": "application/json", "cf-connecting-ip": ip },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
@@ -990,7 +990,7 @@ async function s33_blocked_address(): Promise<void> {
     if (blocked.status !== 403) return bad("s33_blocked_relay", "status=" + blocked.status);
     const body = (await blocked.json()) as { error?: string };
     if (body.error !== "blocked") return bad("s33_blocked_body", JSON.stringify(body));
-    const up = await fetch(g.base + "/ws/blk-dev?token=blk-tok", {
+    const up = await fetch(g.base + "/device/ws/blk-dev?token=blk-tok", {
       headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": "AAAAAAAAAAAAAAAAAAAAAA==", "sec-websocket-version": "13", "cf-connecting-ip": "203.0.113.7" },
     });
     if (up.status !== 403) return bad("s33_blocked_ws", "status=" + up.status);

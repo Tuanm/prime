@@ -6174,7 +6174,7 @@ if (gatewayDomain) {
     else if (/^ws:\/\//i.test(gatewayDomain)) base = gatewayDomain;
     else if (/^http:\/\//i.test(gatewayDomain)) base = gatewayDomain.replace(/^http:\/\//i, "ws://");
     else base = (isLocal ? "ws://" : "wss://") + gatewayDomain;
-    const url = assignedDeviceId ? `${base}/ws/${assignedDeviceId}` : `${base}/ws`;
+    const url = assignedDeviceId ? `${base}/device/ws/${assignedDeviceId}` : `${base}/device/ws`;
     console.error(`[${deviceId}] Connecting to gateway ${url} ...`);
     // Device credential: the hardened gateway requires the token registered for
     // this device id (X-Device-Token header); legacy gateways ignore it.

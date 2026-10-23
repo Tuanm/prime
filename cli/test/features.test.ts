@@ -152,7 +152,7 @@ const okBody = JSON.stringify({
   deviceId: "anon-0123456789abcdef",
   token: "A1B2C3",
   connect_url: `${GW}/mcp/anon-0123456789abcdef?token=A1B2C3`,
-  ws_url: "wss://gw.test/ws/anon-0123456789abcdef",
+  ws_url: "wss://gw.test/device/ws/anon-0123456789abcdef",
   anonymous: true,
   rate_limit: { max: 30, window_ms: 60000 },
 });
@@ -322,15 +322,15 @@ function startFakeGateway() {
           {
             deviceId,
             token,
-            connect_url: `${url.origin}/mcp/${deviceId}?token=${token}`,
-            ws_url: `ws://${url.host}/ws/${deviceId}`,
+            connect_url: `${url.origin}/device/${deviceId}?token=${token}`,
+            ws_url: `ws://${url.host}/device/ws/${deviceId}`,
             anonymous: true,
             rate_limit: { max: 30, window_ms: 60000 },
           },
           { status: 201 },
         );
       }
-      const m = /^\/mcp\/([^/]+)$/.exec(url.pathname);
+      const m = /^\/device\/([^/]+)$/.exec(url.pathname);
       if (m && request.method === "POST") {
         const id = decodeURIComponent(m[1]!);
         const device = fake.devices.get(id);
@@ -400,7 +400,7 @@ describe("prime connect (fake gateway)", () => {
     const j = JSON.parse(first.out) as { device: string; token: string; connect_url: string; reused: boolean; gateway: string };
     expect(j.reused).toBe(false);
     expect(j.gateway).toBe(GATEWAY);
-    expect(j.connect_url).toBe(`${GATEWAY}/mcp/${j.device}?token=${j.token}`);
+    expect(j.connect_url).toBe(`${GATEWAY}/device/${j.device}?token=${j.token}`);
     expect(fake.created).toBe(before + 1);
     const saved = loadConfig(config).devices[j.device]!;
     expect(saved).toMatchObject({ gateway: GATEWAY, token: j.token, anonymous: true });
@@ -414,7 +414,7 @@ describe("prime connect (fake gateway)", () => {
     expect(human.code).toBe(0);
     expect(human.out).toContain(j.device);
     expect(human.out).toContain(j.token);
-    expect(human.out).toContain(`${GATEWAY}/mcp/${j.device}?token=${j.token}`);
+    expect(human.out).toContain(`${GATEWAY}/device/${j.device}?token=${j.token}`);
 
     const forced = await cli(["connect", "--gateway", GATEWAY, "--no-start", "--json", "--new"], config);
     const k = JSON.parse(forced.out) as { device: string; reused: boolean };

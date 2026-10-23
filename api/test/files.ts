@@ -141,13 +141,13 @@ async function main(): Promise<void> {
   check("valid credentials -> 200", (await fetch(BASE + "/api/files", { headers: DEMO })).status === 200);
 
   // ---- trailing slashes land on the page, not on a bare 404 ----
-  for (const [from, to] of [["/files/", "/files"], ["/mcp/", "/mcp"], ["/mcp/demo/", "/mcp/demo"]]) {
+  for (const [from, to] of [["/files/", "/files"], ["/connect/", "/connect"], ["/connect/demo/", "/connect/demo"]]) {
     const r = await fetch(BASE + from, { redirect: "manual" });
     check("GET " + from + " redirects to " + to, r.status === 308 && (r.headers.get("location") ?? "").endsWith(to), r.status + " " + (r.headers.get("location") ?? ""));
   }
   // A POST is not redirected (that path belongs to MCP clients, not pages).
-  const posted = await fetch(BASE + "/mcp/", { method: "POST", redirect: "manual", body: "{}" });
-  check("a POST to /mcp/ is not redirected", posted.status !== 308, String(posted.status));
+  const posted = await fetch(BASE + "/device/", { method: "POST", redirect: "manual", body: "{}" });
+  check("a POST to /device/ is not redirected", posted.status !== 308, String(posted.status));
 
   // ---- a disabled (deactivated) device is refused everywhere ----
   {
@@ -357,7 +357,7 @@ async function main(): Promise<void> {
   })()).status === 403);
   // A session belongs to one device: it opens that device's pages only.
   const otherCookie = (((await (await fetch(BASE + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: "demo", token: "demo" }) })).headers.get("set-cookie")) ?? "").split(";")[0]);
-  const otherPage = await fetch(BASE + "/mcp/other", { headers: { cookie: otherCookie, accept: "text/html" } });
+  const otherPage = await fetch(BASE + "/connect/other", { headers: { cookie: otherCookie, accept: "text/html" } });
   const otherHtml = await otherPage.text();
   check("a session for one device does not open another device's sandbox page", otherPage.status === 200 && otherHtml.includes('id="gate-device"') && otherHtml.includes('value="other"') && !otherHtml.includes('id="connect"'));
   check("GET /api/session without a cookie -> 401", (await fetch(BASE + "/api/session")).status === 401);

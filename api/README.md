@@ -10,15 +10,15 @@
 | **Where** | Cloudflare Worker + Durable Objects (needs a **Paid** plan) |
 | **Why DOs** | A Worker's memory is per-isolate; only a Durable Object per `deviceId` guarantees every `/mcp` request finds the device's WebSocket |
 | **Protocol** | Wire-compatible with the code-mcp device protocol: register / keepalive / JSON-RPC envelope |
-| **Client transports** | **Streamable HTTP** (`POST /mcp/{id}`) and **HTTP with SSE** (`GET /sse/{id}` + `POST /messages/{id}`) — auth-identical, both relay over the device tunnel |
+| **Client transports** | **Streamable HTTP** (`POST /device/{id}`) and **HTTP with SSE** (`GET /device/sse/{id}` + `POST /device/messages/{id}`) — auth-identical, both relay over the device tunnel |
 | **Cost model** | Idle tunnels hibernate (WebSocket Hibernation API); no servers to run |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    C[MCP client] -->|"POST /mcp/{deviceId}"| W
-    D[Device<br/>code-mcp] -->|"wss /ws/{deviceId}?token=…"| W
+    C[MCP client] -->|"POST /device/{deviceId}"| W
+    D[Device<br/>code-mcp] -->|"wss /device/ws/{deviceId}?token=…"| W
     subgraph CF [Cloudflare Worker]
         W[entry — src/index.ts<br/>routing, auth, rate limit]
         DO[DeviceDO — src/device-do.ts<br/>per deviceId<br/>WebSocket + pending registry]
@@ -32,7 +32,7 @@ flowchart LR
 
 | Component | Responsibility |
 | --- | --- |
-| `src/index.ts` | Route `/devices`, `/mcp/{id}`, `/ws`; gateway + device auth **before** any DO; per-isolate rate limiting; origin whitelist |
+| `src/index.ts` | Route `/devices`, `/device/{id}`, `/device/ws`; gateway + device auth **before** any DO; per-isolate rate limiting; origin whitelist |
 | `src/device-do.ts` | One object per device: owns the WebSocket, pending-request registry, request timeout, keepalive watchdog (alarm-driven), per-device pending budget |
 | `src/registry-do.ts` | Single shared object: online deviceIds for `GET /devices`, persisted, TTL-swept |
 | `src/config.ts`, `src/rate-limit.ts`, `src/protocol.ts` | Env config + helpers, limiter, tunnel envelope types |
@@ -47,14 +47,14 @@ sequenceDiagram
     participant DO as DeviceDO
     participant C as MCP client
 
-    D->>W: wss /ws/{deviceId}?token=T
+    D->>W: wss /device/ws/{deviceId}?token=T
     W->>W: deviceKnown(T) — 401 if unknown/bad
     W->>DO: forward upgrade + x-auth-token
     DO->>D: 101 — token re-checked (defense in depth)
     D->>DO: { type: "register", deviceId }
     DO-->>D: { type: "registered" }
 
-    C->>W: POST /mcp/{deviceId} + token
+    C->>W: POST /device/{deviceId} + token
     W->>W: gateway token, rate limit, body cap, budget
     W->>DO: stub.fetch (idempotent routing)
     DO-->>D: { id, request, token? }
@@ -80,9 +80,9 @@ npx wrangler deploy
 
 | Secret | Required | Effect |
 | --- | --- | --- |
-| `DEVICE_TOKENS` | recommended | JSON map `{"deviceId":"token",…}`; authenticates devices at `/ws` and relay requests at `/mcp` |
+| `DEVICE_TOKENS` | recommended | JSON map `{"deviceId":"token",…}`; authenticates devices at `/device/ws` and relay requests at `/mcp` |
 | `DEVICE_TOKEN` | optional | Shared fallback token for all devices when no per-device map is set |
-| `GATEWAY_TOKEN` | optional | Client → gateway bearer auth for `/mcp/*` |
+| `GATEWAY_TOKEN` | optional | Client → gateway bearer auth for `/device/*` |
 | `ADMIN_TOKEN` | optional | `GET /devices` auth (defaults to `GATEWAY_TOKEN`); endpoint hidden (404) when neither is set |
 | `VIRTUAL_DEVICE_TOKENS` | for cloud device | JSON map `{"cloud":"token",…}`; credentials for the in-process virtual device |
 
@@ -133,7 +133,7 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 
 | Goal | Control |
 | --- | --- |
-| No one can hijack a deviceId | Per-device token required at `/ws` connect, re-checked inside the DO; duplicate registration → 409 |
+| No one can hijack a deviceId | Per-device token required at `/device/ws` connect, re-checked inside the DO; duplicate registration → 409 |
 | No one can intercept relay traffic | Same token required on `/mcp` before the DO is touched |
 | No existence oracle | Unknown deviceId → identical 401; no DO created for unauthenticated probes |
 | No roster leak | `/devices` hidden (404) without admin token; admin-gated (401) otherwise |
@@ -156,9 +156,9 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `POST` | `/api/devices/anonymous` | gateway token if configured | Create an anonymous device → `201 {deviceId, token, connect_url, ws_url, rate_limit}`; `429` per-IP limit, `503` device limit |
 | `GET` | `/admin/api/anonymous` | Cloudflare Access | Anonymous devices by `ref` (no ids or codes), plus `count` / `max_devices` |
 | `POST` / `GET` / `DELETE` | `/admin/api/anonymous/{ref}(/tools\|/clients\|/state)` | Cloudflare Access | Tools / Clients / Activate-Deactivate / Delete an anonymous device |
-| `POST` | `/mcp/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
-| `GET` | `/sse/{deviceId}` | gateway + device | Open a `text/event-stream`; first `endpoint` event tells the client the `/messages` POST URL (`/sse?deviceId=` legacy alias) |
-| `POST` | `/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
+| `POST` | `/device/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
+| `GET` | `/device/sse/{deviceId}` | gateway + device | Open a `text/event-stream`; first `endpoint` event tells the client the `/messages` POST URL (`/sse?deviceId=` legacy alias) |
+| `POST` | `/device/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
 | `POST` | `/api/files?name=&expiry_days=` | device basic | Upload a temporary file (raw body, streamed into R2). Protect it at creation with an `X-File-Key` header (`?key=` also accepted; the header wins) |
 | `GET` | `/api/files` | device basic | List this device's files + usage |
 | `GET` | `/api/files/{id}` | device basic, or the `X-File-Key` header for a protected file | Download (supports `Range`) |
@@ -169,8 +169,8 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `GET` | `/` | public | Front page (Prime), linking the three pages below |
 | `GET` | `/mcp` | public | The product page - the page `/` used to be |
 | `GET` | `/sandbox` | device basic | Browser sandbox: this tab as a device |
-| `GET` | `/sandbox/{deviceId}` | device token | The same page for one device; old `/mcp/{deviceId}` browser links redirect here |
-| `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
+| `GET` | `/connect/{deviceId}` | device token | The same page for one device; old `/device/{deviceId}` browser links redirect here |
+| `WS` | `/device/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 
 > **Admin UI** — `/admin` and `/admin/api/*` are protected by **Cloudflare
@@ -185,11 +185,11 @@ A client with no registered device can ask for one:
 ```bash
 curl -X POST https://prime.tuanm.workers.dev/api/devices/anonymous
 # {"deviceId":"anon-3f9c0d1e2a4b5c6d","token":"7KQ2XM",
-#  "connect_url":"https://prime.tuanm.workers.dev/mcp/anon-3f9c0d1e2a4b5c6d?token=7KQ2XM", ...}
+#  "connect_url":"https://prime.tuanm.workers.dev/device/anon-3f9c0d1e2a4b5c6d?token=7KQ2XM", ...}
 ```
 
 The gateway picks an unused id and a 6-character code (digits and upper-case
-letters). The device then connects like any other (`/ws/{id}` with
+letters). The device then connects like any other (`/device/ws/{id}` with
 `X-Device-Token`), and MCP clients use `connect_url`. `prime connect` (the CLI)
 does all of this and runs the bundled code-mcp as the device.
 
@@ -415,7 +415,7 @@ Smoke coverage: gateway/device auth, duplicate-registration rejection, register-
 ### Ticket-based file downloads
 
 Devices that implement the download protocol can return a download URL under
-`/mcp/{deviceId}/download/{ticket}`. Tickets are exactly 64 lowercase hex digits;
+`/device/{deviceId}/download/{ticket}`. Tickets are exactly 64 lowercase hex digits;
 they identify a device-issued download, never a filesystem path or proxy URL.
 Only GET is supported. The endpoint uses the same gateway authentication,
 per-device credentials, disabled-device checks and rate limit as MCP. Virtual
@@ -425,7 +425,7 @@ cloud devices have no tunnel and cannot use this endpoint.
 curl --fail --output artifact.zip \
   --header "Authorization: Bearer $GATEWAY_TOKEN" \
   --header "X-Device-Token: $DEVICE_TOKEN" \
-  "https://YOUR_GATEWAY/mcp/YOUR_DEVICE/download/$TICKET"
+  "https://YOUR_GATEWAY/device/YOUR_DEVICE/download/$TICKET"
 ```
 
 `X-Device-Token` is required for downloads, including when the same credential

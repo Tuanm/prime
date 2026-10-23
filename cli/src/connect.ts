@@ -30,7 +30,7 @@ export interface AnonymousDevice {
 const CONNECT_TIMEOUT_MS = 20_000;
 
 export function connectUrlFor(gateway: string, deviceId: string, token: string): string {
-  return `${gateway}/mcp/${encodeURIComponent(deviceId)}?token=${encodeURIComponent(token)}`;
+  return `${gateway}/device/${encodeURIComponent(deviceId)}?token=${encodeURIComponent(token)}`;
 }
 
 function errorField(text: string): { error?: string; retryAfterMs?: number; maxDevices?: number } {
@@ -195,7 +195,7 @@ export async function probeCredential(
 ): Promise<{ verdict: ProbeVerdict; status?: number; detail?: string }> {
   let response: Response;
   try {
-    response = await fetch(`${gateway}/mcp/${encodeURIComponent(deviceId)}`, {
+    response = await fetch(`${gateway}/device/${encodeURIComponent(deviceId)}`, {
       method: "POST",
       headers: { ...authHeaders(gatewayToken), "content-type": "application/json", "x-device-token": token },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),

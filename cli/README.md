@@ -110,7 +110,7 @@ environment, so code-mcp's own subprocesses never inherit it.
   device id    anon-05ece6d0e71cfce9
   device code  O184FH
   gateway      https://prime.tuanm.workers.dev
-  connect url  https://prime.tuanm.workers.dev/mcp/anon-05ece6d0e71cfce9?token=O184FH
+  connect url  https://prime.tuanm.workers.dev/device/anon-05ece6d0e71cfce9?token=O184FH
 ```
 
 - **Reuse.** The saved device for that gateway is reused on every later run - the

@@ -34,13 +34,13 @@ same thing with a form.
 - **A page to manage them.** `/files` lists what the device holds, with upload, download,
   rename, protection and delete.
 - **Even an MCP client can download** through a short-lived, single-use ticket, for clients
-  that cannot send Basic auth (`GET /mcp/<deviceId>/download/<ticket>`).
+  that cannot send Basic auth (`GET /device/<deviceId>/download/<ticket>`).
 
 ## MCP device management
 
 Run `prime connect` on a machine and it becomes a **device**: a named endpoint whose tools
 (file read/write, shell, search, jobs, preview, memory) any MCP client can call through
-`POST /mcp/<deviceId>`. No ports, no tunnels, no firewall rules - the device connects out
+`POST /device/<deviceId>`. No ports, no tunnels, no firewall rules - the device connects out
 and stays connected.
 
 ```bash

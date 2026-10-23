@@ -6,7 +6,8 @@
 //   POST /admin/api/devices       -> register/update a device (admin token)
 //   DELETE /admin/api/devices/{id}-> remove a device (admin token)
 //   GET  /devices                 -> online deviceIds (admin token)
-//   POST /mcp/{deviceId}          -> gateway auth + rate limit -> DeviceDO
+//   POST /device/{deviceId}       -> gateway auth + rate limit -> DeviceDO
+//        (/mcp/{deviceId} stays as an alias for older clients)
 //   GET  /sse/{deviceId}          -> gateway auth + rate limit -> DeviceDO SSE stream
 //   POST /messages/{deviceId}     -> SSE client->server leg (202 + stream response)
 //   WS   /ws/{deviceId}           -> device auth + origin check -> DeviceDO upgrade
@@ -308,6 +309,13 @@ async function authorizeRelay(
   return null;
 }
 
+/** A 302 to another path on this host, keeping the query string. */
+function redirectTo(url: URL, pathname: string): Response {
+  const to = new URL(url);
+  to.pathname = pathname;
+  return new Response(null, { status: 302, headers: { location: to.toString(), "cache-control": "no-store" } });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
@@ -376,8 +384,8 @@ export default {
         {
           deviceId,
           token,
-          connect_url: url.origin + "/mcp/" + encodeURIComponent(deviceId) + "?token=" + encodeURIComponent(token),
-          ws_url: wsScheme + "//" + url.host + "/ws/" + encodeURIComponent(deviceId),
+          connect_url: url.origin + "/device/" + encodeURIComponent(deviceId) + "?token=" + encodeURIComponent(token),
+          ws_url: wsScheme + "//" + url.host + "/device/ws/" + encodeURIComponent(deviceId),
           anonymous: true,
           rate_limit: { max: anonConfig(env).rateMax, window_ms: cfg.rateWindowMs },
         },
@@ -629,7 +637,7 @@ export default {
     }
 
     // Fixed ticket grammar: no arbitrary path, URL, or upstream proxy target.
-    const download = /^\/mcp\/([^/]+)\/download\/([a-f0-9]{64})$/.exec(url.pathname);
+    const download = /^\/(?:device|mcp)\/([^/]+)\/download\/([a-f0-9]{64})$/.exec(url.pathname);
     if (download) {
       if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
       const denied = await authorizeRelay(download[1], request, url, cfg, env);
@@ -646,15 +654,17 @@ export default {
       }));
     }
 
-    // GET /sandbox: the Sandbox page (this browser as a device); POST
-    // /sandbox?ticket=1 mints its WebSocket ticket. /mcp is the product page now
-    // (the old home page), and the old sandbox URLs keep working there.
+    // GET /connect: the Device Connect page. GET /connect/{deviceId}: the
+    // Sandbox page for that device, which asks for its token. POST
+    // /sandbox?ticket=1 mints the sandbox's WebSocket ticket.
     if (url.pathname === "/sandbox" && request.method === "GET" && url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
     if (url.pathname === "/sandbox") return handleSandbox(request, env, url);
-    if (url.pathname === "/mcp" && request.method === "GET") {
+    if (url.pathname === "/mcp" && request.method === "POST" && url.searchParams.has("ticket")) return handleSandbox(request, env, url);
+    if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/connect" || url.pathname === "/mcp")) {
+      if (url.pathname === "/mcp") return redirectTo(url, "/connect");
       if (url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
       if (url.searchParams.has("frame") || url.searchParams.has("ticket")) return handleSandbox(request, env, url);
-      return new Response(LANDING_HTML, {
+      return new Response(request.method === "HEAD" ? null : LANDING_HTML, {
         headers: {
           "content-type": "text/html; charset=utf-8",
           "x-content-type-options": "nosniff",
@@ -663,31 +673,26 @@ export default {
         },
       });
     }
-    if (url.pathname === "/mcp" && request.method === "POST" && url.searchParams.has("ticket")) return handleSandbox(request, env, url);
-
-    // GET /sandbox/{deviceId} in a browser: the Sandbox page, which asks for
-    // the device token. Old /mcp/{deviceId} links are sent there.
-    if ((request.method === "GET" || request.method === "HEAD") && /^\/sandbox\/[^/]+$/.test(url.pathname)) {
+    if ((request.method === "GET" || request.method === "HEAD") && /^\/connect\/[^/]+$/.test(url.pathname)) {
       return handleSandboxDevicePage(request, env, url);
     }
-    if ((request.method === "GET" || request.method === "HEAD") && /^\/mcp\/[^/]+$/.test(url.pathname) && (request.headers.get("accept") || "").includes("text/html")) {
-      const to = new URL(url);
-      to.pathname = "/sandbox/" + url.pathname.slice("/mcp/".length);
-      return new Response(null, { status: 302, headers: { location: to.toString(), "cache-control": "no-store" } });
+    if ((request.method === "GET" || request.method === "HEAD") && /^\/(sandbox|mcp)\/[^/]+$/.test(url.pathname) && (request.headers.get("accept") || "").includes("text/html")) {
+      return redirectTo(url, "/connect/" + url.pathname.split("/").pop());
     }
 
-    // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.
-    // Return a clear 405 instead of a bare 404 so opening the URL in a browser
-    // (or an SSE-style client) gets an actionable message, not "cannot connect".
-    if (request.method !== "POST" && url.pathname.startsWith("/mcp/")) {
+    // Non-POST on /device/{deviceId} (or the old /mcp/{deviceId}): this is a
+    // POST-only JSON-RPC endpoint. Return a clear 405 instead of a bare 404 so
+    // opening the URL in a browser gets an actionable message.
+    if (request.method !== "POST" && (/^\/device\/[^/]*$/.test(url.pathname) || /^\/mcp\/[^/]*$/.test(url.pathname))) {
       return Response.json(
         { error: "method not allowed", hint: "POST JSON-RPC to this URL; GET/HEAD are not supported (Streamable HTTP)" },
         { status: 405 },
       );
     }
 
-    // POST /mcp/{deviceId}
-    if (request.method === "POST" && url.pathname.startsWith("/mcp/")) {
+    // POST /device/{deviceId} (the old /mcp/{deviceId} alias stays for clients
+    // that have not moved yet)
+    if (request.method === "POST" && (/^\/device\/[^/]*$/.test(url.pathname) || /^\/mcp\/[^/]*$/.test(url.pathname))) {
       if (cfg.gatewayToken) {
         const t = extractToken(request, url, "auth");
         if (!t || !timingSafeEq(t, cfg.gatewayToken)) return unauthorized();
@@ -698,7 +703,7 @@ export default {
         return Response.json({ error: "rate limited" }, { status: 429 });
       }
 
-      const deviceId = url.pathname.slice(5);
+      const deviceId = url.pathname.startsWith("/device/") ? url.pathname.slice("/device/".length) : url.pathname.slice(5);
       if (!validDeviceId(deviceId)) {
         return Response.json({ error: "invalid deviceId" }, { status: 400 });
       }
@@ -757,8 +762,10 @@ export default {
     // JSON-RPC requests (responses arrive over the stream). Auth is identical to
     // POST /mcp; GET /sse?deviceId= is a legacy alias. Virtual devices have no
     // tunnel, so SSE cannot serve them (401/400 like the WS upgrade path).
-    if (request.method === "GET" && (url.pathname.startsWith("/sse/") || url.pathname === "/sse")) {
-      const deviceId = url.pathname.startsWith("/sse/")
+    if (request.method === "GET" && (url.pathname.startsWith("/device/sse/") || url.pathname.startsWith("/sse/") || url.pathname === "/sse")) {
+      const deviceId = url.pathname.startsWith("/device/sse/")
+        ? url.pathname.slice("/device/sse/".length)
+        : url.pathname.startsWith("/sse/")
         ? url.pathname.slice(5)
         : url.searchParams.get("deviceId") || "";
       const denied = await authorizeRelay(deviceId, request, url, cfg, env);
@@ -779,8 +786,10 @@ export default {
 
     // POST /messages/{deviceId}?session=... - the SSE client->server leg. A
     // POST is ACKed with 202; the JSON-RPC response is pushed over the stream.
-    if (request.method === "POST" && (url.pathname.startsWith("/messages/") || url.pathname === "/messages")) {
-      const deviceId = url.pathname.startsWith("/messages/")
+    if (request.method === "POST" && (url.pathname.startsWith("/device/messages/") || url.pathname.startsWith("/messages/") || url.pathname === "/messages")) {
+      const deviceId = url.pathname.startsWith("/device/messages/")
+        ? url.pathname.slice("/device/messages/".length)
+        : url.pathname.startsWith("/messages/")
         ? url.pathname.slice(10)
         : url.searchParams.get("deviceId") || "";
       const denied = await authorizeRelay(deviceId, request, url, cfg, env);
@@ -804,7 +813,7 @@ export default {
       return stub.fetch(new Request(doUrl, { method: "POST", headers, body }));
     }
 
-    // WS upgrade: /ws/{deviceId} (preferred) or /ws?deviceId= (legacy)
+    // WS upgrade: /device/ws/{deviceId} (preferred), /ws/{deviceId} (legacy) or /ws?deviceId=
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       // Probe gate: bound how many WS upgrades an IP can initiate, which also
       // caps the cost of the fresh-identity read for unknown ids below.
@@ -820,9 +829,11 @@ export default {
       }
 
       let deviceId: string;
-      if (url.pathname.startsWith("/ws/")) {
+      if (url.pathname.startsWith("/device/ws/")) {
+        deviceId = url.pathname.slice("/device/ws/".length);
+      } else if (url.pathname.startsWith("/ws/")) {
         deviceId = url.pathname.slice(4);
-      } else if (url.pathname === "/ws") {
+      } else if (url.pathname === "/ws" || url.pathname === "/device/ws") {
         deviceId = url.searchParams.get("deviceId") || "";
       } else {
         return Response.json({ error: "not found" }, { status: 404 });

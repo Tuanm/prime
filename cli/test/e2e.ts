@@ -93,7 +93,7 @@ const TOOLS = [
 function startMockDevice(deviceId: string, token: string): Promise<WebSocket> {
   callLogs[deviceId] = [];
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws/${deviceId}?token=${token}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/device/ws/${deviceId}?token=${token}`);
     const timer = setTimeout(() => reject(new Error("mock device connect timeout")), 20_000);
     ws.addEventListener("open", () => {
       ws.send(JSON.stringify({ type: "register", deviceId }));
@@ -192,7 +192,7 @@ async function startGateway(): Promise<{ kill: () => void }> {
   );
   for (let i = 0; i < 240; i++) {
     try {
-      const r = await fetch(`${BASE}/mcp/probe-device`);
+      const r = await fetch(`${BASE}/device/probe-device`);
       if ([200, 400, 401, 404, 405, 503].includes(r.status)) return { kill: () => proc.kill() };
     } catch {}
     await Bun.sleep(250);
@@ -799,7 +799,7 @@ try {
   check(
     "connect registers an anonymous device (POST /api/devices/anonymous)",
     connectNoStart.code === 0 && /^anon-[0-9a-f]{16}$/.test(anon.device ?? "") && /^[0-9A-Z]{6}$/.test(anon.token ?? "") &&
-      anon.connect_url === `${BASE}/mcp/${anon.device}?token=${anon.token}` && anon.reused === false,
+      anon.connect_url === `${BASE}/device/${anon.device}?token=${anon.token}` && anon.reused === false,
     `code=${connectNoStart.code} out=${connectNoStart.out} err=${connectNoStart.err}`,
   );
 

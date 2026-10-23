@@ -36,7 +36,7 @@ async function throttle() {
 const throttledFetch = async (url, init) => { await throttle(); return fetch(url, init); };
 async function mcpClient(name) {
   const client = new Client({ name, version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(B + "/mcp/" + ID), { fetch: throttledFetch, requestInit: { headers: { "x-device-token": TOKEN } } }));
+  await client.connect(new StreamableHTTPClientTransport(new URL(B + "/device/" + ID), { fetch: throttledFetch, requestInit: { headers: { "x-device-token": TOKEN } } }));
   return client;
 }
 const text = (r) => (r.content || []).map((c) => c.text).join("");
@@ -68,7 +68,7 @@ try {
   const tampered = await openWs(tj.ws_url.replace(/.(?=$)/, (c) => (c === "A" ? "B" : "A")));
   ok(!tampered.ok, "a tampered ticket is refused");
   const tj2 = await (await fetch(B + "/sandbox?ticket=1", { method: "POST", headers: { authorization: auth, "x-sandbox": "1" } })).json();
-  const other = await openWs(tj2.ws_url.replace("/ws/" + ID, "/ws/someone-else"));
+  const other = await openWs(tj2.ws_url.replace("/device/ws/" + ID, "/device/ws/someone-else"));
   ok(!other.ok, "a ticket for " + ID + " does not open another device");
   await sleep(1500);
 
@@ -136,7 +136,7 @@ try {
     const gerr: string[] = []; gp.on("pageerror", (e) => gerr.push(e.message));
 
     // /mcp/{device}: the id is known, so only the token is asked for.
-    await gp.goto(B + "/sandbox/" + ID, { waitUntil: "domcontentloaded" });
+    await gp.goto(B + "/connect/" + ID, { waitUntil: "domcontentloaded" });
     await gp.waitForSelector("#gate-device");
     ok((await gp.textContent("h1")) === "Sandbox" && (await gp.isVisible("#gate-device")), "GET /mcp/{device} shows the sign-in form");
     ok((await gp.inputValue("#gate-device")) === ID && (await gp.getAttribute("#gate-device", "readonly")) !== null, "the device id is filled in and read-only");
@@ -209,11 +209,11 @@ try {
     ok(gerr.length === 0, "no page errors on the forms " + gerr.join(" | "));
     await noAuth.close();
     // Old browser links still land on the page.
-    const moved = await fetch(B + "/mcp/" + ID, { headers: { accept: "text/html" }, redirect: "manual" });
-    ok(moved.status === 302 && (moved.headers.get("location") ?? "").endsWith("/sandbox/" + ID), "old /mcp/{device} links redirect to /sandbox/{device}, got " + moved.status);
-    const asJson = await fetch(B + "/mcp/" + ID, { headers: { accept: "application/json" } });
+    const moved = await fetch(B + "/device/" + ID, { headers: { accept: "text/html" }, redirect: "manual" });
+    ok(moved.status === 302 && (moved.headers.get("location") ?? "").endsWith("/connect/" + ID), "old /mcp/{device} links redirect to /sandbox/{device}, got " + moved.status);
+    const asJson = await fetch(B + "/device/" + ID, { headers: { accept: "application/json" } });
     ok(asJson.status === 405, "MCP clients still get 405 for GET /mcp/{device} (only HTML requests get the form), got " + asJson.status);
-    const badId = await fetch(B + "/mcp/bad%20id", { headers: { accept: "text/html" } });
+    const badId = await fetch(B + "/device/bad%20id", { headers: { accept: "text/html" } });
     ok(badId.status === 404, "an invalid device id -> 404, got " + badId.status);
   }
 
@@ -230,7 +230,7 @@ try {
   await page.keyboard.press("Escape"); await page.click("h1");
 
   // ---- MCP clients ----
-  const raw = await fetch(B + "/mcp/" + ID, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-device-token": TOKEN }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "1" } } }) });
+  const raw = await fetch(B + "/device/" + ID, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-device-token": TOKEN }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "1" } } }) });
   ok(raw.status === 200 && /^[0-9a-f-]{36}$/.test(raw.headers.get("prime-session-id") || ""), "initialize through the gateway returns an Mcp-Session-Id");
   const alpha = await mcpClient("agent-alpha");
   const beta = await mcpClient("agent-beta");
@@ -620,7 +620,7 @@ try {
   ok(/503|offline/i.test(offline), "after Disconnect the gateway reports the device offline: " + offline.slice(0, 80));
 
   // ---- someone else already connected as demo ----
-  const squatter = await openWs(B.replace(/^http/, "ws") + "/ws/" + ID, { "x-device-token": TOKEN });
+  const squatter = await openWs(B.replace(/^http/, "ws") + "/device/ws/" + ID, { "x-device-token": TOKEN });
   ok(squatter.ok, "(another device connects as " + ID + ")");
   await sleep(500);
   await page.click("#connect");

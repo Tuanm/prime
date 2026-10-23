@@ -1,4 +1,4 @@
-// Transport: JSON-RPC over the gateway's MCP relay (`POST {gateway}/mcp/{deviceId}`).
+// Transport: JSON-RPC over the gateway's relay (`POST {gateway}/device/{deviceId}`).
 //
 // The gateway tunnels the body to the device over its WebSocket and returns the
 // device's JSON-RPC response verbatim. One command = one HTTP round trip unless
@@ -86,7 +86,7 @@ export class GatewayClient {
   }
 
   private endpoint(): string {
-    return `${this.target.gateway}/mcp/${encodeURIComponent(this.target.deviceId)}`;
+    return `${this.target.gateway}/device/${encodeURIComponent(this.target.deviceId)}`;
   }
 
   private headers(): Record<string, string> {

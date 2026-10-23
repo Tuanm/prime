@@ -118,13 +118,13 @@ describe("the sign-in form", () => {
   });
 
   test("the form asks for the pair, prepends a known device and posts to /api/session", () => {
-    const withDevice = renderGatePage({ title: "Sandbox", device: "demo", next: "/mcp/demo" });
+    const withDevice = renderGatePage({ title: "Sandbox", device: "demo", next: "/device/demo" });
     expect(withDevice).toContain('id="gate-device"');
     expect(withDevice).toContain('id="gate-token"');
     expect(withDevice).toContain('value="demo"');
     expect(withDevice).toContain("readonly");
     expect(withDevice).toContain('fetch(\'/api/session\'');
-    expect(withDevice).toContain('window.location.replace("/mcp/demo")');
+    expect(withDevice).toContain('window.location.replace("/device/demo")');
     expect(withDevice).not.toContain("__FILES__");
     const unknown = renderGatePage({ title: "Files", device: null, next: "/files" });
     expect(unknown).toContain('id="gate-device"');
