@@ -139,7 +139,7 @@ jobs:
           # to a file beats a multi-line --notes argument, which is one quoting
           # mistake away from mangling the release body.
           cat > RELEASE_NOTES.md <<'NOTES'
-          Standalone `mcp` CLI for code-mcp-gateway.
+          Standalone `mcp` CLI for the Prime gateway.
 
           ## Install
 

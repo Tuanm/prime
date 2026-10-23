@@ -28,7 +28,7 @@ bun code-mcp.ts     --gateway wss://gateway.example.workers.dev --port 7777
 ```
 
 A bare `--gateway` (no URL) connects to the managed gateway at
-`wss://code-mcp.tuanm.workers.dev`.
+`wss://prime.tuanm.workers.dev`.
 
 The gateway authenticates every device at connect time against its device
 registry (unknown ids or missing/mismatched tokens are rejected with 401, so
@@ -61,7 +61,7 @@ liveness detection:
 | `--port <n>`                | Listen port                                                            | `7777` or `$PORT` |
 | `--bind <addr>`             | Bind address                                                           | `127.0.0.1`       |
 | `--token <s>`               | Require `?token=<s>` or `Authorization: Bearer <s>` on every request; in gateway mode also presented to the gateway as the device credential | no auth |
-| `--gateway [url]`          | Connect to a gateway server and tunnel requests via WebSocket; bare flag uses the default managed gateway | `wss://code-mcp.tuanm.workers.dev` |
+| `--gateway [url]`          | Connect to a gateway server and tunnel requests via WebSocket; bare flag uses the default managed gateway | `wss://prime.tuanm.workers.dev` |
 | `--gateway-token <s>`      | Device credential sent to the gateway on connect (overrides `--token`); must match the token registered for `--id` in the gateway | `--token` |
 | `--enable-memory`           | Enable remember/forget/recall tools                                    | disabled          |
 | `--disallowed-tools <list>` | Comma-separated list of tools to disable                               | none              |

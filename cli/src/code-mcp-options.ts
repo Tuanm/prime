@@ -29,7 +29,7 @@ export const CODE_MCP_OPTIONS: Readonly<Record<string, OptionType>> = {
 export const SECRET_OPTIONS = new Set(["token", "gateway-token"]);
 
 /** What a bare --gateway means to code-mcp (it inserts the same default). */
-export const CODE_MCP_DEFAULT_GATEWAY = "code-mcp.tuanm.workers.dev";
+export const CODE_MCP_DEFAULT_GATEWAY = "prime.tuanm.workers.dev";
 
 export type OptionMap = Record<string, string | boolean>;
 

@@ -2,8 +2,8 @@
 // service that starts with the session and restarts on failure:
 //
 //   Linux    systemd user unit   ~/.config/systemd/user/code-mcp.service
-//   macOS    launchd agent       ~/Library/LaunchAgents/dev.code-mcp-gateway.code-mcp.plist
-//   Windows  Scheduled Task      \code-mcp-gateway\code-mcp (at logon, no admin needed)
+//   macOS    launchd agent       ~/Library/LaunchAgents/dev.prime-gateway.code-mcp.plist
+//   Windows  Scheduled Task      \prime-gateway\code-mcp (at logon, no admin needed)
 //
 // The service runs "mcp code-mcp --service --config <path>": options are read at
 // every start from the config's "code-mcp:" section plus the overrides given to
@@ -22,9 +22,12 @@ import { CliError } from "./errors.ts";
 export type Platform = "linux" | "darwin" | "win32";
 
 export const SERVICE_NAME = "code-mcp";
-export const LAUNCHD_LABEL = "dev.code-mcp-gateway.code-mcp";
-export const TASK_PATH = "\\code-mcp-gateway\\";
+export const LAUNCHD_LABEL = "dev.prime-gateway.code-mcp";
+export const TASK_PATH = "\\prime-gateway\\";
 export const TASK_NAME = "code-mcp";
+/** Before the rename the agent/task was installed under these names. */
+export const LEGACY_LAUNCHD_LABEL = "dev.code-mcp-gateway.code-mcp";
+export const LEGACY_TASK_PATH = "\\code-mcp-gateway\\";
 
 export interface ServiceStatus {
   installed: boolean;
@@ -60,7 +63,7 @@ export function launchdPlistPath(home = homedir()): string {
 }
 
 export function defaultLogPath(platform: Platform, configPath: string, home = homedir()): string {
-  if (platform === "darwin") return join(home, "Library", "Logs", "code-mcp-gateway", "code-mcp.log");
+  if (platform === "darwin") return join(home, "Library", "Logs", "prime-gateway", "code-mcp.log");
   // Linux logs to the journal; this file is only used on Windows.
   return join(dirname(configPath), "code-mcp.log");
 }
@@ -159,7 +162,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
   return [
     "# Installed by 'mcp service install'. Remove with 'mcp service uninstall'.",
     "[Unit]",
-    "Description=code-mcp (code-mcp-gateway device server)",
+    "Description=code-mcp (Prime gateway device server)",
     "Wants=network-online.target",
     "After=network-online.target",
     "",
@@ -364,7 +367,20 @@ export function serviceSpecFor(platform: Platform, configPath: string): ServiceS
   return { command, configPath, logPath, pathEnv: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", home: homedir() };
 }
 
+/** Remove a service installed by the pre-rename CLI, so an upgrade leaves one. */
+export function removeLegacyService(platform: Platform): void {
+  if (platform === "darwin") {
+    run(["launchctl", "bootout", "gui/" + uid() + "/" + LEGACY_LAUNCHD_LABEL]);
+    rmSync(join(homedir(), "Library", "LaunchAgents", LEGACY_LAUNCHD_LABEL + ".plist"), { force: true });
+    return;
+  }
+  if (platform === "win32") {
+    run(["schtasks", "/Delete", "/TN", LEGACY_TASK_PATH + SERVICE_NAME, "/F"]);
+  }
+}
+
 export function installService(platform: Platform, spec: ServiceSpec): string {
+  removeLegacyService(platform);
   if (platform === "linux") {
     if (!Bun.which("systemctl")) throw new CliError("systemctl not found: 'mcp service' needs systemd on Linux");
     const unit = systemdUnitPath();
@@ -408,6 +424,7 @@ export function installService(platform: Platform, spec: ServiceSpec): string {
 
 /** Stop and remove. Returns what was there (false: nothing was installed). */
 export function uninstallService(platform: Platform, configPath: string): boolean {
+  removeLegacyService(platform);
   if (platform === "linux") {
     const unit = systemdUnitPath();
     const had = existsSync(unit);

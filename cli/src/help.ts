@@ -5,10 +5,10 @@
 
 import { bold, cyan, dim } from "./output.ts";
 
-const ROOT = `mcp - command line client for code-mcp-gateway
+const ROOT = `mcp - command line client for prime-gateway
 
-Connects to devices exposed through a code-mcp-gateway Worker and drives their
-MCP tools. Credentials and defaults live in ~/.code-mcp-gateway/config.yaml.
+Connects to devices exposed through the Prime gateway and drives their
+MCP tools. Credentials and defaults live in ~/.prime-gateway/config.yaml.
 
 USAGE
   mcp [command] [options]
@@ -55,7 +55,7 @@ EXAMPLES
 
 CONFIG
   Precedence per field: --flag > environment > device entry > defaults section.
-  With no gateway configured anywhere, https://code-mcp.tuanm.workers.dev is used.
+  With no gateway configured anywhere, https://prime.tuanm.workers.dev is used.
   Environment: CODE_MCP_GATEWAY_CONFIG, CODE_MCP_GATEWAY_URL,
   CODE_MCP_GATEWAY_TOKEN, CODE_MCP_GATEWAY_DEVICE_TOKEN,
   CODE_MCP_GATEWAY_TIMEOUT_MS.
@@ -176,7 +176,7 @@ The saved device is an ordinary config entry: 'mcp tools list <id>',
 
 OPTIONS
   --gateway <url>          Gateway origin. Default: the saved default gateway,
-                           else https://code-mcp.tuanm.workers.dev
+                           else https://prime.tuanm.workers.dev
   --gateway-token <token>  Gateway credential, for gateways that require one
   --new                    Register a fresh device instead of reusing the saved one
   --no-start               Only register/reuse and print; do not run code-mcp
@@ -228,7 +228,7 @@ OPTIONS
                            device's tools, shell included
   --gateway, --gateway-token, --token, --timeout
                            Override the gateway/credentials for every device
-                           (default gateway: https://code-mcp.tuanm.workers.dev)
+                           (default gateway: https://prime.tuanm.workers.dev)
 `;
 
 const CODE_MCP = `mcp code-mcp - run the bundled code-mcp device server   (advanced)
@@ -237,7 +237,7 @@ USAGE
   mcp code-mcp [code-mcp flags]
   mcp code-mcp --help          code-mcp's own flag reference
 
-The CLI embeds code-mcp (code-mcp/ in github.com/Tuanm/code-mcp), the MCP server that
+The CLI embeds code-mcp (code-mcp/ in github.com/Tuanm/prime), the MCP server that
 exposes this machine's files and shell as tools. 'mcp connect' runs it for
 you; use this command for anything else code-mcp supports, e.g. a registered
 device:
@@ -245,7 +245,7 @@ device:
   mcp code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 
 OPTIONS FROM THE CONFIG
-  The code-mcp section of ~/.code-mcp-gateway/config.yaml holds code-mcp's
+  The code-mcp section of ~/.prime-gateway/config.yaml holds code-mcp's
   options (names without the dashes); options given here override them:
 
     code-mcp:
@@ -253,7 +253,7 @@ OPTIONS FROM THE CONFIG
       bind: "127.0.0.1"
       id: "my-laptop"
       token: "dev-secret"
-      gateway: "code-mcp.tuanm.workers.dev"
+      gateway: "prime.tuanm.workers.dev"
       enable-memory: true
 
   Values from the config never appear on a command line (ps).
@@ -269,16 +269,16 @@ USAGE
   mcp service status [--json]              is it installed / running?
 
 The service runs 'mcp code-mcp' with the code-mcp section of
-~/.code-mcp-gateway/config.yaml, overridden by the options given to
+~/.prime-gateway/config.yaml, overridden by the options given to
 'service install' (kept in service.yaml next to the config). Options are read
 at every start, so to apply a config change, run 'mcp service install' again.
 No credential is written into the service definition or onto a command line.
 
   Linux    systemd user unit  ~/.config/systemd/user/code-mcp.service
            logs: journalctl --user -u code-mcp
-  macOS    launchd agent      ~/Library/LaunchAgents/dev.code-mcp-gateway.code-mcp.plist
-           logs: ~/Library/Logs/code-mcp-gateway/code-mcp.log
-  Windows  Scheduled Task     \\code-mcp-gateway\\code-mcp (at logon; no admin needed)
+  macOS    launchd agent      ~/Library/LaunchAgents/dev.prime-gateway.code-mcp.plist
+           logs: ~/Library/Logs/prime-gateway/code-mcp.log
+  Windows  Scheduled Task     \\prime-gateway\\code-mcp (at logon; no admin needed)
            logs: code-mcp.log next to the config
 
 It starts at login and is restarted if it crashes. On Linux it stops at logout
@@ -328,7 +328,7 @@ NOTES
 
 ENVIRONMENT
   GITHUB_TOKEN        Raises the GitHub API rate limit (optional)
-  MCP_CLI_REPO        Override the repository, default Tuanm/code-mcp
+  MCP_CLI_REPO        Override the repository, default Tuanm/prime
   MCP_CLI_API_BASE    Override the API base, default https://api.github.com
 `;
 

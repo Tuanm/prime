@@ -351,7 +351,7 @@ export const UI_CSS = `      * {
 `;
 
 /**
- * The code-mcp-gateway favicon, shared by every page so /admin, /files and the
+ * The Prime gateway favicon, shared by every page so /admin, /files and the
  * download page all show the same mark.
  */
 export const FAVICON =

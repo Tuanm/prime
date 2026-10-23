@@ -93,7 +93,7 @@ export class GatewayClient {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
-      "user-agent": "code-mcp-gateway-cli",
+      "user-agent": "prime-gateway-cli",
     };
     // Gateway credential (entry auth) and device credential are distinct: the
     // entry checks the first, the DeviceDO forwards the second to the device.
@@ -195,7 +195,7 @@ export class GatewayClient {
       {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "code-mcp-gateway-cli", version: "0.1.0" },
+        clientInfo: { name: "prime-gateway-cli", version: "0.1.0" },
       },
       opts,
     );
@@ -255,7 +255,7 @@ export class GatewayClient {
       case 404:
         return new CliError(
           "gateway endpoint not found (404)" + (detail ? `: ${detail}` : ""),
-          "Verify the gateway URL - it should be the Worker origin, e.g. https://code-mcp.tuanm.workers.dev",
+          "Verify the gateway URL - it should be the Worker origin, e.g. https://prime.tuanm.workers.dev",
         );
       case 405:
         return new CliError("gateway rejected the request method (405)");

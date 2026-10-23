@@ -4,7 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const MINUTES = Number(process.env.MINUTES || 20);
 const deadline = Date.now() + MINUTES * 60_000;
 const c = new Client({ name: "todo-agent", version: "1" });
-await c.connect(new StreamableHTTPClientTransport(new URL("https://code-mcp.tuanm.workers.dev/mcp/demo"), { requestInit: { headers: { "x-device-token": "demo" } } }));
+await c.connect(new StreamableHTTPClientTransport(new URL("https://prime.tuanm.workers.dev/mcp/demo"), { requestInit: { headers: { "x-device-token": "demo" } } }));
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 async function call(name, args = {}) {
   const r = await c.callTool({ name: "call", arguments: { name, arguments: args } });

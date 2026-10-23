@@ -179,9 +179,9 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 A client with no registered device can ask for one:
 
 ```bash
-curl -X POST https://code-mcp.tuanm.workers.dev/api/devices/anonymous
+curl -X POST https://prime.tuanm.workers.dev/api/devices/anonymous
 # {"deviceId":"anon-3f9c0d1e2a4b5c6d","token":"7KQ2XM",
-#  "connect_url":"https://code-mcp.tuanm.workers.dev/mcp/anon-3f9c0d1e2a4b5c6d?token=7KQ2XM", ...}
+#  "connect_url":"https://prime.tuanm.workers.dev/mcp/anon-3f9c0d1e2a4b5c6d?token=7KQ2XM", ...}
 ```
 
 The gateway picks an unused id and a 6-character code (digits and upper-case
@@ -219,7 +219,7 @@ secret. The browser replays those credentials automatically on same-origin
 fetches, which is why the pages need no token handling of their own.
 
 ```bash
-BASE=https://code-mcp.tuanm.workers.dev
+BASE=https://prime.tuanm.workers.dev
 
 # upload (streamed; 201 returns the id and URLs)
 curl -u demo:demo --data-binary @report.pdf \

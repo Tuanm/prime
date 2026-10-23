@@ -1,5 +1,5 @@
 {
-  "name": "code-mcp-gateway-worker",
+  "name": "prime-gateway-worker",
   "version": "1.0.0",
   "private": true,
   "description": "Cloudflare Worker gateway for exposing local code-mcp servers via WebSocket tunneling",

@@ -147,7 +147,7 @@ Options:
   --domain <host>        Use given public hostname (mutually exclusive with --public)
   --mcp <path>           Aggregate tools from external MCP servers (JSON config)
   --gateway [domain]     Connect to gateway server; bare flag uses the default
-                         (wss://code-mcp.tuanm.workers.dev)
+                         (wss://prime.tuanm.workers.dev)
   --id <uuid>            Use specific device ID for gateway connection
   --gateway-token <s>    Device credential sent to the gateway on connect
                          (defaults to --token; must match the token registered
@@ -155,7 +155,7 @@ Options:
   -h, --help             Show this help and exit`;
 
 // Bare --gateway (no value) connects to the default managed gateway.
-const DEFAULT_GATEWAY = "code-mcp.tuanm.workers.dev";
+const DEFAULT_GATEWAY = "prime.tuanm.workers.dev";
 const cliArgs = Bun.argv.slice(2);
 for (let i = 0; i < cliArgs.length; i++) {
   if (cliArgs[i] === "--gateway" && (i + 1 >= cliArgs.length || cliArgs[i + 1].startsWith("--"))) {

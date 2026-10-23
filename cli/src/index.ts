@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// mcp - command line client for code-mcp-gateway.
+// mcp - command line client for the Prime gateway.
 //
 // Command surface:
 //   mcp connect [--gateway <url>]     this machine as an anonymous device (runs code-mcp)
@@ -68,7 +68,7 @@ const CALL_FLAGS: FlagSpec[] = [
 const VIEW_FLAGS: FlagSpec[] = [...TOOL_FLAGS, flag("device", "string", "Force the device id", { placeholder: "<id>" }), flag("tool", "string", "Force the tool name", { placeholder: "<name>" })];
 
 const ANON_CONNECT_FLAGS: FlagSpec[] = [
-  flag("gateway", "string", "Gateway origin (default: saved default, else https://code-mcp.tuanm.workers.dev)", { placeholder: "<url>" }),
+  flag("gateway", "string", "Gateway origin (default: saved default, else https://prime.tuanm.workers.dev)", { placeholder: "<url>" }),
   flag("gateway-token", "string", "Gateway credential, only for gateways that require one", { placeholder: "<token>" }),
   flag("new", "boolean", "Register a fresh anonymous device instead of reusing the saved one"),
   flag("no-start", "boolean", "Register/reuse and print the credentials, but do not run code-mcp"),

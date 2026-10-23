@@ -5,7 +5,7 @@
 //   2. environment variable
 //   3. per-device entry in the config file
 //   4. defaults section in the config file
-//   5. (gateway only) the managed default, https://code-mcp.tuanm.workers.dev
+//   5. (gateway only) the managed default, https://prime.tuanm.workers.dev
 //
 // The same order applies per field, so `--gateway` can be passed ad hoc while
 // the token still comes from the config file.
@@ -43,7 +43,7 @@ export interface TargetOverrides {
 export const DEFAULT_TIMEOUT_MS = 300_000; // matches the gateway's TIMEOUT_MS default
 
 /** The managed gateway, used when nothing else is configured (same default as code-mcp's bare --gateway). */
-export const DEFAULT_GATEWAY = "https://code-mcp.tuanm.workers.dev";
+export const DEFAULT_GATEWAY = "https://prime.tuanm.workers.dev";
 
 export function assertDeviceId(deviceId: string): string {
   if (!DEVICE_ID_RE.test(deviceId)) {
@@ -87,7 +87,7 @@ function pick(flag: string | undefined, env: string | undefined, ...fallbacks: (
 
 /**
  * The gateway origin for a command: --gateway > environment > device entry >
- * config defaults > the managed default gateway (code-mcp.tuanm.workers.dev).
+ * config defaults > the managed default gateway (prime.tuanm.workers.dev).
  */
 export function resolveGateway(config: Config, flagValue?: string, entryValue?: string): string {
   return normalizeGateway(pick(flagValue, process.env[ENV.gateway], entryValue, config.defaults.gateway) ?? DEFAULT_GATEWAY);

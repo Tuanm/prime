@@ -19,9 +19,9 @@ import { bold, dim, green, yellow } from "./output.ts";
 import { compareVersions, isValidVersion } from "./version.ts";
 
 export const TAG_PREFIX = "cli-v";
-// Renamed from Tuanm/code-mcp-gateway; GitHub redirects the old name, which
+// Renamed from Tuanm/prime; GitHub redirects the old name, which
 // is what releases up to 26.10.19+3 still ask for.
-export const DEFAULT_REPO = "Tuanm/code-mcp";
+export const DEFAULT_REPO = "Tuanm/prime";
 export const DEFAULT_API_BASE = "https://api.github.com";
 
 export interface ReleaseAsset {
@@ -170,7 +170,7 @@ export function currentInstall(script: string = process.argv[1] ?? "", execPath:
 function requestHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
-    "user-agent": "code-mcp-gateway-cli",
+    "user-agent": "prime-gateway-cli",
   };
   if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   return headers;

@@ -54,7 +54,7 @@ describe("code-mcp options", () => {
 
   test("parses --k v, --k=v, booleans, and a bare --gateway like code-mcp", () => {
     expect(parseCodeMcpArgs(["--port", "1", "--bind=0.0.0.0", "--enable-memory", "--public=false"]).options).toEqual({ port: "1", bind: "0.0.0.0", "enable-memory": true, public: false });
-    expect(parseCodeMcpArgs(["--gateway", "--id", "x"]).options).toEqual({ gateway: "code-mcp.tuanm.workers.dev", id: "x" });
+    expect(parseCodeMcpArgs(["--gateway", "--id", "x"]).options).toEqual({ gateway: "prime.tuanm.workers.dev", id: "x" });
     expect(parseCodeMcpArgs(["--help"]).help).toBe(true);
     expect(() => parseCodeMcpArgs(["--port"])).toThrow("needs a value");
     expect(() => parseCodeMcpArgs(["--nope", "1"])).toThrow("unknown code-mcp option");
@@ -91,7 +91,7 @@ describe("default gateway for a device id", () => {
   test("an id without a gateway goes to the configured default, else the managed one", () => {
     // code-mcp dials a gateway only with --gateway: an id alone used to start a
     // local-only server that never showed up on the gateway.
-    expect(withDefaultGateway({ id: "demo", token: "demo" }, undefined)).toEqual({ id: "demo", token: "demo", gateway: "https://code-mcp.tuanm.workers.dev" });
+    expect(withDefaultGateway({ id: "demo", token: "demo" }, undefined)).toEqual({ id: "demo", token: "demo", gateway: "https://prime.tuanm.workers.dev" });
     expect(withDefaultGateway({ id: "demo" }, "https://gw.example")).toEqual({ id: "demo", gateway: "https://gw.example" });
     expect(withDefaultGateway({ id: "demo", gateway: "own.example" }, "https://gw.example").gateway).toBe("own.example");
     // No id: a plain local server, as before.
@@ -104,7 +104,7 @@ describe("default gateway for a device id", () => {
     const c = emptyConfig();
     c.codeMcp = { id: "demo", token: "demo" };
     saveConfig(config, c);
-    expect(effectiveCodeMcpArgv([], { service: false }, config).argv).toEqual(["--token", "demo", "--gateway", "https://code-mcp.tuanm.workers.dev", "--id", "demo"]);
+    expect(effectiveCodeMcpArgv([], { service: false }, config).argv).toEqual(["--token", "demo", "--gateway", "https://prime.tuanm.workers.dev", "--id", "demo"]);
   });
 });
 
@@ -140,16 +140,16 @@ describe("network settings for the service", () => {
 
 describe("service definitions", () => {
   const spec: ServiceSpec = {
-    command: ["/opt/my tools/mcp", "code-mcp", "--service", "--config", "/home/u/.code-mcp-gateway/config.yaml"],
-    configPath: "/home/u/.code-mcp-gateway/config.yaml",
-    logPath: "/home/u/Library/Logs/code-mcp-gateway/code-mcp.log",
+    command: ["/opt/my tools/mcp", "code-mcp", "--service", "--config", "/home/u/.prime-gateway/config.yaml"],
+    configPath: "/home/u/.prime-gateway/config.yaml",
+    logPath: "/home/u/Library/Logs/prime-gateway/code-mcp.log",
     pathEnv: "/usr/local/bin:/usr/bin:/odd/100%/$HOME",
     home: "/home/u",
   };
 
   test("systemd: quoted ExecStart, % and $ escaped there, PATH kept literal", () => {
     const unit = renderSystemdUnit(spec);
-    expect(unit).toContain('ExecStart="/opt/my tools/mcp" "code-mcp" "--service" "--config" "/home/u/.code-mcp-gateway/config.yaml"');
+    expect(unit).toContain('ExecStart="/opt/my tools/mcp" "code-mcp" "--service" "--config" "/home/u/.prime-gateway/config.yaml"');
     expect(unit).toContain('Environment="PATH=/usr/local/bin:/usr/bin:/odd/100%%/$HOME"');
     expect(unit).toContain("Restart=on-failure");
     // Not quoted: systemd rejects a quoted WorkingDirectory as a bad setting.

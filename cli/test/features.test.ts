@@ -585,7 +585,7 @@ describe("mcp serve over HTTP", () => {
 
       const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } });
       expect(init.status).toBe(200);
-      expect(((await init.json()) as any).result.serverInfo.name).toBe("code-mcp-gateway");
+      expect(((await init.json()) as any).result.serverInfo.name).toBe("prime-gateway");
       expect((await post({ jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
       const list = (await (await post({ jsonrpc: "2.0", id: 2, method: "tools/list" })).json()) as any;
       expect(list.result.tools.map((t: { name: string }) => t.name).sort()).toEqual(["alpha_v2__echo", "laptop__boom", "laptop__echo"]);

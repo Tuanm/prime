@@ -1,6 +1,6 @@
-# mcp - code-mcp-gateway CLI
+# mcp - Prime gateway CLI
 
-A small, fast command line client for [code-mcp-gateway](../README.md). It talks
+A small, fast command line client for the [Prime gateway](../README.md). It talks
 to devices through the gateway's MCP relay and lets you list, inspect and call
 their MCP tools from a terminal or a script.
 
@@ -72,7 +72,7 @@ mcp code-mcp [code-mcp options]          # the bundled device server, with the c
 ```
 
 When no gateway is given or configured anywhere, every command uses the
-managed gateway `https://code-mcp.tuanm.workers.dev` (precedence: `--gateway` >
+managed gateway `https://prime.tuanm.workers.dev` (precedence: `--gateway` >
 `CODE_MCP_GATEWAY_URL` > device entry > `defaults.gateway` > that default).
 
 Aliases, as specified:
@@ -87,7 +87,7 @@ Every subcommand supports `--help`, and global flags are available everywhere:
 ### connect - this machine as an anonymous device
 
 ```bash
-mcp connect                                # default gateway: code-mcp.tuanm.workers.dev
+mcp connect                                # default gateway: prime.tuanm.workers.dev
 mcp connect --gateway https://gw.example.dev
 mcp connect --new                          # force a fresh device
 mcp connect --no-start --json              # just print/save the credentials
@@ -109,8 +109,8 @@ environment, so code-mcp's own subprocesses never inherit it.
 ✓ registered anonymous device anon-05ece6d0e71cfce9
   device id    anon-05ece6d0e71cfce9
   device code  O184FH
-  gateway      https://code-mcp.tuanm.workers.dev
-  connect url  https://code-mcp.tuanm.workers.dev/mcp/anon-05ece6d0e71cfce9?token=O184FH
+  gateway      https://prime.tuanm.workers.dev
+  connect url  https://prime.tuanm.workers.dev/mcp/anon-05ece6d0e71cfce9?token=O184FH
 ```
 
 - **Reuse.** The saved device for that gateway is reused on every later run - the
@@ -186,13 +186,13 @@ code-mcp:
   bind: "127.0.0.1"
   id: "demo"
   token: "demo"
-  gateway: "code-mcp.tuanm.workers.dev"
+  gateway: "prime.tuanm.workers.dev"
   enable-memory: true
 ```
 
 With that, a bare `mcp code-mcp` starts the device. A device `id` needs a
 gateway: when `id` is set and `gateway` is not, the CLI's gateway is used
-(`defaults.gateway`, else `https://code-mcp.tuanm.workers.dev`). Values from the config are
+(`defaults.gateway`, else `https://prime.tuanm.workers.dev`). Values from the config are
 handed to code-mcp inside the process, so a token there never shows up in `ps`.
 An unknown key or a wrongly typed value is an error naming the config file.
 `mcp code-mcp` refuses to start while the code-mcp **service** is running - one
@@ -217,8 +217,8 @@ current options.
 | OS | Definition | Logs | Restart after a crash |
 | --- | --- | --- | --- |
 | Linux | systemd user unit `~/.config/systemd/user/code-mcp.service` | `journalctl --user -u code-mcp` | `Restart=on-failure` |
-| macOS | launchd agent `~/Library/LaunchAgents/dev.code-mcp-gateway.code-mcp.plist` | `~/Library/Logs/code-mcp-gateway/code-mcp.log` | `KeepAlive` (not after a clean stop) |
-| Windows | Scheduled Task `\code-mcp-gateway\code-mcp`, at logon, no admin rights, no window | `code-mcp.log` next to the config | a one-minute watchdog trigger |
+| macOS | launchd agent `~/Library/LaunchAgents/dev.prime-gateway.code-mcp.plist` | `~/Library/Logs/prime-gateway/code-mcp.log` | `KeepAlive` (not after a clean stop) |
+| Windows | Scheduled Task `\prime-gateway\code-mcp`, at logon, no admin rights, no window | `code-mcp.log` next to the config | a one-minute watchdog trigger |
 
 The service runs `mcp code-mcp --service --config <config>` and reads its
 options at every start: the config's `code-mcp:` section, overridden by the
@@ -394,7 +394,7 @@ half.
 
 ## Configuration
 
-Defaults live in `~/.code-mcp-gateway/config.yaml` (override with `--config` or
+Defaults live in `~/.prime-gateway/config.yaml` (override with `--config` or
 `CODE_MCP_GATEWAY_CONFIG`). The file holds secrets: it is created `0600` inside a
 `0700` directory, and every write is atomic.
 
@@ -416,7 +416,7 @@ Per field, precedence is:
 --flag  >  environment variable  >  device entry  >  defaults section
 ```
 
-The gateway additionally falls back to `https://code-mcp.tuanm.workers.dev`
+The gateway additionally falls back to `https://prime.tuanm.workers.dev`
 when none of these sets one.
 
 Devices created by `mcp connect` are stored like any other, with their own
@@ -425,7 +425,7 @@ gateway and `anonymous: true`:
 ```yaml
 devices:
   anon-05ece6d0e71cfce9:
-    gateway: "https://code-mcp.tuanm.workers.dev"
+    gateway: "https://prime.tuanm.workers.dev"
     token: "O184FH"
     anonymous: true
 ```
@@ -502,7 +502,7 @@ Failure isolation was measured in both modes with the pattern
 `[ok, FAIL, ok]`: exit code 1, both successful results present, failure
 reported - and the same for a mid-batch timeout.
 
-Against the deployed gateway (code-mcp.tuanm.workers.dev, device on a home
+Against the deployed gateway (prime.tuanm.workers.dev, device on a home
 connection) a single `tools call` costs ~0.4-1.2 s end to end depending on
 network conditions - Cloudflare edge plus the device round trip, not CLI
 startup. HTTP round trips per command: **1**.

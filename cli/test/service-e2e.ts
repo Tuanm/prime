@@ -101,7 +101,7 @@ function servicePids(): number[] {
 function definitionText(): string {
   if (process.platform === "linux") return existsSync(systemdUnitPath()) ? readFileSync(systemdUnitPath(), "utf8") : "";
   if (process.platform === "darwin") return existsSync(launchdPlistPath()) ? readFileSync(launchdPlistPath(), "utf8") : "";
-  const r = Bun.spawnSync(["powershell", "-NoProfile", "-Command", "Export-ScheduledTask -TaskPath '\\code-mcp-gateway\\' -TaskName 'code-mcp' -ErrorAction SilentlyContinue"], { stdout: "pipe" });
+  const r = Bun.spawnSync(["powershell", "-NoProfile", "-Command", "Export-ScheduledTask -TaskPath '\\prime-gateway\\' -TaskName 'code-mcp' -ErrorAction SilentlyContinue"], { stdout: "pipe" });
   return r.stdout.toString();
 }
 

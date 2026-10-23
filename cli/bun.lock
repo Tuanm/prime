@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "code-mcp-gateway-cli",
+      "name": "prime-gateway-cli",
       "devDependencies": {
         "@types/bun": "^1.1.14",
         "typescript": "^5.6.0",

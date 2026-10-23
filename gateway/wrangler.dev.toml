@@ -1,6 +1,6 @@
 # Dev-only config: same worker, no containers block (local workerd cannot
 # run firecracker containers - container tools are exercised on prod).
-name = "code-mcp"
+name = "prime"
 account_id = "b04dd6c1528d6cf40ffd645269716025"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"

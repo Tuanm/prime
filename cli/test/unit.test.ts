@@ -119,7 +119,7 @@ describe("targets", () => {
     const saved = process.env.CODE_MCP_GATEWAY_URL;
     delete process.env.CODE_MCP_GATEWAY_URL;
     try {
-      expect(resolveTarget(emptyConfig(), "alpha").gateway).toBe("https://code-mcp.tuanm.workers.dev");
+      expect(resolveTarget(emptyConfig(), "alpha").gateway).toBe("https://prime.tuanm.workers.dev");
       expect(resolveGateway(emptyConfig())).toBe(DEFAULT_GATEWAY);
       // A saved default beats the fallback, and the flag beats both.
       const config = emptyConfig();
@@ -336,10 +336,10 @@ describe("update helpers", () => {
     const saved = { repo: process.env.MCP_CLI_REPO, api: process.env.MCP_CLI_API_BASE };
     try {
       delete process.env.MCP_CLI_REPO;
-      expect(repoSlug()).toBe("Tuanm/code-mcp");
+      expect(repoSlug()).toBe("Tuanm/prime");
       process.env.MCP_CLI_REPO = "  ";
       process.env.MCP_CLI_API_BASE = "";
-      expect(repoSlug()).toBe("Tuanm/code-mcp");
+      expect(repoSlug()).toBe("Tuanm/prime");
       expect(apiBase()).toBe("https://api.github.com");
       process.env.MCP_CLI_REPO = "me/fork";
       expect(repoSlug()).toBe("me/fork");
