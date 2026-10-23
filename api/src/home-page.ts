@@ -36,17 +36,17 @@ __CSS__
 
     <div class="cards">
       <a class="card" href="/connect">
-        <div class="t">Devices</div>
+        <div class="t">Device Connect</div>
         <div class="d">Any machine becomes a device: its files, shell and tools, reachable from any MCP client.</div>
         <div class="u">/connect</div>
       </a>
       <a class="card" href="/files">
-        <div class="t">File sharing</div>
+        <div class="t">File Share</div>
         <div class="d">Devices park temporary files and hand out a link - optionally protected, always expiring.</div>
         <div class="u">/files</div>
       </a>
       <a class="card" href="/sandbox">
-        <div class="t">Browser sandbox</div>
+        <div class="t">Sandbox</div>
         <div class="d">Tools you write in the page run in a locked-down frame, with no access to your pages, cookies or data.</div>
         <div class="u">/sandbox</div>
       </a>
