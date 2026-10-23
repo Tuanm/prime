@@ -90,7 +90,9 @@ id = "d36acd23e12945058bf9910182deeec7"
 # itself: if the Access application is deleted or misconfigured, the admin is
 # closed rather than exposed. Set the team domain and the admin application's
 # AUD tag, then flip ADMIN_ACCESS to "enforce":
-#   ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
+ACCESS_TEAM_DOMAIN = "tuanm.cloudflareaccess.com"
+# The Access application's AUD tag (Zero Trust -> Access -> Applications ->
+# the admin app -> Application Audience): every accepted assertion must carry it.
 #   ACCESS_AUD = "..."
 # Until those are set, enforce keeps /admin closed to everyone (it refuses any
 # request without a verified Access assertion) - fail closed, never open.
