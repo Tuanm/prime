@@ -1,5 +1,5 @@
 // The public landing page: GET / on the gateway, and index.html on GitHub Pages
-// (gateway/scripts/build-site.ts writes it out). One source for both.
+// (api/scripts/build-site.ts writes it out). One source for both.
 //
 // The page finds the newest mcp release through the GitHub API at load time,
 // so it never needs a rebuild for a new release.

@@ -5,7 +5,7 @@
 //   bun scripts/build.ts --bundle-only  just the portable JS bundle
 //
 // The code-mcp device server ("mcp code-mcp" / "mcp connect") is built in from
-// ../code-mcp/code-mcp.ts in this repository - so an artifact is reproducible
+// src/code-mcp.ts in this package - so an artifact is reproducible
 // from the commit it was built at. Every artifact is smoke-tested to run it.
 //
 // `bun build --compile` embeds the Bun runtime, so each artifact runs on a

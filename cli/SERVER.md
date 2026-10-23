@@ -2,7 +2,7 @@
 
 A minimal MCP (Model Context Protocol) server over HTTP with Streamable HTTP transport and JSON-RPC 2.0.
 
-One implementation in TypeScript/Bun (`code-mcp.ts`).
+One implementation in TypeScript/Bun (`src/code-mcp.ts`).
 
 ## Features
 
@@ -15,16 +15,16 @@ One implementation in TypeScript/Bun (`code-mcp.ts`).
 ## Usage
 ```bash
 # Bun
-bun code-mcp.ts [flags...]
+bun src/code-mcp.ts [flags...]
 ```
 
 See the **Flags** table below.
 
 ### Gateway Mode
 
-Connect to a [Prime](../gateway) (in this repository) to expose this server to the internet without `cloudflared`:
+Connect to a [Prime](../api) (in this repository) to expose this server to the internet without `cloudflared`:
 ```bash
-bun code-mcp.ts     --gateway wss://gateway.example.workers.dev --port 7777
+bun src/code-mcp.ts     --gateway wss://gateway.example.workers.dev --port 7777
 ```
 
 A bare `--gateway` (no URL) connects to the managed gateway at

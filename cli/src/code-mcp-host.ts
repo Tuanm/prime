@@ -1,5 +1,4 @@
-// The bundled code-mcp device server: code-mcp/code-mcp.ts in this repository,
-// reached through src/code-mcp.ts.
+// The bundled code-mcp device server: src/code-mcp.ts in this package.
 //
 // code-mcp.ts is a script, not a library: importing it parses Bun.argv, starts
 // an HTTP server and (with --gateway) dials the gateway. It must therefore never

@@ -33,11 +33,11 @@ const ENTRY = join(ROOT, "src", "index.ts");
 // ---- bundled code-mcp ---------------------------------------------------------
 
 describe("bundled code-mcp", () => {
-  test("comes from code-mcp/ in this repository", () => {
-    // One source: the entry imports the repository's code-mcp, nothing vendored.
+  test("is the device server in this package", () => {
+    // One source, in this package: src/code-mcp.ts is the server itself.
     const entry = readFileSync(join(ROOT, "src", "code-mcp.ts"), "utf8");
-    expect(entry).toContain('import "../../code-mcp/code-mcp.ts";');
-    expect(readFileSync(join(ROOT, "..", "code-mcp", "code-mcp.ts"), "utf8")).toContain("code-mcp listening on");
+    expect(entry).toContain("code-mcp listening on");
+    expect(entry).not.toMatch(/^import\.{2}\/.*code-mcp\/code-mcp\.ts/m);
   });
 
   test("is wired through the #code-mcp import, never a static import", () => {

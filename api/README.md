@@ -410,7 +410,7 @@ Smoke coverage: gateway/device auth, duplicate-registration rejection, register-
 
 > **Miniflare note** — local DO state persists under `.wrangler/state`. After a
 > hard kill, stale sockets linger until the keepalive alarm fires; for a clean
-> run: `rm -rf gateway/.wrangler/state` before starting.
+> run: `rm -rf api/.wrangler/state` before starting.
 
 ### Ticket-based file downloads
 

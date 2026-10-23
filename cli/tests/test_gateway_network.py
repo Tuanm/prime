@@ -68,7 +68,7 @@ class GatewayNetworkTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}
         env.update(env_extra)
         proc = subprocess.Popen(
-            [BUN, str(ROOT / "code-mcp.ts"), "--gateway", "wss://gateway.example.test", "--id", "net-test",
+            [BUN, str(ROOT / "src" / "code-mcp.ts"), "--gateway", "wss://gateway.example.test", "--id", "net-test",
              "--gateway-token", "tok", "--port", str(free_port()), "--bind", "127.0.0.1"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True, encoding="utf-8")
         time.sleep(seconds)

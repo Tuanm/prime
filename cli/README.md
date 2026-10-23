@@ -165,8 +165,8 @@ and credentials `mcp tools list` / `mcp call` use, or just the ids given) into
 
 ### code-mcp - the bundled device server
 
-The CLI embeds [code-mcp](../code-mcp), the MCP server that
-exposes a machine's files and shell. `mcp connect` runs it for you;
+The CLI embeds the code-mcp device server (documented in
+[SERVER.md](SERVER.md)), which exposes a machine's files and shell. `mcp connect` runs it for you;
 `mcp code-mcp [options]` runs it directly (`mcp code-mcp --help` lists its
 options), e.g. as a registered device:
 
@@ -643,9 +643,9 @@ bun test:service      # mcp service against this OS's real service manager
 
 ### The bundled code-mcp
 
-code-mcp lives in this repository at [`../code-mcp`](../code-mcp), and
-`src/code-mcp.ts` simply imports `../../code-mcp/code-mcp.ts` - so a binary is
-built from exactly the code-mcp of the commit it was built at.
+code-mcp lives in this package at `src/code-mcp.ts`, which the binary embeds -
+so a binary is built from exactly the device server of the commit it was built
+at.
 
 - code-mcp is a script with top-level side effects, so it is never imported
   statically: only `mcp code-mcp` loads it, via `await import("#code-mcp")` (a

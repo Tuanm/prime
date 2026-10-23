@@ -5,10 +5,10 @@ on:
     branches: [main]
   pull_request:
 
-# Three components share this repository: gateway/ (the Cloudflare Worker),
-# code-mcp/ (the device server, in TypeScript) and cli/ (the
-# mcp command, which embeds code-mcp and tests against the gateway). A pull
-# request runs the jobs its changes can affect; main always runs everything.
+# Two components share this repository: api/ (the Cloudflare Worker) and cli/
+# (the mcp command, which embeds the device server - src/code-mcp.ts - and tests
+# against the api). A pull request runs the jobs its changes can affect; main
+# always runs everything.
 jobs:
   changes:
     name: What changed
@@ -19,8 +19,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      gateway: ${{ github.event_name == 'push' || steps.filter.outputs.gateway == 'true' }}
-      code-mcp: ${{ github.event_name == 'push' || steps.filter.outputs.code-mcp == 'true' }}
+      api: ${{ github.event_name == 'push' || steps.filter.outputs.api == 'true' }}
       cli: ${{ github.event_name == 'push' || steps.filter.outputs.cli == 'true' }}
     steps:
       - uses: actions/checkout@v4
@@ -31,27 +30,23 @@ jobs:
             workflows: &workflows
               - '.github/**'
               - 'scripts/**'
-            gateway:
+            api:
               - *workflows
-              - 'gateway/**'
-            code-mcp:
-              - *workflows
-              - 'code-mcp/**'
-            # The CLI embeds code-mcp and its end-to-end suite runs the gateway.
+              - 'api/**'
+            # The CLI embeds the device server and its end-to-end suite runs the api.
             cli:
               - *workflows
               - 'cli/**'
-              - 'code-mcp/**'
-              - 'gateway/**'
+              - 'api/**'
 
   test:
     name: Typecheck + unit and smoke tests
     needs: changes
-    if: needs.changes.outputs.gateway == 'true'
+    if: needs.changes.outputs.api == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: gateway
+        working-directory: api
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,10 +100,10 @@ jobs:
         with:
           node-version: '22'
 
-      # The end-to-end suite boots a local wrangler gateway, so the gateway's
+      # The end-to-end suite boots a local wrangler api, so the api's
       # dependencies must be installed even though the CLI itself has none.
-      - name: Install gateway dependencies
-        working-directory: gateway
+      - name: Install api dependencies
+        working-directory: api
         run: npm ci
 
       # A malformed ${{ }} is still valid YAML, so only GitHub's parser rejects
@@ -166,7 +161,7 @@ jobs:
           architecture: ${{ matrix.node-arch }}
 
       - name: Install gateway dependencies
-        working-directory: gateway
+        working-directory: api
         run: npm ci
 
       - name: Install CLI dependencies
@@ -238,13 +233,13 @@ jobs:
           CODE_MCP_SYSTEM_CA_TEST: '1'
         run: bun test/system-ca.ts
 
-  # code-mcp's three implementations. The tests check each one's PowerShell
-  # launcher (and run it against real PowerShell, present on all three
-  # runners), the spawn environment, and that every implementation starts.
-  code-mcp:
-    name: code-mcp on ${{ matrix.os }}
+  # The device server that the CLI embeds. Its tests exercise the PowerShell
+  # launcher (against a real PowerShell, present on all three runners) and the
+  # spawn environment, and that the server starts.
+  device-server:
+    name: device server on ${{ matrix.os }}
     needs: changes
-    if: needs.changes.outputs.code-mcp == 'true'
+    if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -252,7 +247,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     defaults:
       run:
-        working-directory: code-mcp
+        working-directory: cli
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -275,4 +270,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bun code-mcp.ts --help | head -1
+          bun src/code-mcp.ts --help | head -1

@@ -1,6 +1,6 @@
 // Write the GitHub Pages site: the same landing page the gateway serves at /.
 //
-//   bun gateway/scripts/build-site.ts [outDir]     (default _site)
+//   bun api/scripts/build-site.ts [outDir]     (default _site)
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";

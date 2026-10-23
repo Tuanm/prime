@@ -237,7 +237,7 @@ USAGE
   mcp code-mcp [code-mcp flags]
   mcp code-mcp --help          code-mcp's own flag reference
 
-The CLI embeds code-mcp (code-mcp/ in github.com/Tuanm/prime), the MCP server that
+The CLI embeds code-mcp (src/code-mcp.ts in this package), the MCP server that
 exposes this machine's files and shell as tools. 'mcp connect' runs it for
 you; use this command for anything else code-mcp supports, e.g. a registered
 device:

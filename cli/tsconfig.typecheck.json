@@ -1,6 +1,6 @@
 {
-  // "bun run typecheck": everything except code-mcp itself (../code-mcp, which
-  // has its own conventions), mapped to a stub. Bun reads tsconfig.json only.
+  // "bun run typecheck": everything except the device server itself (src/code-mcp.ts,
+  // which has its own conventions), mapped to a stub. Bun reads tsconfig.json only.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "paths": { "#code-mcp": ["./src/code-mcp.stub.d.ts"] }

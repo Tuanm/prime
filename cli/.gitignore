@@ -1,2 +1,7 @@
 node_modules/
 dist/
+
+__pycache__/
+.memo.jsonl
+*.class
+.code-mcp/

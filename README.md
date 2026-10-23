@@ -136,8 +136,8 @@ claude mcp add devices -- mcp serve
 The same server runs on its own for one machine - no service, no account:
 
 ```bash
-bun code-mcp/code-mcp.ts --port 7777 --token secret        # HTTP MCP at http://127.0.0.1:7777/mcp
-bun code-mcp/code-mcp.ts --gateway --id my-laptop --token t # ...or as a device on the service
+bun cli/src/code-mcp.ts --port 7777 --token secret        # HTTP MCP at http://127.0.0.1:7777/mcp
+bun cli/src/code-mcp.ts --gateway --id my-laptop --token t # ...or as a device on the service
 ```
 
 ## CLI
@@ -160,21 +160,21 @@ section. `mcp --help` lists everything, and `mcp call` is an alias for `mcp tool
 
 ## Documentation
 
-- [code-mcp/README.md](code-mcp/README.md) - the device server: tools, flags, behaviour
+- [cli/SERVER.md](cli/SERVER.md) - the device server: tools, flags, behaviour
 - [cli/README.md](cli/README.md) - the `mcp` CLI: install, commands, configuration, exit codes
-- [gateway/README.md](gateway/README.md) - internals, deployment, tunables, tests
+- [api/README.md](api/README.md) - internals, deployment, tunables, tests
 - [MCP specification](https://modelcontextprotocol.io) - the protocol all of this speaks
 
 ## Development
 
 ```bash
-cd gateway && npm test                         # unit, smoke, files, anonymous devices (local wrangler)
-cd gateway && npm run typecheck
+cd api && npm test                         # unit, smoke, files, anonymous devices (local wrangler)
+cd api && npm run typecheck
 cd cli && bun run test && bun test/e2e.ts      # CLI unit + end-to-end, against a local instance
 cd cli && bun test/service-e2e.ts              # mcp service on this OS's real service manager
 cd code-mcp && python -m unittest discover -s tests
 ```
 
-CI runs each component's suites when it, or something it depends on, changes: the service
+CI runs each component's suites when it, or something it depends on, changes: the api
 on Linux; the CLI on Linux and Windows (x64, Arm) plus `mcp service` on Linux, macOS and
-Windows; code-mcp on Linux, macOS and Windows.
+Windows; the device server on Linux, macOS and Windows.

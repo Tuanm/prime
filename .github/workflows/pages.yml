@@ -1,15 +1,15 @@
 name: Landing page (GitHub Pages)
 
-# The same page the gateway serves at / (gateway/src/landing-page.ts). It looks
+# The same page the api serves at / (api/src/landing-page.ts). It looks
 # up the newest mcp release at load time, so releases need no redeploy here.
 on:
   push:
     branches: [main]
     paths:
-      - 'gateway/src/landing-page.ts'
-      - 'gateway/src/home-page.ts'
-      - 'gateway/src/ui-css.ts'
-      - 'gateway/scripts/build-site.ts'
+      - 'api/src/landing-page.ts'
+      - 'api/src/home-page.ts'
+      - 'api/src/ui-css.ts'
+      - 'api/scripts/build-site.ts'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
           bun-version: latest
 
       - name: Build the site
-        run: bun gateway/scripts/build-site.ts _site
+        run: bun api/scripts/build-site.ts _site
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
