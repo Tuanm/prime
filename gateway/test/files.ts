@@ -162,10 +162,10 @@ async function main(): Promise<void> {
     check("disabled: files API -> 403", (await fetch(BASE + "/api/files", { headers: other })).status === 403);
     const gateDisabled = await fetch(BASE + "/files", { headers: other });
     check("disabled: /files page shows the sign-in form (no content)", gateDisabled.status === 200 && (await gateDisabled.text()).includes('id="gate-device"'));
-    const mcpDisabled = await fetch(BASE + "/mcp", { headers: other });
-    check("disabled: /mcp page shows the sign-in form", mcpDisabled.status === 200 && (await mcpDisabled.text()).includes('id="gate-token"'));
+    const mcpDisabled = await fetch(BASE + "/sandbox", { headers: other });
+    check("disabled: /sandbox page shows the sign-in form", mcpDisabled.status === 200 && (await mcpDisabled.text()).includes('id="gate-token"'));
     check("disabled: upload -> 403", (await fetch(BASE + "/api/files?name=x&expiry_days=1", { method: "POST", headers: other, body: bytes(10) })).status === 403);
-    check("disabled: WebSocket ticket -> 403", (await fetch(BASE + "/mcp?ticket=1", { method: "POST", headers: { ...other, "x-sandbox": "1" } })).status === 403);
+    check("disabled: WebSocket ticket -> 403", (await fetch(BASE + "/sandbox?ticket=1", { method: "POST", headers: { ...other, "x-sandbox": "1" } })).status === 403);
     check("disabled device's own page is unaffected for others", (await fetch(BASE + "/api/files", { headers: DEMO })).status === 200);
     check("re-enable -> 200", (await set(false)).status === 200);
     check("re-enabled: files API -> 200", (await fetch(BASE + "/api/files", { headers: other })).status === 200);
@@ -337,8 +337,8 @@ async function main(): Promise<void> {
   const gateHtml = await gate.text();
   check("GET /files without auth -> the sign-in form", gate.status === 200 && gateHtml.includes('id="gate-device"') && gateHtml.includes('id="gate-token"'));
   check("...and no file content", !gateHtml.includes("__FILES__") && !gateHtml.includes("dropzone"));
-  const mcpGate = await fetch(BASE + "/mcp");
-  check("GET /mcp without auth -> the sign-in form", mcpGate.status === 200 && (await mcpGate.text()).includes('id="gate-device"'));
+  const mcpGate = await fetch(BASE + "/sandbox");
+  check("GET /sandbox without auth -> the sign-in form", mcpGate.status === 200 && (await mcpGate.text()).includes('id="gate-device"'));
   // signing in sets a cookie the pages then accept
   const signIn = await fetch(BASE + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: "demo", token: "demo" }) });
   const cookie = (signIn.headers.get("set-cookie") ?? "").split(";")[0];

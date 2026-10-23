@@ -25,6 +25,7 @@ import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
+import { HOME_HTML } from "./home-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
@@ -336,9 +337,9 @@ export default {
       return new Response(null, { status: 308, headers: { location: to.toString(), "cache-control": "no-store" } });
     }
 
-    // ---- Landing page (also published to GitHub Pages) ----
+    // ---- Front page ----
     if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/" || url.pathname === "/index.html")) {
-      return new Response(request.method === "HEAD" ? null : LANDING_HTML, {
+      return new Response(request.method === "HEAD" ? null : HOME_HTML, {
         headers: {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "public, max-age=300",
@@ -645,16 +646,34 @@ export default {
       }));
     }
 
-    // GET /mcp: the Sandbox page (this browser as a device). Exactly /mcp only:
-    // MCP clients use /mcp/{deviceId}, which is untouched.
-    if (url.pathname === "/mcp" && request.method === "GET" && url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
-    if (url.pathname === "/mcp") return handleSandbox(request, env, url);
+    // GET /sandbox: the Sandbox page (this browser as a device); POST
+    // /sandbox?ticket=1 mints its WebSocket ticket. /mcp is the product page now
+    // (the old home page), and the old sandbox URLs keep working there.
+    if (url.pathname === "/sandbox" && request.method === "GET" && url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
+    if (url.pathname === "/sandbox") return handleSandbox(request, env, url);
+    if (url.pathname === "/mcp" && request.method === "GET") {
+      if (url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
+      if (url.searchParams.has("frame") || url.searchParams.has("ticket")) return handleSandbox(request, env, url);
+      return new Response(LANDING_HTML, {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+          "cache-control": "no-store",
+        },
+      });
+    }
+    if (url.pathname === "/mcp" && request.method === "POST" && url.searchParams.has("ticket")) return handleSandbox(request, env, url);
 
-    // GET /mcp/{deviceId} in a browser: the Sandbox page, which asks for the
-    // device token. Only for requests that want HTML - MCP clients get the 405
-    // below, exactly as before.
-    if ((request.method === "GET" || request.method === "HEAD") && /^\/mcp\/[^/]+$/.test(url.pathname) && (request.headers.get("accept") || "").includes("text/html")) {
+    // GET /sandbox/{deviceId} in a browser: the Sandbox page, which asks for
+    // the device token. Old /mcp/{deviceId} links are sent there.
+    if ((request.method === "GET" || request.method === "HEAD") && /^\/sandbox\/[^/]+$/.test(url.pathname)) {
       return handleSandboxDevicePage(request, env, url);
+    }
+    if ((request.method === "GET" || request.method === "HEAD") && /^\/mcp\/[^/]+$/.test(url.pathname) && (request.headers.get("accept") || "").includes("text/html")) {
+      const to = new URL(url);
+      to.pathname = "/sandbox/" + url.pathname.slice("/mcp/".length);
+      return new Response(null, { status: 302, headers: { location: to.toString(), "cache-control": "no-store" } });
     }
 
     // Non-POST on /mcp/{deviceId}: this is a POST-only JSON-RPC endpoint.

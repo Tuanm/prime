@@ -2,7 +2,7 @@
 // (HTTP Basic, as on /files) uploads JavaScript tools - one file per tool, an
 // 'export default async function' documented with JSDoc - kept in this browser's
 // storage. Tools are validated, and later run, in a sandboxed iframe with an
-// opaque origin and no network (GET /mcp?frame=runtime), never in the page.
+// opaque origin and no network (GET /sandbox?frame=runtime), never in the page.
 
 import { validDeviceId } from "./config";
 import { gateResponse } from "./gate-ui";
@@ -468,7 +468,7 @@ const PAGE_JS = String.raw`(function () {
   // ---- the sandbox runtime (opaque origin, no network, no storage) ----------
   var frame = document.createElement("iframe");
   frame.setAttribute("sandbox", "allow-scripts");
-  frame.src = "/mcp?frame=runtime";
+  frame.src = "/sandbox?frame=runtime";
   frame.title = "tool runtime";
   frame.style.display = "none";
   document.body.appendChild(frame);
@@ -726,7 +726,7 @@ const PAGE_JS = String.raw`(function () {
     conn.userClosed = false;
     clearTimeout(conn.timer);
     if (first) setConn("connecting");
-    fetch("/mcp?ticket=1", { method: "POST", headers: { "x-sandbox": "1" }, credentials: "same-origin", cache: "no-store" })
+    fetch("/sandbox?ticket=1", { method: "POST", headers: { "x-sandbox": "1" }, credentials: "same-origin", cache: "no-store" })
       .then(function (r) {
         if (r.status === 401) throw new Error("signed out - reload the page and sign in again");
         if (r.status === 403) throw new Error("this device is disabled - an admin has to activate it again");
@@ -944,7 +944,7 @@ const PAGE_JS = String.raw`(function () {
     return new Promise(function (resolve) {
       var f = document.createElement("iframe");
       f.setAttribute("sandbox", "allow-scripts");
-      f.src = "/mcp?frame=runtime";
+      f.src = "/sandbox?frame=runtime";
       var call = { frame: f, tool: tool, client: client, done: false, waiters: [] };
       var timer = setTimeout(function () { finish({ ok: false, error: "the tool did not finish within " + CALL_TIMEOUT_MS / 1000 + " s and was stopped", logs: [] }); }, CALL_TIMEOUT_MS);
       function finish(r) {
@@ -2211,9 +2211,9 @@ const PAGE_JS = String.raw`(function () {
   function loadSql() {
     if (!sqlReady) sqlReady = new Promise(function (resolve, reject) {
       var sc = document.createElement("script");
-      sc.src = "/mcp?asset=sql-wasm.js";
+      sc.src = "/sandbox?asset=sql-wasm.js";
       sc.onload = function () {
-        window.initSqlJs({ locateFile: function () { return "/mcp?asset=sql-wasm.wasm"; } }).then(function (SQL) {
+        window.initSqlJs({ locateFile: function () { return "/sandbox?asset=sql-wasm.wasm"; } }).then(function (SQL) {
           return idbDo("db", "readonly", function (st) { return st.get(DEVICE); }).then(function (bytes) {
             sqlDb = bytes ? new SQL.Database(new Uint8Array(bytes)) : new SQL.Database();
             resolve(sqlDb);
@@ -2661,12 +2661,12 @@ function refusal(res: Response, base: Record<string, string>): Response {
   return new Response(res.body, { status: 401, headers });
 }
 
-/** GET/HEAD /mcp (page, runtime frame); POST /mcp?ticket=1 (WebSocket ticket). */
+/** GET/HEAD /mcp (page, runtime frame); POST /sandbox?ticket=1 (WebSocket ticket). */
 /** GET /mcp/{deviceId} opened in a browser: the same Sandbox page, which asks
  *  for the device token instead of relying on HTTP Basic. MCP clients keep the
  *  405 they already got: this only answers requests that ask for HTML. */
 export async function handleSandboxDevicePage(request: Request, env: Env, url: URL): Promise<Response> {
-  const deviceId = url.pathname.slice("/mcp/".length);
+  const deviceId = url.pathname.slice("/sandbox/".length);
   if (!validDeviceId(deviceId)) return new Response("not found", { status: 404, headers: { "cache-control": "no-store" } });
   // Same sign-in as /mcp: the device id is known from the path, only its token
   // is asked for, and nothing of the page is sent before it checks out.
@@ -2729,7 +2729,7 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
   const auth = await authorizeDevice(env, request);
   if (auth instanceof Response) {
     const error = auth.status === 403 ? ((await auth.json().catch(() => ({}))) as { error?: string }).error : undefined;
-    return gateResponse({ request, title: "Sandbox", device: null, next: "/mcp", error });
+    return gateResponse({ request, title: "Sandbox", device: null, next: "/sandbox", error });
   }
   const ws = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
   return new Response(request.method === "HEAD" ? null : renderSandboxPage(auth.deviceId), {

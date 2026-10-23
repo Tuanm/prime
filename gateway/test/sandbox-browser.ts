@@ -55,9 +55,9 @@ try {
     ok(reg.ok, "registered " + ID);
   }
   // ---- tickets ----
-  ok((await fetch(B + "/mcp?ticket=1", { method: "POST", headers: { authorization: auth } })).status === 400, "ticket without x-sandbox header -> 400");
-  ok((await fetch(B + "/mcp?ticket=1", { method: "POST", headers: { "x-sandbox": "1" } })).status === 401, "ticket without credentials -> 401");
-  const tr = await fetch(B + "/mcp?ticket=1", { method: "POST", headers: { authorization: auth, "x-sandbox": "1" } });
+  ok((await fetch(B + "/sandbox?ticket=1", { method: "POST", headers: { authorization: auth } })).status === 400, "ticket without x-sandbox header -> 400");
+  ok((await fetch(B + "/sandbox?ticket=1", { method: "POST", headers: { "x-sandbox": "1" } })).status === 401, "ticket without credentials -> 401");
+  const tr = await fetch(B + "/sandbox?ticket=1", { method: "POST", headers: { authorization: auth, "x-sandbox": "1" } });
   const tj = await tr.json();
   ok(tr.status === 200 && tj.ws_url.includes("ticket=") && !tj.ws_url.includes("token=") && tj.online === false, "ticket issued; the WS URL holds the ticket, not the token");
   const first = await openWs(tj.ws_url);
@@ -67,7 +67,7 @@ try {
   ok(!replay.ok, "the same ticket a second time is refused (" + replay.why + ")");
   const tampered = await openWs(tj.ws_url.replace(/.(?=$)/, (c) => (c === "A" ? "B" : "A")));
   ok(!tampered.ok, "a tampered ticket is refused");
-  const tj2 = await (await fetch(B + "/mcp?ticket=1", { method: "POST", headers: { authorization: auth, "x-sandbox": "1" } })).json();
+  const tj2 = await (await fetch(B + "/sandbox?ticket=1", { method: "POST", headers: { authorization: auth, "x-sandbox": "1" } })).json();
   const other = await openWs(tj2.ws_url.replace("/ws/" + ID, "/ws/someone-else"));
   ok(!other.ok, "a ticket for " + ID + " does not open another device");
   await sleep(1500);
@@ -81,7 +81,7 @@ try {
   page.on("dialog", (d) => { nativeDialogs++; d.dismiss(); });
   // The pages ask in their own form now; the browser's Basic credentials are only
   // sent after a 401 challenge, which these pages no longer issue.
-  await page.goto(B + "/mcp", { waitUntil: "domcontentloaded" });
+  await page.goto(B + "/sandbox", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#gate-device");
   await page.fill("#gate-device", ID);
   await page.fill("#gate-token", TOKEN);
@@ -136,7 +136,7 @@ try {
     const gerr: string[] = []; gp.on("pageerror", (e) => gerr.push(e.message));
 
     // /mcp/{device}: the id is known, so only the token is asked for.
-    await gp.goto(B + "/mcp/" + ID, { waitUntil: "domcontentloaded" });
+    await gp.goto(B + "/sandbox/" + ID, { waitUntil: "domcontentloaded" });
     await gp.waitForSelector("#gate-device");
     ok((await gp.textContent("h1")) === "Sandbox" && (await gp.isVisible("#gate-device")), "GET /mcp/{device} shows the sign-in form");
     ok((await gp.inputValue("#gate-device")) === ID && (await gp.getAttribute("#gate-device", "readonly")) !== null, "the device id is filled in and read-only");
@@ -183,7 +183,7 @@ try {
     // above is signed in already (its cookie would skip the form).
     const freshCtx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
     const gp2 = await freshCtx.newPage();
-    await gp2.goto(B + "/mcp", { waitUntil: "domcontentloaded" });
+    await gp2.goto(B + "/sandbox", { waitUntil: "domcontentloaded" });
     await gp2.waitForSelector("#gate-device");
     ok((await gp2.inputValue("#gate-device")) === "" && (await gp2.getAttribute("#gate-device", "readonly")) === null, "/mcp asks for the device id and the token");
     await gp2.fill("#gate-device", ID);
@@ -208,6 +208,9 @@ try {
 
     ok(gerr.length === 0, "no page errors on the forms " + gerr.join(" | "));
     await noAuth.close();
+    // Old browser links still land on the page.
+    const moved = await fetch(B + "/mcp/" + ID, { headers: { accept: "text/html" }, redirect: "manual" });
+    ok(moved.status === 302 && (moved.headers.get("location") ?? "").endsWith("/sandbox/" + ID), "old /mcp/{device} links redirect to /sandbox/{device}, got " + moved.status);
     const asJson = await fetch(B + "/mcp/" + ID, { headers: { accept: "application/json" } });
     ok(asJson.status === 405, "MCP clients still get 405 for GET /mcp/{device} (only HTML requests get the form), got " + asJson.status);
     const badId = await fetch(B + "/mcp/bad%20id", { headers: { accept: "text/html" } });

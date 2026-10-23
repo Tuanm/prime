@@ -139,7 +139,12 @@ try {
   // The landing page is served at /.
   const landing = await fetch(B + "/");
   const landingText = await landing.text();
-  check("GET / serves the landing page", landing.status === 200 && (landing.headers.get("content-type") ?? "").startsWith("text/html") && landingText.includes('id="connect"'), String(landing.status));
+  // / is the Prime front page now; the full product page (and its Connect
+  // section) lives at /mcp.
+  check("GET / serves the front page", landing.status === 200 && (landing.headers.get("content-type") ?? "").startsWith("text/html") && landingText.includes("Prime") && landingText.includes('href="/sandbox"'), String(landing.status));
+  const product = await fetch(B + "/mcp");
+  const productText = await product.text();
+  check("GET /mcp serves the product page", product.status === 200 && productText.includes("code-mcp") && productText.includes('href="https://github.com/Tuanm/prime'), String(product.status));
   check("HEAD / answers without a body", (await fetch(B + "/", { method: "HEAD" })).status === 200);
   check("POST / is not the landing page", (await fetch(B + "/", { method: "POST" })).status !== 200);
 

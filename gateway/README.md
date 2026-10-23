@@ -166,6 +166,10 @@ Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>
 | `DELETE` | `/api/files/{id}` | device basic | Delete a file immediately |
 | `GET` | `/files` | device basic | File management page |
 | `GET` | `/files/{id}` | public; a protected file prompts for its key | File download page |
+| `GET` | `/` | public | Front page (Prime), linking the three pages below |
+| `GET` | `/mcp` | public | The product page - the page `/` used to be |
+| `GET` | `/sandbox` | device basic | Browser sandbox: this tab as a device |
+| `GET` | `/sandbox/{deviceId}` | device token | The same page for one device; old `/mcp/{deviceId}` browser links redirect here |
 | `WS` | `/ws/{deviceId}` | device | Device WebSocket (preferred) |
 | `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
 
