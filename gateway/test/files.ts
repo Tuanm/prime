@@ -140,6 +140,15 @@ async function main(): Promise<void> {
   check("unregistered device -> 401", (await fetch(BASE + "/api/files", { headers: basic("ghost", "ghost") })).status === 401);
   check("valid credentials -> 200", (await fetch(BASE + "/api/files", { headers: DEMO })).status === 200);
 
+  // ---- trailing slashes land on the page, not on a bare 404 ----
+  for (const [from, to] of [["/files/", "/files"], ["/mcp/", "/mcp"], ["/mcp/demo/", "/mcp/demo"]]) {
+    const r = await fetch(BASE + from, { redirect: "manual" });
+    check("GET " + from + " redirects to " + to, r.status === 308 && (r.headers.get("location") ?? "").endsWith(to), r.status + " " + (r.headers.get("location") ?? ""));
+  }
+  // ...and a POST is redirected without being turned into a GET.
+  const posted = await fetch(BASE + "/mcp/", { method: "POST", redirect: "manual", body: "{}" });
+  check("a POST to /mcp/ keeps its method (308)", posted.status === 308, String(posted.status));
+
   // ---- a disabled (deactivated) device is refused everywhere ----
   {
     const set = (disabled: boolean) =>
