@@ -23,7 +23,7 @@ describe("landing page", () => {
     // The page builds asset names as prime-<version>-<id>[.exe]: the ids must be
     // the CLI's build targets, or Connect would point at a file that does not exist.
     const build = readFileSync(join(import.meta.dir, "..", "..", "cli", "scripts", "build.ts"), "utf8");
-    const targets = [...build.matchAll(/out: "mcp-([a-z0-9-]+?)(\.exe)?"/g)].map((m) => m[1]).sort();
+    const targets = [...build.matchAll(/out: "prime-([a-z0-9-]+?)(\.exe)?"/g)].map((m) => m[1]).sort();
     const offered = [...script.matchAll(/\{ id: "([a-z0-9-]+)"/g)].map((m) => m[1]).filter((id) => id !== "bundle").sort();
     expect(targets.length).toBe(6);
     expect(offered).toEqual(targets);
