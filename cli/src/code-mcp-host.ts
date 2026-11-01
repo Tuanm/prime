@@ -144,7 +144,7 @@ function redirectOutput(path: string): void {
   console.info = line;
   console.warn = line;
   console.error = line;
-  write(`\n--- code-prime service started ${new Date().toISOString()} (pid ${process.pid}) ---\n`);
+  write(`\n--- code-mcp service started ${new Date().toISOString()} (pid ${process.pid}) ---\n`);
 }
 
 /** Set on the relaunched service process, so it does not relaunch again. */
@@ -207,7 +207,7 @@ export async function runCodeMcp(args: string[]): Promise<void> {
     const status = serviceStatusSafe(configPath);
     if (status?.running) {
       throw new UsageError(
-        `the code-prime service is running (${status.where})`,
+        `the code-mcp service is running (${status.where})`,
         "It already serves these options. Stop it first with 'prime service uninstall', or check it with 'prime service status'.",
       );
     }

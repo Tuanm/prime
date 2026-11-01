@@ -2,7 +2,7 @@
 // End-to-end test of 'prime service' against the REAL service manager of this OS
 // (systemd user units / launchd / Task Scheduler), with the compiled binary.
 //
-//   bun test/service-e2e.ts            (refuses if a code-prime service is already installed)
+//   bun test/service-e2e.ts            (refuses if a code-mcp service is already installed)
 //
 // Everything runs against an isolated config (CODE_MCP_GATEWAY_CONFIG), and the
 // service is always uninstalled at the end.
@@ -116,7 +116,7 @@ if (!process.env.MCP_BIN) {
 
 const before = await prime(["service", "status", "--json"]);
 if (JSON.parse(before.out || "{}").installed === true) {
-  console.error("A code-prime service is already installed on this machine; refusing to touch it. Run this test where none is installed.");
+  console.error("A code-mcp service is already installed on this machine; refusing to touch it. Run this test where none is installed.");
   process.exit(1);
 }
 
@@ -188,7 +188,7 @@ try {
   const after = JSON.parse((await prime(["service", "status", "--json"])).out || "{}");
   check("status reports not installed", after.installed === false && after.running === false, JSON.stringify(after));
   const again = await prime(["service", "uninstall"]);
-  check("uninstalling twice is harmless", again.code === 0 && again.out.includes("no code-prime service"), again.out + again.err);
+  check("uninstalling twice is harmless", again.code === 0 && again.out.includes("no code-mcp service"), again.out + again.err);
 
   // ---- with no service, 'prime code-mcp' runs on the config's options ----
   const fg = Bun.spawn([BIN, "code-mcp"], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });

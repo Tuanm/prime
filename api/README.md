@@ -1,6 +1,6 @@
 # Prime — Cloudflare Worker
 
-**Production gateway for exposing code-prime devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
+**Production gateway for exposing code-mcp devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
 
 ## Overview
 

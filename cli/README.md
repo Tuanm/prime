@@ -167,7 +167,7 @@ and credentials `prime tools list` / `prime call` use, or just the ids given) in
 
 The CLI embeds the code-mcp device server (documented in
 [SERVER.md](SERVER.md)), which exposes a machine's files and shell. `prime connect` runs it for you;
-`prime code-mcp [options]` runs it directly (`prime code-prime --help` lists its
+`prime code-mcp [options]` runs it directly (`prime code-mcp --help` lists its
 options), e.g. as a registered device:
 
 ```bash
@@ -524,7 +524,7 @@ Design choices behind those numbers:
   parsed with Bun's built-in `Bun.YAML.parse`, and the CLI writes YAML with a
   small emitter. Nothing to resolve, nothing to load.
 - **One round trip per command.** MCP servers *should* require `initialize`
-  before other requests, but current code-prime devices do not. `--handshake auto`
+  before other requests, but current code-mcp devices do not. `--handshake auto`
   (the default) therefore calls directly and only handshakes if the server
   actually complains - see `--handshake always|never` to force it.
 - **Connection reuse within a batch.** A batch spanning several devices creates
@@ -653,7 +653,7 @@ at.
   excluded from `tsc` (mapped to `src/code-mcp.stub.d.ts`) because it is written
   to its own conventions, not this package's strict settings. It uses top-level
   `await`, which is why binaries are compiled with `--bytecode --format=esm`.
-- The build smoke-tests `code-prime --help` on the bundle and the host binary from
+- The build smoke-tests `code-mcp --help` on the bundle and the host binary from
   a directory outside the repository, so a build that lost it fails.
 
 The end-to-end suite compiles the host binary and drives it against a real local
@@ -661,5 +661,5 @@ gateway, covering both credentials, the tunnel relay, every input form, exit
 codes, handshake modes, dotted device ids, sequential ordering, `--parallel`
 overlap, timeouts, and the offline path - and the anonymous flow: `prime connect`
 registering and reusing a device, running the embedded code-mcp (from a
-directory without `src/`), real code-prime tools through the connect URL, and
+directory without `src/`), real code-mcp tools through the connect URL, and
 `prime serve` over stdio and HTTP.

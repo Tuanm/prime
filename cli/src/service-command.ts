@@ -107,7 +107,7 @@ async function waitRunning(platform: Platform, configPath: string, timeoutMs = 3
 export async function serviceInstall(args: string[], opts: ServiceCommandOptions): Promise<void> {
   const platform = platformOrThrow();
   const { options: passed, help } = parseCodeMcpArgs(args);
-  if (help) throw new UsageError("'prime service install' takes code-mcp options (see 'prime code-prime --help'), e.g. prime service install --port 7777");
+  if (help) throw new UsageError("'prime service install' takes code-mcp options (see 'prime code-mcp --help'), e.g. prime service install --port 7777");
   const configPath = resolve(opts.config ?? defaultConfigPath());
   // Validate now, not inside a service log: a typo in the config fails here.
   const config = loadConfig(configPath);
@@ -129,7 +129,7 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
   if (!running) {
     const log = recentLog(platform, spec.logPath);
     throw new CliError(
-      "the code-prime service was installed but is not staying up (" + (status.detail ?? "not running") + ")" + (log ? "\n\n" + log + "\n" : ""),
+      "the code-mcp service was installed but is not staying up (" + (status.detail ?? "not running") + ")" + (log ? "\n\n" + log + "\n" : ""),
       "Fix the options (config: " + configPath + "), then run 'prime service install' again - or remove it with 'prime service uninstall'.",
     );
   }
@@ -152,7 +152,7 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
     printJson({ installed: true, running: true, platform, where, device: online ? { id: effective.id, gateway: online.gateway, online: online.state === "online" } : undefined, options: describeOptions(effective), url: localUrl(effective), log: platform === "linux" ? "journalctl --user -u code-mcp" : spec.logPath, config: configPath, overrides: overridesPath(configPath) });
     return;
   }
-  opts.out(green("✓") + " code-prime service installed and running");
+  opts.out(green("✓") + " code-mcp service installed and running");
   opts.out("  definition  " + where);
   opts.out("  options     " + describeOptions(effective));
   opts.out("  local URL   " + localUrl(effective));
@@ -176,13 +176,13 @@ export async function serviceUninstall(args: string[], opts: ServiceCommandOptio
   rmSync(overridesPath(configPath), { force: true });
   const after = serviceStatus(platform, configPath);
   if (after.running || after.installed) {
-    throw new CliError("the code-prime service could not be fully removed (" + (after.detail ?? "still present") + ")", "Check " + after.where);
+    throw new CliError("the code-mcp service could not be fully removed (" + (after.detail ?? "still present") + ")", "Check " + after.where);
   }
   if (opts.json) {
     printJson({ uninstalled: had, platform, where: after.where });
     return;
   }
-  opts.out(had ? green("✓") + " code-prime service stopped and uninstalled" : "no code-prime service was installed");
+  opts.out(had ? green("✓") + " code-mcp service stopped and uninstalled" : "no code-mcp service was installed");
 }
 
 export async function serviceStatusCommand(args: string[], opts: ServiceCommandOptions): Promise<void> {
@@ -201,7 +201,7 @@ export async function serviceStatusCommand(args: string[], opts: ServiceCommandO
     return;
   }
   const state = status.running ? green("running") : status.installed ? yellow(status.detail ?? "installed, not running") : red("not installed");
-  opts.out("code-prime service: " + bold(state));
+  opts.out("code-mcp service: " + bold(state));
   opts.out("  definition  " + status.where);
   if (options && status.installed) {
     opts.out("  options     " + describeOptions(options));

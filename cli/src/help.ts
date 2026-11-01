@@ -235,7 +235,7 @@ const CODE_MCP = `prime code-mcp - run the bundled code-mcp device server   (adv
 
 USAGE
   prime code-mcp [code-mcp flags]
-  prime code-prime --help          code-mcp's own flag reference
+  prime code-mcp --help          code-mcp's own flag reference
 
 The CLI embeds code-mcp (src/code-mcp.ts in this package), the MCP server that
 exposes this machine's files and shell as tools. 'prime connect' runs it for
@@ -258,7 +258,7 @@ OPTIONS FROM THE CONFIG
 
   Values from the config never appear on a command line (ps).
 
-  Refuses to start while the code-prime service is running ('prime service').
+  Refuses to start while the code-mcp service is running ('prime service').
 `;
 
 const SERVICE = `prime service - run code-mcp as a user service

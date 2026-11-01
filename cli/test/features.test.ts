@@ -49,7 +49,7 @@ describe("bundled code-mcp", () => {
     }
   });
 
-  test("'prime code-prime --help' runs code-mcp; normal commands never start it", () => {
+  test("'prime code-mcp --help' runs code-mcp; normal commands never start it", () => {
     const help = Bun.spawnSync(["bun", ENTRY, "code-mcp", "--help"], { stdout: "pipe", stderr: "pipe" });
     expect(help.exitCode).toBe(0);
     expect(help.stdout.toString()).toContain("--gateway-token");
@@ -129,7 +129,7 @@ describe("bundled code-mcp", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    // On a machine where the code-prime service is running, refusing is the
+    // On a machine where the code-mcp service is running, refusing is the
     // specified behaviour (one code-mcp per machine) - that is the outcome then.
     if (own.stdout.toString().trim() === "" && own.stderr.toString().includes("service is running")) {
       expect(own.exitCode).toBe(2);
