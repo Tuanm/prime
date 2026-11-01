@@ -25,7 +25,7 @@ import { type ServiceStatus, loadOverrides, loadServiceEnv, overridesPath, pidFi
  * code-mcp child. A command-line flag would be visible to every local user via
  * ps; the environment of a process is not (only to its owner and root).
  */
-export const GATEWAY_TOKEN_ENV = "MCP_CODE_MCP_GATEWAY_TOKEN";
+export const GATEWAY_TOKEN_ENV = "PRIME_CHILD_DEVICE_TOKEN";
 
 /**
  * The argv code-mcp should see: the given args, plus "--gateway-token <value>"

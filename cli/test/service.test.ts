@@ -140,16 +140,16 @@ describe("network settings for the service", () => {
 
 describe("service definitions", () => {
   const spec: ServiceSpec = {
-    command: ["/opt/my tools/prime", "code-mcp", "--service", "--config", "/home/u/.prime-gateway/config.yaml"],
-    configPath: "/home/u/.prime-gateway/config.yaml",
-    logPath: "/home/u/Library/Logs/prime-gateway/code-mcp.log",
+    command: ["/opt/my tools/prime", "code-mcp", "--service", "--config", "/home/u/.prime/config.yaml"],
+    configPath: "/home/u/.prime/config.yaml",
+    logPath: "/home/u/Library/Logs/prime/code-mcp.log",
     pathEnv: "/usr/local/bin:/usr/bin:/odd/100%/$HOME",
     home: "/home/u",
   };
 
   test("systemd: quoted ExecStart, % and $ escaped there, PATH kept literal", () => {
     const unit = renderSystemdUnit(spec);
-    expect(unit).toContain('ExecStart="/opt/my tools/prime" "code-mcp" "--service" "--config" "/home/u/.prime-gateway/config.yaml"');
+    expect(unit).toContain('ExecStart="/opt/my tools/prime" "code-mcp" "--service" "--config" "/home/u/.prime/config.yaml"');
     expect(unit).toContain('Environment="PATH=/usr/local/bin:/usr/bin:/odd/100%%/$HOME"');
     expect(unit).toContain("Restart=on-failure");
     // Not quoted: systemd rejects a quoted WorkingDirectory as a bad setting.

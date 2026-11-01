@@ -1,4 +1,4 @@
-// Persistent configuration: ~/.prime-gateway/config.yaml
+// Persistent configuration: ~/.prime/config.yaml
 //
 // Shape (everything optional except `devices`):
 //
@@ -60,14 +60,9 @@ export interface Config {
 }
 
 export function defaultConfigPath(): string {
-  const override = process.env.PRIME_GATEWAY_CONFIG ?? process.env.CODE_MCP_GATEWAY_CONFIG;
+  const override = process.env.PRIME_CONFIG;
   if (override && override.trim().length > 0) return override.trim();
-  const current = join(homedir(), ".prime-gateway", "config.yaml");
-  if (existsSync(current)) return current;
-  // Before the rename this lived in ~/.code-mcp-gateway: keep reading it until
-  // the user moves the file, so an upgrade does not lose their credentials.
-  const legacy = join(homedir(), ".code-mcp-gateway", "config.yaml");
-  return existsSync(legacy) ? legacy : current;
+  return join(homedir(), ".prime", "config.yaml");
 }
 
 export function emptyConfig(): Config {

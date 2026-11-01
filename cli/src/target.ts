@@ -17,11 +17,10 @@ import { UsageError } from "./errors.ts";
 const DEVICE_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 export const ENV = {
-  config: "CODE_MCP_GATEWAY_CONFIG",
-  gateway: "CODE_MCP_GATEWAY_URL",
-  gatewayToken: "CODE_MCP_GATEWAY_TOKEN",
-  deviceToken: "CODE_MCP_GATEWAY_DEVICE_TOKEN",
-  timeoutMs: "CODE_MCP_GATEWAY_TIMEOUT_MS",
+  gateway: "PRIME_GATEWAY_URL",
+  gatewayToken: "PRIME_GATEWAY_TOKEN",
+  deviceToken: "PRIME_DEVICE_TOKEN",
+  timeoutMs: "PRIME_TIMEOUT_MS",
 } as const;
 
 export interface Target {

@@ -170,7 +170,7 @@ export function currentInstall(script: string = process.argv[1] ?? "", execPath:
 function requestHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
-    "user-agent": "prime-gateway-cli",
+    "user-agent": "prime-cli",
   };
   if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   return headers;

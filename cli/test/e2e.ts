@@ -62,7 +62,7 @@ async function cli(
   const started = performance.now();
   const command = opts.via === "bundle" ? ["bun", BUNDLE, ...args] : [BIN, ...args];
   const proc = Bun.spawn(command, {
-    env: { ...process.env, CODE_MCP_GATEWAY_CONFIG: CONFIG, NO_COLOR: "1", ...(opts.env ?? {}) },
+    env: { ...process.env, PRIME_CONFIG: CONFIG, NO_COLOR: "1", ...(opts.env ?? {}) },
     stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
     stdout: "pipe",
     stderr: "pipe",
@@ -436,7 +436,7 @@ try {
 
   // env-var configuration
   const envRun = await cli(["tools", "list", "alpha"], {
-    env: { CODE_MCP_GATEWAY_URL: BASE, CODE_MCP_GATEWAY_TOKEN: GATEWAY_TOKEN, CODE_MCP_GATEWAY_DEVICE_TOKEN: DEVICE_TOKEN, CODE_MCP_GATEWAY_CONFIG: join(CONFIG_DIR, "absent.yaml") },
+    env: { PRIME_GATEWAY_URL: BASE, PRIME_GATEWAY_TOKEN: GATEWAY_TOKEN, PRIME_DEVICE_TOKEN: DEVICE_TOKEN, PRIME_CONFIG: join(CONFIG_DIR, "absent.yaml") },
   });
   check("env-only configuration works", envRun.code === 0 && envRun.out.includes("echo"), `code=${envRun.code} err=${envRun.err}`);
 
@@ -791,7 +791,7 @@ try {
   // the embedded code-mcp as that device, call its real tools through the
   // gateway, then aggregate it with 'prime serve' over stdio and HTTP.
   const ANON_CONFIG = join(CONFIG_DIR, "anon.yaml");
-  const anonEnv = { CODE_MCP_GATEWAY_CONFIG: ANON_CONFIG };
+  const anonEnv = { PRIME_CONFIG: ANON_CONFIG };
   const gwHeaders = { "content-type": "application/json", authorization: `Bearer ${GATEWAY_TOKEN}` };
 
   const connectNoStart = await cli(["connect", "--gateway", BASE, "--gateway-token", GATEWAY_TOKEN, "--no-start", "--json"], { env: anonEnv });
@@ -807,7 +807,7 @@ try {
   const again = JSON.parse(connectAgain.out || "{}") as { device?: string; reused?: boolean };
   check("connect reuses the saved anonymous device", connectAgain.code === 0 && again.device === anon.device && again.reused === true, connectAgain.out);
 
-  const noToken = await cli(["connect", "--gateway", BASE, "--no-start", "--new"], { env: { CODE_MCP_GATEWAY_CONFIG: join(CONFIG_DIR, "anon-notoken.yaml") } });
+  const noToken = await cli(["connect", "--gateway", BASE, "--no-start", "--new"], { env: { PRIME_CONFIG: join(CONFIG_DIR, "anon-notoken.yaml") } });
   check("connect without the required gateway token exits 3", noToken.code === 3 && noToken.err.includes("--gateway-token"), `code=${noToken.code} err=${noToken.err}`);
 
   // Foreground run: the binary re-executes itself as "prime code-mcp ...".
@@ -861,8 +861,8 @@ try {
       JSON.stringify(echo.json).slice(0, 300),
     );
 
-    const anonCall = await cli(["call", `${anon.device}.ls`, JSON.stringify({ cwd: tmpdir(), path: "." })], { env: anonEnv });
-    check("'prime call' reaches the anonymous device from the saved config", anonCall.code === 0, `code=${anonCall.code} err=${anonCall.err}`);
+    const anonCall = await cli(["call", `${anon.device}.ls`, JSON.stringify({ cwd: CONFIG_DIR, path: "." })], { env: anonEnv });
+    check("'prime call' reaches the anonymous device from the saved config", anonCall.code === 0, `code=${anonCall.code} out=${anonCall.out.slice(0, 400)} err=${anonCall.err}`);
 
     // prime serve over stdio
     const serveInput = [

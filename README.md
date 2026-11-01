@@ -154,7 +154,7 @@ prime tools list my-laptop
 prime tools call my-laptop.read '{"path":"README.md"}'
 ```
 
-Credentials and defaults live in `~/.prime-gateway/config.yaml`; flags override
+Credentials and defaults live in `~/.prime/config.yaml`; flags override
 environment variables, which override the device entry, which overrides the defaults
 section. `prime --help` lists everything, and `prime call` is an alias for `prime tools call`.
 

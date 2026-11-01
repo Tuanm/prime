@@ -116,8 +116,8 @@ describe("targets", () => {
   });
 
   test("falls back to the managed default gateway when none is configured", () => {
-    const saved = process.env.CODE_MCP_GATEWAY_URL;
-    delete process.env.CODE_MCP_GATEWAY_URL;
+    const saved = process.env.PRIME_GATEWAY_URL;
+    delete process.env.PRIME_GATEWAY_URL;
     try {
       expect(resolveTarget(emptyConfig(), "alpha").gateway).toBe("https://prime.tuanm.workers.dev");
       expect(resolveGateway(emptyConfig())).toBe(DEFAULT_GATEWAY);
@@ -127,7 +127,7 @@ describe("targets", () => {
       expect(resolveGateway(config)).toBe("https://saved.example.dev");
       expect(resolveGateway(config, "http://127.0.0.1:9")).toBe("http://127.0.0.1:9");
     } finally {
-      if (saved !== undefined) process.env.CODE_MCP_GATEWAY_URL = saved;
+      if (saved !== undefined) process.env.PRIME_GATEWAY_URL = saved;
     }
   });
 });

@@ -8,7 +8,7 @@ import { bold, cyan, dim } from "./output.ts";
 const ROOT = `prime - command line client for the Prime gateway
 
 Connects to devices exposed through the Prime gateway and drives their
-MCP tools. Credentials and defaults live in ~/.prime-gateway/config.yaml.
+MCP tools. Credentials and defaults live in ~/.prime/config.yaml.
 
 USAGE
   prime [command] [options]
@@ -56,9 +56,8 @@ EXAMPLES
 CONFIG
   Precedence per field: --flag > environment > device entry > defaults section.
   With no gateway configured anywhere, https://prime.tuanm.workers.dev is used.
-  Environment: CODE_MCP_GATEWAY_CONFIG, CODE_MCP_GATEWAY_URL,
-  CODE_MCP_GATEWAY_TOKEN, CODE_MCP_GATEWAY_DEVICE_TOKEN,
-  CODE_MCP_GATEWAY_TIMEOUT_MS.
+  Environment: PRIME_CONFIG, PRIME_GATEWAY_URL, PRIME_GATEWAY_TOKEN,
+  PRIME_DEVICE_TOKEN, PRIME_TIMEOUT_MS.
 
 EXIT CODES
   0 success   1 error   2 usage   3 authentication   4 device offline   5 timeout
@@ -245,7 +244,7 @@ device:
   prime code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 
 OPTIONS FROM THE CONFIG
-  The code-mcp section of ~/.prime-gateway/config.yaml holds code-mcp's
+  The code-mcp section of ~/.prime/config.yaml holds code-mcp's
   options (names without the dashes); options given here override them:
 
     code-mcp:
@@ -269,16 +268,16 @@ USAGE
   prime service status [--json]              is it installed / running?
 
 The service runs 'prime code-mcp' with the code-mcp section of
-~/.prime-gateway/config.yaml, overridden by the options given to
+~/.prime/config.yaml, overridden by the options given to
 'service install' (kept in service.yaml next to the config). Options are read
 at every start, so to apply a config change, run 'prime service install' again.
 No credential is written into the service definition or onto a command line.
 
   Linux    systemd user unit  ~/.config/systemd/user/code-mcp.service
            logs: journalctl --user -u code-mcp
-  macOS    launchd agent      ~/Library/LaunchAgents/dev.prime-gateway.code-mcp.plist
-           logs: ~/Library/Logs/prime-gateway/code-mcp.log
-  Windows  Scheduled Task     \\prime-gateway\\code-mcp (at logon; no admin needed)
+  macOS    launchd agent      ~/Library/LaunchAgents/dev.prime.code-mcp.plist
+           logs: ~/Library/Logs/prime/code-mcp.log
+  Windows  Scheduled Task     \\prime\\code-mcp (at logon; no admin needed)
            logs: code-mcp.log next to the config
 
 It starts at login and is restarted if it crashes. On Linux it stops at logout

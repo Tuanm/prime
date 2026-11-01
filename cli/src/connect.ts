@@ -119,7 +119,7 @@ export function parseAnonymousResponse(gateway: string, status: number, headers:
     case 405:
       throw new CliError(
         `${gateway} does not support anonymous devices (HTTP ${status})`,
-        "The gateway may be an older version, or the URL is not a prime-gateway origin.",
+        "The gateway may be an older version, or the URL is not a Prime origin.",
       );
     case 429: {
       const wait = retryAfterMs(headers, detail.retryAfterMs);
@@ -159,7 +159,7 @@ function transportError(gateway: string, err: unknown): Error {
 }
 
 function authHeaders(gatewayToken: string | undefined): Record<string, string> {
-  const headers: Record<string, string> = { "user-agent": "prime-gateway-cli", accept: "application/json" };
+  const headers: Record<string, string> = { "user-agent": "prime-cli", accept: "application/json" };
   if (gatewayToken) headers.authorization = `Bearer ${gatewayToken}`;
   return headers;
 }

@@ -4,7 +4,7 @@
 //
 //   bun test/service-e2e.ts            (refuses if a code-mcp service is already installed)
 //
-// Everything runs against an isolated config (CODE_MCP_GATEWAY_CONFIG), and the
+// Everything runs against an isolated config (PRIME_CONFIG), and the
 // service is always uninstalled at the end.
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,7 +36,7 @@ function check(name: string, cond: unknown, detail = "") {
 
 const dir = mkdtempSync(join(tmpdir(), "prime-service-e2e-"));
 const CONFIG = join(dir, "config.yaml");
-const ENV = { ...process.env, CODE_MCP_GATEWAY_CONFIG: CONFIG, NO_COLOR: "1" };
+const ENV = { ...process.env, PRIME_CONFIG: CONFIG, NO_COLOR: "1" };
 
 async function prime(args: string[], timeoutMs = 120_000) {
   const proc = Bun.spawn([BIN, ...args], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -101,7 +101,7 @@ function servicePids(): number[] {
 function definitionText(): string {
   if (process.platform === "linux") return existsSync(systemdUnitPath()) ? readFileSync(systemdUnitPath(), "utf8") : "";
   if (process.platform === "darwin") return existsSync(launchdPlistPath()) ? readFileSync(launchdPlistPath(), "utf8") : "";
-  const r = Bun.spawnSync(["powershell", "-NoProfile", "-Command", "Export-ScheduledTask -TaskPath '\\prime-gateway\\' -TaskName 'code-mcp' -ErrorAction SilentlyContinue"], { stdout: "pipe" });
+  const r = Bun.spawnSync(["powershell", "-NoProfile", "-Command", "Export-ScheduledTask -TaskPath '\\prime\\' -TaskName 'code-mcp' -ErrorAction SilentlyContinue"], { stdout: "pipe" });
   return r.stdout.toString();
 }
 

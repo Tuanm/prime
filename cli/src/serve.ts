@@ -227,9 +227,9 @@ export class AggregateServer {
         return rpcResult(id, {
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: this.onToolsChanged !== undefined } },
-          serverInfo: { name: "prime-gateway", title: "Prime gateway devices", version: this.opts.version },
+          serverInfo: { name: "prime", title: "Prime devices", version: this.opts.version },
           instructions:
-            "Tools of every device connected to prime-gateway. Each tool name is <device>__<tool>; the description starts with [<device-id>].",
+            "Tools of every device connected to Prime. Each tool name is <device>__<tool>; the description starts with [<device-id>].",
         });
       }
       case "ping":

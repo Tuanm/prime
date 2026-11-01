@@ -125,7 +125,7 @@ describe("bundled code-mcp", () => {
     const config = join(dir, "config.yaml");
     await Bun.write(config, 'code-mcp:\n  port: "1111"\n  token: "cfg-secret"\n  enable-memory: true\n');
     const own = Bun.spawnSync(["bun", "--preload", probe, ENTRY, "code-mcp", "--port", "2222"], {
-      env: { ...process.env, CODE_MCP_GATEWAY_CONFIG: config },
+      env: { ...process.env, PRIME_CONFIG: config },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -380,7 +380,7 @@ function freshConfig(): string {
 
 async function cli(args: string[], config: string, stdin?: string): Promise<{ code: number; out: string; err: string }> {
   const proc = Bun.spawn(["bun", ENTRY, ...args], {
-    env: { ...process.env, CODE_MCP_GATEWAY_CONFIG: config, NO_COLOR: "1", CODE_MCP_GATEWAY_URL: "" },
+    env: { ...process.env, PRIME_CONFIG: config, NO_COLOR: "1", PRIME_GATEWAY_URL: "" },
     stdin: stdin === undefined ? "ignore" : new Blob([stdin]),
     stdout: "pipe",
     stderr: "pipe",
@@ -562,7 +562,7 @@ describe("prime serve over HTTP", () => {
   test("POST /mcp answers JSON-RPC, GET is 405, notifications are 202", async () => {
     const config = serveFixture();
     const proc = Bun.spawn(["bun", ENTRY, "serve", "--port", "0"], {
-      env: { ...process.env, CODE_MCP_GATEWAY_CONFIG: config, NO_COLOR: "1", CODE_MCP_GATEWAY_URL: "" },
+      env: { ...process.env, PRIME_CONFIG: config, NO_COLOR: "1", PRIME_GATEWAY_URL: "" },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -585,7 +585,7 @@ describe("prime serve over HTTP", () => {
 
       const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } });
       expect(init.status).toBe(200);
-      expect(((await init.json()) as any).result.serverInfo.name).toBe("prime-gateway");
+      expect(((await init.json()) as any).result.serverInfo.name).toBe("prime");
       expect((await post({ jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
       const list = (await (await post({ jsonrpc: "2.0", id: 2, method: "tools/list" })).json()) as any;
       expect(list.result.tools.map((t: { name: string }) => t.name).sort()).toEqual(["alpha_v2__echo", "laptop__boom", "laptop__echo"]);

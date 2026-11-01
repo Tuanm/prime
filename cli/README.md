@@ -73,7 +73,7 @@ prime code-mcp [code-mcp options]          # the bundled device server, with the
 
 When no gateway is given or configured anywhere, every command uses the
 managed gateway `https://prime.tuanm.workers.dev` (precedence: `--gateway` >
-`CODE_MCP_GATEWAY_URL` > device entry > `defaults.gateway` > that default).
+`PRIME_GATEWAY_URL` > device entry > `defaults.gateway` > that default).
 
 Aliases, as specified:
 
@@ -100,7 +100,7 @@ prime connect -- --enable-memory             # extra flags for code-mcp
 the connect URL, and then runs the **bundled code-mcp** in the foreground as that
 device (`prime code-mcp --gateway <origin> --id <id> --port <free port> --bind
 127.0.0.1`). Ctrl-C stops it; the command exits with code-mcp's status. The
-device code is handed over in the `MCP_CODE_MCP_GATEWAY_TOKEN` environment
+device code is handed over in the `PRIME_CHILD_DEVICE_TOKEN` environment
 variable rather than on the command line, so `ps` never shows it; the child turns
 it into code-mcp's `--gateway-token` in-process and removes it from its
 environment, so code-mcp's own subprocesses never inherit it.
@@ -217,8 +217,8 @@ current options.
 | OS | Definition | Logs | Restart after a crash |
 | --- | --- | --- | --- |
 | Linux | systemd user unit `~/.config/systemd/user/code-mcp.service` | `journalctl --user -u code-mcp` | `Restart=on-failure` |
-| macOS | launchd agent `~/Library/LaunchAgents/dev.prime-gateway.code-mcp.plist` | `~/Library/Logs/prime-gateway/code-mcp.log` | `KeepAlive` (not after a clean stop) |
-| Windows | Scheduled Task `\prime-gateway\code-mcp`, at logon, no admin rights, no window | `code-mcp.log` next to the config | a one-minute watchdog trigger |
+| macOS | launchd agent `~/Library/LaunchAgents/dev.prime.code-mcp.plist` | `~/Library/Logs/prime/code-mcp.log` | `KeepAlive` (not after a clean stop) |
+| Windows | Scheduled Task `\prime\code-mcp`, at logon, no admin rights, no window | `code-mcp.log` next to the config | a one-minute watchdog trigger |
 
 The service runs `prime code-mcp --service --config <config>` and reads its
 options at every start: the config's `code-mcp:` section, overridden by the
@@ -394,8 +394,7 @@ half.
 
 ## Configuration
 
-Defaults live in `~/.prime-gateway/config.yaml` (override with `--config` or
-`CODE_MCP_GATEWAY_CONFIG`). The file holds secrets: it is created `0600` inside a
+Defaults live in `~/.prime/config.yaml` (override with `--config` or `PRIME_CONFIG`). The file holds secrets: it is created `0600` inside a
 `0700` directory, and every write is atomic.
 
 ```yaml
@@ -432,11 +431,11 @@ devices:
 
 | Environment variable | Meaning |
 | --- | --- |
-| `CODE_MCP_GATEWAY_CONFIG` | Config file path |
-| `CODE_MCP_GATEWAY_URL` | Gateway origin |
-| `CODE_MCP_GATEWAY_TOKEN` | Gateway credential (`Authorization: Bearer`) |
-| `CODE_MCP_GATEWAY_DEVICE_TOKEN` | Device credential (`X-Device-Token`) |
-| `CODE_MCP_GATEWAY_TIMEOUT_MS` | Per-request timeout |
+| `PRIME_CONFIG` | Config file path |
+| `PRIME_GATEWAY_URL` | Gateway origin |
+| `PRIME_GATEWAY_TOKEN` | Gateway credential (`Authorization: Bearer`) |
+| `PRIME_DEVICE_TOKEN` | Device credential (`X-Device-Token`) |
+| `PRIME_TIMEOUT_MS` | Per-request timeout |
 
 Two credentials are involved: the **gateway token** authenticates you to the
 Worker, and the **device token** is forwarded through the tunnel to the device.

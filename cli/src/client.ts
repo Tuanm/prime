@@ -93,7 +93,7 @@ export class GatewayClient {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
-      "user-agent": "prime-gateway-cli",
+      "user-agent": "prime-cli",
     };
     // Gateway credential (entry auth) and device credential are distinct: the
     // entry checks the first, the DeviceDO forwards the second to the device.
@@ -195,7 +195,7 @@ export class GatewayClient {
       {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "prime-gateway-cli", version: "0.1.0" },
+        clientInfo: { name: "prime-cli", version: "0.1.0" },
       },
       opts,
     );
