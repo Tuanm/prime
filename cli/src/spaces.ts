@@ -35,9 +35,21 @@ interface ContainerInfo {
 
 // ---- small process helpers -------------------------------------------------
 
-function exec(bin: string, args: string[], timeoutMs = 60_000): { code: number; out: string; err: string } {
+function exec(
+  bin: string,
+  args: string[],
+  timeoutMs = 60_000,
+  env?: Record<string, string | undefined>,
+): { code: number; out: string; err: string } {
   try {
-    const proc = Bun.spawnSync({ cmd: [bin, ...args], stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: timeoutMs });
+    const proc = Bun.spawnSync({
+      cmd: [bin, ...args],
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+      timeout: timeoutMs,
+      ...(env ? { env } : {}),
+    });
     return {
       code: proc.exitCode ?? 1,
       out: proc.stdout ? proc.stdout.toString() : "",
@@ -125,8 +137,8 @@ function isWsl2(): boolean {
 function podmanFailureHint(): string | undefined {
   if (!isWsl2()) return undefined;
   const crun = hasCrun()
-    ? "crun is installed, so prime tried --runtime=crun --cgroups=disabled (limits unenforced)."
-    : "or install crun (sudo apt install crun) so prime can start with --runtime=crun --cgroups=disabled (limits unenforced).";
+    ? "crun is installed, so prime forces engine.runtime=crun and retries with --cgroups=disabled (limits unenforced)."
+    : "or install crun (sudo apt install crun): prime then forces engine.runtime=crun for its containers and retries with --cgroups=disabled (limits unenforced).";
   return "WSL2: enable systemd ([boot]\\nsystemd=true in /etc/wsl.conf, then wsl --shutdown) and run loginctl enable-linger $USER; " + crun;
 }
 
@@ -244,6 +256,15 @@ function containerInfo(runtime: RuntimeInfo, container: string): ContainerInfo {
 
 /** Run the container with its token in a 0600 env file, so it never appears in
  *  the host process list (the file is removed right after the runtime reads it). */
+/** Force podman's OCI runtime to crun for this invocation (NoCgroups needs it).
+ *  podman has dropped the per-container --runtime flag, so this uses the config
+ *  override podman documents for exactly this purpose. */
+function crunEnv(dir: string): Record<string, string> {
+  const file = join(dir, "containers.conf");
+  writeFileSync(file, "[engine]\nruntime = \"crun\"\n", { mode: 0o600 });
+  return { ...process.env, CONTAINERS_CONF_OVERRIDE: file };
+}
+
 function runContainer(
   runtime: RuntimeInfo,
   space: SpaceEntry,
@@ -263,12 +284,14 @@ function runContainer(
     // --cgroup-manager is a global flag.
     const systemd = hasUserSystemd();
     const crun = hasCrun();
-    const attempts: Array<{ globals: string[]; flags: string[]; limits: boolean }> = [];
+    const attempts: Array<{ globals: string[]; flags: string[]; limits: boolean; crun?: boolean }> = [];
     if (!systemd) attempts.push({ globals: ["--cgroup-manager=cgroupfs"], flags: [], limits: true });
     attempts.push({ globals: [], flags: [], limits: true });
     // NoCgroups only works with crun; runc rejects it ("not compatible with
-    // NoCgroups"). Without crun, the real fix is enabling systemd in WSL.
-    if (crun) attempts.push({ globals: [], flags: ["--runtime=crun", "--cgroups=disabled"], limits: false });
+    // NoCgroups") and podman has no per-container --runtime flag any more, so
+    // the runtime is forced through a config override. Without crun, the real
+    // fix is enabling systemd in WSL.
+    if (crun) attempts.push({ globals: [], flags: ["--cgroups=disabled"], limits: false, crun: true });
     const seen = new Set<string>();
     let warnedLimits = false;
     let last = { code: 1, out: "", err: "" };
@@ -279,7 +302,8 @@ function runContainer(
       // containerArgs already starts with "run": globals go before it, the
       // run-only flags (--cgroups) right after it.
       const base = containerArgs(runtime, space, image, envFile, attempt.limits);
-      last = exec(runtime.bin, [...attempt.globals, base[0]!, ...attempt.flags, ...base.slice(1)], 300_000);
+      const env = attempt.crun ? crunEnv(dir) : undefined;
+      last = exec(runtime.bin, [...attempt.globals, base[0]!, ...attempt.flags, ...base.slice(1)], 300_000, env);
       if (last.code === 0) return last;
       exec(runtime.bin, ["rm", "-f", space.container], 60_000);
       if (!isPodmanCgroupFailure(last.err + last.out)) return last;
@@ -533,6 +557,14 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     let start = exec(runtime.bin, [...globalFlags, "start", space.container], 120_000);
     if (start.code !== 0 && runtime.kind === "podman" && isPodmanCgroupFailure(start.err + start.out)) {
       start = exec(runtime.bin, ["--cgroup-manager=cgroupfs", "start", space.container], 120_000);
+    }
+    if (start.code !== 0 && runtime.kind === "podman" && hasCrun()) {
+      const dir = mkdtempSync(join(tmpdir(), "prime-space-"));
+      try {
+        start = exec(runtime.bin, ["start", space.container], 120_000, crunEnv(dir));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
     if (start.code !== 0) fail("cannot start the space", ((start.err || start.out).slice(0, 400) + "\n" + (podmanFailureHint() ?? "")).trim());
   }

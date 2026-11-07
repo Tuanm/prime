@@ -435,8 +435,9 @@ SECURITY
   Apple vmnet has NAT: an Apple space can reach the internet and host services on
   0.0.0.0. Use podman/docker --offline for a no-network space.
   --offline (podman/docker) puts the container on an internal network.
-  WSL2 without systemd: enable systemd, or install crun - prime then retries with
-  --runtime=crun --cgroups=disabled (limits unenforced). runc cannot do NoCgroups.
+  WSL2 without systemd: enable systemd, or install crun - prime then forces
+  engine.runtime=crun and retries with --cgroups=disabled (limits unenforced).
+  runc cannot do NoCgroups, and podman has no per-container --runtime flag.
 
 OPTIONS (create)
   --name <name>       space name (default: a generated device id)

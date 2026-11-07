@@ -356,8 +356,10 @@ fails while applying cgroup configuration or moving the rootless netns. Two fixe
 1. Enable systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`), run `wsl --shutdown`,
    then `loginctl enable-linger $USER`. This keeps cpus/memory limits.
 2. Or install **crun** (`sudo apt install crun`): only crun accepts NoCgroups, so
-   prime can retry with `--runtime=crun --cgroups=disabled` (limits unenforced,
-   a warning is printed). runc rejects that with "not compatible with NoCgroups".
+   prime forces podman's `engine.runtime` to crun for its own containers (via
+   `CONTAINERS_CONF_OVERRIDE`) and retries with `--cgroups=disabled` (limits
+   unenforced, a warning is printed). runc rejects that with "not compatible with
+   NoCgroups"; podman no longer has a per-container `--runtime` flag.
 
 prime tries the default, then cgroupfs, then the crun fallback; the hint prints
 if every attempt fails.
