@@ -12,7 +12,7 @@ import { bool, num, str, type ParsedArgs } from "./args.ts";
 import { saveConfig, type Config, type SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
@@ -36,12 +36,17 @@ interface ContainerInfo {
 // ---- small process helpers -------------------------------------------------
 
 function exec(bin: string, args: string[], timeoutMs = 60_000): { code: number; out: string; err: string } {
-  const proc = Bun.spawnSync({ cmd: [bin, ...args], stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: timeoutMs });
-  return {
-    code: proc.exitCode ?? 1,
-    out: proc.stdout ? proc.stdout.toString() : "",
-    err: proc.stderr ? proc.stderr.toString() : "",
-  };
+  try {
+    const proc = Bun.spawnSync({ cmd: [bin, ...args], stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: timeoutMs });
+    return {
+      code: proc.exitCode ?? 1,
+      out: proc.stdout ? proc.stdout.toString() : "",
+      err: proc.stderr ? proc.stderr.toString() : "",
+    };
+  } catch (err) {
+    // A missing binary (systemctl on macOS, for example) is just a failed probe.
+    return { code: 1, out: "", err: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 async function execStream(bin: string, args: string[]): Promise<number> {
@@ -88,6 +93,33 @@ function dockerReachable(): boolean {
 function dockerRootless(): boolean {
   const r = exec("docker", ["info", "--format", "{{json .SecurityOptions}}"], 20_000);
   return r.code === 0 && /rootless/i.test(r.out);
+}
+
+/** Is a per-user systemd available for podman's cgroup manager? */
+function hasUserSystemd(): boolean {
+  const dir = process.env.XDG_RUNTIME_DIR;
+  if (dir && existsSync(join(dir, "bus"))) return true;
+  return exec("systemctl", ["--user", "show-environment"], 5_000).code === 0;
+}
+
+/** podman on WSL2 without systemd fails while applying cgroups / moving the
+ *  rootless netns into the systemd user slice. Those are retried differently. */
+export function isPodmanCgroupFailure(text: string): boolean {
+  return /cgroup|systemd|user\.slice|slirp4netns|libpod-/i.test(text);
+}
+
+function isWsl2(): boolean {
+  try {
+    return /microsoft/i.test(readFileSync("/proc/version", "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/** A hint shown only when the fallbacks also failed. */
+function podmanFailureHint(): string | undefined {
+  if (!isWsl2()) return undefined;
+  return "WSL2: enable systemd ([boot]\\nsystemd=true in /etc/wsl.conf, then wsl --shutdown), start it and run loginctl enable-linger $USER; prime also retries with --cgroup-manager=cgroupfs and, last, --cgroups=disabled (limits then unenforced).";
 }
 
 function runtimeBin(kind: RuntimeKind): string | undefined {
@@ -204,12 +236,49 @@ function containerInfo(runtime: RuntimeInfo, container: string): ContainerInfo {
 
 /** Run the container with its token in a 0600 env file, so it never appears in
  *  the host process list (the file is removed right after the runtime reads it). */
-function runContainer(runtime: RuntimeInfo, space: SpaceEntry, image: string): { code: number; out: string; err: string } {
+function runContainer(
+  runtime: RuntimeInfo,
+  space: SpaceEntry,
+  image: string,
+  note: (text: string) => void,
+): { code: number; out: string; err: string } {
   const dir = mkdtempSync(join(tmpdir(), "prime-space-"));
   const envFile = join(dir, "env");
   try {
     writeFileSync(envFile, "PRIME_SPACE_TOKEN=" + space.token + "\n", { mode: 0o600 });
-    return exec(runtime.bin, containerArgs(runtime, space, image, envFile), 300_000);
+    if (runtime.kind !== "podman") {
+      return exec(runtime.bin, containerArgs(runtime, space, image, envFile), 300_000);
+    }
+    // Rootless podman wants a user systemd for cgroup handling. WSL2 often has
+    // none: try the default, then cgroupfs, then disabled cgroups (no limits).
+    // NOTE: --cgroups is a "run" flag, so it must follow the subcommand; only
+    // --cgroup-manager is a global flag.
+    const systemd = hasUserSystemd();
+    const attempts: Array<{ globals: string[]; flags: string[]; limits: boolean }> = [];
+    if (!systemd) attempts.push({ globals: ["--cgroup-manager=cgroupfs"], flags: [], limits: true });
+    attempts.push({ globals: [], flags: [], limits: true });
+    attempts.push({ globals: ["--cgroup-manager=cgroupfs"], flags: ["--cgroups=disabled"], limits: false });
+    attempts.push({ globals: [], flags: ["--cgroups=disabled"], limits: false });
+    const seen = new Set<string>();
+    let warnedLimits = false;
+    let last = { code: 1, out: "", err: "" };
+    for (const attempt of attempts) {
+      const key = JSON.stringify([attempt.globals, attempt.flags, attempt.limits]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // containerArgs already starts with "run": globals go before it, the
+      // run-only flags (--cgroups) right after it.
+      const base = containerArgs(runtime, space, image, envFile, attempt.limits);
+      last = exec(runtime.bin, [...attempt.globals, base[0]!, ...attempt.flags, ...base.slice(1)], 300_000);
+      if (last.code === 0) return last;
+      exec(runtime.bin, ["rm", "-f", space.container], 60_000);
+      if (!isPodmanCgroupFailure(last.err + last.out)) return last;
+      if (!attempt.limits && !warnedLimits) {
+        warnedLimits = true;
+        note("  cgroups are unavailable here; the cpu/memory limits are not enforced");
+      }
+    }
+    return last;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -256,7 +325,7 @@ function networkDelete(runtime: RuntimeInfo, name: string | undefined): void {
   exec(runtime.bin, ["network", "rm", name], 60_000);
 }
 
-function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, envFile: string): string[] {
+function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, envFile: string, limits = true): string[] {
   const args: string[] = ["run", "-d", "--name", space.container, "--label", "prime.space=" + space.id];
   args.push("--env-file", envFile);
   if (runtime.kind === "apple") {
@@ -265,8 +334,8 @@ function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, e
     return args.concat([image]);
   }
   args.push("--network", space.offline ? "none" : space.network ?? "", "--publish", "127.0.0.1:" + space.port + ":" + CONTAINER_PORT);
-  args.push("--cpus", String(space.cpus ?? 2), "--memory", space.memory ?? "4g");
-  args.push("--pids-limit", "512", "--security-opt", "no-new-privileges");
+  if (limits) args.push("--cpus", String(space.cpus ?? 2), "--memory", space.memory ?? "4g");
+  args.push(...(limits ? ["--pids-limit", "512"] : []), "--security-opt", "no-new-privileges");
   if (space.volume) args.push("-v", space.volume + ":/root/work");
   return args.concat([image]);
 }
@@ -401,11 +470,11 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   if (volume) volumeCreate(runtime, volume);
   if (network && network !== "none") networkCreate(runtime, network, offline);
   const started = Date.now();
-  const run = runContainer(runtime, space, image);
+  const run = runContainer(runtime, space, image, (text) => ctx.note(text));
   if (run.code !== 0) {
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
-    fail("cannot start the space container", (run.err || run.out).slice(0, 400) || undefined);
+    fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
   }
   let url: string | undefined;
   try {
@@ -447,11 +516,15 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     if (space.mode === "persistent") {
       fail('the persistent container for space "' + name + '" is gone', "Its volume still exists. Delete the space and create it again to start over.");
     }
-    const run = runContainer(runtime, space, space.image);
-    if (run.code !== 0) fail("cannot start the space container", (run.err || run.out).slice(0, 400) || undefined);
+    const run = runContainer(runtime, space, space.image, (text) => ctx.note(text));
+    if (run.code !== 0) fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
   } else if (existing.state === "stopped") {
-    const start = exec(runtime.bin, ["start", space.container], 120_000);
-    if (start.code !== 0) fail("cannot start the space", (start.err || start.out).slice(0, 400));
+    const globalFlags = runtime.kind === "podman" && !hasUserSystemd() ? ["--cgroup-manager=cgroupfs"] : [];
+    let start = exec(runtime.bin, [...globalFlags, "start", space.container], 120_000);
+    if (start.code !== 0 && runtime.kind === "podman" && isPodmanCgroupFailure(start.err + start.out)) {
+      start = exec(runtime.bin, ["--cgroup-manager=cgroupfs", "start", space.container], 120_000);
+    }
+    if (start.code !== 0) fail("cannot start the space", ((start.err || start.out).slice(0, 400) + "\n" + (podmanFailureHint() ?? "")).trim());
   }
   const url = requireRunningAddress(runtime, space);
   if (!url) fail("the space container is running but has no address yet");

@@ -14,7 +14,7 @@ import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/c
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
 import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
-import { defaultImage, newSpaceId, parseSpaceMode, requireSpace } from "../src/spaces.ts";
+import { defaultImage, isPodmanCgroupFailure, newSpaceId, parseSpaceMode, requireSpace } from "../src/spaces.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
@@ -568,6 +568,12 @@ describe("spaces", () => {
     config.devices["space-1234abcd"] = { local_url: "http://192.168.64.4:7777", token: "t0k", space: "dev" };
     saveConfig(path, config);
     expect(loadConfig(path)).toEqual(config);
+  });
+
+  test("podman cgroup failures are recognised for the WSL fallbacks", () => {
+    expect(isPodmanCgroupFailure("failed to move the rootless netns slirp4netns process to the systemd user.slice")).toBe(true);
+    expect(isPodmanCgroupFailure("unable to apply cgroup configuration: unable to start unit")).toBe(true);
+    expect(isPodmanCgroupFailure("Error: image not found")).toBe(false);
   });
 
   test("requireSpace names the known spaces", () => {
