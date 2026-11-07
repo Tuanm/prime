@@ -676,8 +676,14 @@ export default {
     if ((request.method === "GET" || request.method === "HEAD") && /^\/connect\/[^/]+$/.test(url.pathname)) {
       return handleSandboxDevicePage(request, env, url);
     }
-    if ((request.method === "GET" || request.method === "HEAD") && /^\/(sandbox|mcp)\/[^/]+$/.test(url.pathname) && (request.headers.get("accept") || "").includes("text/html")) {
-      return redirectTo(url, "/connect/" + url.pathname.split("/").pop());
+    // Old page links: /device/{id} (the sandbox page before the move),
+    // /sandbox/{id} and /mcp/{id} all land on /connect/{id}. An invalid id is a
+    // 404 for everyone; a non-HTML GET keeps the relay's 405 so MCP clients see
+    // the endpoint they expect.
+    const oldPage = (request.method === "GET" || request.method === "HEAD") ? /^\/(device|sandbox|mcp)\/([^/]+)$/.exec(url.pathname) : null;
+    if (oldPage) {
+      if (!validDeviceId(oldPage[2]!)) return new Response("not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+      if ((request.headers.get("accept") || "").includes("text/html")) return redirectTo(url, "/connect/" + oldPage[2]);
     }
 
     // Non-POST on /device/{deviceId} (or the old /mcp/{deviceId}): this is a
@@ -744,8 +750,8 @@ export default {
       const xdt = request.headers.get("x-device-token");
       if (xdt) headers.set("x-device-token", xdt);
       // The MCP session (issued by the DO on initialize) tells clients apart.
-      const sid = request.headers.get("prime-session-id");
-      if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) headers.set("prime-session-id", sid);
+      const sid = request.headers.get("mcp-session-id");
+      if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) headers.set("mcp-session-id", sid);
       // Preserve auth params for the DO's own device-auth check.
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);

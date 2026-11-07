@@ -210,7 +210,7 @@ try {
     await noAuth.close();
     // Old browser links still land on the page.
     const moved = await fetch(B + "/device/" + ID, { headers: { accept: "text/html" }, redirect: "manual" });
-    ok(moved.status === 302 && (moved.headers.get("location") ?? "").endsWith("/connect/" + ID), "old /mcp/{device} links redirect to /sandbox/{device}, got " + moved.status);
+    ok(moved.status === 302 && (moved.headers.get("location") ?? "").endsWith("/connect/" + ID), "old /device/{device} links redirect to /connect/{device}, got " + moved.status);
     const asJson = await fetch(B + "/device/" + ID, { headers: { accept: "application/json" } });
     ok(asJson.status === 405, "MCP clients still get 405 for GET /mcp/{device} (only HTML requests get the form), got " + asJson.status);
     const badId = await fetch(B + "/device/bad%20id", { headers: { accept: "text/html" } });
@@ -231,7 +231,8 @@ try {
 
   // ---- MCP clients ----
   const raw = await fetch(B + "/device/" + ID, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-device-token": TOKEN }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "raw", version: "1" } } }) });
-  ok(raw.status === 200 && /^[0-9a-f-]{36}$/.test(raw.headers.get("prime-session-id") || ""), "initialize through the gateway returns an Mcp-Session-Id");
+  const sessionId = raw.headers.get("mcp-session-id") || "";
+  ok(raw.status === 200 && /^[0-9a-f-]{36}$/.test(sessionId), "initialize through the gateway returns an Mcp-Session-Id");
   const alpha = await mcpClient("agent-alpha");
   const beta = await mcpClient("agent-beta");
   const listed = (await alpha.listTools()).tools.map((t) => t.name);
