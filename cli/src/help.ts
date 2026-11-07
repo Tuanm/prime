@@ -431,7 +431,9 @@ SECURITY
   Rootless runtime + no host mounts + no docker socket. Resource limits:
   --cpus (default 2), --memory (default 4g); podman also pins --pids-limit 512
   and no-new-privileges. The MCP server needs a random per-space token; the
-  container binds it inside the VM/namespace, and the host port is loopback-only.
+  container binds it inside the VM/namespace; nothing is published to the LAN.
+  Apple vmnet has NAT: an Apple space can reach the internet and host services on
+  0.0.0.0. Use podman/docker --offline for a no-network space.
   --offline (podman/docker) puts the container on an internal network.
 
 OPTIONS (create)

@@ -12,6 +12,9 @@ import { bool, num, str, type ParsedArgs } from "./args.ts";
 import { saveConfig, type Config, type SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
 
 const SPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -199,6 +202,19 @@ function containerInfo(runtime: RuntimeInfo, container: string): ContainerInfo {
   return runtime.kind === "apple" ? appleInfo(container) : podmanLikeInfo(runtime, container);
 }
 
+/** Run the container with its token in a 0600 env file, so it never appears in
+ *  the host process list (the file is removed right after the runtime reads it). */
+function runContainer(runtime: RuntimeInfo, space: SpaceEntry, image: string): { code: number; out: string; err: string } {
+  const dir = mkdtempSync(join(tmpdir(), "prime-space-"));
+  const envFile = join(dir, "env");
+  try {
+    writeFileSync(envFile, "PRIME_SPACE_TOKEN=" + space.token + "\n", { mode: 0o600 });
+    return exec(runtime.bin, containerArgs(runtime, space, image, envFile), 300_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function requireRunningAddress(runtime: RuntimeInfo, space: SpaceEntry): string | undefined {
   if (runtime.kind === "apple") {
     const info = appleInfo(space.container);
@@ -240,9 +256,9 @@ function networkDelete(runtime: RuntimeInfo, name: string | undefined): void {
   exec(runtime.bin, ["network", "rm", name], 60_000);
 }
 
-function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string): string[] {
+function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, envFile: string): string[] {
   const args: string[] = ["run", "-d", "--name", space.container, "--label", "prime.space=" + space.id];
-  args.push("-e", "PRIME_SPACE_TOKEN=" + space.token);
+  args.push("--env-file", envFile);
   if (runtime.kind === "apple") {
     args.push("-c", String(space.cpus ?? 2), "-m", space.memory ?? "4g");
     if (space.volume) args.push("-v", space.volume + ":/root/work");
@@ -385,7 +401,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   if (volume) volumeCreate(runtime, volume);
   if (network && network !== "none") networkCreate(runtime, network, offline);
   const started = Date.now();
-  const run = exec(runtime.bin, containerArgs(runtime, space, image), 300_000);
+  const run = runContainer(runtime, space, image);
   if (run.code !== 0) {
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
@@ -431,7 +447,7 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     if (space.mode === "persistent") {
       fail('the persistent container for space "' + name + '" is gone', "Its volume still exists. Delete the space and create it again to start over.");
     }
-    const run = exec(runtime.bin, containerArgs(runtime, space, space.image), 300_000);
+    const run = runContainer(runtime, space, space.image);
     if (run.code !== 0) fail("cannot start the space container", (run.err || run.out).slice(0, 400) || undefined);
   } else if (existing.state === "stopped") {
     const start = exec(runtime.bin, ["start", space.container], 120_000);

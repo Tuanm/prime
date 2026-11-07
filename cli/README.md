@@ -340,7 +340,11 @@ address, or a loopback publish - so nothing is exposed to the LAN.
 clean. `--persistent` mounts a named volume at `/root/work` and keeps the
 container on stop, so start resumes it.
 
-**Security.** Rootless runtime, no host mounts, no docker socket. `--cpus` and
+**Security.** Rootless runtime, no host mounts, no docker socket; the space token
+travels in a 0600 env file, not on a process list. Apple vmnet has NAT, so an
+Apple space can reach the internet and host services bound to 0.0.0.0 (but not
+the host filesystem); use podman/docker `--offline` when a space must have no
+network. `--cpus` and
 `--memory` bound the container; podman also sets `--pids-limit 512` and
 `no-new-privileges`. The MCP server only answers with the random per-space token,
 and `--offline` (podman/docker) puts it on an internal network. The image is

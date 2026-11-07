@@ -50,6 +50,11 @@ __CSS__
         <div class="d">Tools you write in the page run in a locked-down frame, with no access to your pages, cookies or data.</div>
         <div class="u">/sandbox</div>
       </a>
+      <a class="card" href="https://github.com/Tuanm/prime/blob/main/cli/README.md#spaces---disposable-or-persistent-codespaces">
+        <div class="t">Codespaces</div>
+        <div class="d">prime spaces create runs a rootless Linux container as a local device: disposable or persistent, with its own token and limits.</div>
+        <div class="u">prime spaces</div>
+      </a>
     </div>
 
     <p class="meta"><a href="https://github.com/Tuanm/prime/releases">All releases</a></p>

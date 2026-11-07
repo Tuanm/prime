@@ -112,9 +112,13 @@ prime spaces delete work
 ```
 
 Spaces are rootless on the host: Apple's container micro-VM on macOS (root inside
-is not root on the host) and rootless podman on Linux. Each has a random token, no
-host mounts, no docker socket, resource limits, a private network, and only the
-runtime's own address is reachable from this machine.
+is not root on the host) and rootless podman on Linux. Each has a random token
+(passed in a 0600 env file, never on a process list), no host mounts, no docker
+socket, and cpus/memory limits. The runtime's private address is the only way in:
+nothing is published to the LAN. Apple's vmnet still has NAT, so an Apple space
+can reach the internet and host services bound to 0.0.0.0; podman/docker
+`--offline` is the no-network mode. The image is public:
+`ghcr.io/tuanm/prime-space:<version>`.
 
 ## Access control
 

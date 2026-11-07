@@ -81,6 +81,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
       <li><code>prime connect</code> registers this machine as a device and serves its tools until you stop it.</li>
       <li><code>prime service install</code> keeps it running at every login.</li>
       <li><code>prime serve</code> exposes every connected device to a local MCP client.</li>
+      <li><code>prime spaces create</code> runs a rootless Linux codespace as a local device.</li>
     </ul>
 
     <script>
