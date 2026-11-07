@@ -5,22 +5,32 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to the same branch cancels the superseded run: while iterating, the
+# longest wait was several full runs queued one after another.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 # Two components share this repository: api/ (the Cloudflare Worker) and cli/
-# (the mcp command, which embeds the device buddy - src/code-mcp.ts - and tests
-# against the api). A pull request runs the jobs its changes can affect; main
-# always runs everything.
+# (the prime CLI, which embeds the device buddy - src/code-mcp.ts - and tests
+# against the api). Each job runs only for the changes that can affect it, on
+# pushes as well as pull requests: a README-only commit runs nothing heavy.
 jobs:
   changes:
     name: What changed
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # contents: read is needed to check out a private repository; listing
     # the pull request's files needs pull-requests: read.
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      api: ${{ github.event_name == 'push' || steps.filter.outputs.api == 'true' }}
-      cli: ${{ github.event_name == 'push' || steps.filter.outputs.cli == 'true' }}
+      api: ${{ steps.filter.outputs.api }}
+      cli: ${{ steps.filter.outputs.cli }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -44,6 +54,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.api == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: api
@@ -60,6 +71,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: api/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -67,25 +80,36 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      # The admin dialog test drives the page in Chromium, and it runs with the
-      # unit tests below (as well as the sandbox end-to-end test further down).
-      - name: Install Chromium for the browser tests
+      # The admin View dialog test drives the page in Chromium, so the browser
+      # binary is needed here too (the sandbox suite lives in its own job below).
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('api/package-lock.json') }}
+
+      - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
+      # Unit, smoke, files and anonymous-device suites.
       - name: Unit and smoke tests
         # run-smoke.ts resolves bun via $BUN_PATH or ~/.bun/bin/bun
         # (setup-bun's install location on Linux runners).
         run: bun run test
 
-      # The Sandbox page (GET /mcp) in a real browser, used by real MCP clients.
-      - name: Sandbox in Chromium with MCP clients
-        run: bun test/sandbox-browser.ts
-
-  cli:
-    name: prime CLI (typecheck, unit, end-to-end)
+  # The Sandbox page in a real Chromium, used by real MCP clients. A separate
+  # job so it cannot hold up the unit results, and retried once: assertions that
+  # watch an animation or a 10-second idle fade occasionally lose a race on a
+  # loaded runner even when the page is correct.
+  browser:
+    name: Sandbox in Chromium
     needs: changes
-    if: needs.changes.outputs.cli == 'true'
+    if: needs.changes.outputs.api == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: api
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,6 +123,61 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('api/package-lock.json') }}
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Sandbox in Chromium with MCP clients
+        run: |
+          set -euo pipefail
+          # The suite drives real cursors and a 10-second idle fade: a loaded
+          # runner can lose that race even when the page is correct.
+          for attempt in 1 2; do
+            if bun test/sandbox-browser.ts; then exit 0; fi
+            echo "::warning::sandbox-browser failed on attempt $attempt; retrying once"
+            sleep 5
+          done
+          exit 1
+
+  cli:
+    name: prime CLI (typecheck, unit, end-to-end)
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Cache bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('cli/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
 
       # The end-to-end suite boots a local wrangler api, so the api's
       # dependencies must be installed even though the CLI itself has none.
@@ -134,17 +213,23 @@ jobs:
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - os: windows-latest
             node-arch: x64
+            e2e: true
           # workerd (wrangler's local runtime, used by the end-to-end gateway)
           # has no Windows Arm build, so Node runs as x64 under Windows'
           # emulation there. Bun - and so the CLI under test - stays native Arm.
+          # The wrangler e2e is skipped (it is the slow part and is
+          # architecture-independent JavaScript); unit tests and a native binary
+          # still run.
           - os: windows-11-arm
             node-arch: x64
+            e2e: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -159,6 +244,15 @@ jobs:
         with:
           node-version: '22'
           architecture: ${{ matrix.node-arch }}
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Cache bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('cli/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
 
       - name: Install gateway dependencies
         working-directory: api
@@ -177,6 +271,7 @@ jobs:
         run: bun test
 
       - name: End-to-end tests
+        if: matrix.e2e
         working-directory: cli
         run: bun test/e2e.ts
 
@@ -188,15 +283,18 @@ jobs:
 
   # 'prime service' against each OS's real service manager: a systemd user unit,
   # a launchd agent, a Scheduled Task - installed, exercised, uninstalled.
+  # windows-11-arm is deliberately absent: its emulated runner was slower than
+  # every other job combined, and the service code is the same on both Arms.
   cli-service:
     name: prime service on ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest, windows-11-arm]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -205,6 +303,13 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - name: Cache bun
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('cli/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
 
       - name: Install CLI dependencies
         working-directory: cli
@@ -241,8 +346,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     defaults:
@@ -261,7 +367,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
 
       - name: Tests (Python harness over the TS launcher)
         run: python -m unittest discover -s tests -v
