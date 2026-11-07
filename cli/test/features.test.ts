@@ -33,7 +33,7 @@ const ENTRY = join(ROOT, "src", "index.ts");
 // ---- bundled code-mcp ---------------------------------------------------------
 
 describe("bundled code-mcp", () => {
-  test("is the device server in this package", () => {
+  test("is the device buddy in this package", () => {
     // One source, in this package: src/code-mcp.ts is the server itself.
     const entry = readFileSync(join(ROOT, "src", "code-mcp.ts"), "utf8");
     expect(entry).toContain("code-mcp listening on");

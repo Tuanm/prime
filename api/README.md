@@ -1,6 +1,6 @@
 # Prime — Cloudflare Worker
 
-**Production gateway for exposing code-mcp devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
+**Production gateway for exposing devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
 
 ## Overview
 
@@ -9,7 +9,7 @@
 | **What** | WebSocket tunnel gateway: a device connects once; MCP clients relay JSON-RPC calls to it over HTTP |
 | **Where** | Cloudflare Worker + Durable Objects (needs a **Paid** plan) |
 | **Why DOs** | A Worker's memory is per-isolate; only a Durable Object per `deviceId` guarantees every `/mcp` request finds the device's WebSocket |
-| **Protocol** | Wire-compatible with the code-mcp device protocol: register / keepalive / JSON-RPC envelope |
+| **Protocol** | Wire-compatible with the device protocol: register / keepalive / JSON-RPC envelope |
 | **Client transports** | **Streamable HTTP** (`POST /device/{id}`) and **HTTP with SSE** (`GET /device/sse/{id}` + `POST /device/messages/{id}`) — auth-identical, both relay over the device tunnel |
 | **Cost model** | Idle tunnels hibernate (WebSocket Hibernation API); no servers to run |
 
@@ -18,7 +18,7 @@
 ```mermaid
 flowchart LR
     C[MCP client] -->|"POST /device/{deviceId}"| W
-    D[Device<br/>code-mcp] -->|"wss /device/ws/{deviceId}?token=…"| W
+    D[Device<br/>device buddy] -->|"wss /device/ws/{deviceId}?token=…"| W
     subgraph CF [Cloudflare Worker]
         W[entry — src/index.ts<br/>routing, auth, rate limit]
         DO[DeviceDO — src/device-do.ts<br/>per deviceId<br/>WebSocket + pending registry]
@@ -90,7 +90,7 @@ npx wrangler deploy
 
 The gateway also exposes an **in-process device** (`deviceId: cloud`, from `VIRTUAL_DEVICE_IDS`) that needs no tunnel. Its tools run in the Worker against Cloudflare services, and — for shell/file/jobs — inside a **Cloudflare Container** (dev image: node, bun, python, git, bash, ripgrep; see `Dockerfile` + `src/coding-sandbox.ts`).
 
-Tools (code-mcp naming convention): `bash`, `read`, `write`, `ls`, `job`, `fetch`, `search`, `kv`, `sql`, `guide`. The sandbox is the only place with real processes: plain Workers cannot spawn them.
+Tools (the device tool naming convention): `bash`, `read`, `write`, `ls`, `job`, `fetch`, `search`, `kv`, `sql`, `guide`. The sandbox is the only place with real processes: plain Workers cannot spawn them.
 
 | Component | Responsibility |
 | --- | --- |
@@ -191,7 +191,7 @@ curl -X POST https://prime.tuanm.workers.dev/api/devices/anonymous
 The gateway picks an unused id and a 6-character code (digits and upper-case
 letters). The device then connects like any other (`/device/ws/{id}` with
 `X-Device-Token`), and MCP clients use `connect_url`. `prime connect` (the CLI)
-does all of this and runs the bundled code-mcp as the device.
+does all of this and runs the bundled device buddy as the device.
 
 - **Lower limits:** `ANON_RATE_LIMIT_MAX` (30/min per client IP) instead of
   `RATE_LIMIT_MAX` (100); 5 registrations per IP per hour; no file storage.

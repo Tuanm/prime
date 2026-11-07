@@ -1,5 +1,5 @@
 {
-  // "bun run typecheck": everything except the device server itself (src/code-mcp.ts,
+  // "bun run typecheck": everything except the device buddy itself (src/code-mcp.ts,
   // which has its own conventions), mapped to a stub. Bun reads tsconfig.json only.
   "extends": "./tsconfig.json",
   "compilerOptions": {

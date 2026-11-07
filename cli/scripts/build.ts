@@ -4,7 +4,7 @@
 //   bun scripts/build.ts --host-only  just this machine's binary (fast, for tests)
 //   bun scripts/build.ts --bundle-only  just the portable JS bundle
 //
-// The code-mcp device server ("prime code-mcp" / "prime connect") is built in from
+// The code-mcp device buddy ("prime code-mcp" / "prime connect") is built in from
 // src/code-mcp.ts in this package - so an artifact is reproducible
 // from the commit it was built at. Every artifact is smoke-tested to run it.
 //

@@ -38,12 +38,12 @@ installed as) plus one binary per platform:
 | `dist/prime-darwin-x64` | 66.2 MB | no |
 | `dist/prime-linux-x64` / `-linux-arm64` | 77.6 / 77.5 MB | no |
 | `dist/prime-windows-x64.exe` / `-windows-arm64.exe` | ~95 / ~84 MB | no |
-| `dist/prime.js` | ~240 KB (includes code-mcp) | yes |
+| `dist/prime.js` | ~240 KB (includes the device buddy) | yes |
 
 The compiled binaries are large because `bun build --compile` embeds the
 whole Bun runtime; that is the price of shipping one file that runs anywhere
 with no install step. If Bun (>= 1.2, for the built-in YAML parser) is already
-present, the ~240 KB bundle (most of it the embedded code-mcp) is the leaner choice:
+present, the ~240 KB bundle (most of it the embedded device buddy) is the leaner choice:
 
 ```bash
 install -m 755 dist/prime.js ~/.local/bin/prime
@@ -52,7 +52,7 @@ install -m 755 dist/prime.js ~/.local/bin/prime
 ## Commands
 
 ```text
-prime connect [--gateway <url>] [--new] [--no-start] [-- <code-mcp flags>]
+prime connect [--gateway <url>] [--new] [--no-start] [-- <device flags>]
 prime serve [<device-id>...] [--port <n> [--host <addr>]]
 prime devices connect <device-id> [options]
 prime devices disconnect <device-id>
@@ -67,11 +67,11 @@ prime tools call <device-id>.<tool-id> [<json>] [options]
 prime tools call <device-id>.<tool-id> <json> <device-id>.<tool-id> <json> ...
 ... | prime tools call
 prime update [--check]
-prime service install [code-mcp options]   # code-mcp as a user service
+prime service install [options]            # the device buddy as a user service
 prime service uninstall
 prime service status
 prime help [connect|serve|service|devices|tools|code-mcp]
-prime code-mcp [code-mcp options]          # the bundled device server, with the config's options
+prime code-mcp [options]                   # the bundled device buddy, with the config's options
 ```
 
 When no gateway is given or configured anywhere, every command uses the
@@ -96,19 +96,19 @@ prime connect                                # default gateway: prime.tuanm.work
 prime connect --gateway https://gw.example.dev
 prime connect --new                          # force a fresh device
 prime connect --no-start --json              # just print/save the credentials
-prime connect -- --enable-memory             # extra flags for code-mcp
+prime connect -- --enable-memory             # extra flags for the device buddy
 ```
 
 `prime connect` asks the gateway for an anonymous device
 (`POST /api/devices/anonymous`), saves `{gateway, id, token}` in the config file
 (marked `anonymous: true`), prints the device id, the 6-character device code and
-the connect URL, and then runs the **bundled code-mcp** in the foreground as that
+the connect URL, and then runs the **bundled device buddy** in the foreground as that
 device (`prime code-mcp --gateway <origin> --id <id> --port <free port> --bind
-127.0.0.1`). Ctrl-C stops it; the command exits with code-mcp's status. The
+127.0.0.1`). Ctrl-C stops it; the command exits with its status. The
 device code is handed over in the `PRIME_CHILD_DEVICE_TOKEN` environment
 variable rather than on the command line, so `ps` never shows it; the child turns
-it into code-mcp's `--gateway-token` in-process and removes it from its
-environment, so code-mcp's own subprocesses never inherit it.
+it into its `--gateway-token` in-process and removes it from its
+environment, so its own subprocesses never inherit it.
 
 ```text
 ✓ registered anonymous device anon-05ece6d0e71cfce9
@@ -168,9 +168,9 @@ and credentials `prime tools list` / `prime call` use, or just the ids given) in
   `notifications/tools/list_changed`, so devices that come online later appear.
   With no reachable device the server still starts with an empty list.
 
-### code-mcp - the bundled device server
+### code-mcp - the device buddy
 
-The CLI embeds the code-mcp device server (documented in
+The CLI embeds the device buddy (documented in
 [SERVER.md](SERVER.md)), which exposes a machine's files and shell. `prime connect` runs it for you;
 `prime code-mcp [options]` runs it directly (`prime code-mcp --help` lists its
 options), e.g. as a registered device:
@@ -179,7 +179,7 @@ options), e.g. as a registered device:
 prime code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 ```
 
-Its options can live in the config, in a `code-mcp:` section (code-mcp's option
+Its options can live in the config, in a `code-mcp:` section (its option
 names without the dashes); options on the command line override them:
 
 ```yaml
@@ -198,21 +198,20 @@ code-mcp:
 With that, a bare `prime code-mcp` starts the device. A device `id` needs a
 gateway: when `id` is set and `gateway` is not, the CLI's gateway is used
 (`defaults.gateway`, else `https://prime.tuanm.workers.dev`). Values from the config are
-handed to code-mcp inside the process, so a token there never shows up in `ps`.
+handed to the device buddy inside the process, so a token there never shows up in `ps`.
 An unknown key or a wrongly typed value is an error naming the config file.
-`prime code-mcp` refuses to start while the code-mcp **service** is running - one
-code-mcp per machine and config.
+`prime code-mcp` refuses to start while the **service** is running - one device buddy per machine and config.
 
-### service - code-mcp as a user service
+### service - the device buddy as a user service
 
 ```bash
-prime service install                          # the config's code-mcp section as is
+prime service install                          # the config's service options as is
 prime service install --port 7788 --enable-memory   # ...with overrides
 prime service status [--json]
 prime service uninstall
 ```
 
-`install` registers code-mcp with the OS so it starts at login and comes back
+`install` registers the device buddy with the OS so it starts at login and comes back
 after a crash, then waits until it has **stayed** up before reporting success
 (otherwise it prints the service's own log). With a device `id`, it also
 waits for the device to be **online on the gateway**, and fails if the gateway
@@ -240,7 +239,7 @@ run from - `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` (either case),
 (0600; a proxy URL can hold a password), and lists their names. The service
 also trusts the operating system's certificate store (`NODE_USE_SYSTEM_CA=1`),
 where an organisation installs its TLS-inspection root, so a managed device
-usually needs nothing set at all. code-mcp's tunnel uses `HTTPS_PROXY`
+usually needs nothing set at all. Its tunnel uses `HTTPS_PROXY`
 (respecting `NO_PROXY`). If the tunnel still reports `TLS handshake failed`,
 export `NODE_EXTRA_CA_CERTS=/path/to/your-org-root.pem` and re-run `install`.
 
@@ -562,7 +561,7 @@ Design choices behind those numbers:
   parsed with Bun's built-in `Bun.YAML.parse`, and the CLI writes YAML with a
   small emitter. Nothing to resolve, nothing to load.
 - **One round trip per command.** MCP servers *should* require `initialize`
-  before other requests, but current code-mcp devices do not. `--handshake auto`
+  before other requests, but current devices do not. `--handshake auto`
   (the default) therefore calls directly and only handshakes if the server
   actually complains - see `--handshake always|never` to force it.
 - **Connection reuse within a batch.** A batch spanning several devices creates
@@ -679,25 +678,25 @@ bun run typecheck     # tsc with tsconfig.typecheck.json
 bun test:service      # prime service against this OS's real service manager
 ```
 
-### The bundled code-mcp
+### The bundled device buddy
 
-code-mcp lives in this package at `src/code-mcp.ts`, which the binary embeds -
-so a binary is built from exactly the device server of the commit it was built
-at.
+The device buddy lives in this package as one module (`src/code-mcp.ts`), which the binary embeds -
+so a binary embeds exactly the device buddy of the commit it was built
+from.
 
-- code-mcp is a script with top-level side effects, so it is never imported
+- It is a script with top-level side effects, so it is never imported
   statically: only `prime code-mcp` loads it, via `await import("#code-mcp")` (a
   `package.json` subpath import, a static string so `bun build` embeds it). It is
   excluded from `tsc` (mapped to `src/code-mcp.stub.d.ts`) because it is written
   to its own conventions, not this package's strict settings. It uses top-level
   `await`, which is why binaries are compiled with `--bytecode --format=esm`.
-- The build smoke-tests `code-mcp --help` on the bundle and the host binary from
+- The build smoke-tests the server's `--help` on the bundle and the host binary from
   a directory outside the repository, so a build that lost it fails.
 
 The end-to-end suite compiles the host binary and drives it against a real local
 gateway, covering both credentials, the tunnel relay, every input form, exit
 codes, handshake modes, dotted device ids, sequential ordering, `--parallel`
 overlap, timeouts, and the offline path - and the anonymous flow: `prime connect`
-registering and reusing a device, running the embedded code-mcp (from a
-directory without `src/`), real code-mcp tools through the connect URL, and
+registering and reusing a device, running the embedded device buddy (from a
+directory without `src/`), real device tools through the connect URL, and
 `prime serve` over stdio and HTTP.

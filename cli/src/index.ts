@@ -6,7 +6,7 @@
 //   prime serve [--port <n>]           all devices' tools as one MCP server
 //   prime devices connect|disconnect|status|list
 //   prime tools   list|view|call
-//   prime code-mcp [flags]             (advanced) the bundled code-mcp device server
+//   prime code-mcp [flags]             (advanced) the bundled device buddy
 //   prime service install|uninstall|status   code-mcp as a user service
 //   prime help [topic]
 //
@@ -138,7 +138,7 @@ async function main(argv: string[]): Promise<void> {
     process.stdout.write(rootHelp().trimEnd() + "\n");
     return;
   }
-  // Hidden/advanced: run the bundled code-mcp device server. Every argument
+  // Hidden/advanced: run the bundled device buddy. Every argument
   // belongs to code-mcp (including --help), so mcp's parser must not see them.
   if (argv[0] === "code-mcp") {
     await runCodeMcp(argv.slice(1));

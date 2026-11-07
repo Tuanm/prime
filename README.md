@@ -169,7 +169,7 @@ section. `prime --help` lists everything, and `prime call` is an alias for `prim
 
 ## Documentation
 
-- [cli/SERVER.md](cli/SERVER.md) - the device server: tools, flags, behaviour
+- [cli/SERVER.md](cli/SERVER.md) - the device buddy: tools, flags, behaviour
 - [cli/README.md](cli/README.md) - the `prime` CLI: install, commands, configuration, exit codes
 - [api/README.md](api/README.md) - internals, deployment, tunables, tests
 - [MCP specification](https://modelcontextprotocol.io) - the protocol all of this speaks
@@ -186,4 +186,4 @@ cd cli && python3 -m unittest discover -s tests
 
 CI runs each component's suites when it, or something it depends on, changes: the api
 on Linux; the CLI on Linux and Windows (x64, Arm) plus `prime service` on Linux, macOS and
-Windows; the device server on Linux, macOS and Windows.
+Windows; the device buddy on Linux, macOS and Windows.

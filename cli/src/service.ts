@@ -159,7 +159,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
   return [
     "# Installed by 'prime service install'. Remove with 'prime service uninstall'.",
     "[Unit]",
-    "Description=code-mcp (Prime gateway device server)",
+    "Description=code-mcp (Prime gateway device buddy)",
     "Wants=network-online.target",
     "After=network-online.target",
     "",

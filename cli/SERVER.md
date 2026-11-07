@@ -1,6 +1,6 @@
-# Code MCP
+# Device buddy
 
-A minimal MCP (Model Context Protocol) server over HTTP with Streamable HTTP transport and JSON-RPC 2.0.
+A minimal MCP (Model Context Protocol) server over HTTP with Streamable HTTP transport and JSON-RPC 2.0 - the companion a device runs to expose itself.
 
 One implementation in TypeScript/Bun (`src/code-mcp.ts`).
 

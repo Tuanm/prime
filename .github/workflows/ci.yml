@@ -6,7 +6,7 @@ on:
   pull_request:
 
 # Two components share this repository: api/ (the Cloudflare Worker) and cli/
-# (the mcp command, which embeds the device server - src/code-mcp.ts - and tests
+# (the mcp command, which embeds the device buddy - src/code-mcp.ts - and tests
 # against the api). A pull request runs the jobs its changes can affect; main
 # always runs everything.
 jobs:
@@ -33,7 +33,7 @@ jobs:
             api:
               - *workflows
               - 'api/**'
-            # The CLI embeds the device server and its end-to-end suite runs the api.
+            # The CLI embeds the device buddy and its end-to-end suite runs the api.
             cli:
               - *workflows
               - 'cli/**'
@@ -233,11 +233,11 @@ jobs:
           CODE_MCP_SYSTEM_CA_TEST: '1'
         run: bun test/system-ca.ts
 
-  # The device server that the CLI embeds. Its tests exercise the PowerShell
+  # The device buddy that the CLI embeds. Its tests exercise the PowerShell
   # launcher (against a real PowerShell, present on all three runners) and the
   # spawn environment, and that the server starts.
   device-server:
-    name: device server on ${{ matrix.os }}
+    name: device buddy on ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}

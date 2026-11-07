@@ -15,7 +15,7 @@ USAGE
 
 COMMANDS
   connect [--gateway <url>] [--new]       Connect THIS machine as an anonymous device
-                                          (registers or reuses one, runs code-mcp)
+                                          (registers or reuses one, runs the device buddy)
   serve [--port <n>]                      Serve every device's tools as one MCP server
                                           (stdio by default; HTTP with --port)
   devices connect <device-id> [options]   Save credentials for a device and verify it
@@ -28,7 +28,7 @@ COMMANDS
   files list                              List uploaded files and their metadata
   files upload <path> [options]           Upload a file through the files API
   files download <id|name> [options]      Download an uploaded file
-  service install [code-mcp options]      Run code-mcp as a user service (starts at
+  service install [options]               Run the device buddy as a user service (starts at
                                           login, restarts on failure)
   service uninstall                       Stop and remove that service
   service status                          Is it installed / running?
@@ -36,8 +36,8 @@ COMMANDS
   help [command]                          Show help
 
 ADVANCED
-  code-mcp [code-mcp options]             Run the bundled code-mcp device server with
-                                          the config's code-mcp options ('prime help code-mcp')
+  code-mcp [options]                      Run the bundled device buddy with
+                                          the config's options ('prime help code-mcp')
 
 ALIASES
   prime                   Same as 'prime --help'
@@ -165,11 +165,11 @@ ${bold("call")}
 const CONNECT = `prime connect - connect THIS machine to the gateway as an anonymous device
 
 USAGE
-  prime connect [--gateway <url>] [--new] [--no-start] [--json] [-- <code-mcp flags>]
+  prime connect [--gateway <url>] [--new] [--no-start] [--json] [-- <device flags>]
 
 Creates an anonymous device on the gateway (POST /api/devices/anonymous), saves
 its id and device code in the config file, prints them with the connect URL,
-then runs the bundled code-mcp in the foreground as that device - your files
+then runs the bundled device buddy in the foreground as that device - your files
 and shell become MCP tools reachable through the gateway. Ctrl-C stops it.
 
 The device is saved per gateway and reused on every later run (the gateway
@@ -186,10 +186,10 @@ OPTIONS
                            else https://prime.tuanm.workers.dev
   --gateway-token <token>  Gateway credential, for gateways that require one
   --new                    Register a fresh device instead of reusing the saved one
-  --no-start               Only register/reuse and print; do not run code-mcp
-  --port <n>               Local port for code-mcp's HTTP listener (default: free)
-  --json                   Print the credentials as JSON (then run code-mcp)
-  -- <flags>               Extra code-mcp flags, e.g. -- --enable-memory
+  --no-start               Only register/reuse and print; do not run it
+  --port <n>               Local port for its HTTP listener (default: free)
+  --json                   Print the credentials as JSON (then run the device buddy)
+  -- <flags>               Extra device-buddy flags, e.g. -- --enable-memory
 
   Keep the connect URL and device code secret: they grant shell access to this
   machine. Anonymous devices have a lower request budget than registered ones
@@ -238,22 +238,22 @@ OPTIONS
                            (default gateway: https://prime.tuanm.workers.dev)
 `;
 
-const CODE_MCP = `prime code-mcp - run the bundled code-mcp device server   (advanced)
+const CODE_MCP = `prime code-mcp - the bundled device buddy   (advanced)
 
 USAGE
-  prime code-mcp [code-mcp flags]
-  prime code-mcp --help          code-mcp's own flag reference
+  prime code-mcp [options]
+  prime code-mcp --help          its own flag reference
 
-The CLI embeds code-mcp (src/code-mcp.ts in this package), the MCP server that
+The CLI embeds the device buddy (one module in this package), the MCP server that
 exposes this machine's files and shell as tools. 'prime connect' runs it for
-you; use this command for anything else code-mcp supports, e.g. a registered
+you; use this command for anything else it supports, e.g. a registered
 device:
 
   prime code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
 
 OPTIONS FROM THE CONFIG
-  The code-mcp section of ~/.prime/config.yaml holds code-mcp's
-  options (names without the dashes); options given here override them:
+  The config's matching section holds its options (names without the dashes);
+  options given here override them:
 
     code-mcp:
       port: "7777"
@@ -265,17 +265,17 @@ OPTIONS FROM THE CONFIG
 
   Values from the config never appear on a command line (ps).
 
-  Refuses to start while the code-mcp service is running ('prime service').
+  Refuses to start while the service is running ('prime service').
 `;
 
-const SERVICE = `prime service - run code-mcp as a user service
+const SERVICE = `prime service - the device buddy as a user service
 
 USAGE
-  prime service install [code-mcp options]   install (or reinstall) and start it
+  prime service install [options]            install (or reinstall) and start it
   prime service uninstall                    stop and remove it
   prime service status [--json]              is it installed / running?
 
-The service runs 'prime code-mcp' with the code-mcp section of
+The service runs 'prime code-mcp' with the matching section of
 ~/.prime/config.yaml, overridden by the options given to
 'service install' (kept in service.yaml next to the config). Options are read
 at every start, so to apply a config change, run 'prime service install' again.
@@ -292,7 +292,7 @@ It starts at login and is restarted if it crashes. On Linux it stops at logout
 unless lingering is on: loginctl enable-linger USER.
 
 EXAMPLES
-  prime service install                         # config's code-mcp section as is
+  prime service install                         # the config's service options as is
   prime service install --port 7788 --enable-memory
   prime service status
   prime service uninstall
@@ -425,7 +425,7 @@ export function usageLine(topic: string, sub?: string): string {
     return "Usage: prime devices <connect|disconnect|status|list> [args]";
   }
   if (topic === "update" || topic === "upgrade") return "Usage: prime update [--check] [--force] [--to <path>]";
-  if (topic === "connect") return "Usage: prime connect [--gateway <url>] [--new] [-- <code-mcp flags>]";
+  if (topic === "connect") return "Usage: prime connect [--gateway <url>] [--new] [-- <device flags>]";
   if (topic === "serve") return "Usage: prime serve [<device-id>...] [--port <n>] [--host <addr>]";
   if (topic === "files" || topic === "upload" || topic === "download") {
     if (sub === "list") return "Usage: prime files list [--device <id>] [--json]";
