@@ -29,8 +29,8 @@ describe("landing page", () => {
     expect(offered).toEqual(targets);
   });
 
-  test("reads the version from cli-v<version> tags", () => {
-    expect(script).toContain('rel.tag_name.slice("cli-v".length)');
-    expect(script).toContain('/^cli-v/');
+  test("reads the version from prime-v<version> tags", () => {
+    expect(script).toContain('rel.tag_name.slice("prime-v".length)');
+    expect(script).toContain('/^prime-v/');
   });
 });

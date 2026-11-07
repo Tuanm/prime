@@ -141,10 +141,10 @@ export const LANDING_HTML = String.raw`<!doctype html>
           .then(function (list) {
             for (var i = 0; i < list.length; i++) {
               var rel = list[i];
-              if (rel.draft || rel.prerelease || !/^cli-v/.test(rel.tag_name || "")) continue;
+              if (rel.draft || rel.prerelease || !/^prime-v/.test(rel.tag_name || "")) continue;
               var assets = {};
               (rel.assets || []).forEach(function (a) { assets[a.name] = { url: a.browser_download_url, size: a.size }; });
-              release = { tag: rel.tag_name, version: rel.tag_name.slice("cli-v".length), assets: assets, url: rel.html_url };
+              release = { tag: rel.tag_name, version: rel.tag_name.slice("prime-v".length), assets: assets, url: rel.html_url };
               break;
             }
             render();

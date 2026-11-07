@@ -295,7 +295,7 @@ const UPDATE = `prime update - install the newest release   (alias: prime upgrad
 USAGE
   prime update [--check] [--force] [--release-version <v>] [--to <path>] [--json]
 
-Checks the GitHub releases for a newer 'cli-v<version>' tag and, if there is
+Checks the GitHub releases for a newer 'prime-v<version>' tag and, if there is
 one, downloads the asset for this platform, verifies it against the release's
 SHA256SUMS, and swaps it in.
 

@@ -3,7 +3,7 @@
 // The CLI ships as a self-contained binary with no package manager behind it, so
 // this is the only way to move forward without re-downloading by hand.
 //
-// The flow is: list the repo's releases, keep the ones tagged `cli-v*`, pick the
+// The flow is: list the repo's releases, keep the ones tagged `prime-v*`, pick the
 // highest by SemVer, and if it beats the running version, download that release's
 // asset for this platform together with its SHA256SUMS, verify the digest, and
 // swap the file in atomically.
@@ -18,7 +18,7 @@ import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, yellow } from "./output.ts";
 import { compareVersions, isValidVersion } from "./version.ts";
 
-export const TAG_PREFIX = "cli-v";
+export const TAG_PREFIX = "prime-v";
 // Renamed from Tuanm/prime; GitHub redirects the old name, which
 // is what releases up to 26.10.19+3 still ask for.
 export const DEFAULT_REPO = "Tuanm/prime";
@@ -66,7 +66,7 @@ export interface UpdateOutcome {
 
 // ---- pure helpers (unit tested) -------------------------------------------
 
-/** "cli-v26.10.3" -> "26.10.3"; undefined when the tag is not a CLI release. */
+/** "prime-v26.10.3" -> "26.10.3"; undefined when the tag is not a CLI release. */
 export function versionFromTag(tag: string, prefix = TAG_PREFIX): string | undefined {
   if (!tag.startsWith(prefix)) return undefined;
   const version = tag.slice(prefix.length);

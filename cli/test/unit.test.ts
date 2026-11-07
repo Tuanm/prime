@@ -370,10 +370,10 @@ describe("update helpers", () => {
   });
 
   test("versionFromTag only accepts CLI release tags", () => {
-    expect(versionFromTag("cli-v26.10.3")).toBe("26.10.3");
-    expect(versionFromTag("cli-v26.10.3+1")).toBe("26.10.3+1");
+    expect(versionFromTag("prime-v26.10.3")).toBe("26.10.3");
+    expect(versionFromTag("prime-v26.10.3+1")).toBe("26.10.3+1");
     expect(versionFromTag("worker-v1.0.0")).toBeUndefined();
-    expect(versionFromTag("cli-v26.10.03")).toBeUndefined(); // zero padded
+    expect(versionFromTag("prime-v26.10.03")).toBeUndefined(); // zero padded
     expect(versionFromTag("v26.10.3")).toBeUndefined();
   });
 
@@ -386,7 +386,7 @@ describe("update helpers", () => {
   });
 
   const release = (version: string, prerelease = false): Release => ({
-    tag: `cli-v${version}`,
+    tag: `prime-v${version}`,
     version,
     prerelease,
     htmlUrl: "",

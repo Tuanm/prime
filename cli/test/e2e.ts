@@ -639,10 +639,10 @@ try {
       if (path.endsWith("/releases")) {
         return Response.json([
           {
-            tag_name: `cli-v${FAKE_VERSION}`,
+            tag_name: `prime-v${FAKE_VERSION}`,
             draft: false,
             prerelease: false,
-            html_url: `${UPDATE_BASE}/releases/tag/cli-v${FAKE_VERSION}`,
+            html_url: `${UPDATE_BASE}/releases/tag/prime-v${FAKE_VERSION}`,
             assets: [
               { name: fakeAsset, browser_download_url: `${UPDATE_BASE}/asset`, size: fakeBinaryBytes.length },
               { name: fakeBundle, browser_download_url: `${UPDATE_BASE}/bundle`, size: fakeBundleBytes.length },
@@ -650,11 +650,11 @@ try {
             ],
           },
           // An older release must be ignored in favour of the newest.
-          { tag_name: "cli-v26.10.2", draft: false, prerelease: false, html_url: "", assets: [] },
+          { tag_name: "prime-v26.10.2", draft: false, prerelease: false, html_url: "", assets: [] },
           // Matches the version the test binary reports, so "--release-version
           // <current>" has a real release to resolve to.
           {
-            tag_name: `cli-v${CURRENT_VERSION}`,
+            tag_name: `prime-v${CURRENT_VERSION}`,
             draft: false,
             prerelease: true,
             html_url: "",
@@ -666,7 +666,7 @@ try {
           },
           // A draft and a non-CLI tag must both be ignored (the draft is the
           // highest version here, so picking it would fail the check).
-          { tag_name: "cli-v100.1.1", draft: true, prerelease: false, html_url: "", assets: [] },
+          { tag_name: "prime-v100.1.1", draft: true, prerelease: false, html_url: "", assets: [] },
           { tag_name: "worker-v1.0.0", draft: false, prerelease: false, html_url: "", assets: [] },
         ]);
       }

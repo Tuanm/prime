@@ -576,7 +576,7 @@ prime update --json       # machine-readable result
   installed 26.10.4 -> /Users/you/.local/bin/prime
 ```
 
-It lists the repo's releases, keeps the `cli-v*` tags, picks the highest by
+It lists the repo's releases, keeps the `prime-v*` tags, picks the highest by
 SemVer, downloads the asset for this platform, checks it against the release's
 `SHA256SUMS`, and replaces the file atomically - so an interrupted update cannot
 leave a half-written executable. A release without `SHA256SUMS` is refused
@@ -605,8 +605,8 @@ Install that one release by hand (below), and `prime update` takes over from the
 runner (Bun cross-compiles) and publishes a GitHub Release:
 
 ```bash
-git tag cli-v26.10.3
-git push origin cli-v26.10.3
+git tag prime-v26.10.3
+git push origin prime-v26.10.3
 ```
 
 The tag supplies the version baked into the binaries, so `prime --version` in a
@@ -622,7 +622,7 @@ The one subtlety is that the version also lands in `package.json` and a Release
 tag, and both are parsed as SemVer - which **forbids leading zeros**. So the day
 is not padded: `26.10.3`, never `26.10.03`. (`npm pack` accepts the padded form,
 so this fails late and confusingly.) A second release on the same day uses build
-metadata: `cli-v26.10.3+1`.
+metadata: `prime-v26.10.3+1`.
 
 `cli/src/version.ts` is the single source of truth, enforced by both the build
 (`bun run build --version <v>` rejects a bad value with a hint) and the release
