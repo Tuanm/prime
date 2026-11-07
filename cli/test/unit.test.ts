@@ -13,6 +13,7 @@ import { parseArgs, flag } from "../src/args.ts";
 import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/client.ts";
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
+import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
@@ -449,5 +450,81 @@ describe("misc", () => {
 
   test("a missing config file yields an empty config", () => {
     expect(loadConfig(join(tmpdir(), "definitely-absent-config.yaml"))).toEqual(emptyConfig());
+  });
+});
+
+describe("files", () => {
+  test("formatBytes uses binary units and never loses a zero", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1024)).toBe("1.0 KiB");
+    expect(formatBytes(1536)).toBe("1.5 KiB");
+    expect(formatBytes(8 * 1024 * 1024)).toBe("8.0 MiB");
+    expect(formatBytes(3 * 1024 ** 3)).toBe("3.0 GiB");
+  });
+
+  test("formatExpiry is relative and says expired", () => {
+    const now = Date.parse("2026-11-01T00:00:00Z");
+    expect(formatExpiry("2026-11-01T00:30:00Z", now)).toBe("in 30m");
+    expect(formatExpiry("2026-11-01T06:00:00Z", now)).toBe("in 6h");
+    expect(formatExpiry("2026-11-03T00:00:00Z", now)).toBe("in 2d");
+    expect(formatExpiry("2026-10-31T23:00:00Z", now)).toBe("expired");
+  });
+
+  test("parseContentDispositionName reads both filename forms", () => {
+    expect(parseContentDispositionName('attachment; filename="a b.pdf"')).toBe("a b.pdf");
+    expect(parseContentDispositionName("attachment; filename*=UTF-8''a%20b.pdf")).toBe("a b.pdf");
+    expect(parseContentDispositionName(null)).toBeUndefined();
+  });
+
+  test("expiryParams maps the flags and rejects bad combinations", () => {
+    const specs = [flag("expires-in", "number", ""), flag("expiry-days", "number", "")];
+    expect(expiryParams(parseArgs(["--expires-in", "3600"], specs)).get("expires_in")).toBe("3600");
+    expect(expiryParams(parseArgs(["--expiry-days", "2"], specs)).get("expiry_days")).toBe("2");
+    expect(() => expiryParams(parseArgs(["--expires-in", "60", "--expiry-days", "1"], specs))).toThrow(/only one/);
+    expect(() => expiryParams(parseArgs(["--expires-in", "0"], specs))).toThrow(/positive/);
+  });
+
+  const serviceConfig = () => {
+    const config = emptyConfig();
+    config.codeMcp = { id: "svc-dev", "gateway-token": "svc-token", gateway: "gw.example.dev" };
+    return config;
+  };
+
+  test("a files target defaults to the code-mcp section", () => {
+    const target = resolveFilesTarget(serviceConfig(), {}, "/tmp/config.yaml", {});
+    expect(target.device).toBe("svc-dev");
+    expect(target.token).toBe("svc-token");
+    expect(target.gateway).toBe("https://gw.example.dev");
+  });
+
+  test("files target flags override the config", () => {
+    const target = resolveFilesTarget(serviceConfig(), { device: "other", token: "t2", gateway: "https://x.dev/" }, "/tmp/c.yaml", {});
+    expect(target.device).toBe("other");
+    expect(target.token).toBe("t2");
+    expect(target.gateway).toBe("https://x.dev");
+  });
+
+  test("an explicit --device uses that device's own token and gateway", () => {
+    const config = serviceConfig();
+    config.devices = { "my-device": { token: "dev-token", gateway: "https://d.dev" } };
+    const target = resolveFilesTarget(config, { device: "my-device" }, "/tmp/c.yaml", {});
+    expect(target.device).toBe("my-device");
+    expect(target.token).toBe("dev-token");
+    expect(target.gateway).toBe("https://d.dev");
+  });
+
+  test("env supplies the gateway and the last-resort token", () => {
+    const config = emptyConfig();
+    config.devices = { alpha: { token: "entry-token" } };
+    const target = resolveFilesTarget(config, {}, "/tmp/c.yaml", { PRIME_DEVICE_TOKEN: "env-token", PRIME_GATEWAY_URL: "https://env.dev" });
+    expect(target.device).toBe("alpha");
+    expect(target.token).toBe("entry-token");
+    expect(target.gateway).toBe("https://env.dev");
+  });
+
+  test("missing device or token is a usage error with a hint", () => {
+    expect(() => resolveFilesTarget(emptyConfig(), {}, "/tmp/c.yaml", {})).toThrow(/no device configured/);
+    expect(() => resolveFilesTarget({ defaults: {}, devices: { alpha: {} }, codeMcp: {} }, {}, "/tmp/c.yaml", {})).toThrow(/no token/);
   });
 });

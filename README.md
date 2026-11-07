@@ -25,7 +25,13 @@ curl -u my-laptop:t --data-binary @report.pdf \
 ```
 
 The answer carries the file's id and its `/files/<id>` link; the `/files` page does the
-same thing with a form.
+same thing with a form, and the CLI wraps the same API:
+
+```bash
+prime files upload report.pdf            # alias: prime upload report.pdf
+prime files list                         # files, sizes, dates, protection
+prime files download report.pdf -o copy.pdf
+```
 
 - **Protected links.** A file can carry a key, passed as the `X-File-Key` request header -
   never in the URL - so it cannot leak through access logs or a `Referer`.
@@ -152,6 +158,9 @@ prime service install --id my-laptop --token t   # ...or a registered one, at ev
 prime devices connect my-laptop --token t   # save credentials for a registered device
 prime tools list my-laptop
 prime tools call my-laptop.read '{"path":"README.md"}'
+prime files upload report.pdf            # store a file behind the gateway
+prime files list                         # what this device has stored
+prime files download report.pdf -o copy.pdf
 ```
 
 Credentials and defaults live in `~/.prime/config.yaml`; flags override

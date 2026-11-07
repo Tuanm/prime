@@ -25,6 +25,9 @@ COMMANDS
   tools list <device-id>                  List a device's MCP tools
   tools view <device-id>.<tool-id>        Show one tool's schema
   tools call <device-id>.<tool-id> [json] Call one or more tools
+  files list                              List uploaded files and their metadata
+  files upload <path> [options]           Upload a file through the files API
+  files download <id|name> [options]      Download an uploaded file
   service install [code-mcp options]      Run code-mcp as a user service (starts at
                                           login, restarts on failure)
   service uninstall                       Stop and remove that service
@@ -40,6 +43,8 @@ ALIASES
   prime                   Same as 'prime --help'
   prime call                Same as 'prime tools call'
   prime upgrade             Same as 'prime update'
+  prime upload              Same as 'prime files upload'
+  prime download            Same as 'prime files download'
 
 EXAMPLES
   prime connect                                    # this machine, on the default gateway
@@ -52,6 +57,9 @@ EXAMPLES
   prime tools call my-laptop.click '{"selector":"#submit"}'
   echo '{"name":"my-laptop.snapshot","arguments":{}}' | prime tools call
   prime call my-laptop.snapshot '{}' my-laptop.click '{"selector":"#ok"}'
+  prime files upload ./report.pdf --expiry-days 1
+  prime files list
+  prime files download report.pdf -o ./report.pdf
 
 CONFIG
   Precedence per field: --flag > environment > device entry > defaults section.
@@ -331,6 +339,62 @@ ENVIRONMENT
   MCP_CLI_API_BASE    Override the API base, default https://api.github.com
 `;
 
+const FILES = `prime files - list, upload and download files on the gateway
+
+USAGE
+  prime files list [options]
+  prime files upload <path> [options]       (alias: prime upload)
+  prime files download <id|name> [options]  (alias: prime download)
+
+The files API stores files in R2 under a registered device. Uploads expire
+(default: the gateway maximum, 7 days) and count against per-device limits.
+Every command authenticates with a device id + token. By default both come from
+the device configured for the background service (the options 'prime service
+install' writes), so once the service is installed the file commands just
+work. Flags override each field:
+
+  --device <id>       Device whose files to use (default: the service's device)
+  --token <token>     Device token (default: the service's credential)
+  --gateway <url>     Gateway origin (default: the service's gateway)
+  --timeout <ms>      Per-request timeout (default 300000)
+
+${bold("list")}
+  Prints the stored files with their metadata: name, id, size, content type,
+  creation time, expiry and whether the file has a protection key. --json
+  prints the full API record, including the download and page URLs and the
+  device's usage. --show-keys prints protection keys (owner only).
+
+${bold("upload")}
+  Streams the file to POST /api/files - nothing is buffered, so a large file
+  is never held in memory. Progress is drawn on stderr when it is a TTY.
+
+  --name <name>          Stored name (default: the path basename)
+  --key <key>            Protect the file at creation; downloads then need the
+                         same key, sent as a request header
+  --content-type <type>  MIME type (default: the file type, else
+                         application/octet-stream)
+  --expires-in <sec>     Lifetime in seconds
+  --expiry-days <days>   Lifetime in days
+  --json                 Machine-readable result
+
+${bold("download")}
+  Streams GET /api/files/<id> straight to disk. Without -o the stored name is
+  used, in the current directory or inside -o's directory.
+
+  -o, --output <path>    Output path (- writes the bytes to stdout)
+  --key <key>            Key for a protected file (owner auth also works)
+  --resume               Continue a partial download with a Range request
+                         (needs a concrete -o)
+  --force                Overwrite an existing output file
+  --json                 Machine-readable result
+
+  A file may be named instead of an id when exactly one file on the device has
+  that name; for duplicates the command lists the matching ids.
+
+EXIT CODES
+  0 success   1 error   2 usage   3 authentication   4 device offline   5 timeout
+`;
+
 export function rootHelp(): string {
   return ROOT;
 }
@@ -340,12 +404,13 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "devices") return DEVICES;
   if (topic === "tools") return TOOLS;
   if (topic === "call") return TOOLS;
+  if (topic === "files" || topic === "upload" || topic === "download") return FILES;
   if (topic === "update" || topic === "upgrade") return UPDATE;
   if (topic === "connect") return CONNECT;
   if (topic === "serve") return SERVE;
   if (topic === "code-mcp") return CODE_MCP;
   if (topic === "service") return SERVICE;
-  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|call|update|code-mcp]")}`;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|files|call|update|code-mcp]")}`;
   void sub;
   return undefined;
 }
@@ -362,6 +427,12 @@ export function usageLine(topic: string, sub?: string): string {
   if (topic === "update" || topic === "upgrade") return "Usage: prime update [--check] [--force] [--to <path>]";
   if (topic === "connect") return "Usage: prime connect [--gateway <url>] [--new] [-- <code-mcp flags>]";
   if (topic === "serve") return "Usage: prime serve [<device-id>...] [--port <n>] [--host <addr>]";
+  if (topic === "files" || topic === "upload" || topic === "download") {
+    if (sub === "list") return "Usage: prime files list [--device <id>] [--json]";
+    if (sub === "upload") return "Usage: prime files upload <path> [--name <name>] [--expiry-days <n>] [--key <key>]";
+    if (sub === "download") return "Usage: prime files download <id|name> [-o <path>] [--key <key>] [--resume]";
+    return "Usage: prime files <list|upload|download> [args]";
+  }
   if (topic === "tools" || topic === "call") {
     if (sub === "list") return "Usage: prime tools list <device-id>";
     if (sub === "view") return "Usage: prime tools view <device-id>.<tool-id>";

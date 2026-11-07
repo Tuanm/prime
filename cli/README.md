@@ -58,6 +58,9 @@ prime devices connect <device-id> [options]
 prime devices disconnect <device-id>
 prime devices status <device-id>
 prime devices list [--no-probe]
+prime files list [--json] [--show-keys]
+prime files upload <path> [--name <n>] [--key <k>] [--expiry-days <n>]
+prime files download <id|name> [-o <path>] [--key <k>] [--resume]
 prime tools list <device-id>
 prime tools view <device-id>.<tool-id>
 prime tools call <device-id>.<tool-id> [<json>] [options]
@@ -80,6 +83,8 @@ Aliases, as specified:
 - `prime` on its own is `prime --help`.
 - `prime call ...` is `prime tools call ...`.
 - `prime upgrade` is `prime update`.
+- `prime upload ...` is `prime files upload ...`, and `prime download ...` is
+  `prime files download ...`.
 
 Every subcommand supports `--help`, and global flags are available everywhere:
 `--json`, `--no-color`, `--config <path>`, `--verbose`, `--quiet`.
@@ -269,6 +274,40 @@ DEVICE    STATUS   LATENCY   GATEWAY
 alpha     online   12 ms     https://gw.example.dev
 staging   offline  -         https://staging.example.dev
 ```
+
+### files - list, upload and download
+
+The gateway keeps temporary files in R2, scoped to a registered device. The
+commands below speak to its REST API (`/api/files`) with that device's id and
+token, and stream both directions so a large file is never held in memory.
+
+```bash
+prime files upload ./report.pdf                  # expires in 7 days (the maximum)
+prime files upload ./secret.pdf --key hunter2 --expiry-days 1
+prime files list                                 # name, id, size, type, dates, lock
+prime files download report.pdf -o ./report.pdf  # by name, when it is unique
+prime files download 1a2b3c... -o ./report.pdf   # by id, always
+prime files download 1a2b... -o ./part.pdf --resume   # continue a partial file
+```
+
+By default the device and gateway are the ones configured for the background
+service, so after `prime service install ... --id <id> --gateway-token <token>`
+the file commands work with no extra flags. Each field can be overridden:
+
+```text
+--device <id>     device whose files to use
+--token <token>   that device's token
+--gateway <url>   gateway origin
+--timeout <ms>    per-request timeout (default 300000)
+```
+
+Upload options: `--name` (stored name), `--key` (protect the file at creation;
+downloads then need `--key`), `--content-type`, `--expires-in <seconds>` or
+`--expiry-days <days>`. Download options: `-o/--output` (`-` for stdout),
+`--resume` for an interrupted transfer, `--force` to overwrite. `list
+--show-keys` prints protection keys for the owner; without it they show as
+"locked: yes". Files are per device: 200 MiB each, 5 files and 500 MiB per
+device, 7 days maximum; expired files fall out of the listing automatically.
 
 ## Calling tools
 

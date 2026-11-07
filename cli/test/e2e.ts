@@ -6,7 +6,7 @@
 // documented input form.
 
 import { spawn } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -785,6 +785,142 @@ try {
 
   updateServer.stop(true);
   rmSync(installDir, { recursive: true, force: true });
+
+  // ---- files: upload, list and download ---------------------------------------
+  // The dev gateway runs with ADMIN_ACCESS=off, so registering a device is a
+  // plain POST. The files API itself then authenticates with that device's pair.
+  const FILES_DEVICE = "files-e2e";
+  const FILES_TOKEN = "files-e2e-secret";
+  const OTHER_DEVICE = "files-other";
+  const OTHER_TOKEN = "files-other-secret";
+  const filesArgs = ["--gateway", BASE, "--device", FILES_DEVICE, "--token", FILES_TOKEN];
+  const filesDir = mkdtempSync(join(tmpdir(), "prime-files-"));
+  const hashOf = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  const basic = "Basic " + Buffer.from(FILES_DEVICE + ":" + FILES_TOKEN).toString("base64");
+  {
+    const registered = await fetch(`${BASE}/admin/api/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: FILES_DEVICE, token: FILES_TOKEN }),
+    });
+    const other = await fetch(`${BASE}/admin/api/devices`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: OTHER_DEVICE, token: OTHER_TOKEN }),
+    });
+    check("files: the test devices are registered in the local registry", registered.ok && other.ok, `${registered.status}/${other.status}`);
+  }
+  // The files API caches the registry map for 2s per isolate; give the cache
+  // from before the registration time to expire before the first upload.
+  await Bun.sleep(2_500);
+
+  const smallPath = join(filesDir, "notes.txt");
+  writeFileSync(smallPath, "hello from prime files\n");
+  const upSmall = await cli(["files", "upload", smallPath, ...filesArgs, "--json"]);
+  const smallJson = JSON.parse(upSmall.out || "{}") as { file?: { id?: string; size?: number; name?: string } };
+  check(
+    "files upload: a small file is stored under its name",
+    upSmall.code === 0 && smallJson.file?.id !== undefined && smallJson.file?.name === "notes.txt" && smallJson.file?.size === 23,
+    `code=${upSmall.code} out=${upSmall.out.slice(0, 300)} err=${upSmall.err.slice(0, 300)}`,
+  );
+
+  const filesListRun = await cli(["files", "list", ...filesArgs, "--json"]);
+  const filesListJson = JSON.parse(filesListRun.out || "{}") as { files?: { id: string; name: string; size: number }[] };
+  check(
+    "files list: shows the uploaded file with its metadata",
+    Boolean(filesListRun.code === 0 && filesListJson.files?.some((file) => file.id === smallJson.file?.id && file.name === "notes.txt" && file.size === 23)),
+    `code=${filesListRun.code} out=${filesListRun.out.slice(0, 300)} err=${filesListRun.err.slice(0, 300)}`,
+  );
+  const listHuman = await cli(["files", "list", ...filesArgs]);
+  check(
+    "files list: renders a table with the name and its size",
+    listHuman.code === 0 && listHuman.out.includes("NAME") && listHuman.out.includes("notes.txt"),
+    listHuman.out.slice(0, 300) + listHuman.err.slice(0, 200),
+  );
+
+  const byIdOut = join(filesDir, "by-id.txt");
+  const dlById = await cli(["files", "download", smallJson.file!.id!, "-o", byIdOut, ...filesArgs]);
+  check(
+    "files download: by id writes the exact bytes",
+    dlById.code === 0 && readFileSync(byIdOut, "utf8") === "hello from prime files\n",
+    dlById.err.slice(0, 300) + dlById.out.slice(0, 200),
+  );
+  const byNameOut = join(filesDir, "by-name.txt");
+  const dlByName = await cli(["files", "download", "notes.txt", "-o", byNameOut, ...filesArgs]);
+  check(
+    "files download: a stored name resolves to its id",
+    dlByName.code === 0 && readFileSync(byNameOut, "utf8") === "hello from prime files\n",
+    dlByName.err.slice(0, 300),
+  );
+  const clobber = await cli(["files", "download", smallJson.file!.id!, "-o", byIdOut, ...filesArgs]);
+  check(
+    "files download: refuses to overwrite without --force",
+    clobber.code === 1 && clobber.err.includes("refusing to overwrite"),
+    `code=${clobber.code} err=${clobber.err.slice(0, 200)}`,
+  );
+
+  const secretPath = join(filesDir, "secret.bin");
+  writeFileSync(secretPath, "top secret");
+  const upSecret = await cli(["files", "upload", secretPath, "--key", "hunter2", ...filesArgs, "--json"]);
+  const secretJson = JSON.parse(upSecret.out || "{}") as { file?: { id?: string; protected?: boolean } };
+  check(
+    "files upload: --key protects the file",
+    upSecret.code === 0 && secretJson.file?.protected === true && secretJson.file?.id !== undefined,
+    `code=${upSecret.code} out=${upSecret.out.slice(0, 300)} err=${upSecret.err.slice(0, 200)}`,
+  );
+  const lockedOut = join(filesDir, "secret-out.bin");
+  const ownerOut = join(filesDir, "secret-owner.bin");
+  const otherArgs = ["--gateway", BASE, "--device", OTHER_DEVICE, "--token", OTHER_TOKEN];
+  // Another device is not the owner, so it needs the key; the owner itself does
+  // not (the API accepts the owning device's credentials in place of the key).
+  const noKey = await cli(["files", "download", secretJson.file!.id!, "-o", lockedOut, ...otherArgs]);
+  check("files download: a protected file refuses a non-owner without its key", noKey.code === 3, `code=${noKey.code} err=${noKey.err.slice(0, 200)}`);
+  const withKey = await cli(["files", "download", secretJson.file!.id!, "--key", "hunter2", "-o", lockedOut, ...otherArgs]);
+  check("files download: the key unlocks the file for a non-owner", withKey.code === 0 && readFileSync(lockedOut, "utf8") === "top secret", withKey.err.slice(0, 200));
+  const ownerNoKey = await cli(["files", "download", secretJson.file!.id!, "-o", ownerOut, ...filesArgs]);
+  check("files download: the owner can read a protected file without the key", ownerNoKey.code === 0 && readFileSync(ownerOut, "utf8") === "top secret", ownerNoKey.err.slice(0, 200));
+  const keysShown = await cli(["files", "list", ...filesArgs, "--show-keys"]);
+  check("files list: --show-keys prints the protection key", keysShown.code === 0 && keysShown.out.includes("hunter2"), keysShown.out.slice(0, 300));
+
+  // Bigger than R2's 5 MiB multipart part, so this exercises streaming on both
+  // the up and the down path (the CLI never buffers the file).
+  const bigSize = 12 * 1024 * 1024 + 7;
+  const bigBytes = new Uint8Array(bigSize);
+  for (let i = 0; i < bigSize; i++) bigBytes[i] = (i * 31 + 7) & 0xff;
+  const bigPath = join(filesDir, "big.bin");
+  writeFileSync(bigPath, bigBytes);
+  const upBig = await cli(["files", "upload", bigPath, ...filesArgs, "--json"]);
+  const bigJson = JSON.parse(upBig.out || "{}") as { file?: { id?: string; size?: number } };
+  check(
+    "files upload: a 12 MiB file is stored byte-exactly",
+    upBig.code === 0 && bigJson.file?.id !== undefined && bigJson.file?.size === bigSize,
+    `code=${upBig.code} out=${upBig.out.slice(0, 300)} err=${upBig.err.slice(0, 300)}`,
+  );
+  const bigOut = join(filesDir, "big-out.bin");
+  const dlBig = await cli(["files", "download", bigJson.file!.id!, "-o", bigOut, ...filesArgs]);
+  const downloaded = new Uint8Array(readFileSync(bigOut));
+  check(
+    "files download: a 12 MiB file matches the local hash",
+    dlBig.code === 0 && downloaded.length === bigSize && hashOf(downloaded) === hashOf(bigBytes),
+    `code=${dlBig.code} bytes=${downloaded.length} err=${dlBig.err.slice(0, 300)}`,
+  );
+
+  // Simulate an interrupted transfer, then continue it with a Range request.
+  truncateSync(bigOut, 6 * 1024 * 1024);
+  const resumed = await cli(["files", "download", bigJson.file!.id!, "-o", bigOut, "--resume", "--json", ...filesArgs]);
+  const resumedJson = JSON.parse(resumed.out || "{}") as { resumed?: boolean; size?: number };
+  const resumedBytes = new Uint8Array(readFileSync(bigOut));
+  check(
+    "files download --resume continues a partial file to the full hash",
+    resumed.code === 0 && resumedJson.resumed === true && resumedBytes.length === bigSize && hashOf(resumedBytes) === hashOf(bigBytes),
+    `code=${resumed.code} json=${resumed.out.slice(0, 160)} bytes=${resumedBytes.length} err=${resumed.err.slice(0, 200)}`,
+  );
+
+  // Leave the shared registry and R2 clean for the rest of the suite.
+  for (const id of [smallJson.file?.id, secretJson.file?.id, bigJson.file?.id]) {
+    if (id) await fetch(`${BASE}/api/files/${encodeURIComponent(id)}`, { method: "DELETE", headers: { authorization: basic } });
+  }
+  rmSync(filesDir, { recursive: true, force: true });
 
   // ---- anonymous device: prime connect + bundled code-mcp + prime serve ---------
   // The real flow, with the compiled binary: register an anonymous device, run

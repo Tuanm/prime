@@ -19,6 +19,7 @@ import { connectCommand } from "./connect.ts";
 import { serveCommand } from "./serve.ts";
 import { type Ctx, makeCtx } from "./context.ts";
 import { devicesConnect, devicesDisconnect, devicesList, devicesStatus } from "./devices.ts";
+import { filesDownload, filesList, filesUpload } from "./files.ts";
 import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
@@ -27,7 +28,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.7-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.8-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -66,6 +67,35 @@ const CALL_FLAGS: FlagSpec[] = [
 ];
 
 const VIEW_FLAGS: FlagSpec[] = [...TOOL_FLAGS, flag("device", "string", "Force the device id", { placeholder: "<id>" }), flag("tool", "string", "Force the tool name", { placeholder: "<name>" })];
+
+const FILES_TARGET_FLAGS: FlagSpec[] = [
+  flag("device", "string", "Device id whose files to use (default: the code-mcp section's id)", { placeholder: "<id>" }),
+  flag("gateway", "string", "Gateway origin", { placeholder: "<url>" }),
+  flag("token", "string", "Device token", { placeholder: "<token>" }),
+  flag("timeout", "number", "Per-request timeout in milliseconds", { placeholder: "<ms>" }),
+];
+
+const FILES_LIST_FLAGS: FlagSpec[] = [
+  ...FILES_TARGET_FLAGS,
+  flag("show-keys", "boolean", "Print each protected file's key (owner only)"),
+];
+
+const FILES_UPLOAD_FLAGS: FlagSpec[] = [
+  ...FILES_TARGET_FLAGS,
+  flag("name", "string", "Stored file name (default: the path's basename)", { placeholder: "<name>" }),
+  flag("key", "string", "Protect the file with this key; downloads then need --key", { placeholder: "<key>" }),
+  flag("content-type", "string", "MIME type (default: from the file)", { placeholder: "<type>" }),
+  flag("expires-in", "number", "Lifetime in seconds (default: the server maximum)", { placeholder: "<seconds>" }),
+  flag("expiry-days", "number", "Lifetime in days", { placeholder: "<days>" }),
+];
+
+const FILES_DOWNLOAD_FLAGS: FlagSpec[] = [
+  ...FILES_TARGET_FLAGS,
+  flag("output", "string", "Write to this path (- for stdout; default: the stored name)", { short: "o", placeholder: "<path>" }),
+  flag("key", "string", "File key for a protected file", { placeholder: "<key>" }),
+  flag("resume", "boolean", "Continue a partial download (needs -o <path>)"),
+  flag("force", "boolean", "Overwrite an existing output file"),
+];
 
 const ANON_CONNECT_FLAGS: FlagSpec[] = [
   flag("gateway", "string", "Gateway origin (default: saved default, else https://prime.tuanm.workers.dev)", { placeholder: "<url>" }),
@@ -154,9 +184,12 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  // Aliases: `prime call ...` === `prime tools call ...`, `prime upgrade` === `prime update`.
+  // Aliases: `prime call ...` === `prime tools call ...`, `prime upgrade` === `prime update`,
+  // `prime upload`/`prime download` === `prime files upload`/`prime files download`.
   if (argv[0] === "call") argv = ["tools", "call", ...argv.slice(1)];
   if (argv[0] === "upgrade") argv = ["update", ...argv.slice(1)];
+  if (argv[0] === "upload") argv = ["files", "upload", ...argv.slice(1)];
+  if (argv[0] === "download") argv = ["files", "download", ...argv.slice(1)];
 
   const topic = argv[0]!;
   const rest = argv.slice(1);
@@ -179,7 +212,7 @@ async function main(argv: string[]): Promise<void> {
     }
   }
 
-  if (topic === "devices" || topic === "tools") {
+  if (topic === "devices" || topic === "tools" || topic === "files") {
     if (wantHelp) {
       showHelp(helpFor(topic, sub), topic, sub);
       return;
@@ -207,6 +240,17 @@ async function main(argv: string[]): Promise<void> {
           return devicesList(ctx);
         default:
           throw new UsageError(`unknown devices command "${sub}"`, `Valid: connect, disconnect, status, list. ${usageLine("devices")}`);
+      }
+    case "files":
+      switch (sub) {
+        case "list":
+          return filesList(ctx);
+        case "upload":
+          return filesUpload(ctx);
+        case "download":
+          return filesDownload(ctx);
+        default:
+          throw new UsageError(`unknown files command "${sub}"`, `Valid: list, upload, download. ${usageLine("files")}`);
       }
     case "tools":
       switch (sub) {
@@ -252,6 +296,12 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "list") return TOOL_FLAGS;
     if (sub === "view") return VIEW_FLAGS;
     if (sub === "call") return CALL_FLAGS;
+    return [];
+  }
+  if (topic === "files") {
+    if (sub === "list") return FILES_LIST_FLAGS;
+    if (sub === "upload") return FILES_UPLOAD_FLAGS;
+    if (sub === "download") return FILES_DOWNLOAD_FLAGS;
     return [];
   }
   if (topic === "update") return UPDATE_FLAGS;
