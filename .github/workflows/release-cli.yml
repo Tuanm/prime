@@ -139,9 +139,11 @@ jobs:
         working-directory: cli
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/prime-space
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
+          # OCI repository names are lowercase; GitHub logins are not.
+          IMAGE="ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/prime-space"
           # One image per architecture, then a manifest list so the tag works on
           # both. The Dockerfile lives in the source tree; the binaries are in
           # dist/ after the packaging step, and come from one build.
@@ -219,9 +221,9 @@ jobs:
           shasum -a 256 -c SHA256SUMS --ignore-missing
           ```
 
-          `prime spaces create` pulls `ghcr.io/${{ github.repository_owner }}/prime-space:<version>`
-          (linux/amd64 and linux/arm64); make that package public once in its settings, or
-          run `container registry login ghcr.io` first.
+          `prime spaces create` pulls the `ghcr.io/<owner>/prime-space:<version>` image
+          (linux/amd64 and linux/arm64); make that package public once in its settings,
+          or run `container registry login ghcr.io` first.
 
           Run `prime --help` for commands, or see
           [cli/README.md](https://github.com/${{ github.repository }}/blob/main/cli/README.md)
