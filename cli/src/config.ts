@@ -40,6 +40,10 @@ export interface DeviceEntry {
   note?: string;
   /** Created by 'prime connect' via POST /api/devices/anonymous (reused per gateway). */
   anonymous?: boolean;
+  /** A local MCP endpoint (a space) instead of a gateway tunnel. */
+  local_url?: string;
+  /** The space this local device belongs to. */
+  space?: string;
 }
 
 export interface Defaults {
@@ -52,9 +56,32 @@ export interface Defaults {
 /** code-mcp's own options (flag names without "--"); see code-mcp-options.ts. */
 export type CodeMcpSection = Record<string, string | boolean>;
 
+/** A local codespace: a rootless container running this machine's device buddy. */
+export interface SpaceEntry {
+  /** Device id the space answers as (also its container label). */
+  id: string;
+  runtime: string;
+  image: string;
+  mode: "persistent" | "ephemeral";
+  container: string;
+  volume?: string;
+  network?: string;
+  token: string;
+  /** Host loopback port (podman/docker); 7777 inside an Apple space. */
+  port?: number;
+  cpus?: number;
+  memory?: string;
+  offline?: boolean;
+  /** Where the MCP server answers right now; recomputed on every start. */
+  local_url?: string;
+  created_at?: string;
+}
+
 export interface Config {
   defaults: Defaults;
   devices: Record<string, DeviceEntry>;
+  /** Codespaces, keyed by their user-facing name. */
+  spaces: Record<string, SpaceEntry>;
   /** The "code-mcp:" section. Kept verbatim (validated where it is used). */
   codeMcp: CodeMcpSection;
 }
@@ -66,7 +93,7 @@ export function defaultConfigPath(): string {
 }
 
 export function emptyConfig(): Config {
-  return { defaults: {}, devices: {}, codeMcp: {} };
+  return { defaults: {}, devices: {}, spaces: {}, codeMcp: {} };
 }
 
 function asString(value: unknown): string | undefined {
@@ -112,6 +139,29 @@ export function parseConfig(text: string, source: string): Config {
       connected_at: asString(entry.connected_at),
       note: asString(entry.note),
       ...(entry.anonymous === true ? { anonymous: true } : {}),
+      ...(asString(entry.local_url) ? { local_url: asString(entry.local_url) } : {}),
+      ...(asString(entry.space) ? { space: asString(entry.space) } : {}),
+    };
+  }
+
+  for (const [name, value] of Object.entries(asRecord(doc.spaces))) {
+    const entry = asRecord(value);
+    const mode = entry.mode === "persistent" ? "persistent" : "ephemeral";
+    config.spaces[name] = {
+      id: asString(entry.id) ?? "",
+      runtime: asString(entry.runtime) ?? "",
+      image: asString(entry.image) ?? "",
+      mode,
+      container: asString(entry.container) ?? "",
+      token: asString(entry.token) ?? "",
+      ...(asString(entry.volume) ? { volume: asString(entry.volume) } : {}),
+      ...(asString(entry.network) ? { network: asString(entry.network) } : {}),
+      ...(typeof entry.port === "number" ? { port: entry.port } : {}),
+      ...(typeof entry.cpus === "number" ? { cpus: entry.cpus } : {}),
+      ...(asString(entry.memory) ? { memory: asString(entry.memory) } : {}),
+      ...(entry.offline === true ? { offline: true } : {}),
+      ...(asString(entry.local_url) ? { local_url: asString(entry.local_url) } : {}),
+      ...(asString(entry.created_at) ? { created_at: asString(entry.created_at) } : {}),
     };
   }
 
@@ -185,6 +235,35 @@ export function serializeConfig(config: Config): string {
         ["connected_at", entry.connected_at],
         ["note", entry.note],
         ["anonymous", entry.anonymous === true ? true : undefined],
+        ["local_url", entry.local_url],
+        ["space", entry.space],
+      ] as const) {
+        if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
+      }
+    }
+  }
+
+  const spaceNames = Object.keys(config.spaces).sort();
+  if (spaceNames.length > 0) {
+    out += "\n# Codespaces: 'prime spaces ...' manages these; the matching device entry is local.\nspaces:\n";
+    for (const name of spaceNames) {
+      const space = config.spaces[name]!;
+      out += `  ${/^[A-Za-z0-9._-]+$/.test(name) ? name : yamlScalar(name)}:\n`;
+      for (const [key, value] of [
+        ["id", space.id],
+        ["runtime", space.runtime],
+        ["image", space.image],
+        ["mode", space.mode],
+        ["container", space.container],
+        ["volume", space.volume],
+        ["network", space.network],
+        ["token", space.token],
+        ["port", space.port],
+        ["cpus", space.cpus],
+        ["memory", space.memory],
+        ["offline", space.offline === true ? true : undefined],
+        ["local_url", space.local_url],
+        ["created_at", space.created_at],
       ] as const) {
         if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
       }

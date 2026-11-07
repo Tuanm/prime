@@ -24,11 +24,12 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
+import { isSpaceCommand, spacesCreate, spacesDelete, spacesList, spacesLogs, spacesStart, spacesStop } from "./spaces.ts";
 import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.8-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.9-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -67,6 +68,26 @@ const CALL_FLAGS: FlagSpec[] = [
 ];
 
 const VIEW_FLAGS: FlagSpec[] = [...TOOL_FLAGS, flag("device", "string", "Force the device id", { placeholder: "<id>" }), flag("tool", "string", "Force the tool name", { placeholder: "<name>" })];
+
+const SPACE_CREATE_FLAGS: FlagSpec[] = [
+  flag("name", "string", "Space name (default: a generated device id)", { placeholder: "<name>" }),
+  flag("persistent", "boolean", "Keep the state across stop/start"),
+  flag("ephemeral", "boolean", "Discard the state on stop (default)"),
+  flag("image", "string", "Image to use (default: the release's ghcr.io/tuanm/prime-space tag)", { placeholder: "<image>" }),
+  flag("cpus", "number", "CPUs for the container (default 2)", { placeholder: "<n>" }),
+  flag("memory", "string", "Memory limit, e.g. 4g (default 4g)", { placeholder: "<size>" }),
+  flag("offline", "boolean", "No network access (podman/docker only)"),
+  flag("runtime", "string", "Runtime: apple|podman|docker", { placeholder: "<runtime>" }),
+  flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
+];
+
+const SPACE_LIFECYCLE_FLAGS: FlagSpec[] = [
+  flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
+];
+
+const SPACE_LIST_FLAGS: FlagSpec[] = [
+  flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
+];
 
 const FILES_TARGET_FLAGS: FlagSpec[] = [
   flag("device", "string", "Device id whose files to use (default: the code-mcp section's id)", { placeholder: "<id>" }),
@@ -212,7 +233,7 @@ async function main(argv: string[]): Promise<void> {
     }
   }
 
-  if (topic === "devices" || topic === "tools" || topic === "files") {
+  if (topic === "devices" || topic === "tools" || topic === "files" || topic === "spaces") {
     if (wantHelp) {
       showHelp(helpFor(topic, sub), topic, sub);
       return;
@@ -240,6 +261,23 @@ async function main(argv: string[]): Promise<void> {
           return devicesList(ctx);
         default:
           throw new UsageError(`unknown devices command "${sub}"`, `Valid: connect, disconnect, status, list. ${usageLine("devices")}`);
+      }
+    case "spaces":
+      switch (sub) {
+        case "create":
+          return spacesCreate(ctx, VERSION);
+        case "start":
+          return spacesStart(ctx);
+        case "stop":
+          return spacesStop(ctx);
+        case "delete":
+          return spacesDelete(ctx);
+        case "list":
+          return spacesList(ctx);
+        case "logs":
+          return spacesLogs(ctx);
+        default:
+          throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, logs. ${usageLine("spaces")}`);
       }
     case "files":
       switch (sub) {
@@ -296,6 +334,12 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "list") return TOOL_FLAGS;
     if (sub === "view") return VIEW_FLAGS;
     if (sub === "call") return CALL_FLAGS;
+    return [];
+  }
+  if (topic === "spaces") {
+    if (sub === "create") return SPACE_CREATE_FLAGS;
+    if (sub === "list") return SPACE_LIST_FLAGS;
+    if (isSpaceCommand(sub)) return SPACE_LIFECYCLE_FLAGS;
     return [];
   }
   if (topic === "files") {

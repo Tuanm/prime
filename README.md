@@ -95,6 +95,27 @@ export default async function add(a, b = 1) { return a + b; }
 - **Isolated by construction.** Each call runs in a sandboxed, credential-less iframe with
   no network and a 120 s cap; clients are told apart by session, not by IP.
 
+## Codespaces
+
+`prime spaces` turns a Linux container into a local device: the device buddy runs
+inside it with no gateway, and the container is registered like any other device, so
+`prime devices list` and `prime tools call <space-id>.<tool>` work unchanged.
+
+```bash
+prime spaces create --name dev                  # ephemeral: stop wipes it
+prime spaces create --name work --persistent    # keeps /root/work across stop/start
+prime spaces list
+prime devices list                              # the space is a local device
+prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
+prime spaces stop dev
+prime spaces delete work
+```
+
+Spaces are rootless on the host: Apple's container micro-VM on macOS (root inside
+is not root on the host) and rootless podman on Linux. Each has a random token, no
+host mounts, no docker socket, resource limits, a private network, and only the
+runtime's own address is reachable from this machine.
+
 ## Access control
 
 - **Per-device tokens** on both the device connection and every relayed request; unknown
@@ -158,6 +179,8 @@ prime service install --id my-laptop --token t   # ...or a registered one, at ev
 prime devices connect my-laptop --token t   # save credentials for a registered device
 prime tools list my-laptop
 prime tools call my-laptop.read '{"path":"README.md"}'
+prime spaces create --name dev          # a local Linux codespace as a device
+prime spaces list
 prime files upload report.pdf            # store a file behind the gateway
 prime files list                         # what this device has stored
 prime files download report.pdf -o copy.pdf

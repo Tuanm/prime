@@ -61,6 +61,8 @@ prime devices list [--no-probe]
 prime files list [--json] [--show-keys]
 prime files upload <path> [--name <n>] [--key <k>] [--expiry-days <n>]
 prime files download <id|name> [-o <path>] [--key <k>] [--resume]
+prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
+prime spaces list|start|stop|delete|logs <name>
 prime tools list <device-id>
 prime tools view <device-id>.<tool-id>
 prime tools call <device-id>.<tool-id> [<json>] [options]
@@ -307,6 +309,44 @@ downloads then need `--key`), `--content-type`, `--expires-in <seconds>` or
 --show-keys` prints protection keys for the owner; without it they show as
 "locked: yes". Files are per device: 200 MiB each, 5 files and 500 MiB per
 device, 7 days maximum; expired files fall out of the listing automatically.
+
+### spaces - disposable or persistent codespaces
+
+A space is a rootless Linux container running the device buddy with **no gateway**.
+When it starts, prime registers it as a local device, so the ordinary commands
+work against it: `prime devices list`, `prime tools list <space-id>`,
+`prime tools call <space-id>.<tool>`.
+
+```bash
+prime spaces create --name dev                    # ephemeral, 2 cpu, 4g, /root/work
+prime spaces create --name work --persistent      # keeps /root/work across restarts
+prime spaces list                                 # name, mode, state, device, url
+prime devices list                                # the space shows up as "local"
+prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
+prime spaces stop dev                             # ephemeral: wipes the container
+prime spaces start work                           # persistent: resumes the container
+prime spaces logs work
+prime spaces delete work                          # container + volume + device entry
+```
+
+**Runtimes.** macOS uses the Apple container CLI: one lightweight micro-VM per
+space, so root inside is not root on the host, and no Docker Desktop is needed.
+Linux uses rootless podman (a user namespace maps container root to your user);
+docker is a fallback and requires `--allow-rootful` unless it runs rootless. The
+host reaches the space over the runtime's private network - an Apple vmnet
+address, or a loopback publish - so nothing is exposed to the LAN.
+
+**State.** `--ephemeral` (default) deletes the container on stop: the next start is
+clean. `--persistent` mounts a named volume at `/root/work` and keeps the
+container on stop, so start resumes it.
+
+**Security.** Rootless runtime, no host mounts, no docker socket. `--cpus` and
+`--memory` bound the container; podman also sets `--pids-limit 512` and
+`no-new-privileges`. The MCP server only answers with the random per-space token,
+and `--offline` (podman/docker) puts it on an internal network. The image is
+`ghcr.io/tuanm/prime-space:<version>`, built multi-arch by the release workflow.
+
+**Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`.
 
 ## Calling tools
 

@@ -139,7 +139,7 @@ export async function devicesStatus(ctx: Ctx): Promise<void> {
   if (!answered) throw failure; // human mode: the error carries an actionable hint
 
   ctx.out(`${green("●")} ${bold(deviceId)} ${green("online")} ${dim(`${latencyMs} ms`)}`);
-  ctx.out(`  gateway ${target.gateway}`);
+  ctx.out(`  ${target.localUrl ? "local MCP" : "gateway"} ${target.localUrl ?? target.gateway}`);
 }
 
 export async function devicesList(ctx: Ctx): Promise<void> {
@@ -166,8 +166,10 @@ export async function devicesList(ctx: Ctx): Promise<void> {
   const describe = (id: string) => {
     const entry = ctx.config.devices[id]!;
     return {
-      gateway: entry.gateway ?? ctx.config.defaults.gateway ?? null,
+      gateway: entry.local_url ?? entry.gateway ?? ctx.config.defaults.gateway ?? null,
       token: entry.token ?? ctx.config.defaults.token,
+      local: Boolean(entry.local_url),
+      ...(entry.space ? { space: entry.space } : {}),
     };
   };
 
@@ -180,6 +182,8 @@ export async function devicesList(ctx: Ctx): Promise<void> {
           device: r.id,
           gateway: info.gateway,
           token_configured: Boolean(info.token),
+          ...(info.local ? { local: true } : {}),
+          ...(info.space ? { space: info.space } : {}),
           ...(noProbe ? {} : { online: r.online, latency_ms: r.latencyMs, ...(r.error ? { error: r.error } : {}) }),
         };
       }),
@@ -189,7 +193,7 @@ export async function devicesList(ctx: Ctx): Promise<void> {
 
   const rows = results.map((r) => {
     const info = describe(r.id);
-    const gateway = info.gateway ?? dim("-");
+    const gateway = info.gateway ? (info.local ? green("local ") + info.gateway : info.gateway) : dim("-");
     if (noProbe) return [bold(r.id), dim("unknown"), dim("-"), gateway];
     return [
       bold(r.id),

@@ -27,6 +27,8 @@ export interface Target {
   deviceId: string;
   /** Always an http(s) origin, no trailing slash. */
   gateway: string;
+  /** A local MCP server (a space): dial it directly instead of the gateway relay. */
+  localUrl?: string;
   gatewayToken?: string;
   deviceToken?: string;
   timeoutMs: number;
@@ -52,6 +54,23 @@ export function assertDeviceId(deviceId: string): string {
     );
   }
   return deviceId;
+}
+
+/** A local MCP base URL: http(s), no trailing slash, no /mcp suffix. */
+export function normalizeLocalUrl(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) throw new UsageError("empty local URL");
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new UsageError(`invalid local URL "${input}"`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new UsageError(`unsupported local URL scheme "${url.protocol.replace(":", "")}"`, "Use an http(s) URL.");
+  }
+  const path = url.pathname.replace(/\/+$/, "").replace(/\/mcp$/, "");
+  return `${url.protocol}//${url.host}${path}`;
 }
 
 /** Accept "host", "http://host", "https://host/" and return a clean origin. */
@@ -97,6 +116,7 @@ export function resolveTarget(config: Config, deviceId: string, overrides: Targe
   const entry = config.devices[deviceId] ?? {};
 
   const gateway = resolveGateway(config, overrides.gateway, entry.gateway);
+  const localUrl = entry.local_url ? normalizeLocalUrl(entry.local_url) : undefined;
 
   const timeoutRaw = overrides.timeoutMs ?? Number(process.env[ENV.timeoutMs] ?? Number.NaN);
   const timeoutMs =
@@ -107,6 +127,7 @@ export function resolveTarget(config: Config, deviceId: string, overrides: Targe
   return {
     deviceId,
     gateway,
+    ...(localUrl ? { localUrl } : {}),
     gatewayToken: pick(overrides.gatewayToken, process.env[ENV.gatewayToken], entry.gateway_token, config.defaults.gateway_token),
     deviceToken: pick(overrides.deviceToken, process.env[ENV.deviceToken], entry.token, config.defaults.token),
     timeoutMs,

@@ -28,6 +28,8 @@ COMMANDS
   files list                              List uploaded files and their metadata
   files upload <path> [options]           Upload a file through the files API
   files download <id|name> [options]      Download an uploaded file
+  spaces create [--name <n>] [--persistent] A rootless Linux codespace running the device buddy
+  spaces list|start|stop|delete|logs <name> Manage the codespaces (local devices)
   service install [options]               Run the device buddy as a user service (starts at
                                           login, restarts on failure)
   service uninstall                       Stop and remove that service
@@ -395,6 +397,62 @@ EXIT CODES
   0 success   1 error   2 usage   3 authentication   4 device offline   5 timeout
 `;
 
+const SPACES = `prime spaces - disposable or persistent Linux codespaces
+
+USAGE
+  prime spaces create [--name <name>] [--persistent] [options]
+  prime spaces list [--json]
+  prime spaces start <name>
+  prime spaces stop <name>
+  prime spaces delete <name>
+  prime spaces logs <name>
+
+A space is a rootless Linux container that runs the device buddy (no gateway)
+and registers itself as a local device, so "prime devices list" and
+"prime tools call <space-id>.<tool>" work like any other device - except that
+the container is the machine.
+
+RUNTIME
+  macOS   the Apple container CLI: one lightweight micro-VM per space, so root
+          inside is not root on the host. No Docker Desktop needed.
+  Linux   rootless podman (containers get a user namespace; root inside maps to
+          your host user). Docker is a fallback and needs --allow-rootful unless
+          it runs rootless.
+  A space is reached over the runtime private network: an Apple vmnet address,
+  or a 127.0.0.1 port published by podman/docker. Nothing is exposed to the LAN.
+
+STATE
+  --ephemeral (default)  stop deletes the container: the next start is a clean
+                         environment.
+  --persistent           /root/work is a named volume and stop keeps the
+                         container, so start resumes exactly where it was.
+
+SECURITY
+  Rootless runtime + no host mounts + no docker socket. Resource limits:
+  --cpus (default 2), --memory (default 4g); podman also pins --pids-limit 512
+  and no-new-privileges. The MCP server needs a random per-space token; the
+  container binds it inside the VM/namespace, and the host port is loopback-only.
+  --offline (podman/docker) puts the container on an internal network.
+
+OPTIONS (create)
+  --name <name>       space name (default: a generated device id)
+  --persistent        keep /root/work and the container across stop/start
+  --image <image>     default: ghcr.io/tuanm/prime-space:<version>
+  --cpus <n>          default 2
+  --memory <size>     default 4g, e.g. 512m, 2g
+  --offline           no network access (podman/docker only)
+  --runtime <rt>      apple|podman|docker
+  --allow-rootful     permit rootful docker (not recommended)
+
+EXAMPLES
+  prime spaces create --name dev                    # ephemeral, 2 cpu, 4g
+  prime spaces create --name work --persistent      # keeps /root/work
+  prime devices list                                # the space shows up local
+  prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
+  prime spaces stop dev                             # deletes the container state
+  prime spaces start work                           # resumes the persistent space
+  prime spaces delete work                          # container, volume, device entry
+`;
 export function rootHelp(): string {
   return ROOT;
 }
@@ -405,12 +463,13 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "tools") return TOOLS;
   if (topic === "call") return TOOLS;
   if (topic === "files" || topic === "upload" || topic === "download") return FILES;
+  if (topic === "spaces") return SPACES;
   if (topic === "update" || topic === "upgrade") return UPDATE;
   if (topic === "connect") return CONNECT;
   if (topic === "serve") return SERVE;
   if (topic === "code-mcp") return CODE_MCP;
   if (topic === "service") return SERVICE;
-  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|files|call|update|code-mcp]")}`;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|files|spaces|call|update|code-mcp]")}`;
   void sub;
   return undefined;
 }
@@ -427,6 +486,12 @@ export function usageLine(topic: string, sub?: string): string {
   if (topic === "update" || topic === "upgrade") return "Usage: prime update [--check] [--force] [--to <path>]";
   if (topic === "connect") return "Usage: prime connect [--gateway <url>] [--new] [-- <device flags>]";
   if (topic === "serve") return "Usage: prime serve [<device-id>...] [--port <n>] [--host <addr>]";
+  if (topic === "spaces") {
+    if (sub === "create") return "Usage: prime spaces create [--name <name>] [--persistent] [--cpus <n>] [--memory <4g>]";
+    if (sub === "list") return "Usage: prime spaces list [--json]";
+    if (sub === "logs") return "Usage: prime spaces logs <name>";
+    return "Usage: prime spaces <create|start|stop|delete|list|logs> [args]";
+  }
   if (topic === "files" || topic === "upload" || topic === "download") {
     if (sub === "list") return "Usage: prime files list [--device <id>] [--json]";
     if (sub === "upload") return "Usage: prime files upload <path> [--name <name>] [--expiry-days <n>] [--key <key>]";

@@ -14,6 +14,7 @@ import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/c
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
 import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
+import { defaultImage, newSpaceId, parseSpaceMode, requireSpace } from "../src/spaces.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
@@ -525,6 +526,61 @@ describe("files", () => {
 
   test("missing device or token is a usage error with a hint", () => {
     expect(() => resolveFilesTarget(emptyConfig(), {}, "/tmp/c.yaml", {})).toThrow(/no device configured/);
-    expect(() => resolveFilesTarget({ defaults: {}, devices: { alpha: {} }, codeMcp: {} }, {}, "/tmp/c.yaml", {})).toThrow(/no token/);
+    expect(() => resolveFilesTarget({ defaults: {}, devices: { alpha: {} }, spaces: {}, codeMcp: {} }, {}, "/tmp/c.yaml", {})).toThrow(/no token/);
+  });
+});
+
+describe("spaces", () => {
+  test("defaultImage follows the release tag and never includes -dev", () => {
+    expect(defaultImage("26.11.9")).toBe("ghcr.io/tuanm/prime-space:26.11.9");
+    expect(defaultImage("26.11.9-dev")).toBe("ghcr.io/tuanm/prime-space:26.11.9");
+  });
+
+  test("a space id is a valid device id", () => {
+    const id = newSpaceId();
+    expect(id).toMatch(/^space-[a-f0-9]{8}$/);
+    expect(() => assertDeviceId(id)).not.toThrow();
+  });
+
+  test("persistent and ephemeral flags pick the mode", () => {
+    const specs = [flag("persistent", "boolean", ""), flag("ephemeral", "boolean", "")];
+    expect(parseSpaceMode(parseArgs([], specs))).toBe("ephemeral");
+    expect(parseSpaceMode(parseArgs(["--persistent"], specs))).toBe("persistent");
+    expect(parseSpaceMode(parseArgs(["--ephemeral"], specs))).toBe("ephemeral");
+  });
+
+  test("config round-trips a space and its local device", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prime-cli-"));
+    const path = join(dir, "config.yaml");
+    const config = emptyConfig();
+    config.spaces.dev = {
+      id: "space-1234abcd",
+      runtime: "apple",
+      image: "ghcr.io/tuanm/prime-space:26.11.9",
+      mode: "persistent",
+      container: "prime-space-1234abcd",
+      volume: "prime-space-1234abcd-work",
+      token: "t0k",
+      cpus: 2,
+      memory: "4g",
+      local_url: "http://192.168.64.4:7777",
+    };
+    config.devices["space-1234abcd"] = { local_url: "http://192.168.64.4:7777", token: "t0k", space: "dev" };
+    saveConfig(path, config);
+    expect(loadConfig(path)).toEqual(config);
+  });
+
+  test("requireSpace names the known spaces", () => {
+    const config = emptyConfig();
+    config.spaces.dev = { id: "space-1", runtime: "apple", image: "i", mode: "ephemeral", container: "c", token: "t" };
+    expect(requireSpace(config, "dev").id).toBe("space-1");
+    expect(() => requireSpace(config, "nope")).toThrow(/no space named/);
+    let hint = "";
+    try {
+      requireSpace(config, "nope");
+    } catch (err) {
+      hint = (err as { hint?: string }).hint ?? "";
+    }
+    expect(hint).toContain("dev");
   });
 });

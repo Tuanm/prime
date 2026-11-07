@@ -67,6 +67,7 @@ export class GatewayClient {
   private lastMs = 0;
   private lastAttemptCount = 0;
   private handshaken = false;
+  private localSid?: string;
 
   constructor(target: Target) {
     this.target = target;
@@ -89,6 +90,49 @@ export class GatewayClient {
     return `${this.target.gateway}/device/${encodeURIComponent(this.target.deviceId)}`;
   }
 
+  /** A space answers MCP directly on loopback/the vmnet address; no tunnel. */
+  private get isLocal(): boolean {
+    return Boolean(this.target.localUrl);
+  }
+
+  private async localRpc(method: string, params: unknown, opts: CallOptions): Promise<unknown> {
+    const timeoutMs = opts.timeoutMs ?? this.target.timeoutMs;
+    const isNotification = method.startsWith("notifications/");
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: isNotification ? null : 1,
+      method,
+      ...(params === undefined ? {} : { params }),
+    });
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json",
+      "user-agent": "prime-cli",
+    };
+    if (this.target.deviceToken) headers.authorization = `Bearer ${this.target.deviceToken}`;
+    if (this.localSid) headers["mcp-session-id"] = this.localSid;
+
+    const signal = AbortSignal.timeout(timeoutMs);
+    const started = performance.now();
+    let response: Response;
+    try {
+      response = await fetch(`${this.target.localUrl}/mcp`, { method: "POST", headers, body, signal });
+    } catch (err) {
+      this.lastMs = Math.round(performance.now() - started);
+      throw this.transportError(err, timeoutMs);
+    }
+    this.lastMs = Math.round(performance.now() - started);
+    this.lastAttempts = 1;
+    const sid = response.headers.get("mcp-session-id");
+    if (sid) this.localSid = sid;
+    if (response.status === 204) return undefined;
+    const text = await response.text();
+    if (!response.ok) throw this.httpError(response.status, text);
+    const contentType = response.headers.get("content-type") ?? "";
+    const payload = contentType.includes("text/event-stream") ? sseLastJson(text) : text;
+    return this.parseBody(response.status, payload ?? text);
+  }
+
   private headers(): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -104,6 +148,7 @@ export class GatewayClient {
 
   /** Raw JSON-RPC call. Returns the `result`; throws McpError on a JSON-RPC error. */
   async rpc(method: string, params?: unknown, opts: CallOptions = {}): Promise<unknown> {
+    if (this.isLocal) return this.localRpc(method, params, opts);
     const timeoutMs = opts.timeoutMs ?? this.target.timeoutMs;
     const isNotification = method.startsWith("notifications/");
     const body = JSON.stringify({
@@ -238,9 +283,12 @@ export class GatewayClient {
         "Raise it with --timeout <ms>, or set a longer TIMEOUT_MS on the gateway.",
       );
     }
+    const where = this.isLocal ? `the space's MCP server at ${this.target.localUrl}` : `the gateway at ${this.target.gateway}`;
     return new CliError(
-      `cannot reach the gateway at ${this.target.gateway}: ${message}`,
-      "Check the URL, your network, and any proxy; a 401/404 from the gateway means it is reachable but rejected the request.",
+      `cannot reach ${where}: ${message}`,
+      this.isLocal
+        ? "Check that the space is running ('prime spaces list') and retry."
+        : "Check the URL, your network, and any proxy; a 401/404 from the gateway means it is reachable but rejected the request.",
     );
   }
 
@@ -250,12 +298,16 @@ export class GatewayClient {
       case 401:
         return new AuthError(
           "unauthorized" + (detail ? `: ${detail}` : ""),
-          "Check --gateway-token (gateway credential) and --token (device credential). Run 'prime devices connect' to update them.",
+          this.isLocal
+            ? "The space's token does not match its config entry; 'prime spaces delete' and create it again."
+            : "Check --gateway-token (gateway credential) and --token (device credential). Run 'prime devices connect' to update them.",
         );
       case 404:
         return new CliError(
-          "gateway endpoint not found (404)" + (detail ? `: ${detail}` : ""),
-          "Verify the gateway URL - it should be the Worker origin, e.g. https://prime.tuanm.workers.dev",
+          (this.isLocal ? "space MCP endpoint not found (404)" : "gateway endpoint not found (404)") + (detail ? `: ${detail}` : ""),
+          this.isLocal
+            ? "The space process may still be booting; 'prime spaces list' shows its state."
+            : "Verify the gateway URL - it should be the Worker origin, e.g. https://prime.tuanm.workers.dev",
         );
       case 405:
         return new CliError("gateway rejected the request method (405)");
@@ -265,8 +317,10 @@ export class GatewayClient {
         return new CliError("rate limited by the gateway (429)", "Retry shortly, or raise RATE_LIMIT_MAX on the gateway.");
       case 503:
         return new OfflineError(
-          detail === "device busy" ? "device is busy (too many in-flight requests)" : "device is offline",
-          `No live tunnel for "${this.target.deviceId}". Start the device (e.g. the Browser MCP extension) and confirm it shows Connected, then retry.`,
+          this.isLocal ? "space is not running" : detail === "device busy" ? "device is busy (too many in-flight requests)" : "device is offline",
+          this.isLocal
+            ? `The container for "${this.target.deviceId}" is stopped. Run 'prime spaces start <name>'.`
+            : `No live tunnel for "${this.target.deviceId}". Start the device (e.g. the Browser MCP extension) and confirm it shows Connected, then retry.`,
         );
       case 502:
         return new CliError("device send failed (502)", "The tunnel dropped mid-request; retry.");
@@ -287,6 +341,22 @@ function errorDetail(text: string): string | undefined {
     }
   } catch {}
   return text.slice(0, 200);
+}
+
+/** Last JSON object in an SSE body (what MCP Streamable HTTP may reply with). */
+function sseLastJson(text: string): string | undefined {
+  const chunks = text
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .filter(Boolean);
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    try {
+      JSON.parse(chunks[i]!);
+      return chunks[i];
+    } catch {}
+  }
+  return chunks[chunks.length - 1];
 }
 
 /** Did the device reject us for not having initialized the session? */
