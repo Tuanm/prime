@@ -108,6 +108,11 @@ export function isPodmanCgroupFailure(text: string): boolean {
   return /cgroup|systemd|user\.slice|slirp4netns|libpod-/i.test(text);
 }
 
+/** crun is the only runtime that accepts NoCgroups; runc rejects it. */
+function hasCrun(): boolean {
+  return which("crun") !== undefined;
+}
+
 function isWsl2(): boolean {
   try {
     return /microsoft/i.test(readFileSync("/proc/version", "utf8"));
@@ -119,7 +124,10 @@ function isWsl2(): boolean {
 /** A hint shown only when the fallbacks also failed. */
 function podmanFailureHint(): string | undefined {
   if (!isWsl2()) return undefined;
-  return "WSL2: enable systemd ([boot]\\nsystemd=true in /etc/wsl.conf, then wsl --shutdown), start it and run loginctl enable-linger $USER; prime also retries with --cgroup-manager=cgroupfs and, last, --cgroups=disabled (limits then unenforced).";
+  const crun = hasCrun()
+    ? "crun is installed, so prime tried --runtime=crun --cgroups=disabled (limits unenforced)."
+    : "or install crun (sudo apt install crun) so prime can start with --runtime=crun --cgroups=disabled (limits unenforced).";
+  return "WSL2: enable systemd ([boot]\\nsystemd=true in /etc/wsl.conf, then wsl --shutdown) and run loginctl enable-linger $USER; " + crun;
 }
 
 function runtimeBin(kind: RuntimeKind): string | undefined {
@@ -254,11 +262,13 @@ function runContainer(
     // NOTE: --cgroups is a "run" flag, so it must follow the subcommand; only
     // --cgroup-manager is a global flag.
     const systemd = hasUserSystemd();
+    const crun = hasCrun();
     const attempts: Array<{ globals: string[]; flags: string[]; limits: boolean }> = [];
     if (!systemd) attempts.push({ globals: ["--cgroup-manager=cgroupfs"], flags: [], limits: true });
     attempts.push({ globals: [], flags: [], limits: true });
-    attempts.push({ globals: ["--cgroup-manager=cgroupfs"], flags: ["--cgroups=disabled"], limits: false });
-    attempts.push({ globals: [], flags: ["--cgroups=disabled"], limits: false });
+    // NoCgroups only works with crun; runc rejects it ("not compatible with
+    // NoCgroups"). Without crun, the real fix is enabling systemd in WSL.
+    if (crun) attempts.push({ globals: [], flags: ["--runtime=crun", "--cgroups=disabled"], limits: false });
     const seen = new Set<string>();
     let warnedLimits = false;
     let last = { code: 1, out: "", err: "" };

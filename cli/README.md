@@ -350,12 +350,17 @@ network. `--cpus` and
 and `--offline` (podman/docker) puts it on an internal network. The image is
 `ghcr.io/tuanm/prime-space:<version>`, built multi-arch by the release workflow.
 
-**WSL2.** Rootless podman there needs a user systemd for cgroups; without one, podman
-fails while applying cgroup configuration or moving the rootless netns. Enable
-systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`), run `wsl --shutdown`, then
-`loginctl enable-linger $USER`. prime also retries with
-`--cgroup-manager=cgroupfs` and, last, `--cgroups=disabled` (limits then
-unenforced), so a space may still start; the hint prints if every attempt fails.
+**WSL2.** Rootless podman there needs a user systemd for cgroups; without one it
+fails while applying cgroup configuration or moving the rootless netns. Two fixes:
+
+1. Enable systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`), run `wsl --shutdown`,
+   then `loginctl enable-linger $USER`. This keeps cpus/memory limits.
+2. Or install **crun** (`sudo apt install crun`): only crun accepts NoCgroups, so
+   prime can retry with `--runtime=crun --cgroups=disabled` (limits unenforced,
+   a warning is printed). runc rejects that with "not compatible with NoCgroups".
+
+prime tries the default, then cgroupfs, then the crun fallback; the hint prints
+if every attempt fails.
 
 **Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`.
 

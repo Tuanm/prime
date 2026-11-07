@@ -573,6 +573,7 @@ describe("spaces", () => {
   test("podman cgroup failures are recognised for the WSL fallbacks", () => {
     expect(isPodmanCgroupFailure("failed to move the rootless netns slirp4netns process to the systemd user.slice")).toBe(true);
     expect(isPodmanCgroupFailure("unable to apply cgroup configuration: unable to start unit")).toBe(true);
+    expect(isPodmanCgroupFailure("requested OCI runtime runc is not compatible with NoCgroups: invalid argument")).toBe(true);
     expect(isPodmanCgroupFailure("Error: image not found")).toBe(false);
   });
 
