@@ -17,11 +17,16 @@ export interface BrokerScope {
   codes: Record<string, { secret: string; digits: number; period: number; algorithm: string; hosts: string[] }>;
 }
 
+// Bump when a broker change must not be served by an already-running process
+// from an older prime binary.
+const BROKER_PROTOCOL = 2;
+
 export interface BrokerState {
   pid: number;
   socket: string;
   token: string;
   started_at: string;
+  protocol?: number;
 }
 
 interface ListenerInfo {
@@ -289,7 +294,7 @@ export async function brokerMain(): Promise<void> {
   try {
     chmodSync(socketPath, 0o600);
   } catch {}
-  const state: BrokerState = { pid: process.pid, socket: socketPath, token: controlToken, started_at: new Date(stats.startedAt).toISOString() };
+  const state: BrokerState = { pid: process.pid, socket: socketPath, token: controlToken, started_at: new Date(stats.startedAt).toISOString(), protocol: BROKER_PROTOCOL };
   writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
   chmodSync(statePath, 0o600);
   process.on("SIGTERM", shutdown);
@@ -316,23 +321,46 @@ export async function brokerMain(): Promise<void> {
   await new Promise<void>(() => {});
 }
 
-async function httpTool(req: Request, scope: BrokerScope): Promise<Response> {
+const MAX_REQUEST_BODY = 64_000;
+
+/** Read a JSON request without trusting content-length (chunked bodies bypass it). */
+async function readJsonBody(req: Request): Promise<{ ok: true; body: any } | { ok: false; status: number; error: string }> {
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_REQUEST_BODY) return { ok: false, status: 413, error: "request too large" };
+  if (!req.body) return { ok: true, body: {} };
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_REQUEST_BODY) {
+        try { await reader.cancel(); } catch {}
+        return { ok: false, status: 413, error: "request too large" };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, status: 400, error: "invalid request body" };
+  }
   let body: any;
   try {
-    body = await req.json();
+    body = JSON.parse(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8"));
   } catch {
-    return Response.json({ error: "invalid JSON" }, { status: 400 });
+    return { ok: false, status: 400, error: "invalid JSON" };
   }
+  return { ok: true, body };
+}
+
+async function httpTool(req: Request, scope: BrokerScope): Promise<Response> {
+  const parsed = await readJsonBody(req);
+  if (!parsed.ok) return Response.json({ error: parsed.error }, { status: parsed.status });
+  const body = parsed.body;
   const method = String(body?.method ?? "GET").toUpperCase();
   if (DANGEROUS_METHODS.has(method)) return Response.json({ error: "method not allowed" }, { status: 400 });
-  const url = String(body?.url ?? "");
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return Response.json({ error: "invalid url" }, { status: 400 });
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return Response.json({ error: "only http(s) is allowed" }, { status: 400 });
   const secretPlaceholders = new Set(Object.keys(scope.secrets));
   const codePlaceholders = new Set(Object.keys(scope.codes));
   const usedSecrets = usedPlaceholders(body, secretPlaceholders);
@@ -340,17 +368,7 @@ async function httpTool(req: Request, scope: BrokerScope): Promise<Response> {
   if (usedSecrets.size === 0 && usedCodes.size === 0) {
     return Response.json({ error: "no vault secret/code is used; use local tools for non-secret requests" }, { status: 400 });
   }
-  const allowedHosts = new Set<string>();
-  for (const placeholder of usedSecrets) for (const host of scope.secrets[placeholder]!.hosts) allowedHosts.add(host);
-  for (const placeholder of usedCodes) for (const host of scope.codes[placeholder]!.hosts) allowedHosts.add(host);
-  if (allowedHosts.size === 0) return Response.json({ error: "no allowed_hosts configured for the used secret/code" }, { status: 403 });
-  if (!hostAllowed(parsed.hostname, [...allowedHosts])) return Response.json({ error: "host is not allowed for the used secret/code" }, { status: 403 });
-  try {
-    const resolved = await lookup(parsed.hostname);
-    if (isPrivateAddress(resolved.address)) return Response.json({ error: "private addresses are not allowed" }, { status: 403 });
-  } catch {
-    return Response.json({ error: "cannot resolve host" }, { status: 502 });
-  }
+
   const mapping = new Map<string, string>();
   const currentCodes: string[] = [];
   for (const placeholder of usedSecrets) mapping.set(placeholder, scope.secrets[placeholder]!.value);
@@ -360,14 +378,43 @@ async function httpTool(req: Request, scope: BrokerScope): Promise<Response> {
     mapping.set(placeholder, code);
   }
   const substituted = substitute(body, mapping) as any;
+  let target: URL;
+  try {
+    target = new URL(String(substituted.url));
+  } catch {
+    return Response.json({ error: "invalid url" }, { status: 400 });
+  }
+  // A secret must never travel over cleartext.
+  if (target.protocol !== "https:") {
+    return Response.json({ error: "secrets/codes require an https url" }, { status: 400 });
+  }
+  // Every used secret/code must individually allow the final target host. A
+  // union check would let one allowed secret carry another secret to the wrong
+  // host.
+  for (const placeholder of usedSecrets) {
+    const hosts = scope.secrets[placeholder]!.hosts;
+    if (hosts.length === 0 || !hostAllowed(target.hostname, hosts)) {
+      return Response.json({ error: "host is not allowed for the used secret/code" }, { status: 403 });
+    }
+  }
+  for (const placeholder of usedCodes) {
+    const hosts = scope.codes[placeholder]!.hosts;
+    if (hosts.length === 0 || !hostAllowed(target.hostname, hosts)) {
+      return Response.json({ error: "host is not allowed for the used secret/code" }, { status: 403 });
+    }
+  }
+  try {
+    const resolved = await lookup(target.hostname);
+    if (isPrivateAddress(resolved.address)) return Response.json({ error: "private addresses are not allowed" }, { status: 403 });
+  } catch {
+    return Response.json({ error: "cannot resolve host" }, { status: 502 });
+  }
   const headers: Record<string, string> = {};
   if (substituted.headers && typeof substituted.headers === "object") {
     for (const [key, value] of Object.entries(substituted.headers as Record<string, unknown>)) {
       if (typeof value === "string" && !/^(host|content-length|transfer-encoding)$/i.test(key)) headers[key] = value;
     }
   }
-  const target = new URL(String(substituted.url));
-  if (!hostAllowed(target.hostname, [...allowedHosts])) return Response.json({ error: "redirect target is not allowed" }, { status: 403 });
   let response: Response;
   try {
     response = await fetch(target, {
@@ -430,17 +477,37 @@ async function control(configPath: string, body: unknown, timeoutMs = 1000): Pro
 export async function ensureBroker(configPath: string): Promise<BrokerState> {
   const existing = readBrokerState(configPath);
   if (existing && pidAlive(existing.pid) && existsSync(existing.socket)) {
+    if (existing.protocol === BROKER_PROTOCOL) {
+      try {
+        await control(configPath, { op: "status" }, 800);
+        return existing;
+      } catch {}
+    }
+    // An older broker (or an unresponsive one) must not keep serving after a
+    // security fix lands in the host binary.
     try {
-      await control(configPath, { op: "status" }, 800);
-      return existing;
+      await control(configPath, { op: "shutdown" }, 800);
     } catch {}
+    for (let i = 0; i < 20 && existsSync(existing.socket); i++) await Bun.sleep(25);
+    if (pidAlive(existing.pid)) {
+      try { process.kill(existing.pid, "SIGTERM"); } catch {}
+    }
   }
   rmSync(brokerStatePath(configPath), { force: true });
   rmSync(brokerSocketPath(configPath), { force: true });
   const dir = brokerDir(configPath);
   const brokerEnv: Record<string, string | undefined> = { PRIME_BROKER_DIR: dir };
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key === "PRIME_VAULT_KEY" || key === "PRIME_VAULT_KEY_FILE" || key === "PRIME_BROKER_DIR") continue;
+  // The broker needs almost nothing from the caller's environment. Copying all
+  // of it would silently hand it unrelated credentials (cloud tokens, etc.).
+  const inherited = new Set([
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+    "TERM", "NO_COLOR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "PRIME_BROKER_IDLE_MS", "PRIME_BROKER_SCOPE_TTL_MS",
+  ]);
+  for (const key of inherited) {
+    const value = process.env[key];
     if (value !== undefined) brokerEnv[key] = value;
   }
   const child = Bun.spawn({

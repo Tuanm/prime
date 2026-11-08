@@ -140,7 +140,8 @@ A space can be assigned companies at creation (`--vault <company>`, repeatable, 
 `--vault-all`); its `run` tool executes
 JavaScript with `tools.<name>({...})`, `values.<name>`, `secrets.<name>` and
 `codes.<name>`. Inside the sandbox secrets are opaque placeholders; `tools.http`
-goes through a host broker that enforces allowed hosts and redacts responses.
+goes through a host broker that enforces per-secret allowed hosts (HTTPS only for
+secrets) and redacts responses.
 Token/vault files are removed from the space once the server has read them.
 
 ```bash

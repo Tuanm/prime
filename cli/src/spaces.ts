@@ -581,7 +581,7 @@ async function prepareVault(ctx: Ctx, space: SpaceEntry, runtime: RuntimeInfo): 
     ...(bind ? { bind } : {}),
     ...(port ? { port } : {}),
     ...(unixPath ? { unix: unixPath } : {}),
-    scope: { values: scope.values, secrets: secretScope, codes: codeScope },
+    scope: { secrets: secretScope, codes: codeScope },
   };
 }
 

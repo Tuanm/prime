@@ -510,8 +510,9 @@ VAULTS AND RUN
   are placeholders inside the sandbox. Values are local; secrets and codes stay
   in a host-side broker, and tools.http is the only operation allowed to use
   them: the broker checks the secret/code --allow-host list, substitutes the
-  real value, and redacts the response. Local shell/file tools reject
-  placeholders. codes.<name> is a placeholder object; the broker turns it into
+  real value, and redacts the response. Secret/code requests must use https,
+  and every secret/code on the request must allow that host. Local shell/file
+  tools reject placeholders. codes.<name> is a placeholder object; the broker turns it into
   the current TOTP code at request time. The broker starts on demand and exits
   after the last space scope idles. Manage it with 'prime vaults status'.
   Manage entries with 'prime vaults --help'.

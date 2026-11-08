@@ -402,8 +402,9 @@ a per-space capability token (removed after startup). A space created with
 `values.<name>`, `secrets.<name>` and `codes.<name>` (`{code, expires_at}`).
 Inside the sandbox secrets are placeholders; the server forwards `tools.http` to
 the broker, which substitutes the real value only for hosts listed in that
-secret/code's `--allow-host` metadata and redacts the response. Local shell/file
-tools reject placeholders. The broker is a host process (not in the space), only
+secret/code's `--allow-host` metadata and redacts the response. A request that
+uses a secret/code must be `https://`; every secret/code used on the request
+must individually allow that host. Local shell/file tools reject placeholders. The broker is a host process (not in the space), only
 holds scopes for running spaces, and exits after the last scope goes idle. The
 token/vault files are removed from the space as soon as it answers. On Apple containers the broker listens on the space's vmnet gateway; on Linux
 containers it listens on a Unix socket bind-mounted at /run/prime/broker.sock,
