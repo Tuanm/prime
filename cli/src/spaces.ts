@@ -19,7 +19,8 @@ import { bold, cyan, dim, green, printJson, red, table, yellow } from "./output.
 import { formatBytes } from "./files.ts";
 import { connectUrlFor, probeCredential, registerAnonymous, type AnonymousDevice } from "./connect.ts";
 import { ENV, resolveGateway } from "./target.ts";
-import { allVaultCompanies, vaultPayloadFor } from "./vaults.ts";
+import { allVaultCompanies, brokerScopeFor } from "./vaults.ts";
+import { type BrokerScope, ensureBroker, registerBrokerScope, unregisterBrokerScope } from "./vault-broker.ts";
 
 const SPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CONTAINER_PORT = 7777;
@@ -478,12 +479,90 @@ function wipeSecretFiles(dir: string | undefined): void {
   for (const name of ["token", "gateway-token", "vault.json"]) rmSync(join(dir, name), { force: true });
 }
 
-function writeVaultFile(ctx: Ctx, space: SpaceEntry): void {
+function networkGateway(runtime: RuntimeInfo, network: string): string | undefined {
+  if (runtime.kind === "apple") {
+    const r = exec("container", ["network", "inspect", network], 20_000);
+    if (r.code !== 0) return undefined;
+    try {
+      const parsed = JSON.parse(r.out) as Array<{ status?: { ipv4Gateway?: string } }>;
+      return parsed[0]?.status?.ipv4Gateway?.split("/")[0];
+    } catch {
+      return undefined;
+    }
+  }
+  const r = runtimeExec(runtime, ["network", "inspect", network, "--format", "json"], 20_000);
+  if (r.code !== 0) return undefined;
+  try {
+    if (runtime.kind === "podman") {
+      const parsed = JSON.parse(r.out) as Array<{ subnets?: Array<{ gateway?: string }> }>;
+      return parsed[0]?.subnets?.[0]?.gateway;
+    }
+    const parsed = JSON.parse(r.out) as Array<{ IPAM?: { Config?: Array<{ Gateway?: string }> } }>;
+    return parsed[0]?.IPAM?.Config?.[0]?.Gateway;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build the space's vault payload. Values stay local; secrets/codes become
+ *  placeholders and are registered with the host broker, which alone holds the
+ *  real values and enforces the allowed-host list for its HTTP tool. */
+interface PendingBroker {
+  token: string;
+  gateway: string;
+  port: number;
+  scope: BrokerScope;
+}
+
+async function prepareVault(ctx: Ctx, space: SpaceEntry, runtime: RuntimeInfo): Promise<PendingBroker | undefined> {
   if (!space.vaults || space.vaults.length === 0 || !space.secret_dir) return;
-  const payload = vaultPayloadFor(ctx.configPath, space.vaults, space.vault_kinds, space.trusted === true);
+  const scope = brokerScopeFor(ctx.configPath, space.vaults, space.vault_kinds);
+  const secretNames = Object.keys(scope.secrets);
+  const codeNames = Object.keys(scope.codes);
   const file = join(space.secret_dir, "vault.json");
-  writeFileSync(file, JSON.stringify(payload), { mode: 0o600 });
+  if (secretNames.length === 0 && codeNames.length === 0) {
+    writeFileSync(file, JSON.stringify({ values: scope.values }), { mode: 0o600 });
+    chmodSync(file, 0o600);
+    space.broker_token = undefined;
+    space.broker_url = undefined;
+    space.broker_bind = undefined;
+    return undefined;
+  }
+  if (!space.network) fail("the space has no network for the vault broker");
+  const gateway = networkGateway(runtime, space.network);
+  if (!gateway) fail("cannot determine the host gateway for the vault broker");
+  const port = await freePort();
+  const token = newToken();
+  const prefix = token.slice(0, 8);
+  const secretPayload: Record<string, string> = {};
+  const codePayload: Record<string, unknown> = {};
+  const secretScope: Record<string, { value: string; hosts: string[] }> = {};
+  const codeScope: Record<string, { secret: string; digits: number; period: number; algorithm: string; hosts: string[] }> = {};
+  for (const name of secretNames) {
+    const placeholder = "__prime_secret_" + prefix + "_" + name + "__";
+    secretPayload[name] = placeholder;
+    secretScope[placeholder] = scope.secrets[name]!;
+  }
+  for (const name of codeNames) {
+    const placeholder = "__prime_code_" + prefix + "_" + name + "__";
+    codePayload[name] = { code: placeholder, expires_at: null };
+    codeScope[placeholder] = scope.codes[name]!;
+  }
+  const brokerUrl = "http://" + gateway + ":" + port;
+  writeFileSync(file, JSON.stringify({ values: scope.values, secrets: secretPayload, codes: codePayload, broker: { url: brokerUrl, token } }), { mode: 0o600 });
   chmodSync(file, 0o600);
+  space.broker_token = token;
+  space.broker_url = brokerUrl;
+  space.broker_bind = gateway;
+  return { token, gateway, port, scope: { values: scope.values, secrets: secretScope, codes: codeScope } };
+}
+
+/** Bind the broker listener only after the space's network interface exists. */
+async function activateBroker(ctx: Ctx, pending: PendingBroker | undefined): Promise<void> {
+  if (!pending) return;
+  await ensureBroker(ctx.configPath);
+  await registerBrokerScope(ctx.configPath, pending.token, pending.gateway, pending.port, pending.scope);
+
 }
 
 function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, secretDir: string, limits = true): string[] {
@@ -697,6 +776,12 @@ async function waitGatewayOnline(
   }
 }
 
+function clearBroker(space: SpaceEntry): void {
+  space.broker_token = undefined;
+  space.broker_url = undefined;
+  space.broker_bind = undefined;
+}
+
 export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const name = str(ctx.parsed, "name") ?? newSpaceId();
   assertSpaceName(name);
@@ -718,12 +803,6 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   vaultCompanies = [...new Set(vaultCompanies)].sort();
   const vaultKinds = parseVaultKinds(ctx);
   const trusted = bool(ctx.parsed, "trusted");
-  if (vaultCompanies.length > 0 && !trusted) {
-    const kinds = vaultKinds ?? ["value", "secret", "code"];
-    if (kinds.includes("secret") || kinds.includes("code")) {
-      throw new UsageError("secrets/codes cannot enter an untrusted space", "Use --vault-kind values, or pass --trusted only when every client of this space is trusted.");
-    }
-  }
   const image = str(ctx.parsed, "image") ?? defaultImage(version);
   const cpus = num(ctx.parsed, "cpus") ?? 2;
   const memory = str(ctx.parsed, "memory") ?? "4g";
@@ -760,9 +839,10 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const secretDir = secretDirFor(ctx, container);
   ensureSecret(secretDir, token);
   space.secret_dir = secretDir;
+  let pendingBroker: PendingBroker | undefined;
   if (vaultCompanies.length > 0) {
     try {
-      writeVaultFile(ctx, space);
+      pendingBroker = await prepareVault(ctx, space, runtime);
     } catch (err) {
       removeSecret(secretDir);
       networkDelete(runtime, network);
@@ -785,6 +865,18 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   }
   const started = Date.now();
   const run = runContainer(runtime, space, image, secretDir, bool(ctx.parsed, "allow-no-limits"), (text) => ctx.note(text));
+  if (run.code === 0 && pendingBroker) {
+    try {
+      await activateBroker(ctx, pendingBroker);
+    } catch (err) {
+      runtimeExec(runtime, ["rm", "-f", container], 120_000);
+      if (volume) volumeDelete(runtime, volume);
+      networkDelete(runtime, network);
+      removeSecret(secretDir);
+      if (pendingBroker) await unregisterBrokerScope(ctx.configPath, pendingBroker.token);
+      throw err;
+    }
+  }
   if (run.code !== 0) {
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
@@ -808,6 +900,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
     removeSecret(secretDir);
+    if (pendingBroker) await unregisterBrokerScope(ctx.configPath, pendingBroker.token);
     throw err;
   }
   space.local_url = url;
@@ -873,6 +966,10 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     }
     if (!space.secret_dir) ctx.note("  legacy space: recreate it to move the token out of the container config");
   }
+  if (existing.state === "missing") {
+    if (!space.network || space.network === "none") space.network = space.container + "-net";
+    networkCreate(runtime, space.network, space.offline === true);
+  }
   if (!space.secret_dir) space.secret_dir = secretDirFor(ctx, space.container);
   const expose = space.expose === true;
   let gatewayToken: string | undefined;
@@ -881,7 +978,13 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     await refreshExposure(ctx, name, space, gatewayToken);
   }
   ensureSecret(space.secret_dir, space.token, expose ? space.remote_token : undefined);
-  writeVaultFile(ctx, space);
+  let pendingBroker: PendingBroker | undefined;
+  try {
+    pendingBroker = await prepareVault(ctx, space, runtime);
+  } catch (err) {
+    wipeSecretFiles(space.secret_dir);
+    throw err;
+  }
   let started = 0;
   try {
     started = Date.now();
@@ -889,9 +992,6 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     if (space.mode === "persistent") {
       fail('the persistent container for space "' + name + '" is gone', "Its volume still exists. Delete the space and create it again to start over.");
     }
-    // An ephemeral stop removes the container and its network; recreate both.
-    if (!space.network || space.network === "none") space.network = space.container + "-net";
-    networkCreate(runtime, space.network, space.offline === true);
     const run = runContainer(runtime, space, space.image, space.secret_dir, allowNoLimits, (text) => ctx.note(text));
     if (run.code === 0) space.cgroup_mode = run.cgroup;
     if (run.code === 0 && run.cgroup === "disabled" && !allowNoLimits) {
@@ -917,6 +1017,7 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     }
     if (start.code !== 0) fail("cannot start the space", ((start.err || start.out).slice(0, 400) + "\n" + (podmanFailureHint() ?? "")).trim());
   }
+  await activateBroker(ctx, pendingBroker);
   const url = requireRunningAddress(runtime, space);
   if (!url) fail("the space container is running but has no address yet");
   await waitReady(url, space.token, ctx.quiet);
@@ -955,8 +1056,9 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     ctx.out("  connect   " + cyan(connectUrlFor(space.gateway, space.gateway_device, space.remote_token)));
   }
   } catch (err) {
-    // Never leave the decrypted token/vault files on the host after a failed start.
+    // Never leave the decrypted token/vault files (or a live broker scope) after a failed start.
     wipeSecretFiles(space.secret_dir);
+    if (pendingBroker) await unregisterBrokerScope(ctx.configPath, pendingBroker.token);
     throw err;
   }
 }
@@ -977,6 +1079,8 @@ export async function spacesStop(ctx: Ctx): Promise<void> {
   }
   if (space.mode === "ephemeral") networkDelete(runtime, space.network);
   space.local_url = undefined;
+  await unregisterBrokerScope(ctx.configPath, space.broker_token);
+  clearBroker(space);
   saveConfig(ctx.configPath, ctx.config);
   if (ctx.json) {
     printJson({ stopped: true, name, state_wiped: wiped });
@@ -991,6 +1095,7 @@ export async function spacesDelete(ctx: Ctx): Promise<void> {
   const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
   runtimeExec(runtime, ["stop", space.container], 120_000);
   runtimeExec(runtime, ["rm", "-f", space.container], 120_000);
+  await unregisterBrokerScope(ctx.configPath, space.broker_token);
   if (space.volume) volumeDelete(runtime, space.volume);
   networkDelete(runtime, space.network);
   removeSecret(space.secret_dir);

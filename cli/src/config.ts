@@ -82,6 +82,12 @@ export interface SpaceEntry {
   vault_kinds?: Array<"value" | "secret" | "code">;
   /** Trusted spaces may receive secrets/codes; untrusted ones only values. */
   trusted?: boolean;
+  /** Host broker capability token while the space is running. */
+  broker_token?: string;
+  /** Broker HTTP URL the space's run tool uses. */
+  broker_url?: string;
+  /** Interface the broker listener is bound to. */
+  broker_bind?: string;
   /** Publish this space through a gateway as an anonymous device. */
   expose?: boolean;
   /** Gateway origin used for --expose. */
@@ -186,6 +192,9 @@ export function parseConfig(text: string, source: string): Config {
       ...(asString(entry.secret_dir) ? { secret_dir: asString(entry.secret_dir) } : {}),
       ...(Array.isArray(entry.vaults) ? { vaults: entry.vaults.filter((flag): flag is string => typeof flag === "string") } : {}),
       ...(entry.trusted === true ? { trusted: true } : {}),
+      ...(asString(entry.broker_token) ? { broker_token: asString(entry.broker_token) } : {}),
+      ...(asString(entry.broker_url) ? { broker_url: asString(entry.broker_url) } : {}),
+      ...(asString(entry.broker_bind) ? { broker_bind: asString(entry.broker_bind) } : {}),
       ...(Array.isArray(entry.vault_kinds)
         ? {
             vault_kinds: entry.vault_kinds.filter(
@@ -288,6 +297,9 @@ export function serializeConfig(config: Config): string {
       const space = config.spaces[name]!;
       out += `  ${/^[A-Za-z0-9._-]+$/.test(name) ? name : yamlScalar(name)}:\n`;
       if (space.trusted === true) out += "    trusted: true\n";
+      if (space.broker_token) out += "    broker_token: " + yamlScalar(space.broker_token) + "\n";
+      if (space.broker_url) out += "    broker_url: " + yamlScalar(space.broker_url) + "\n";
+      if (space.broker_bind) out += "    broker_bind: " + yamlScalar(space.broker_bind) + "\n";
       if (space.vaults && space.vaults.length > 0) {
         out += "    vaults: [" + space.vaults.map((name) => yamlScalar(name)).join(", ") + "]\n";
       }

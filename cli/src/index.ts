@@ -30,7 +30,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.24-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.25-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -98,6 +98,7 @@ const VAULTS_FLAGS: FlagSpec[] = [
   flag("all", "boolean", "Select every company (assign)"),
   flag("clear", "boolean", "Clear the vault assignment"),
   flag("keychain", "boolean", "Store the vault key in the OS keychain (may ask for authorization)"),
+  flag("allow-host", "string", "Host the broker may use this secret/code with (repeatable)", { placeholder: "<host>", repeatable: true }),
   flag("vault-kind", "string", "Limit the assignment to values, secrets or codes (repeatable)", { placeholder: "<kind>", repeatable: true }),
   flag("trusted", "boolean", "Allow secrets/codes into this space (only for trusted clients)"),
 ];
@@ -187,6 +188,12 @@ function showHelp(text: string | undefined, topic: string, sub?: string): void {
 async function main(argv: string[]): Promise<void> {
   if (argv.length === 0) {
     process.stdout.write(rootHelp().trimEnd() + "\n");
+    return;
+  }
+  // Hidden: the host-side vault broker. Started on demand by prime spaces.
+  if (argv[0] === "__vault-broker") {
+    const { brokerMain } = await import("./vault-broker.ts");
+    await brokerMain();
     return;
   }
   // Hidden: the JavaScript child used by the run tool. It shares stdin/stdout

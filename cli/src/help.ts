@@ -506,14 +506,14 @@ VAULTS AND RUN
   prime spaces create --vault acme (repeatable) or --vault-all assigns companies.
   The space's MCP server gains a run tool: JavaScript with tools.<name>({...}),
   values.<name>, secrets.<name> and codes.<name> ({code, expires_at}). Secrets
-  are placeholders inside the sandbox; the server substitutes them only for
-  approved integrations (mcp) and redacts them from all results, so a client
-  never receives the raw value. codes.<name> is a short-lived TOTP object.
-  A space is UNTRUSTED by default: only values are injected, never secrets or
-  codes, because a client with code execution in a space could otherwise read
-  them from that space. Pass --trusted (and --vault-kind secrets/codes as
-  needed) only when every client of that space is trusted.
-  Manage the vault with 'prime vaults --help'.
+  are placeholders inside the sandbox. Values are local; secrets and codes stay
+  in a host-side broker, and tools.http is the only operation allowed to use
+  them: the broker checks the secret/code --allow-host list, substitutes the
+  real value, and redacts the response. Local shell/file tools reject
+  placeholders. codes.<name> is a placeholder object; the broker turns it into
+  the current TOTP code at request time. The broker starts on demand and exits
+  after the last space scope idles. Manage it with 'prime vaults status'.
+  Manage entries with 'prime vaults --help'.
 
 TOP
   prime spaces top <name> opens a live activity monitor: container cpu/memory/io,
@@ -533,7 +533,7 @@ OPTIONS (create)
   --vault <company>   let the run tool use a company's values/secrets/codes (repeatable)
   --vault-all         assign every vault company
   --vault-kind <k>    limit to values, secrets or codes (repeatable)
-  --trusted           allow secrets/codes into the space (trusted clients only)
+  --trusted           deprecated; the broker keeps secrets out of every space
   --gateway <url>     gateway for --expose
   --runtime <rt>      apple|podman|docker
   --allow-rootful     permit rootful docker (not recommended)

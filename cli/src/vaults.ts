@@ -14,6 +14,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 import { bool, str, strList } from "./args.ts";
 import { saveConfig } from "./config.ts";
+import { brokerStatus } from "./vault-broker.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
@@ -27,6 +28,19 @@ export interface VaultCode {
   algorithm: "SHA1" | "SHA256" | "SHA512";
   issuer?: string;
   label?: string;
+  /** Hosts where the broker may send this code. */
+  hosts?: string[];
+}
+
+export interface VaultSecret {
+  value: string;
+  hosts: string[];
+}
+
+export interface BrokerScope {
+  values: Record<string, string>;
+  secrets: Record<string, VaultSecret>;
+  codes: Record<string, VaultCode & { hosts: string[] }>;
 }
 
 export interface VaultPayload {
@@ -369,6 +383,50 @@ export function vaultPayloadFor(configPath: string, companies: string[], kinds?:
 }
 
 
+/** Per-space broker scope: values are returned; secrets/codes keep their
+ *  allowed-host list so the broker can enforce it. */
+export function brokerScopeFor(configPath: string, companies: string[], kinds?: string[]): BrokerScope {
+  const scope: BrokerScope = { values: {}, secrets: {}, codes: {} };
+  const { db, key } = openDb(configPath, false);
+  try {
+    for (const company of companies) {
+      assertCompany(db, company);
+      const rows = db.query("SELECT kind, name, iv, ciphertext, tag FROM entries WHERE company = ? ORDER BY kind, name").all(company) as Array<{
+        kind: string;
+        name: string;
+        iv: Uint8Array;
+        ciphertext: Uint8Array;
+        tag: Uint8Array;
+      }>;
+      for (const row of rows) {
+        if (kinds && kinds.length > 0 && !kinds.includes(row.kind)) continue;
+        if (Object.hasOwn(scope.values, row.name) || Object.hasOwn(scope.secrets, row.name) || Object.hasOwn(scope.codes, row.name)) {
+          throw new CliError('duplicate vault name "' + row.name + '" across assigned companies', "Rename the entry so the flat maps stay unambiguous.");
+        }
+        const plaintext = openSealed(key, sealed(row), aad(company, row.kind, row.name));
+        if (row.kind === "value") {
+          scope.values[row.name] = plaintext;
+        } else if (row.kind === "secret") {
+          let value = plaintext;
+          let hosts: string[] = [];
+          try {
+            const parsed = JSON.parse(plaintext) as { value?: unknown; hosts?: unknown };
+            if (typeof parsed.value === "string") value = parsed.value;
+            if (Array.isArray(parsed.hosts)) hosts = parsed.hosts.filter((host): host is string => typeof host === "string");
+          } catch {}
+          scope.secrets[row.name] = { value, hosts };
+        } else {
+          const parsed = JSON.parse(plaintext) as VaultCode;
+          scope.codes[row.name] = { ...parsed, hosts: Array.isArray(parsed.hosts) ? parsed.hosts : [] };
+        }
+      }
+    }
+  } finally {
+    db.close();
+  }
+  return scope;
+}
+
 export async function vaultsCommand(ctx: Ctx): Promise<void> {
   const args = ctx.parsed.positionals;
   const sub = args[1];
@@ -444,11 +502,20 @@ function vaultsSet(ctx: Ctx): void {
   if (!company || !kindRaw || !name) throw new UsageError("missing arguments", "Usage: prime vaults set <company> <value|secret|code> <name> [--value <v> | --stdin | --uri <otpauth://...>]");
   const kind = assertKind(kindRaw);
   assertName(name);
+  const hosts = strList(ctx.parsed, "allow-host").map((host) => host.trim().toLowerCase()).filter(Boolean);
   const raw = readValue(ctx, kind, str(ctx.parsed, "uri"));
-  const plaintext = kind === "code" ? JSON.stringify(parseOtpAuth(raw)) : raw;
+  const plaintext =
+    kind === "code"
+      ? JSON.stringify({ ...parseOtpAuth(raw), hosts })
+      : kind === "secret"
+        ? JSON.stringify({ value: raw, hosts })
+        : raw;
   upsert(ctx, company, kind, name, plaintext);
   ctx.out(green("\u2713") + " stored " + kind + " " + bold(name) + " in company " + bold(company));
-  if (kind !== "value") ctx.note(dim("  use 'prime vaults get " + company + " " + kind + " " + name + " --reveal' to print it (careful)"));
+  if (kind !== "value") {
+    if (hosts.length === 0) ctx.note(yellow("  warning: no --allow-host set; the broker cannot use this " + kind));
+    ctx.note(dim("  use 'prime vaults get " + company + " " + kind + " " + name + " --reveal' to print it (careful)"));
+  }
 }
 
 function vaultsList(ctx: Ctx, company: string | undefined): void {
@@ -491,7 +558,14 @@ function vaultsGet(ctx: Ctx): void {
       else ctx.out(totp.code + dim("  expires in " + Math.ceil(totp.expires_in_ms / 1000) + "s"));
       return;
     }
-    const value = decryptEntry(db, key, company, kind, name);
+    const stored = decryptEntry(db, key, company, kind, name);
+    let value = stored;
+    if (kind === "secret") {
+      try {
+        const parsed = JSON.parse(stored) as { value?: unknown };
+        if (typeof parsed.value === "string") value = parsed.value;
+      } catch {}
+    }
     const reveal = bool(ctx.parsed, "reveal");
     if (ctx.json) {
       printJson({ company, name, kind, value: reveal ? value : mask(value), revealed: reveal });
@@ -566,11 +640,6 @@ function vaultsAssign(ctx: Ctx): void {
         else throw new UsageError('unknown vault category "' + item + '"', "Use values, secrets or codes.");
       }
     }
-    const trusted = bool(ctx.parsed, "trusted") || space.trusted === true;
-    const effective = kindsRaw.length > 0 ? [...kinds] : ["value", "secret", "code"];
-    if (!trusted && (effective.includes("secret") || effective.includes("code"))) {
-      throw new UsageError("secrets/codes cannot enter an untrusted space", "Use --vault-kind values, or pass --trusted only when every client of this space is trusted.");
-    }
     space.vaults = [...new Set(selected)].sort();
     space.vault_kinds = kindsRaw.length > 0 ? [...kinds] : undefined;
     if (bool(ctx.parsed, "trusted")) space.trusted = true;
@@ -582,7 +651,7 @@ function vaultsAssign(ctx: Ctx): void {
   }
 }
 
-function vaultsStatus(ctx: Ctx): void {
+async function vaultsStatus(ctx: Ctx): Promise<void> {
   const file = vaultPath(ctx.configPath);
   if (!existsSync(file)) {
     if (ctx.json) printJson({ initialised: false, database: file });
@@ -593,11 +662,18 @@ function vaultsStatus(ctx: Ctx): void {
   try {
     const companies = Number((db.query("SELECT COUNT(*) AS n FROM companies").get() as { n: number }).n);
     const entries = Number((db.query("SELECT COUNT(*) AS n FROM entries").get() as { n: number }).n);
-    if (ctx.json) printJson({ initialised: true, database: file, key_backend: backend, companies, entries });
+    const broker = await brokerStatus(ctx.configPath);
+    if (ctx.json) printJson({ initialised: true, database: file, key_backend: backend, companies, entries, broker });
     else {
       ctx.out("  database  " + dim(file));
       ctx.out("  key       " + dim(backend));
       ctx.out("  companies " + companies + "   entries " + entries);
+      if (broker.running) {
+        ctx.out("  broker    " + green("running") + "   pid " + broker.pid + "   scopes " + (broker.scopes ?? 0) + "   requests " + (broker.requests ?? 0));
+        ctx.out("  socket    " + dim(broker.socket ?? ""));
+      } else {
+        ctx.out("  broker    " + dim("not running (starts on demand)"));
+      }
     }
   } finally {
     db.close();

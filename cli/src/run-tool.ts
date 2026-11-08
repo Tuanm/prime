@@ -19,7 +19,8 @@ export interface RunCode {
 export interface RunVault {
   values: Record<string, string>;
   secrets: Record<string, string>;
-  codes: Record<string, RunCode>;
+  codes: Record<string, unknown>;
+  broker?: { url: string; token: string };
 }
 
 export interface RunToolDef {
@@ -32,23 +33,6 @@ export interface RunOutcome {
   logs?: unknown[];
   error?: string;
 }
-
-const SECRET_PREFIX = "__prime_vault_secret__:";
-const SECRET_SUFFIX = "__";
-const DANGEROUS_SECRET_TOOLS = new Set([
-  "bash",
-  "shell",
-  "command",
-  "powershell",
-  "read",
-  "write",
-  "edit",
-  "multi_edit",
-  "grep",
-  "find",
-  "ls",
-  "job",
-]);
 
 /** Load the vault payload the entrypoint mounted, then drop the file. The host
  *  removes it as soon as the server answers; reading here keeps the values in
@@ -66,6 +50,7 @@ export function loadRunVault(): RunVault {
       values: parsed.values ?? {},
       secrets: parsed.secrets ?? {},
       codes: parsed.codes ?? {},
+      ...(parsed.broker && typeof parsed.broker === "object" ? { broker: parsed.broker as { url: string; token: string } } : {}),
     };
   } catch {
     try {
@@ -132,21 +117,6 @@ function redact(value: unknown, secrets: string[], placeholders: string[], seen 
   return value;
 }
 
-function substitute(value: unknown, mapping: Map<string, string>): unknown {
-  if (typeof value === "string") {
-    let text = value;
-    for (const [placeholder, secret] of mapping) text = text.split(placeholder).join(secret);
-    return text;
-  }
-  if (Array.isArray(value)) return value.map((item) => substitute(item, mapping));
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = substitute(item, mapping);
-    return out;
-  }
-  return value;
-}
-
 function hasPlaceholder(value: unknown, mapping: Map<string, string>): boolean {
   if (typeof value === "string") {
     for (const placeholder of mapping.keys()) if (value.includes(placeholder)) return true;
@@ -165,6 +135,29 @@ function stringify(value: unknown): string {
   }
 }
 
+/** Only the broker sees real secrets; the space forwards the HTTP operation. */
+async function callBroker(broker: { url: string; token: string }, args: unknown): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(broker.url + "/http", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-prime-broker-token": broker.token },
+      body: JSON.stringify(args ?? {}),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new Error("the vault broker is not reachable");
+  }
+  let body: any;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error("the vault broker returned an invalid response");
+  }
+  if (!response.ok) throw new Error(String(body?.error ?? "the vault broker rejected the request"));
+  return body;
+}
+
 /** Run code in a child process and proxy its tool calls back here. */
 export async function runCodeInChild(
   code: string,
@@ -176,13 +169,17 @@ export async function runCodeInChild(
   if (code.length > 100_000) return { ok: false, error: "code is too large (max 100000 characters)" };
   const mapping = new Map<string, string>();
   const childSecrets: Record<string, string> = {};
-  for (const [name, secret] of Object.entries(vault.secrets)) {
-    const placeholder = SECRET_PREFIX + name + SECRET_SUFFIX;
-    mapping.set(placeholder, secret);
+  for (const [name, placeholder] of Object.entries(vault.secrets)) {
+    mapping.set(placeholder, placeholder);
     childSecrets[name] = placeholder;
   }
-  const childCodes: Record<string, ReturnType<typeof totpEntry>> = {};
-  for (const [name, entry] of Object.entries(vault.codes)) childCodes[name] = totpEntry(entry);
+  const childCodes: Record<string, unknown> = { ...vault.codes };
+  for (const entry of Object.values(vault.codes)) {
+    if (entry && typeof entry === "object" && typeof (entry as { code?: unknown }).code === "string") {
+      const placeholder = (entry as { code: string }).code;
+      mapping.set(placeholder, placeholder);
+    }
+  }
 
   const payload = {
     code,
@@ -253,15 +250,19 @@ export async function runCodeInChild(
         const args = message.args ?? {};
         let outcome: { ok: boolean; result?: unknown; error?: string };
         try {
-          const tool = Object.hasOwn(tools, name) ? tools[name] : undefined;
-          if (!tool) throw new Error('unknown tool "' + name + '"');
-          if (name === "run") throw new Error("run cannot call itself");
-          if (DANGEROUS_SECRET_TOOLS.has(name) && hasPlaceholder(args, mapping)) {
-            throw new Error("vault secrets cannot be passed to " + name + " (they would appear in files or shell output); use an mcp integration instead");
+          if (name === "http") {
+            if (!vault.broker) throw new Error("no vault broker is configured for this space");
+            outcome = { ok: true, result: sanitize(await callBroker(vault.broker, args)) };
+          } else {
+            const tool = Object.hasOwn(tools, name) ? tools[name] : undefined;
+            if (!tool) throw new Error('unknown tool "' + name + '"');
+            if (name === "run") throw new Error("run cannot call itself");
+            if (hasPlaceholder(args, mapping)) {
+              throw new Error("vault secrets/codes can only be used through tools.http via the broker");
+            }
+            const result = await tool.handler(args);
+            outcome = { ok: true, result: sanitize(result) };
           }
-          const substituted = substitute(args, mapping);
-          const result = await tool.handler(substituted);
-          outcome = { ok: true, result: sanitize(result) };
         } catch (err) {
           outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
         }

@@ -394,29 +394,28 @@ if every attempt fails. Spaces created before limit/token tracking can be listed
 `~/.prime/keys/`; `prime vaults init --keychain` opts into the OS keychain
 (macOS Keychain / Secret Service, may show an authorization dialog). Existing
 keychain items are found automatically. Companies group values,
-secrets and TOTP codes. Spaces are untrusted by default: they receive only
-values, never secrets or TOTP codes, because a client with code execution in a
-space could read anything that space holds. Pass `--trusted` (and
-`--vault-kind secrets/codes` when needed) only when every client of the space is
-trusted. A space created with `--vault acme` (repeatable) or
-`--vault-all` gets the `run` tool: JavaScript with `tools.<name>({...})`,
+secrets and TOTP codes. Values are injected into the space; secrets and TOTP codes are not. They stay in
+a host-side broker started on demand, and the space only holds placeholders and
+a per-space capability token (removed after startup). A space created with
+`--vault acme` (repeatable) or `--vault-all` gets the `run` tool: JavaScript with `tools.<name>({...})`,
 `values.<name>`, `secrets.<name>` and `codes.<name>` (`{code, expires_at}`).
-Inside the sandbox secrets are placeholders; the server substitutes them only for
-approved integrations (the `mcp` tool) and redacts them from every result, so
-clients never receive the raw value. The vault payload is read by the device
-buddy at startup and the host removes the token/vault files before the space
-answers, so shell/file tools cannot read them afterwards. Codes are short-lived
-TOTP values. Assign only companies whose credentials a space's clients may use.
+Inside the sandbox secrets are placeholders; the server forwards `tools.http` to
+the broker, which substitutes the real value only for hosts listed in that
+secret/code's `--allow-host` metadata and redacts the response. Local shell/file
+tools reject placeholders. The broker is a host process (not in the space), only
+holds scopes for running spaces, and exits after the last scope goes idle. The
+token/vault files are removed from the space as soon as it answers.
 
 ```bash
 prime vaults init
 prime vaults company add acme
 prime vaults set acme value region --value eu-west-1
-printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin
-prime vaults set acme code deploy --uri 'otpauth://totp/Acme:deploy?secret=...&issuer=Acme'
+printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin --allow-host api.example.com
+prime vaults set acme code deploy --uri 'otpauth://totp/Acme:deploy?secret=...&issuer=Acme' --allow-host api.example.com
 prime vaults code acme deploy --json
 prime spaces create --name dev --vault acme
-prime tools call dev.run '{"code":"return {region: values.region, code: codes.deploy.code}"}'
+prime tools call dev.run '{"code":"return await tools.http({url: \"https://api.example.com/me\", headers: {Authorization: \"Bearer \" + secrets.api}})"}'
+prime vaults status                                       # broker/pid/scopes
 prime vaults assign dev acme beta      # afterwards, restart the space
 ```
 
