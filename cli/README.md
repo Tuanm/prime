@@ -394,7 +394,11 @@ if every attempt fails. Spaces created before limit/token tracking can be listed
 `~/.prime/keys/`; `prime vaults init --keychain` opts into the OS keychain
 (macOS Keychain / Secret Service, may show an authorization dialog). Existing
 keychain items are found automatically. Companies group values,
-secrets and TOTP codes. A space created with `--vault acme` (repeatable) or
+secrets and TOTP codes. Spaces are untrusted by default: they receive only
+values, never secrets or TOTP codes, because a client with code execution in a
+space could read anything that space holds. Pass `--trusted` (and
+`--vault-kind secrets/codes` when needed) only when every client of the space is
+trusted. A space created with `--vault acme` (repeatable) or
 `--vault-all` gets the `run` tool: JavaScript with `tools.<name>({...})`,
 `values.<name>`, `secrets.<name>` and `codes.<name>` (`{code, expires_at}`).
 Inside the sandbox secrets are placeholders; the server substitutes them only for

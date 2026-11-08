@@ -480,7 +480,7 @@ function wipeSecretFiles(dir: string | undefined): void {
 
 function writeVaultFile(ctx: Ctx, space: SpaceEntry): void {
   if (!space.vaults || space.vaults.length === 0 || !space.secret_dir) return;
-  const payload = vaultPayloadFor(ctx.configPath, space.vaults, space.vault_kinds);
+  const payload = vaultPayloadFor(ctx.configPath, space.vaults, space.vault_kinds, space.trusted === true);
   const file = join(space.secret_dir, "vault.json");
   writeFileSync(file, JSON.stringify(payload), { mode: 0o600 });
   chmodSync(file, 0o600);
@@ -717,6 +717,13 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   if (bool(ctx.parsed, "vault-all")) vaultCompanies = allVaultCompanies(ctx.configPath);
   vaultCompanies = [...new Set(vaultCompanies)].sort();
   const vaultKinds = parseVaultKinds(ctx);
+  const trusted = bool(ctx.parsed, "trusted");
+  if (vaultCompanies.length > 0 && !trusted) {
+    const kinds = vaultKinds ?? ["value", "secret", "code"];
+    if (kinds.includes("secret") || kinds.includes("code")) {
+      throw new UsageError("secrets/codes cannot enter an untrusted space", "Use --vault-kind values, or pass --trusted only when every client of this space is trusted.");
+    }
+  }
   const image = str(ctx.parsed, "image") ?? defaultImage(version);
   const cpus = num(ctx.parsed, "cpus") ?? 2;
   const memory = str(ctx.parsed, "memory") ?? "4g";
@@ -743,6 +750,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     ...(offline ? { offline: true } : {}),
     ...(vaultCompanies.length > 0 ? { vaults: vaultCompanies } : {}),
     ...(vaultCompanies.length > 0 && vaultKinds ? { vault_kinds: vaultKinds } : {}),
+    ...(vaultCompanies.length > 0 && trusted ? { trusted: true } : {}),
     created_at: new Date().toISOString(),
   };
 
@@ -1107,6 +1115,7 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
         cgroup_mode: space.cgroup_mode ?? null,
         token_in_file: Boolean(space.secret_dir),
         vaults: space.vaults ?? [],
+        trusted: space.trusted === true,
         exposed: space.gateway_device
           ? {
               device: space.gateway_device,

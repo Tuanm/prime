@@ -336,7 +336,7 @@ export function allVaultCompanies(configPath: string): string[] {
   }
 }
 
-export function vaultPayloadFor(configPath: string, companies: string[], kinds?: string[]): VaultPayload {
+export function vaultPayloadFor(configPath: string, companies: string[], kinds?: string[], trusted = true): VaultPayload {
   const payload: VaultPayload = { values: {}, secrets: {}, codes: {} };
   if (companies.length === 0) return payload;
   const { db, key } = openDb(configPath, false);
@@ -351,6 +351,7 @@ export function vaultPayloadFor(configPath: string, companies: string[], kinds?:
         tag: Uint8Array;
       }>;
       for (const row of rows) {
+        if (!trusted && row.kind !== "value") continue;
         if (kinds && kinds.length > 0 && !kinds.includes(row.kind)) continue;
         const plaintext = openSealed(key, sealed(row), aad(company, row.kind, row.name));
         const target = row.kind === "value" ? payload.values : row.kind === "secret" ? payload.secrets : payload.codes;
@@ -542,6 +543,8 @@ function vaultsAssign(ctx: Ctx): void {
   try {
     if (bool(ctx.parsed, "clear")) {
       space.vaults = [];
+      space.vault_kinds = undefined;
+      space.trusted = undefined;
       saveConfig(ctx.configPath, ctx.config);
       ctx.out(green("\u2713") + " cleared vaults for space " + bold(spaceName));
       return;
@@ -552,10 +555,9 @@ function vaultsAssign(ctx: Ctx): void {
     }
     if (selected.length === 0) throw new UsageError("no companies selected", "Pass company names, or --all.");
     for (const company of selected) assertCompany(db, company);
-    space.vaults = [...new Set(selected)].sort();
     const kindsRaw = strList(ctx.parsed, "vault-kind");
+    const kinds = new Set<"value" | "secret" | "code">();
     if (kindsRaw.length > 0) {
-      const kinds = new Set<"value" | "secret" | "code">();
       for (const item of kindsRaw) {
         const value = String(item).toLowerCase();
         if (value === "value" || value === "values") kinds.add("value");
@@ -563,10 +565,15 @@ function vaultsAssign(ctx: Ctx): void {
         else if (value === "code" || value === "codes") kinds.add("code");
         else throw new UsageError('unknown vault category "' + item + '"', "Use values, secrets or codes.");
       }
-      space.vault_kinds = [...kinds];
-    } else {
-      space.vault_kinds = undefined;
     }
+    const trusted = bool(ctx.parsed, "trusted") || space.trusted === true;
+    const effective = kindsRaw.length > 0 ? [...kinds] : ["value", "secret", "code"];
+    if (!trusted && (effective.includes("secret") || effective.includes("code"))) {
+      throw new UsageError("secrets/codes cannot enter an untrusted space", "Use --vault-kind values, or pass --trusted only when every client of this space is trusted.");
+    }
+    space.vaults = [...new Set(selected)].sort();
+    space.vault_kinds = kindsRaw.length > 0 ? [...kinds] : undefined;
+    if (bool(ctx.parsed, "trusted")) space.trusted = true;
     saveConfig(ctx.configPath, ctx.config);
     ctx.out(green("\u2713") + " space " + bold(spaceName) + " can use " + space.vaults.join(", "));
     ctx.note(dim("  restart the space to pick up the assignment"));

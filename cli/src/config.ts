@@ -80,6 +80,8 @@ export interface SpaceEntry {
   vaults?: string[];
   /** Optional subset of categories: value, secret, code (default: all). */
   vault_kinds?: Array<"value" | "secret" | "code">;
+  /** Trusted spaces may receive secrets/codes; untrusted ones only values. */
+  trusted?: boolean;
   /** Publish this space through a gateway as an anonymous device. */
   expose?: boolean;
   /** Gateway origin used for --expose. */
@@ -183,6 +185,7 @@ export function parseConfig(text: string, source: string): Config {
         : {}),
       ...(asString(entry.secret_dir) ? { secret_dir: asString(entry.secret_dir) } : {}),
       ...(Array.isArray(entry.vaults) ? { vaults: entry.vaults.filter((flag): flag is string => typeof flag === "string") } : {}),
+      ...(entry.trusted === true ? { trusted: true } : {}),
       ...(Array.isArray(entry.vault_kinds)
         ? {
             vault_kinds: entry.vault_kinds.filter(
@@ -284,6 +287,7 @@ export function serializeConfig(config: Config): string {
     for (const name of spaceNames) {
       const space = config.spaces[name]!;
       out += `  ${/^[A-Za-z0-9._-]+$/.test(name) ? name : yamlScalar(name)}:\n`;
+      if (space.trusted === true) out += "    trusted: true\n";
       if (space.vaults && space.vaults.length > 0) {
         out += "    vaults: [" + space.vaults.map((name) => yamlScalar(name)).join(", ") + "]\n";
       }

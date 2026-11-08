@@ -409,7 +409,7 @@ USAGE
   prime vaults get <company> <value|secret|code> <name> [--reveal] [--json]
   prime vaults code <company> <name> [--json]
   prime vaults rm <company> <value|secret|code> <name>
-  prime vaults assign <space> <company...> [--all] [--clear]
+  prime vaults assign <space> <company...> [--all] [--clear] [--vault-kind <k>] [--trusted]
   prime vaults status [--json]
 
 The vault is one AES-256-GCM encrypted SQLite database under ~/.prime/vaults.db.
@@ -509,6 +509,10 @@ VAULTS AND RUN
   are placeholders inside the sandbox; the server substitutes them only for
   approved integrations (mcp) and redacts them from all results, so a client
   never receives the raw value. codes.<name> is a short-lived TOTP object.
+  A space is UNTRUSTED by default: only values are injected, never secrets or
+  codes, because a client with code execution in a space could otherwise read
+  them from that space. Pass --trusted (and --vault-kind secrets/codes as
+  needed) only when every client of that space is trusted.
   Manage the vault with 'prime vaults --help'.
 
 TOP
@@ -529,6 +533,7 @@ OPTIONS (create)
   --vault <company>   let the run tool use a company's values/secrets/codes (repeatable)
   --vault-all         assign every vault company
   --vault-kind <k>    limit to values, secrets or codes (repeatable)
+  --trusted           allow secrets/codes into the space (trusted clients only)
   --gateway <url>     gateway for --expose
   --runtime <rt>      apple|podman|docker
   --allow-rootful     permit rootful docker (not recommended)

@@ -131,8 +131,10 @@ image is public: `ghcr.io/tuanm/prime-space:<version>`.
 
 `prime vaults` keeps values, secrets and TOTP codes in an encrypted local SQLite
 database (~/.prime/vaults.db), grouped into companies. The key is kept in the OS
-keychain when possible. A space can be assigned companies at creation
-(`--vault <company>`, repeatable, or `--vault-all`); its `run` tool executes
+keychain when possible. Spaces are untrusted by default and receive only values, never secrets or TOTP
+codes; pass `--trusted` only when every client is trusted. A space can be
+assigned companies at creation (`--vault <company>`, repeatable, or
+`--vault-all`); its `run` tool executes
 JavaScript with `tools.<name>({...})`, `values.<name>`, `secrets.<name>` and
 `codes.<name>`. Inside the sandbox secrets are opaque placeholders; the server
 substitutes them only for approved integrations and redacts them from results.
