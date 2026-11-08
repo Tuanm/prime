@@ -554,18 +554,17 @@ async function prepareVault(ctx: Ctx, space: SpaceEntry, runtime: RuntimeInfo): 
     port = await freePort();
   }
   const token = newToken();
-  const prefix = token.slice(0, 8);
   const secretPayload: Record<string, string> = {};
   const codePayload: Record<string, unknown> = {};
   const secretScope: Record<string, { value: string; hosts: string[] }> = {};
   const codeScope: Record<string, { secret: string; digits: number; period: number; algorithm: string; hosts: string[] }> = {};
   for (const name of secretNames) {
-    const placeholder = "__prime_secret_" + prefix + "_" + name + "__";
+    const placeholder = "__prime_secret_" + Buffer.from(randomBytes(12)).toString("hex") + "__";
     secretPayload[name] = placeholder;
     secretScope[placeholder] = scope.secrets[name]!;
   }
   for (const name of codeNames) {
-    const placeholder = "__prime_code_" + prefix + "_" + name + "__";
+    const placeholder = "__prime_code_" + Buffer.from(randomBytes(12)).toString("hex") + "__";
     codePayload[name] = { code: placeholder, expires_at: null };
     codeScope[placeholder] = scope.codes[name]!;
   }
