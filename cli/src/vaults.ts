@@ -109,8 +109,10 @@ function keychainStore(encoded: string): boolean {
   return r.code === 0;
 }
 
-/** Load or create the vault key, and report where it is kept. */
-export function vaultKey(configPath: string, create: boolean): { key: Buffer; backend: string } {
+/** Load or create the vault key, and report where it is kept.
+ *  Creating a keychain item may show an authorization dialog, so it only
+ *  happens with the explicit --keychain flag; otherwise a 0600 key file is used. */
+export function vaultKey(configPath: string, create: boolean, useKeychain = false): { key: Buffer; backend: string } {
   const fromEnv = process.env.PRIME_VAULT_KEY;
   if (fromEnv) return { key: decodeKey(fromEnv), backend: "environment (PRIME_VAULT_KEY)" };
   const envFile = process.env.PRIME_VAULT_KEY_FILE;
@@ -128,13 +130,18 @@ export function vaultKey(configPath: string, create: boolean): { key: Buffer; ba
   if (existsSync(file)) return { key: decodeKey(readFileSync(file, "utf8")), backend: "file " + file };
   if (!create) throw new CliError("vault is not initialised", "Run 'prime vaults init' first.");
   const key = randomBytes(32);
-  if (keychainStore(encodeKey(key))) {
+  if (useKeychain && keychainStore(encodeKey(key))) {
     return { key, backend: process.platform === "darwin" ? "macOS Keychain" : "Secret Service" };
   }
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(file), 0o700);
   writeFileSync(file, encodeKey(key) + "\n", { mode: 0o600 });
   chmodSync(file, 0o600);
-  return { key, backend: "file " + file + " (no OS keychain available)", warning: true } as { key: Buffer; backend: string };
+  return {
+    key,
+    backend: "file " + file + (useKeychain ? " (keychain creation was not authorized)" : " (use --keychain for the OS keychain)"),
+    warning: true,
+  } as { key: Buffer; backend: string };
 }
 
 function seal(key: Buffer, plaintext: string, aad: string): Sealed {
@@ -160,11 +167,11 @@ function aad(company: string, kind: string, name: string): string {
   return SEAL_VERSION + "|" + company + "|" + kind + "|" + name;
 }
 
-function openDb(configPath: string, create: boolean): { db: Database; key: Buffer; backend: string } {
+function openDb(configPath: string, create: boolean, useKeychain = false): { db: Database; key: Buffer; backend: string } {
   const file = vaultPath(configPath);
   if (!existsSync(file) && !create) throw new CliError("vault is not initialised", "Run 'prime vaults init' first.");
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  const { key, backend } = vaultKey(configPath, create);
+  const { key, backend } = vaultKey(configPath, create, useKeychain);
   const db = new Database(file, { create: true });
   db.exec("PRAGMA foreign_keys = ON;");
   if (create) {
@@ -379,7 +386,7 @@ export async function vaultsCommand(ctx: Ctx): Promise<void> {
 function vaultsInit(ctx: Ctx): void {
   const file = vaultPath(ctx.configPath);
   const existing = existsSync(file);
-  const { db, backend } = openDb(ctx.configPath, true);
+  const { db, backend } = openDb(ctx.configPath, true, bool(ctx.parsed, "keychain"));
   db.close();
   if (ctx.json) {
     printJson({ initialised: true, database: file, key_backend: backend, already_existed: existing });
@@ -388,7 +395,7 @@ function vaultsInit(ctx: Ctx): void {
   ctx.out(green("\u2713") + " vault ready");
   ctx.out("  database " + dim(file));
   ctx.out("  key      " + dim(backend));
-  if (/^file /.test(backend)) ctx.note(yellow("  warning: the key is a local file; install a keychain/Secret Service for stronger protection"));
+  if (/^file /.test(backend)) ctx.note(yellow("  warning: the key is a local 0600 file; pass --keychain to use the OS keychain, or set PRIME_VAULT_KEY_FILE"));
 }
 
 function vaultsCompany(ctx: Ctx, action: string | undefined, name: string | undefined): void {

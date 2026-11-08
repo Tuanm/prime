@@ -402,7 +402,7 @@ EXIT CODES
 const VAULTS = `prime vaults - encrypted local values, secrets and TOTP codes
 
 USAGE
-  prime vaults init
+  prime vaults init [--keychain]
   prime vaults company add|list|rm <name>
   prime vaults set <company> <value|secret|code> <name> [--value <v> | --stdin | --uri <otpauth://...>]
   prime vaults list [company] [--json]
@@ -413,10 +413,12 @@ USAGE
   prime vaults status [--json]
 
 The vault is one AES-256-GCM encrypted SQLite database under ~/.prime/vaults.db.
-The key lives in the OS keychain when available (macOS Keychain, Secret
-Service); otherwise it is a 0600 file next to the database (a warning is shown).
-PRIME_VAULT_KEY (base64) and PRIME_VAULT_KEY_FILE exist for automation and
-tests; do not put the key in shell history.
+By default the key is a 0600 file under ~/.prime/keys/ (a warning is shown).
+Pass --keychain to store/read it in the OS keychain (macOS Keychain or Secret
+Service); that may show an authorization dialog, so it is opt-in. Existing
+keychain items are still found automatically. PRIME_VAULT_KEY (base64) and
+PRIME_VAULT_KEY_FILE exist for automation and tests; do not put the key in
+shell history.
 
 Companies group entries. A space assigned to one or more companies receives
 their values, secrets and TOTP codes in its 'run' tool as values.{name},
@@ -429,7 +431,7 @@ SECRETS
   passed. The key is never printed by status or init.
 
 EXAMPLES
-  prime vaults init
+  prime vaults init [--keychain]
   prime vaults company add acme
   prime vaults set acme value region --value eu-west-1
   printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin

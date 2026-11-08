@@ -30,7 +30,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.21-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.22-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -95,6 +95,7 @@ const VAULTS_FLAGS: FlagSpec[] = [
   flag("reveal", "boolean", "Print the raw value instead of masking it"),
   flag("all", "boolean", "Select every company (assign)"),
   flag("clear", "boolean", "Clear the vault assignment"),
+  flag("keychain", "boolean", "Store the vault key in the OS keychain (may ask for authorization)"),
 ];
 
 const SPACE_TOP_FLAGS: FlagSpec[] = [

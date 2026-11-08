@@ -390,8 +390,10 @@ if every attempt fails. Spaces created before limit/token tracking can be listed
 **Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`, `--allow-no-limits`.
 
 **Vaults and run.** The local vault is an encrypted SQLite database at
-`~/.prime/vaults.db` (AES-256-GCM); the key lives in the OS keychain when one is
-available, otherwise in a 0600 file under ~/.prime/keys/ (a separate 0700 directory) with a warning. Companies group values,
+`~/.prime/vaults.db` (AES-256-GCM). By default the key is a 0600 file under
+`~/.prime/keys/`; `prime vaults init --keychain` opts into the OS keychain
+(macOS Keychain / Secret Service, may show an authorization dialog). Existing
+keychain items are found automatically. Companies group values,
 secrets and TOTP codes. A space created with `--vault acme` (repeatable) or
 `--vault-all` gets the `run` tool: JavaScript with `tools.<name>({...})`,
 `values.<name>`, `secrets.<name>` and `codes.<name>` (`{code, expires_at}`).
