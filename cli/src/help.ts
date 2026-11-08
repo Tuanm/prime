@@ -29,7 +29,7 @@ COMMANDS
   files upload <path> [options]           Upload a file through the files API
   files download <id|name> [options]      Download an uploaded file
   spaces create [--name <n>] [--persistent] A rootless Linux codespace running the device buddy
-  spaces list|start|stop|delete|logs <name> Manage the codespaces (local devices)
+  spaces list|start|stop|delete|logs|top  Manage the codespaces (local devices)
   service install [options]               Run the device buddy as a user service (starts at
                                           login, restarts on failure)
   service uninstall                       Stop and remove that service
@@ -406,6 +406,7 @@ USAGE
   prime spaces stop <name>
   prime spaces delete <name>
   prime spaces logs <name>
+  prime spaces top <name> [--once] [--json]
   prime spaces doctor [--json]
 
 A space is a rootless Linux container that runs the device buddy (no gateway)
@@ -447,6 +448,13 @@ SECURITY
   per-container --runtime flag. Spaces created before limit/token tracking must
   be recreated (or started with --allow-no-limits) so both guarantees apply.
 
+TOP
+  prime spaces top <name> opens a live activity monitor: container cpu/memory/io,
+  and a process list from inside the space (ps), sorted by cpu. It refreshes every
+  2 seconds; press q or Ctrl-C to quit. --once prints a single snapshot, --json
+  returns it as data, --interval and --limit adjust the refresh and row count.
+  Commands that carry the space token are redacted.
+
 OPTIONS (create)
   --name <name>       space name (default: a generated device id)
   --persistent        keep /root/work and the container across stop/start
@@ -467,6 +475,7 @@ EXAMPLES
   prime spaces start work                           # resumes the persistent space
   prime spaces delete work                          # container, volume, device entry
   prime spaces doctor                               # rootless? systemd? crun? limits?
+  prime spaces top dev                              # live cpu/mem/processes (q quits)
 `;
 export function rootHelp(): string {
   return ROOT;
@@ -505,8 +514,9 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "create") return "Usage: prime spaces create [--name <name>] [--persistent] [--cpus <n>] [--memory <4g>]";
     if (sub === "list") return "Usage: prime spaces list [--json]";
     if (sub === "logs") return "Usage: prime spaces logs <name>";
+    if (sub === "top") return "Usage: prime spaces top <name> [--once] [--json] [--interval <s>] [--limit <n>]";
     if (sub === "doctor") return "Usage: prime spaces doctor [--json]";
-    return "Usage: prime spaces <create|start|stop|delete|list|logs|doctor> [args]";
+    return "Usage: prime spaces <create|start|stop|delete|list|logs|doctor|top> [args]";
   }
   if (topic === "files" || topic === "upload" || topic === "download") {
     if (sub === "list") return "Usage: prime files list [--device <id>] [--json]";

@@ -16,6 +16,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
+import { formatBytes } from "./files.ts";
 
 const SPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CONTAINER_PORT = 7777;
@@ -906,7 +907,300 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
   }
 }
 
-export const SPACE_COMMANDS = ["create", "start", "stop", "delete", "list", "logs", "doctor"] as const;
+
+// ---- spaces top (activity monitor) -----------------------------------------
+
+export interface TopStats {
+  cpu_percent?: number;
+  cpu_usec?: number;
+  memory_used_bytes?: number;
+  memory_limit_bytes?: number;
+  memory_percent?: number;
+  net_rx_bytes?: number;
+  net_tx_bytes?: number;
+  block_read_bytes?: number;
+  block_write_bytes?: number;
+  pids?: number;
+}
+
+export interface TopProcess {
+  pid: number;
+  ppid: number;
+  stat: string;
+  cpu: number;
+  mem: number;
+  rss_kib: number;
+  command: string;
+}
+
+/** 5.3 MB, 104.29 MiB, 12B, or a plain number of bytes. */
+export function parseHumanBytes(text: string): number | undefined {
+  const match = /^([0-9]+(?:\.[0-9]+)?)\s*([a-z]+)?$/i.exec(text.trim());
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  const unit = (match[2] ?? "b").toLowerCase();
+  const factors: Record<string, number> = {
+    b: 1,
+    kb: 1000, mb: 1000 ** 2, gb: 1000 ** 3, tb: 1000 ** 4,
+    kib: 1024, mib: 1024 ** 2, gib: 1024 ** 3, tib: 1024 ** 4,
+  };
+  const factor = factors[unit];
+  return factor === undefined ? undefined : value * factor;
+}
+
+function splitPair(text: string | undefined): [number | undefined, number | undefined] {
+  if (!text) return [undefined, undefined];
+  const parts = text.split("/");
+  return [parseHumanBytes(parts[0] ?? ""), parts[1] ? parseHumanBytes(parts[1]) : undefined];
+}
+
+function percent(text: string | number | undefined): number | undefined {
+  if (text === undefined) return undefined;
+  if (typeof text === "number") return text;
+  const value = Number(text.replace("%", "").trim());
+  return Number.isFinite(value) ? value : undefined;
+}
+
+export function parseAppleStats(raw: string): TopStats | undefined {
+  try {
+    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+    const item = Array.isArray(parsed) ? parsed[0] : undefined;
+    if (!item) return undefined;
+    return {
+      cpu_usec: Number(item.cpuUsageUsec ?? 0),
+      memory_used_bytes: Number(item.memoryUsageBytes ?? 0),
+      memory_limit_bytes: Number(item.memoryLimitBytes ?? 0),
+      net_rx_bytes: Number(item.networkRxBytes ?? 0),
+      net_tx_bytes: Number(item.networkTxBytes ?? 0),
+      block_read_bytes: Number(item.blockReadBytes ?? 0),
+      block_write_bytes: Number(item.blockWriteBytes ?? 0),
+      pids: Number(item.numProcesses ?? 0),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export function parsePodmanStats(raw: string): TopStats | undefined {
+  try {
+    const parsed = JSON.parse(raw) as Array<Record<string, string>>;
+    const item = Array.isArray(parsed) ? parsed[0] : undefined;
+    if (!item) return undefined;
+    const [memUsed, memLimit] = splitPair(item.mem_usage);
+    const [netRx, netTx] = splitPair(item.net_io);
+    const [blockRead, blockWrite] = splitPair(item.block_io);
+    return {
+      cpu_percent: percent(item.cpu_percent),
+      memory_used_bytes: memUsed,
+      memory_limit_bytes: memLimit,
+      memory_percent: percent(item.mem_percent),
+      net_rx_bytes: netRx,
+      net_tx_bytes: netTx,
+      block_read_bytes: blockRead,
+      block_write_bytes: blockWrite,
+      pids: Number(item.pids ?? 0),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseDockerStats(raw: string): TopStats | undefined {
+  try {
+    const item = JSON.parse(raw) as Record<string, string>;
+    const [memUsed, memLimit] = splitPair(item.MemUsage);
+    const [netRx, netTx] = splitPair(item.NetIO);
+    const [blockRead, blockWrite] = splitPair(item.BlockIO);
+    return {
+      cpu_percent: percent(item.CPUPerc),
+      memory_used_bytes: memUsed,
+      memory_limit_bytes: memLimit,
+      memory_percent: percent(item.MemPerc),
+      net_rx_bytes: netRx,
+      net_tx_bytes: netTx,
+      block_read_bytes: blockRead,
+      block_write_bytes: blockWrite,
+      pids: Number(item.PIDs ?? 0),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Never print a space token that a process command line happens to carry. */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/(--token[=\s]+)(\"?[^\s\"]+\"?)/g, "$1***")
+    .replace(/(PRIME_SPACE_TOKEN=)(\S+)/g, "$1***");
+}
+
+export function parseTopProcesses(raw: string): TopProcess[] {
+  const rows: TopProcess[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+([0-9.]+)\s+([0-9.]+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    rows.push({
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      stat: match[3]!,
+      cpu: Number(match[4]),
+      mem: Number(match[5]),
+      rss_kib: Number(match[6]),
+      command: redactSecrets(match[7]!.trim()).slice(0, 400),
+    });
+  }
+  return rows.sort((a, b) => b.cpu - a.cpu || b.rss_kib - a.rss_kib);
+}
+
+function captureTopStats(runtime: RuntimeInfo, space: SpaceEntry): TopStats | undefined {
+  if (runtime.kind === "apple") {
+    const r = exec("container", ["stats", "--no-stream", "--format", "json", space.container], 20_000);
+    return r.code === 0 ? parseAppleStats(r.out) : undefined;
+  }
+  if (runtime.kind === "podman") {
+    const r = runtimeExec(runtime, ["stats", "--no-stream", "--format", "json", space.container], 20_000);
+    return r.code === 0 ? parsePodmanStats(r.out) : undefined;
+  }
+  const r = runtimeExec(runtime, ["stats", "--no-stream", "--format", "{{json .}}", space.container], 20_000);
+  return r.code === 0 ? parseDockerStats(r.out.trim()) : undefined;
+}
+
+function captureTopProcesses(runtime: RuntimeInfo, space: SpaceEntry): TopProcess[] {
+  const ps = ["ps", "-eo", "pid,ppid,stat,pcpu,pmem,rss,args"];
+  const r = runtime.kind === "apple"
+    ? exec("container", ["exec", space.container, ...ps], 20_000)
+    : runtimeExec(runtime, ["exec", space.container, ...ps], 20_000);
+  return r.code === 0 ? parseTopProcesses(r.out) : [];
+}
+
+function topBar(stats: TopStats | undefined): string {
+  if (!stats) return dim("no stats yet");
+  const parts: string[] = [];
+  parts.push("cpu " + (stats.cpu_percent === undefined ? dim("-") : stats.cpu_percent.toFixed(1) + "%"));
+  if (stats.memory_used_bytes !== undefined) {
+    const limit = stats.memory_limit_bytes ? " / " + formatBytes(stats.memory_limit_bytes) : "";
+    const pct = stats.memory_percent === undefined ? "" : " (" + stats.memory_percent.toFixed(1) + "%)";
+    parts.push("mem " + formatBytes(stats.memory_used_bytes) + limit + pct);
+  }
+  if (stats.net_rx_bytes !== undefined || stats.net_tx_bytes !== undefined) {
+    parts.push("net \u2193 " + formatBytes(stats.net_rx_bytes ?? 0) + " \u2191 " + formatBytes(stats.net_tx_bytes ?? 0));
+  }
+  if (stats.block_read_bytes !== undefined || stats.block_write_bytes !== undefined) {
+    parts.push("io " + formatBytes(stats.block_read_bytes ?? 0) + "/" + formatBytes(stats.block_write_bytes ?? 0));
+  }
+  if (stats.pids !== undefined) parts.push("pids " + stats.pids);
+  return parts.join("   ");
+}
+
+function renderTopFrame(
+  name: string,
+  space: SpaceEntry,
+  runtime: RuntimeInfo,
+  stats: TopStats | undefined,
+  processes: TopProcess[],
+  limit: number,
+  interval: number,
+  clear: boolean,
+): string {
+  const width = Math.min(Math.max(process.stdout.columns ?? 100, 60), 200);
+  const lines: string[] = [];
+  lines.push(clear ? "\x1b[2J\x1b[H" : "");
+  lines.push(bold("prime spaces top ") + space.id + "  [" + runtime.kind + "]  " + name);
+  if (space.local_url) lines.push(dim(space.local_url) + "   cgroup " + (space.cgroup_mode ?? "-"));
+  lines.push(topBar(stats));
+  lines.push("");
+  lines.push(dim("  PID  PPID STAT   CPU%   MEM%      RSS COMMAND"));
+  const rows = processes.slice(0, limit);
+  for (const row of rows) {
+    const prefix = " " + String(row.pid).padStart(5) + " " + String(row.ppid).padStart(5) + " " + row.stat.padEnd(4) +
+      " " + row.cpu.toFixed(1).padStart(5) + " " + row.mem.toFixed(1).padStart(6) + " " + formatBytes(row.rss_kib * 1024).padStart(8) + " " ;
+    const room = Math.max(10, width - prefix.length);
+    const command = row.command.length > room ? row.command.slice(0, room - 1) + "\u2026" : row.command;
+    lines.push(prefix + command);
+  }
+  if (rows.length === 0) lines.push(dim("  no process data (container may not expose ps)"));
+  lines.push("");
+  lines.push(dim("every " + interval + "s \u00b7 q to quit"));
+  return lines.join("\n") + "\n";
+}
+
+export async function spacesTop(ctx: Ctx): Promise<void> {
+  const name = requirePositional(ctx, "<name>", "prime spaces top <name>");
+  const space = requireSpace(ctx.config, name);
+  const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
+  const info = containerInfo(runtime, space.container);
+  if (info.state !== "running") fail('space "' + name + '" is not running', "Start it with: prime spaces start " + name);
+  const once = ctx.json || bool(ctx.parsed, "once") || !process.stdout.isTTY;
+  const interval = Math.max(1, Math.round(num(ctx.parsed, "interval") ?? 2));
+  const limit = Math.max(1, Math.round(num(ctx.parsed, "limit") ?? 15));
+  let previous: { usec: number; at: number } | undefined;
+  const sample = () => {
+    const stats = captureTopStats(runtime, space);
+    const processes = captureTopProcesses(runtime, space);
+    const now = Date.now();
+    if (stats?.cpu_usec !== undefined) {
+      if (previous) {
+        const seconds = (now - previous.at) / 1000;
+        if (seconds > 0) stats.cpu_percent = Math.max(0, ((stats.cpu_usec - previous.usec) / 1e6 / seconds) * 100);
+      }
+      previous = { usec: stats.cpu_usec, at: now };
+    }
+    return { stats, processes };
+  };
+  if (once) {
+    let snapshot = sample();
+    if (runtime.kind === "apple" && snapshot.stats && snapshot.stats.cpu_percent === undefined) {
+      await Bun.sleep(700);
+      snapshot = sample();
+    }
+    if (ctx.json) {
+      printJson({
+        name,
+        device: space.id,
+        runtime: runtime.kind,
+        url: space.local_url,
+        cpus: space.cpus,
+        memory: space.memory,
+        cgroup_mode: space.cgroup_mode ?? null,
+        stats: snapshot.stats ?? null,
+        processes: snapshot.processes,
+      });
+      return;
+    }
+    process.stdout.write(renderTopFrame(name, space, runtime, snapshot.stats, snapshot.processes, limit, interval, false));
+    return;
+  }
+  const tty = Boolean(process.stdout.isTTY);
+  const stdin = process.stdin;
+  let stopped = false;
+  const onSignal = () => { stopped = true; };
+  const onKey = (chunk: Buffer) => {
+    if (chunk.includes(0x71) || chunk.includes(0x03)) stopped = true;
+  };
+  if (tty) process.stdout.write("\x1b[?1049h\x1b[?25l");
+  try {
+    if (tty && typeof stdin.setRawMode === "function") {
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.on("data", onKey);
+    }
+    process.on("SIGINT", onSignal);
+    while (!stopped) {
+      const snapshot = sample();
+      process.stdout.write(renderTopFrame(name, space, runtime, snapshot.stats, snapshot.processes, limit, interval, true));
+      await Bun.sleep(interval * 1000);
+    }
+  } finally {
+    process.off("SIGINT", onSignal);
+    if (tty) {
+      stdin.off("data", onKey);
+      if (typeof stdin.setRawMode === "function") stdin.setRawMode(false);
+      stdin.pause();
+      process.stdout.write("\x1b[?25h\x1b[?1049l");
+    }
+  }
+}
+export const SPACE_COMMANDS = ["create", "start", "stop", "delete", "list", "logs", "doctor", "top"] as const;
 export type SpaceCommand = (typeof SPACE_COMMANDS)[number];
 
 export function isSpaceCommand(value: string | undefined): value is SpaceCommand {

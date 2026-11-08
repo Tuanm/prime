@@ -63,6 +63,7 @@ prime files upload <path> [--name <n>] [--key <k>] [--expiry-days <n>]
 prime files download <id|name> [-o <path>] [--key <k>] [--resume]
 prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
 prime spaces list|start|stop|delete|logs <name>
+prime spaces top <name> [--once] [--json]
 prime spaces doctor [--json]
 prime tools list <device-id>
 prime tools view <device-id>.<tool-id>
@@ -327,6 +328,7 @@ prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
 prime spaces stop dev                             # ephemeral: wipes the container
 prime spaces start work                           # persistent: resumes the container
 prime spaces logs work
+prime spaces top dev                              # live cpu/mem/processes (q quits)
 prime spaces doctor                               # rootless? systemd? crun? limits?
 prime spaces delete work                          # container + volume + device entry
 ```
@@ -382,6 +384,12 @@ if every attempt fails. Spaces created before limit/token tracking can be listed
 `--allow-no-limits` is passed.
 
 **Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`, `--allow-no-limits`.
+
+**Monitor.** `prime spaces top <name>` is an htop-style view of one space: cpu,
+memory, net/block io, pids and the process list from inside the container, sorted
+by cpu and refreshed every 2 seconds (`q`/Ctrl-C quits). `--once` prints one
+snapshot, `--json` returns it as data, `--interval` and `--limit` tune it.
+Command lines that carry the space token are redacted.
 
 ## Calling tools
 

@@ -14,7 +14,7 @@ import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/c
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
 import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
-import { defaultImage, isPodmanCgroupFailure, newSpaceId, parseSpaceMode, requireSpace } from "../src/spaces.ts";
+import { defaultImage, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace } from "../src/spaces.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
@@ -571,6 +571,23 @@ describe("spaces", () => {
     saveConfig(path, config);
     expect(loadConfig(path)).toEqual(config);
     expect(loadConfig(path).spaces.dev?.cgroup_mode).toBe("disabled");
+  });
+
+  test("top parsers read container stats and redact tokens", () => {
+    expect(parseHumanBytes("104.29 MiB")).toBeCloseTo(104.29 * 1024 ** 2, 0);
+    expect(parseHumanBytes("5.337MB")).toBeCloseTo(5_337_000, 0);
+    expect(parseHumanBytes("12B")).toBe(12);
+    const apple = parseAppleStats(JSON.stringify([{ cpuUsageUsec: 48_643, memoryUsageBytes: 105_984_000, memoryLimitBytes: 4_294_967_296, networkRxBytes: 19_416, networkTxBytes: 1_295, blockReadBytes: 97_349_632, blockWriteBytes: 0, numProcesses: 5 }]));
+    expect(apple?.memory_used_bytes).toBe(105_984_000);
+    expect(apple?.pids).toBe(5);
+    const podman = parsePodmanStats(JSON.stringify([{ cpu_percent: "19.84%", mem_usage: "5.337MB / 4.295GB", mem_percent: "0.12%", net_io: "254B / 176B", block_io: "0B / 0B", pids: "5" }]));
+    expect(podman?.cpu_percent).toBeCloseTo(19.84, 2);
+    expect(podman?.memory_used_bytes).toBeCloseTo(5_337_000, 0);
+    expect(podman?.pids).toBe(5);
+    const processes = parseTopProcesses("PID PPID STAT %CPU %MEM RSS COMMAND\n 1 0 Ssl 0.8 0.6 29068 prime code-mcp --token abc123def\n 13 0 R 0.0 0.0 3740 ps -eo pid");
+    expect(processes[0]?.command).toContain("--token ***");
+    expect(processes[0]?.command).not.toContain("abc123def");
+    expect(redactSecrets("PRIME_SPACE_TOKEN=deadbeef")).toBe("PRIME_SPACE_TOKEN=***");
   });
 
   test("podman cgroup failures are recognised for the WSL fallbacks", () => {

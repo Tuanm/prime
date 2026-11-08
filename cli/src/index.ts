@@ -24,12 +24,12 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { isSpaceCommand, spacesCreate, spacesDelete, spacesDoctor, spacesList, spacesLogs, spacesStart, spacesStop } from "./spaces.ts";
+import { isSpaceCommand, spacesCreate, spacesDelete, spacesDoctor, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
 import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.16-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.17-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -79,6 +79,13 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("offline", "boolean", "No network access (Apple internal network or podman internal)"),
   flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
   flag("runtime", "string", "Runtime: apple|podman|docker", { placeholder: "<runtime>" }),
+  flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
+];
+
+const SPACE_TOP_FLAGS: FlagSpec[] = [
+  flag("interval", "number", "Refresh interval in seconds (default 2)", { placeholder: "<s>" }),
+  flag("limit", "number", "Process rows to show (default 15)", { placeholder: "<n>" }),
+  flag("once", "boolean", "Print one snapshot and exit"),
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
 ];
 
@@ -280,8 +287,10 @@ async function main(argv: string[]): Promise<void> {
           return spacesLogs(ctx);
         case "doctor":
           return spacesDoctor(ctx);
+        case "top":
+          return spacesTop(ctx);
         default:
-          throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, logs, doctor. ${usageLine("spaces")}`);
+          throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, logs, doctor, top. ${usageLine("spaces")}`);
       }
     case "files":
       switch (sub) {
@@ -343,6 +352,7 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
   if (topic === "spaces") {
     if (sub === "create") return SPACE_CREATE_FLAGS;
     if (sub === "list") return SPACE_LIST_FLAGS;
+    if (sub === "top") return SPACE_TOP_FLAGS;
     if (isSpaceCommand(sub)) return SPACE_LIFECYCLE_FLAGS;
     return [];
   }
