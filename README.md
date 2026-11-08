@@ -112,6 +112,7 @@ prime spaces top dev                             # live cpu/mem/processes
 prime spaces doctor                              # rootless? systemd? limits?
 prime devices list                              # the space is a local device
 prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
+prime spaces enter dev                          # interactive shell (or: enter dev -- cat /etc/os-release)
 prime spaces stop dev
 prime spaces delete work
 ```

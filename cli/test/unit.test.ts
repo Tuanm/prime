@@ -14,7 +14,7 @@ import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/c
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
 import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
-import { defaultImage, entrypointScript, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace } from "../src/spaces.ts";
+import { defaultImage, entrypointScript, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace, spaceEnterArgs } from "../src/spaces.ts";
 import { parseOtpAuth, totpAt } from "../src/vaults.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
@@ -635,6 +635,12 @@ describe("spaces", () => {
     expect(isPodmanCgroupFailure("unable to apply cgroup configuration: unable to start unit")).toBe(true);
     expect(isPodmanCgroupFailure("requested OCI runtime runc is not compatible with NoCgroups: invalid argument")).toBe(true);
     expect(isPodmanCgroupFailure("Error: image not found")).toBe(false);
+  });
+
+  test("enter builds an interactive exec or a one-shot command", () => {
+    expect(spaceEnterArgs("prime-space-1", true, "/bin/bash", [])).toEqual(["exec", "-i", "-t", "prime-space-1", "/bin/bash"]);
+    expect(spaceEnterArgs("prime-space-1", false, "/bin/sh", [])).toEqual(["exec", "-i", "prime-space-1", "/bin/sh"]);
+    expect(spaceEnterArgs("prime-space-1", false, "/bin/bash", ["cat", "/etc/os-release"])).toEqual(["exec", "-i", "prime-space-1", "cat", "/etc/os-release"]);
   });
 
   test("requireSpace names the known spaces", () => {

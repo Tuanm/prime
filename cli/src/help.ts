@@ -30,7 +30,7 @@ COMMANDS
   files download <id|name> [options]      Download an uploaded file
   vaults <cmd>                            Encrypted values, secrets and TOTP codes
   spaces create [--name <n>] [--persistent] A rootless Linux codespace running the device buddy
-  spaces list|start|stop|delete|logs|top  Manage the codespaces (local devices)
+  spaces list|start|stop|delete|logs|enter|top  Manage the codespaces (local devices)
   vaults <cmd>                            Encrypted values, secrets and TOTP
   service install [options]               Run the device buddy as a user service (starts at
                                           login, restarts on failure)
@@ -449,6 +449,7 @@ USAGE
   prime spaces stop <name>
   prime spaces delete <name>
   prime spaces logs <name>
+  prime spaces enter <name> [--shell <path>] [-- <command...>]
   prime spaces top <name> [--once] [--json]
   prime spaces doctor [--json]
 
@@ -515,6 +516,11 @@ VAULTS AND RUN
   after the last space scope idles. Manage it with 'prime vaults status'.
   Manage entries with 'prime vaults --help'.
 
+ENTER
+  prime spaces enter <name> opens an interactive shell in a running space (root
+  inside the rootless container, not on the host). Pass a command after -- to
+  run it instead; --shell changes the default /bin/bash.
+
 TOP
   prime spaces top <name> opens a live activity monitor: container cpu/memory/io,
   and a process list from inside the space (ps), sorted by cpu. It refreshes every
@@ -548,6 +554,8 @@ EXAMPLES
   prime spaces start work                           # resumes the persistent space
   prime spaces delete work                          # container, volume, device entry
   prime spaces doctor                               # rootless? systemd? crun? limits?
+  prime spaces enter dev                            # interactive shell inside the space
+  prime spaces enter dev -- cat /etc/os-release     # or run one command
   prime spaces top dev                              # live cpu/mem/processes (q quits)
   prime spaces create --name pub --expose           # reachable through the gateway
 `;

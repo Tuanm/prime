@@ -329,6 +329,8 @@ prime devices list                                # the space shows up as "local
 prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
 prime spaces stop dev                             # ephemeral: wipes the container
 prime spaces start work                           # persistent: resumes the container
+prime spaces enter dev                            # interactive shell in the space
+prime spaces enter dev -- cat /etc/os-release     # or one command
 prime spaces logs work
 prime spaces top dev                              # live cpu/mem/processes (q quits)
 prime spaces create --name pub --expose           # anonymous device via the gateway

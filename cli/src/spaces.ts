@@ -12,6 +12,7 @@ import { bool, num, str, strList, type ParsedArgs } from "./args.ts";
 import { saveConfig, type Config, type SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1094,6 +1095,33 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
   }
 }
 
+
+/** Build the runtime exec invocation for an interactive shell/command. */
+export function spaceEnterArgs(container: string, tty: boolean, shell: string, command: string[]): string[] {
+  return ["exec", "-i", ...(tty ? ["-t"] : []), container, ...(command.length > 0 ? command : [shell])];
+}
+
+function runtimeInteractive(runtime: RuntimeInfo, args: string[]): number {
+  const env = runtime.kind === "podman" ? { ...process.env, ...(podmanEnv() ?? {}) } : process.env;
+  const result = spawnSync(runtime.bin, args, { stdio: "inherit", env });
+  if (result.error) fail("cannot start the container runtime", String(result.error));
+  return result.status ?? 1;
+}
+
+/** Open a shell in a running space, or run one command after `--`. */
+export async function spacesEnter(ctx: Ctx): Promise<void> {
+  const name = positional(ctx);
+  if (!name) throw new UsageError("missing <name>", "Usage: prime spaces enter <name> [--shell <path>] [-- <command...>]");
+  const space = requireSpace(ctx.config, name);
+  const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
+  const info = containerInfo(runtime, space.container);
+  if (info.state !== "running") fail('space "' + name + '" is not running', "Start it with: prime spaces start " + name);
+  const command = ctx.parsed.positionals.slice(3);
+  const shell = str(ctx.parsed, "shell") ?? "/bin/bash";
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  process.exitCode = runtimeInteractive(runtime, spaceEnterArgs(space.container, tty, shell, command));
+}
+
 export async function spacesStop(ctx: Ctx): Promise<void> {
   const name = requirePositional(ctx, "<name>", "prime spaces stop <name>");
   const space = requireSpace(ctx.config, name);
@@ -1622,7 +1650,7 @@ export async function spacesTop(ctx: Ctx): Promise<void> {
     }
   }
 }
-export const SPACE_COMMANDS = ["create", "start", "stop", "delete", "list", "logs", "doctor", "top"] as const;
+export const SPACE_COMMANDS = ["create", "start", "stop", "delete", "list", "logs", "enter", "doctor", "top"] as const;
 export type SpaceCommand = (typeof SPACE_COMMANDS)[number];
 
 export function isSpaceCommand(value: string | undefined): value is SpaceCommand {
