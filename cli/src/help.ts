@@ -406,7 +406,6 @@ USAGE
   prime spaces stop <name>
   prime spaces delete <name>
   prime spaces logs <name>
-  prime spaces doctor
   prime spaces doctor [--json]
 
 A space is a rootless Linux container that runs the device buddy (no gateway)
@@ -420,8 +419,10 @@ RUNTIME
   Linux   rootless podman (containers get a user namespace; root inside maps to
           your host user). Docker is a fallback and needs --allow-rootful unless
           it runs rootless.
-  A space is reached over the runtime private network: an Apple vmnet address,
-  or a 127.0.0.1 port published by podman/docker. Nothing is exposed to the LAN.
+  Every space gets its own network (an Apple vmnet or a podman bridge), so two
+  spaces cannot reach each other. The host reaches a space over that private
+  address (Apple) or a 127.0.0.1 publish (podman/docker); nothing is exposed to
+  the LAN.
 
 STATE
   --ephemeral (default)  stop deletes the container: the next start is a clean
@@ -430,16 +431,19 @@ STATE
                          container, so start resumes exactly where it was.
 
 SECURITY
-  Rootless runtime + no host mounts + no docker socket. Resource limits:
-  --cpus (default 2), --memory (default 4g); podman also pins --pids-limit 512
-  and no-new-privileges. The MCP server needs a random per-space token; the
-  container binds it inside the VM/namespace; nothing is published to the LAN.
-  Apple vmnet has NAT: an Apple space can reach the internet and host services on
-  0.0.0.0. Use podman/docker --offline for a no-network space.
-  --offline (podman/docker) puts the container on an internal network.
+  Rootless runtime + no host mounts + no docker socket + per-space network.
+  Resource limits are REQUIRED by default: --cpus (default 2), --memory
+  (default 4g); podman also pins --pids-limit 512 and no-new-privileges. If the
+  runtime cannot enforce cgroups (rootless podman without systemd, WSL2), create
+  refuses unless --allow-no-limits is passed. The MCP server needs a random
+  per-space token; it is passed in a 0600 env file, not on a process list.
+  Online spaces have NAT: they reach the internet and host services on 0.0.0.0.
+  --offline puts a space on an internal network (Apple internal vmnet or podman
+  internal): no internet, but the host can still reach it.
   WSL2 without systemd: enable systemd, or install crun - prime then forces
-  engine.runtime=crun and retries with --cgroups=disabled (limits unenforced).
-  runc cannot do NoCgroups, and podman has no per-container --runtime flag.
+  engine.runtime=crun and retries with --cgroups=disabled (no limits: refused
+  unless --allow-no-limits). runc cannot do NoCgroups, and podman has no
+  per-container --runtime flag.
 
 OPTIONS (create)
   --name <name>       space name (default: a generated device id)
@@ -447,9 +451,10 @@ OPTIONS (create)
   --image <image>     default: ghcr.io/tuanm/prime-space:<version>
   --cpus <n>          default 2
   --memory <size>     default 4g, e.g. 512m, 2g
-  --offline           no network access (podman/docker only)
+  --offline           internal network only (no internet), host still connects
   --runtime <rt>      apple|podman|docker
   --allow-rootful     permit rootful docker (not recommended)
+  --allow-no-limits   accept a space without enforced cpu/memory limits
 
 EXAMPLES
   prime spaces create --name dev                    # ephemeral, 2 cpu, 4g

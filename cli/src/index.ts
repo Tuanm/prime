@@ -29,7 +29,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.14-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.15-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -76,13 +76,15 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("image", "string", "Image to use (default: the release's ghcr.io/tuanm/prime-space tag)", { placeholder: "<image>" }),
   flag("cpus", "number", "CPUs for the container (default 2)", { placeholder: "<n>" }),
   flag("memory", "string", "Memory limit, e.g. 4g (default 4g)", { placeholder: "<size>" }),
-  flag("offline", "boolean", "No network access (podman/docker only)"),
+  flag("offline", "boolean", "No network access (Apple internal network or podman internal)"),
+  flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
   flag("runtime", "string", "Runtime: apple|podman|docker", { placeholder: "<runtime>" }),
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
 ];
 
 const SPACE_LIFECYCLE_FLAGS: FlagSpec[] = [
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
+  flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
 ];
 
 const SPACE_LIST_FLAGS: FlagSpec[] = [

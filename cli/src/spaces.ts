@@ -393,16 +393,19 @@ function volumeDelete(runtime: RuntimeInfo, name: string): void {
 }
 
 function networkCreate(runtime: RuntimeInfo, name: string, internal: boolean): void {
-  if (runtime.kind === "apple") return;
   const args = ["network", "create"];
   if (internal) args.push("--internal");
   args.push(name);
-  const r = runtimeExec(runtime, args, 60_000);
+  const r = runtime.kind === "apple" ? exec("container", args, 60_000) : runtimeExec(runtime, args, 60_000);
   if (r.code !== 0 && !/already exists/i.test(r.err)) fail("cannot create the space network", r.err.slice(0, 300));
 }
 
 function networkDelete(runtime: RuntimeInfo, name: string | undefined): void {
-  if (runtime.kind === "apple" || !name || name === "none") return;
+  if (!name || name === "none") return;
+  if (runtime.kind === "apple") {
+    exec("container", ["network", "delete", name], 60_000);
+    return;
+  }
   runtimeExec(runtime, ["network", "rm", name], 60_000);
 }
 
@@ -411,10 +414,13 @@ function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, e
   args.push("--env-file", envFile);
   if (runtime.kind === "apple") {
     args.push("-c", String(space.cpus ?? 2), "-m", space.memory ?? "4g");
+    if (space.network) args.push("--network", space.network);
     if (space.volume) args.push("-v", space.volume + ":/root/work");
     return args.concat([image]);
   }
-  args.push("--network", space.offline ? "none" : space.network ?? "", "--publish", "127.0.0.1:" + space.port + ":" + CONTAINER_PORT);
+  const podmanNetwork = space.network && space.network !== "none" ? space.network : "none";
+  args.push("--network", podmanNetwork);
+  if (podmanNetwork !== "none") args.push("--publish", "127.0.0.1:" + space.port + ":" + CONTAINER_PORT);
   if (limits) args.push("--cpus", String(space.cpus ?? 2), "--memory", space.memory ?? "4g");
   args.push(...(limits ? ["--pids-limit", "512"] : []), "--security-opt", "no-new-privileges");
   if (space.volume) args.push("-v", space.volume + ":/root/work");
@@ -517,9 +523,6 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   if (persistent && bool(ctx.parsed, "ephemeral")) throw new UsageError("--persistent and --ephemeral contradict each other");
   const offline = bool(ctx.parsed, "offline");
   const runtime = await detectRuntime(str(ctx.parsed, "runtime"), bool(ctx.parsed, "allow-rootful"));
-  if (offline && runtime.kind === "apple") {
-    throw new UsageError("--offline is not supported with Apple containers", "Apple vmnet always has NAT; use podman/docker for an offline space.");
-  }
   const image = str(ctx.parsed, "image") ?? defaultImage(version);
   const cpus = num(ctx.parsed, "cpus") ?? 2;
   const memory = str(ctx.parsed, "memory") ?? "4g";
@@ -530,7 +533,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const port = runtime.kind === "apple" ? CONTAINER_PORT : await freePort();
   const container = "prime-space-" + id.slice("space-".length);
   const volume = persistent ? container + "-work" : undefined;
-  const network = runtime.kind === "apple" ? undefined : (offline ? "none" : container + "-net");
+  const network = container + "-net";
   const space: SpaceEntry = {
     id,
     runtime: runtime.kind,
@@ -549,13 +552,19 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
 
   await ensureImage(runtime, image, (text) => ctx.note(text));
   if (volume) volumeCreate(runtime, volume);
-  if (network && network !== "none") networkCreate(runtime, network, offline);
+  networkCreate(runtime, network, offline);
   const started = Date.now();
   const run = runContainer(runtime, space, image, (text) => ctx.note(text));
   if (run.code !== 0) {
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
     fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
+  }
+  if (run.cgroup === "disabled" && !bool(ctx.parsed, "allow-no-limits")) {
+    runtimeExec(runtime, ["rm", "-f", container], 120_000);
+    if (volume) volumeDelete(runtime, volume);
+    networkDelete(runtime, network);
+    fail("this runtime cannot enforce the cpu/memory limits", "Enable systemd cgroups (run 'prime spaces doctor') and retry, or pass --allow-no-limits to accept a space without resource limits.");
   }
   let url: string | undefined;
   try {
@@ -591,6 +600,7 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
   const name = requirePositional(ctx, "<name>", "prime spaces start <name>");
   const space = requireSpace(ctx.config, name);
   const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
+  const allowNoLimits = bool(ctx.parsed, "allow-no-limits");
   await ensureImage(runtime, space.image, (text) => ctx.note(text));
   const existing = containerInfo(runtime, space.container);
   const started = Date.now();
@@ -598,10 +608,23 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     if (space.mode === "persistent") {
       fail('the persistent container for space "' + name + '" is gone', "Its volume still exists. Delete the space and create it again to start over.");
     }
+    // Spaces created before per-space networks keep working: give them one now.
+    if (!space.network || space.network === "none") {
+      space.network = space.container + "-net";
+      networkCreate(runtime, space.network, space.offline === true);
+    }
     const run = runContainer(runtime, space, space.image, (text) => ctx.note(text));
     if (run.code === 0) space.cgroup_mode = run.cgroup;
+    if (run.code === 0 && run.cgroup === "disabled" && !allowNoLimits) {
+      runtimeExec(runtime, ["rm", "-f", space.container], 120_000);
+      networkDelete(runtime, space.network);
+      fail("this runtime cannot enforce the cpu/memory limits", "Enable systemd cgroups (run 'prime spaces doctor') and retry, or pass --allow-no-limits to accept a space without resource limits.");
+    }
     if (run.code !== 0) fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
   } else if (existing.state === "stopped") {
+    if (space.cgroup_mode === "disabled" && !allowNoLimits) {
+      fail("space \"" + name + "\" was created without enforced cpu/memory limits", "Enable systemd cgroups and recreate it, or pass --allow-no-limits to start it anyway.");
+    }
     const globalFlags = runtime.kind === "podman" && !hasUserSystemd() ? ["--cgroup-manager=cgroupfs"] : [];
     let start = runtimeExec(runtime, [...globalFlags, "start", space.container], 120_000);
     if (start.code !== 0 && runtime.kind === "podman" && isPodmanCgroupFailure(start.err + start.out)) {
@@ -777,7 +800,14 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
         mode: space.mode,
         runtime: space.runtime,
         cgroup_mode: space.cgroup_mode ?? null,
-        limits_enforced: space.runtime === "apple" ? true : space.cgroup_mode !== "disabled",
+        limits_enforced:
+          space.runtime === "apple"
+            ? true
+            : space.cgroup_mode === "systemd" || space.cgroup_mode === "cgroupfs"
+              ? true
+              : space.cgroup_mode === "disabled"
+                ? false
+                : null,
       };
     });
   const hints: string[] = [];
@@ -790,8 +820,11 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
     if (!crun) hints.push("No crun: without systemd cgroups, runc cannot disable cgroups. Install crun (sudo apt install crun) as the fallback.");
   }
   if (rootless === false) hints.push("podman is running rootful; prime only accepts rootless podman.");
-  if (spaces.some((space) => !space.limits_enforced)) {
-    hints.push("Some spaces were created with cgroups disabled; cpu/memory limits are not enforced for them. Delete and recreate after fixing systemd.");
+  if (spaces.some((space) => space.limits_enforced === false)) {
+    hints.push("Some spaces were created with cgroups disabled; cpu/memory limits are not enforced for them. Delete and recreate after fixing systemd, or start them with --allow-no-limits.");
+  }
+  if (spaces.some((space) => space.limits_enforced === null)) {
+    hints.push("Some spaces predate limit tracking; recreate them to record and enforce limits.");
   }
   if (ctx.json) {
     printJson({
@@ -823,7 +856,7 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
       space.mode,
       space.runtime,
       space.cgroup_mode ?? dim("-"),
-      space.limits_enforced ? green("enforced") : yellow("not enforced"),
+      space.limits_enforced === null ? yellow("unknown") : space.limits_enforced ? green("enforced") : yellow("not enforced"),
     ]);
     ctx.out(table(["SPACE", "MODE", "RUNTIME", "CGROUPS", "LIMITS"], rows));
   }

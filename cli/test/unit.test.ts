@@ -563,11 +563,13 @@ describe("spaces", () => {
       token: "t0k",
       cpus: 2,
       memory: "4g",
+      cgroup_mode: "disabled",
       local_url: "http://192.168.64.4:7777",
     };
     config.devices["space-1234abcd"] = { local_url: "http://192.168.64.4:7777", token: "t0k", space: "dev" };
     saveConfig(path, config);
     expect(loadConfig(path)).toEqual(config);
+    expect(loadConfig(path).spaces.dev?.cgroup_mode).toBe("disabled");
   });
 
   test("podman cgroup failures are recognised for the WSL fallbacks", () => {

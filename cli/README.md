@@ -342,15 +342,21 @@ address, or a loopback publish - so nothing is exposed to the LAN.
 clean. `--persistent` mounts a named volume at `/root/work` and keeps the
 container on stop, so start resumes it.
 
-**Security.** Rootless runtime, no host mounts, no docker socket; the space token
-travels in a 0600 env file, not on a process list. Apple vmnet has NAT, so an
-Apple space can reach the internet and host services bound to 0.0.0.0 (but not
-the host filesystem); use podman/docker `--offline` when a space must have no
-network. `--cpus` and
-`--memory` bound the container; podman also sets `--pids-limit 512` and
-`no-new-privileges`. The MCP server only answers with the random per-space token,
-and `--offline` (podman/docker) puts it on an internal network. The image is
-`ghcr.io/tuanm/prime-space:<version>`, built multi-arch by the release workflow.
+**Networks.** Every space gets its own network (Apple vmnet or podman bridge),
+deleted with the space: two spaces cannot reach each other. The host connects over
+the space's private address; nothing is published to the LAN. `--offline` switches
+to an internal network (no internet) on both runtimes while the host keeps access.
+
+**Security.** Rootless runtime, no host mounts, no docker socket, per-space
+network; the space token travels in a 0600 env file, not on a process list.
+`--cpus` and `--memory` bound the container, and **limits are required**: when the
+runtime cannot enforce cgroups (podman without systemd, WSL2 crun fallback),
+create refuses instead of silently running unlimited, unless you pass
+`--allow-no-limits`. Online spaces have NAT (internet and host services on
+0.0.0.0, not the host filesystem); `--offline` gives a no-internet internal
+network on Apple and podman alike. The MCP server only answers with the random
+per-space token. The image is `ghcr.io/tuanm/prime-space:<version>`, built
+multi-arch by the release workflow.
 
 **Diagnose.** `prime spaces doctor` prints the platform (including WSL2 detection),
 uid, podman version/rootless flag, cgroup manager and OCI runtime, the user
@@ -363,14 +369,15 @@ fails while applying cgroup configuration or moving the rootless netns. Two fixe
    then `loginctl enable-linger $USER`. This keeps cpus/memory limits.
 2. Or install **crun** (`sudo apt install crun`): only crun accepts NoCgroups, so
    prime forces podman's `engine.runtime` to crun for its own containers (via
-   `CONTAINERS_CONF_OVERRIDE`) and retries with `--cgroups=disabled` (limits
-   unenforced, a warning is printed). runc rejects that with "not compatible with
-   NoCgroups"; podman no longer has a per-container `--runtime` flag.
+   `CONTAINERS_CONF_OVERRIDE`) and retries with `--cgroups=disabled` (no limits:
+   create refuses unless `--allow-no-limits`). runc rejects that with "not
+   compatible with NoCgroups"; podman no longer has a per-container `--runtime`
+   flag.
 
 prime tries the default, then cgroupfs, then the crun fallback; the hint prints
 if every attempt fails.
 
-**Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`.
+**Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`, `--allow-no-limits`.
 
 ## Calling tools
 
