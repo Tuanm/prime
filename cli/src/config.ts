@@ -76,6 +76,16 @@ export interface SpaceEntry {
   cgroup_mode?: "systemd" | "cgroupfs" | "disabled";
   /** Host directory (0700) holding the token file mounted read-only. */
   secret_dir?: string;
+  /** Publish this space through a gateway as an anonymous device. */
+  expose?: boolean;
+  /** Gateway origin used for --expose. */
+  gateway?: string;
+  /** Gateway device id assigned to this space (anonymous). */
+  gateway_device?: string;
+  /** Device token for the gateway device (not the local MCP token). */
+  remote_token?: string;
+  /** Gateway credential used for registration/probes, when the gateway needs one. */
+  gateway_token?: string;
   /** Where the MCP server answers right now; recomputed on every start. */
   local_url?: string;
   created_at?: string;
@@ -168,6 +178,11 @@ export function parseConfig(text: string, source: string): Config {
         ? { cgroup_mode: entry.cgroup_mode }
         : {}),
       ...(asString(entry.secret_dir) ? { secret_dir: asString(entry.secret_dir) } : {}),
+      ...(entry.expose === true ? { expose: true } : {}),
+      ...(asString(entry.gateway) ? { gateway: asString(entry.gateway) } : {}),
+      ...(asString(entry.gateway_device) ? { gateway_device: asString(entry.gateway_device) } : {}),
+      ...(asString(entry.remote_token) ? { remote_token: asString(entry.remote_token) } : {}),
+      ...(asString(entry.gateway_token) ? { gateway_token: asString(entry.gateway_token) } : {}),
       ...(asString(entry.local_url) ? { local_url: asString(entry.local_url) } : {}),
       ...(asString(entry.created_at) ? { created_at: asString(entry.created_at) } : {}),
     };
@@ -272,6 +287,11 @@ export function serializeConfig(config: Config): string {
         ["offline", space.offline === true ? true : undefined],
         ["cgroup_mode", space.cgroup_mode],
         ["secret_dir", space.secret_dir],
+        ["expose", space.expose === true ? true : undefined],
+        ["gateway", space.gateway],
+        ["gateway_device", space.gateway_device],
+        ["remote_token", space.remote_token],
+        ["gateway_token", space.gateway_token],
         ["local_url", space.local_url],
         ["created_at", space.created_at],
       ] as const) {

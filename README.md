@@ -104,6 +104,7 @@ inside it with no gateway, and the container is registered like any other device
 ```bash
 prime spaces create --name dev                  # ephemeral: stop wipes it
 prime spaces create --name work --persistent    # keeps /root/work across stop/start
+prime spaces create --name pub --expose         # anonymous device via the gateway
 prime spaces list
 prime spaces top dev                             # live cpu/mem/processes
 prime spaces doctor                              # rootless? systemd? limits?
@@ -120,7 +121,9 @@ config or env), no host mounts, no docker socket, and cpus/memory limits; when t
 enforce those limits, create refuses unless `--allow-no-limits` is passed. The
 runtime's private address is the only way in: nothing is published to the LAN.
 Online spaces have NAT (internet and host services on 0.0.0.0, not the host
-filesystem); `--offline` is the no-internet mode on Apple and podman alike. The
+filesystem); `--offline` is the no-internet mode on Apple and podman alike.
+`--expose` makes a space reachable through the gateway as an anonymous device
+(its connect URL is a credential: treat it like root access). The
 image is public: `ghcr.io/tuanm/prime-space:<version>`.
 
 ## Access control

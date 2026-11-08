@@ -15,8 +15,10 @@ import { CliError, UsageError } from "./errors.ts";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
+import { bold, cyan, dim, green, printJson, red, table, yellow } from "./output.ts";
 import { formatBytes } from "./files.ts";
+import { connectUrlFor, probeCredential, registerAnonymous, type AnonymousDevice } from "./connect.ts";
+import { ENV, resolveGateway } from "./target.ts";
 
 const SPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CONTAINER_PORT = 7777;
@@ -416,9 +418,28 @@ function networkDelete(runtime: RuntimeInfo, name: string | undefined): void {
   runtimeExec(runtime, ["network", "rm", name], 60_000);
 }
 
-const TOKEN_SCRIPT =
-  'set -e; token=$(cat /run/prime/token); [ -n "$token" ] || { echo "prime: token file missing" >&2; exit 1; }; ' +
-  'exec /usr/local/bin/prime code-mcp --bind 0.0.0.0 --port 7777 --token "$token"';
+function shellArg(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+/** The container entrypoint. The local MCP token (and, when exposed, the
+ *  gateway device token) come from read-only mounted files; only the public
+ *  gateway origin and device id are command-line arguments. */
+export function entrypointScript(space: SpaceEntry): string {
+  const base =
+    'set -e; token=$(cat /run/prime/token); [ -n "$token" ] || { echo "prime: token file missing" >&2; exit 1; }; ';
+  if (space.expose && space.gateway && space.gateway_device) {
+    return (
+      base +
+      'export PRIME_CHILD_DEVICE_TOKEN=$(cat /run/prime/gateway-token); ' +
+      'exec /usr/local/bin/prime code-mcp --bind 0.0.0.0 --port 7777 --token "$token" --gateway ' +
+      shellArg(space.gateway) +
+      " --id " +
+      shellArg(space.gateway_device)
+    );
+  }
+  return base + 'exec /usr/local/bin/prime code-mcp --bind 0.0.0.0 --port 7777 --token "$token"';
+}
 
 /** Host directory (0700) with a 0600 token file, mounted read-only into the
  *  space, so the token never appears in the container config or env. */
@@ -429,10 +450,17 @@ function secretDirFor(ctx: Ctx, container: string): string {
   return dir;
 }
 
-function ensureSecret(dir: string, token: string): void {
+function ensureSecret(dir: string, token: string, remoteToken?: string): void {
   const file = join(dir, "token");
   writeFileSync(file, token + "\n", { mode: 0o600 });
   chmodSync(file, 0o600);
+  const remote = join(dir, "gateway-token");
+  if (remoteToken) {
+    writeFileSync(remote, remoteToken + "\n", { mode: 0o600 });
+    chmodSync(remote, 0o600);
+  } else {
+    rmSync(remote, { force: true });
+  }
 }
 
 function removeSecret(dir: string | undefined): void {
@@ -447,7 +475,7 @@ function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, s
     args.push("-c", String(space.cpus ?? 2), "-m", space.memory ?? "4g");
     if (space.network) args.push("--network", space.network);
     if (space.volume) args.push("-v", space.volume + ":/root/work");
-    return args.concat([image, "-c", TOKEN_SCRIPT]);
+    return args.concat([image, "-c", entrypointScript(space)]);
   }
   const podmanNetwork = space.network && space.network !== "none" ? space.network : "none";
   args.push("--network", podmanNetwork);
@@ -455,7 +483,7 @@ function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, s
   if (limits) args.push("--cpus", String(space.cpus ?? 2), "--memory", space.memory ?? "4g");
   args.push(...(limits ? ["--pids-limit", "512"] : []), "--security-opt", "no-new-privileges");
   if (space.volume) args.push("-v", space.volume + ":/root/work");
-  return args.concat([image, "-c", TOKEN_SCRIPT]);
+  return args.concat([image, "-c", entrypointScript(space)]);
 }
 
 async function waitReady(url: string, token: string, quiet: boolean): Promise<void> {
@@ -544,6 +572,98 @@ function registerDevice(config: Config, spaceName: string, space: SpaceEntry, ur
 
 // ---- commands ---------------------------------------------------------------
 
+
+
+function resolveGatewayToken(ctx: Ctx, saved?: string): string | undefined {
+  const flag = str(ctx.parsed, "gateway-token");
+  if (flag) return flag;
+  const env = process.env[ENV.gatewayToken];
+  if (env) return env;
+  return saved || ctx.config.defaults.gateway_token || undefined;
+}
+
+/** Register/update the anonymous device entry for an exposed space. */
+function rememberExposed(
+  ctx: Ctx,
+  name: string,
+  space: SpaceEntry,
+  device: AnonymousDevice,
+  gateway: string,
+  gatewayToken: string | undefined,
+): void {
+  // Drop the previous remote entry only; the local direct entry stays.
+  for (const [id, entry] of Object.entries(ctx.config.devices)) {
+    if (entry.space === name && !entry.local_url) delete ctx.config.devices[id];
+  }
+  ctx.config.devices[device.deviceId] = {
+    gateway,
+    ...(gatewayToken ? { gateway_token: gatewayToken } : {}),
+    token: device.token,
+    anonymous: true,
+    connected_at: new Date().toISOString(),
+    note: "anonymous device exposed by 'prime spaces create'",
+    space: name,
+  };
+  space.expose = true;
+  space.gateway = gateway;
+  space.gateway_device = device.deviceId;
+  space.remote_token = device.token;
+  if (gatewayToken) space.gateway_token = gatewayToken;
+}
+
+/** Is the anonymous device still accepted? Re-register when the gateway has
+ *  forgotten it (unused anonymous devices expire). */
+async function refreshExposure(ctx: Ctx, name: string, space: SpaceEntry, gatewayToken: string | undefined): Promise<void> {
+  const gateway = space.gateway;
+  if (!gateway || !space.gateway_device || !space.remote_token) {
+    fail('space "' + name + '" was exposed but its gateway credentials are missing', "Delete the space and create it again with --expose.");
+  }
+  let verdict: "valid" | "online" | "rejected" | "disabled" | "locked" | "unknown";
+  try {
+    const probe = await probeCredential(gateway, space.gateway_device, space.remote_token, gatewayToken);
+    verdict = probe.verdict;
+  } catch (err) {
+    // Keep the local space usable when the gateway is temporarily unreachable;
+    // the tunnel inside the space retries on its own.
+    ctx.note(yellow("  warning: cannot reach the gateway for \"" + name + "\": " + (err instanceof Error ? err.message : String(err))));
+    ensureSecret(space.secret_dir!, space.token, space.remote_token);
+    return;
+  }
+  if (verdict === "rejected") {
+    const device = await registerAnonymous(gateway, gatewayToken);
+    rememberExposed(ctx, name, space, device, gateway, gatewayToken);
+    ctx.note("  the old anonymous device expired; registered " + device.deviceId);
+  } else if (verdict === "disabled") {
+    fail('the gateway disabled the anonymous device for space "' + name + '"', "Create the space again with --expose (or without it for a local-only space).");
+  } else if (verdict === "locked") {
+    fail('the gateway temporarily locked the anonymous device for space "' + name + '"', "Retry in about 10 minutes, or create the space again with --expose.");
+  } else if (verdict === "unknown") {
+    ctx.note(yellow("  warning: could not verify the anonymous device; using it anyway"));
+  }
+  ensureSecret(space.secret_dir!, space.token, space.remote_token);
+}
+
+async function waitGatewayOnline(
+  gateway: string,
+  deviceId: string,
+  token: string,
+  gatewayToken: string | undefined,
+  timeoutMs = 8_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const probe = await probeCredential(gateway, deviceId, token, gatewayToken);
+      if (probe.verdict === "online") return true;
+      if (probe.verdict === "rejected" || probe.verdict === "disabled" || probe.verdict === "locked") return false;
+    } catch {
+      return false;
+    }
+    if (Date.now() > deadline) return false;
+    await Bun.sleep(500);
+  }
+}
+
 export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const name = str(ctx.parsed, "name") ?? newSpaceId();
   assertSpaceName(name);
@@ -553,7 +673,13 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const persistent = bool(ctx.parsed, "persistent");
   if (persistent && bool(ctx.parsed, "ephemeral")) throw new UsageError("--persistent and --ephemeral contradict each other");
   const offline = bool(ctx.parsed, "offline");
+  const expose = bool(ctx.parsed, "expose");
+  if (expose && offline) {
+    throw new UsageError("--expose needs network access", "An offline space cannot reach the gateway; drop --offline to expose it.");
+  }
   const runtime = await detectRuntime(str(ctx.parsed, "runtime"), bool(ctx.parsed, "allow-rootful"));
+  const gateway = expose ? resolveGateway(ctx.config, str(ctx.parsed, "gateway")) : undefined;
+  const gatewayToken = expose ? resolveGatewayToken(ctx) : undefined;
   const image = str(ctx.parsed, "image") ?? defaultImage(version);
   const cpus = num(ctx.parsed, "cpus") ?? 2;
   const memory = str(ctx.parsed, "memory") ?? "4g";
@@ -587,6 +713,19 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const secretDir = secretDirFor(ctx, container);
   ensureSecret(secretDir, token);
   space.secret_dir = secretDir;
+  let exposed: AnonymousDevice | undefined;
+  if (expose) {
+    try {
+      exposed = await registerAnonymous(gateway!, gatewayToken);
+    } catch (err) {
+      removeSecret(secretDir);
+      networkDelete(runtime, network);
+      if (volume) volumeDelete(runtime, volume);
+      throw err;
+    }
+    rememberExposed(ctx, name, space, exposed, gateway!, gatewayToken);
+    ensureSecret(secretDir, token, exposed.token);
+  }
   const started = Date.now();
   const run = runContainer(runtime, space, image, secretDir, bool(ctx.parsed, "allow-no-limits"), (text) => ctx.note(text));
   if (run.code !== 0) {
@@ -617,11 +756,34 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   space.local_url = url;
   space.cgroup_mode = run.cgroup;
   const bootMs = Date.now() - started;
+  let exposedOnline = false;
+  if (expose && exposed) {
+    exposedOnline = await waitGatewayOnline(gateway!, exposed.deviceId, exposed.token, gatewayToken);
+  }
   registerDevice(ctx.config, name, space, url);
   ctx.config.spaces[name] = space;
   saveConfig(ctx.configPath, ctx.config);
   if (ctx.json) {
-    printJson({ created: true, name, space, device: space.id, url, boot_ms: bootMs, config_path: ctx.configPath });
+    printJson({
+      created: true,
+      name,
+      space,
+      device: space.id,
+      url,
+      boot_ms: bootMs,
+      ...(expose && exposed
+        ? {
+            exposed: {
+              device: exposed.deviceId,
+              gateway: gateway!,
+              connect_url: connectUrlFor(gateway!, exposed.deviceId, exposed.token),
+              online: exposedOnline,
+              ...(exposed.rateLimit ? { rate_limit: exposed.rateLimit } : {}),
+            },
+          }
+        : {}),
+      config_path: ctx.configPath,
+    });
     return;
   }
   ctx.out(green("\u2713") + " created space " + bold(name) + " (" + space.mode + ", " + runtime.kind + ")");
@@ -630,7 +792,13 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   ctx.out("  image     " + image);
   ctx.out("  limits    " + cpus + " cpu, " + memory + (offline ? ", offline" : ""));
   ctx.out("  boot      " + (bootMs / 1000).toFixed(1) + "s");
-  ctx.out("  try       " + dim("prime tools call " + space.id + ".bash '{\"cwd\":\"/root/work\",\"command\":\"uname -a\"}'"));
+  if (expose && exposed) {
+    ctx.out("  exposed   " + bold(exposed.deviceId) + (exposedOnline ? green(" (online)") : yellow(" (tunnel starting)")));
+    ctx.out("  connect   " + cyan(connectUrlFor(gateway!, exposed.deviceId, exposed.token)));
+    ctx.note(yellow("  warning: anyone with that URL can run commands in this space"));
+  } else {
+    ctx.out("  try       " + dim("prime tools call " + space.id + ".bash '{\"cwd\":\"/root/work\",\"command\":\"uname -a\"}'"));
+  }
 }
 
 export async function spacesStart(ctx: Ctx): Promise<void> {
@@ -647,7 +815,13 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     if (!space.secret_dir) ctx.note("  legacy space: recreate it to move the token out of the container config");
   }
   if (!space.secret_dir) space.secret_dir = secretDirFor(ctx, space.container);
-  ensureSecret(space.secret_dir, space.token);
+  const expose = space.expose === true;
+  let gatewayToken: string | undefined;
+  if (expose) {
+    gatewayToken = resolveGatewayToken(ctx, space.gateway_token);
+    await refreshExposure(ctx, name, space, gatewayToken);
+  }
+  ensureSecret(space.secret_dir, space.token, expose ? space.remote_token : undefined);
   const started = Date.now();
   if (existing.state === "missing") {
     if (space.mode === "persistent") {
@@ -685,14 +859,38 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
   if (!url) fail("the space container is running but has no address yet");
   await waitReady(url, space.token, ctx.quiet);
   space.local_url = url;
+  let exposedOnline = false;
+  if (expose && space.gateway && space.gateway_device && space.remote_token) {
+    exposedOnline = await waitGatewayOnline(space.gateway, space.gateway_device, space.remote_token, gatewayToken);
+  }
   registerDevice(ctx.config, name, space, url);
   saveConfig(ctx.configPath, ctx.config);
   if (ctx.json) {
-    printJson({ started: true, name, space, url, boot_ms: Date.now() - started });
+    printJson({
+      started: true,
+      name,
+      space,
+      url,
+      boot_ms: Date.now() - started,
+      ...(expose && space.gateway && space.gateway_device && space.remote_token
+        ? {
+            exposed: {
+              device: space.gateway_device,
+              gateway: space.gateway,
+              connect_url: connectUrlFor(space.gateway, space.gateway_device, space.remote_token),
+              online: exposedOnline,
+            },
+          }
+        : {}),
+    });
     return;
   }
   ctx.out(green("\u2713") + " started space " + bold(name) + " (" + ((Date.now() - started) / 1000).toFixed(1) + "s)");
   ctx.out("  url       " + url);
+  if (expose && space.gateway && space.gateway_device && space.remote_token) {
+    ctx.out("  exposed   " + bold(space.gateway_device) + (exposedOnline ? green(" (online)") : yellow(" (tunnel starting)")));
+    ctx.out("  connect   " + cyan(connectUrlFor(space.gateway, space.gateway_device, space.remote_token)));
+  }
 }
 
 export async function spacesStop(ctx: Ctx): Promise<void> {
@@ -730,7 +928,9 @@ export async function spacesDelete(ctx: Ctx): Promise<void> {
   removeSecret(space.secret_dir);
   if (!space.secret_dir && space.container) removeSecret(secretDirFor(ctx, space.container));
   delete ctx.config.spaces[name];
-  delete ctx.config.devices[space.id];
+  for (const [deviceId, entry] of Object.entries(ctx.config.devices)) {
+    if (entry.space === name || deviceId === space.id) delete ctx.config.devices[deviceId];
+  }
   saveConfig(ctx.configPath, ctx.config);
   if (ctx.json) {
     printJson({ deleted: true, name, device: space.id });
@@ -789,9 +989,10 @@ export async function spacesList(ctx: Ctx): Promise<void> {
     row.state === "running" ? green("running") : row.state === "stopped" ? yellow("stopped") : red(row.state),
     row.space.id,
     row.url ?? dim("-"),
+    row.space.gateway_device ?? dim("-"),
     row.space.image,
   ]);
-  ctx.out(table(["NAME", "MODE", "STATUS", "DEVICE", "URL", "IMAGE"], tableRows));
+  ctx.out(table(["NAME", "MODE", "STATUS", "DEVICE", "URL", "EXPOSED", "IMAGE"], tableRows));
   const running = rows.filter((r) => r.state === "running").length;
   ctx.note(dim(running + "/" + rows.length + " running" + (runtimeError ? " (runtime: " + runtimeError + ")" : "")));
 }
@@ -845,6 +1046,14 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
         runtime: space.runtime,
         cgroup_mode: space.cgroup_mode ?? null,
         token_in_file: Boolean(space.secret_dir),
+        exposed: space.gateway_device
+          ? {
+              device: space.gateway_device,
+              gateway: space.gateway,
+              connect_url:
+                space.gateway && space.remote_token ? connectUrlFor(space.gateway, space.gateway_device, space.remote_token) : null,
+            }
+          : null,
         limits_enforced:
           space.runtime === "apple"
             ? true

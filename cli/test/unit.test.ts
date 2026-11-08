@@ -14,7 +14,7 @@ import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/c
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
 import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
-import { defaultImage, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace } from "../src/spaces.ts";
+import { defaultImage, entrypointScript, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace } from "../src/spaces.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
@@ -565,6 +565,10 @@ describe("spaces", () => {
       memory: "4g",
       cgroup_mode: "disabled",
       secret_dir: "/home/me/.prime/spaces/prime-space-1234abcd",
+      expose: true,
+      gateway: "https://gw.example.dev",
+      gateway_device: "anon-abc",
+      remote_token: "remotetoken",
       local_url: "http://192.168.64.4:7777",
     };
     config.devices["space-1234abcd"] = { local_url: "http://192.168.64.4:7777", token: "t0k", space: "dev" };
@@ -588,6 +592,28 @@ describe("spaces", () => {
     expect(processes[0]?.command).toContain("--token ***");
     expect(processes[0]?.command).not.toContain("abc123def");
     expect(redactSecrets("PRIME_SPACE_TOKEN=deadbeef")).toBe("PRIME_SPACE_TOKEN=***");
+  });
+
+  test("the exposed entrypoint reads secrets from files and passes the gateway", () => {
+    const space = {
+      id: "space-1",
+      runtime: "apple",
+      image: "i",
+      mode: "ephemeral" as const,
+      container: "c",
+      token: "localtoken",
+      expose: true,
+      gateway: "https://gw.example.dev",
+      gateway_device: "anon-abc",
+      remote_token: "remotetoken",
+    };
+    const script = entrypointScript(space);
+    expect(script).toContain("cat /run/prime/token");
+    expect(script).toContain("cat /run/prime/gateway-token");
+    expect(script).toContain("--gateway 'https://gw.example.dev' --id 'anon-abc'");
+    expect(script).not.toContain("localtoken");
+    expect(script).not.toContain("remotetoken");
+    expect(entrypointScript({ ...space, expose: false }).includes("--gateway")).toBe(false);
   });
 
   test("podman cgroup failures are recognised for the WSL fallbacks", () => {

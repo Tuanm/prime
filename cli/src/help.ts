@@ -400,7 +400,7 @@ EXIT CODES
 const SPACES = `prime spaces - disposable or persistent Linux codespaces
 
 USAGE
-  prime spaces create [--name <name>] [--persistent] [options]
+  prime spaces create [--name <name>] [--persistent] [--expose] [options]
   prime spaces list [--json]
   prime spaces start <name>
   prime spaces stop <name>
@@ -424,6 +424,17 @@ RUNTIME
   spaces cannot reach each other. The host reaches a space over that private
   address (Apple) or a 127.0.0.1 publish (podman/docker); nothing is exposed to
   the LAN.
+
+EXPOSE
+  --expose publishes the space through the gateway as an anonymous device: the
+  device buddy in the space opens an outbound tunnel, so any MCP client with the
+  printed connect URL can call its tools. The local direct device stays. Pick a
+  gateway with --gateway; --gateway-token is only for gateways that require one.
+  --offline cannot be exposed (no route to the gateway). Treat the connect URL
+  like a root password: anyone holding it can run commands in the space.
+  Anonymous devices have a lower request budget and expire when left unused;
+  deleting the space removes the local entries, and the gateway drops the device
+  when it stays unused. The local direct device remains available either way.
 
 STATE
   --ephemeral (default)  stop deletes the container: the next start is a clean
@@ -462,6 +473,8 @@ OPTIONS (create)
   --cpus <n>          default 2
   --memory <size>     default 4g, e.g. 512m, 2g
   --offline           internal network only (no internet), host still connects
+  --expose            publish through the gateway as an anonymous device
+  --gateway <url>     gateway for --expose
   --runtime <rt>      apple|podman|docker
   --allow-rootful     permit rootful docker (not recommended)
   --allow-no-limits   accept a space without enforced cpu/memory limits
@@ -476,6 +489,7 @@ EXAMPLES
   prime spaces delete work                          # container, volume, device entry
   prime spaces doctor                               # rootless? systemd? crun? limits?
   prime spaces top dev                              # live cpu/mem/processes (q quits)
+  prime spaces create --name pub --expose           # reachable through the gateway
 `;
 export function rootHelp(): string {
   return ROOT;

@@ -64,6 +64,7 @@ prime files download <id|name> [-o <path>] [--key <k>] [--resume]
 prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
 prime spaces list|start|stop|delete|logs <name>
 prime spaces top <name> [--once] [--json]
+prime spaces create --expose [--gateway <url>]
 prime spaces doctor [--json]
 prime tools list <device-id>
 prime tools view <device-id>.<tool-id>
@@ -329,6 +330,7 @@ prime spaces stop dev                             # ephemeral: wipes the contain
 prime spaces start work                           # persistent: resumes the container
 prime spaces logs work
 prime spaces top dev                              # live cpu/mem/processes (q quits)
+prime spaces create --name pub --expose           # anonymous device via the gateway
 prime spaces doctor                               # rootless? systemd? crun? limits?
 prime spaces delete work                          # container + volume + device entry
 ```
@@ -384,6 +386,17 @@ if every attempt fails. Spaces created before limit/token tracking can be listed
 `--allow-no-limits` is passed.
 
 **Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`, `--allow-no-limits`.
+
+**Expose.** `--expose` publishes the space through the gateway as an anonymous
+device: the device buddy inside the space opens an outbound tunnel, so any MCP
+client with the printed connect URL can call its tools (the local direct device
+stays too). The connect URL is a credential: anyone who has it can run commands
+as root in the space. Anonymous devices have a lower request budget and expire
+when unused; `--offline` cannot be exposed. The gateway is chosen with
+`--gateway` (default: saved default, then the managed gateway); pass
+`--gateway-token` only when the gateway requires one. Deleting the space removes
+the local entries; the anonymous device expires on the gateway once unused, and
+the local direct device stays available either way.
 
 **Monitor.** `prime spaces top <name>` is an htop-style view of one space: cpu,
 memory, net/block io, pids and the process list from inside the container, sorted

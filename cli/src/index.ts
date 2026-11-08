@@ -29,7 +29,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.19-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.20-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -77,6 +77,9 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("cpus", "number", "CPUs for the container (default 2)", { placeholder: "<n>" }),
   flag("memory", "string", "Memory limit, e.g. 4g (default 4g)", { placeholder: "<size>" }),
   flag("offline", "boolean", "No network access (Apple internal network or podman internal)"),
+  flag("expose", "boolean", "Publish the space through the gateway as an anonymous device"),
+  flag("gateway", "string", "Gateway for --expose (default: saved default or the managed gateway)", { placeholder: "<url>" }),
+  flag("gateway-token", "string", "Gateway credential for --expose, only if the gateway needs one", { placeholder: "<token>" }),
   flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
   flag("runtime", "string", "Runtime: apple|podman|docker", { placeholder: "<runtime>" }),
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
@@ -92,6 +95,7 @@ const SPACE_TOP_FLAGS: FlagSpec[] = [
 const SPACE_LIFECYCLE_FLAGS: FlagSpec[] = [
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
   flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
+  flag("gateway-token", "string", "Gateway credential, only if the gateway needs one", { placeholder: "<token>" }),
 ];
 
 const SPACE_LIST_FLAGS: FlagSpec[] = [
