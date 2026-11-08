@@ -480,7 +480,7 @@ function wipeSecretFiles(dir: string | undefined): void {
 
 function writeVaultFile(ctx: Ctx, space: SpaceEntry): void {
   if (!space.vaults || space.vaults.length === 0 || !space.secret_dir) return;
-  const payload = vaultPayloadFor(ctx.configPath, space.vaults);
+  const payload = vaultPayloadFor(ctx.configPath, space.vaults, space.vault_kinds);
   const file = join(space.secret_dir, "vault.json");
   writeFileSync(file, JSON.stringify(payload), { mode: 0o600 });
   chmodSync(file, 0o600);
@@ -593,6 +593,20 @@ function registerDevice(config: Config, spaceName: string, space: SpaceEntry, ur
 
 
 
+function parseVaultKinds(ctx: Ctx): Array<"value" | "secret" | "code"> | undefined {
+  const raw = strList(ctx.parsed, "vault-kind");
+  if (raw.length === 0) return undefined;
+  const out = new Set<"value" | "secret" | "code">();
+  for (const item of raw) {
+    const value = item.toLowerCase();
+    if (value === "value" || value === "values") out.add("value");
+    else if (value === "secret" || value === "secrets") out.add("secret");
+    else if (value === "code" || value === "codes") out.add("code");
+    else throw new UsageError('unknown vault category "' + item + '"', "Use values, secrets or codes.");
+  }
+  return [...out];
+}
+
 function resolveGatewayToken(ctx: Ctx, saved?: string): string | undefined {
   const flag = str(ctx.parsed, "gateway-token");
   if (flag) return flag;
@@ -702,6 +716,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   let vaultCompanies = strList(ctx.parsed, "vault");
   if (bool(ctx.parsed, "vault-all")) vaultCompanies = allVaultCompanies(ctx.configPath);
   vaultCompanies = [...new Set(vaultCompanies)].sort();
+  const vaultKinds = parseVaultKinds(ctx);
   const image = str(ctx.parsed, "image") ?? defaultImage(version);
   const cpus = num(ctx.parsed, "cpus") ?? 2;
   const memory = str(ctx.parsed, "memory") ?? "4g";
@@ -727,6 +742,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     memory,
     ...(offline ? { offline: true } : {}),
     ...(vaultCompanies.length > 0 ? { vaults: vaultCompanies } : {}),
+    ...(vaultCompanies.length > 0 && vaultKinds ? { vault_kinds: vaultKinds } : {}),
     created_at: new Date().toISOString(),
   };
 

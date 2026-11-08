@@ -65,7 +65,7 @@ prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
 prime spaces list|start|stop|delete|logs <name>
 prime spaces top <name> [--once] [--json]
 prime spaces create --expose [--gateway <url>]
-prime spaces create --vault <company> [--vault <company>...]
+prime spaces create --vault <company> [--vault <company>...] [--vault-kind <values|secrets|codes>]
 prime vaults init|company|set|list|get|code|rm|assign|status
 prime spaces doctor [--json]
 prime tools list <device-id>

@@ -12,7 +12,7 @@ import { Database } from "bun:sqlite";
 import { createDecipheriv, createCipheriv, createHmac, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { bool, str } from "./args.ts";
+import { bool, str, strList } from "./args.ts";
 import { saveConfig } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
@@ -336,7 +336,7 @@ export function allVaultCompanies(configPath: string): string[] {
   }
 }
 
-export function vaultPayloadFor(configPath: string, companies: string[]): VaultPayload {
+export function vaultPayloadFor(configPath: string, companies: string[], kinds?: string[]): VaultPayload {
   const payload: VaultPayload = { values: {}, secrets: {}, codes: {} };
   if (companies.length === 0) return payload;
   const { db, key } = openDb(configPath, false);
@@ -351,6 +351,7 @@ export function vaultPayloadFor(configPath: string, companies: string[]): VaultP
         tag: Uint8Array;
       }>;
       for (const row of rows) {
+        if (kinds && kinds.length > 0 && !kinds.includes(row.kind)) continue;
         const plaintext = openSealed(key, sealed(row), aad(company, row.kind, row.name));
         const target = row.kind === "value" ? payload.values : row.kind === "secret" ? payload.secrets : payload.codes;
         if (Object.hasOwn(payload.values, row.name) || Object.hasOwn(payload.secrets, row.name) || Object.hasOwn(payload.codes, row.name)) {
@@ -552,6 +553,20 @@ function vaultsAssign(ctx: Ctx): void {
     if (selected.length === 0) throw new UsageError("no companies selected", "Pass company names, or --all.");
     for (const company of selected) assertCompany(db, company);
     space.vaults = [...new Set(selected)].sort();
+    const kindsRaw = strList(ctx.parsed, "vault-kind");
+    if (kindsRaw.length > 0) {
+      const kinds = new Set<"value" | "secret" | "code">();
+      for (const item of kindsRaw) {
+        const value = String(item).toLowerCase();
+        if (value === "value" || value === "values") kinds.add("value");
+        else if (value === "secret" || value === "secrets") kinds.add("secret");
+        else if (value === "code" || value === "codes") kinds.add("code");
+        else throw new UsageError('unknown vault category "' + item + '"', "Use values, secrets or codes.");
+      }
+      space.vault_kinds = [...kinds];
+    } else {
+      space.vault_kinds = undefined;
+    }
     saveConfig(ctx.configPath, ctx.config);
     ctx.out(green("\u2713") + " space " + bold(spaceName) + " can use " + space.vaults.join(", "));
     ctx.note(dim("  restart the space to pick up the assignment"));

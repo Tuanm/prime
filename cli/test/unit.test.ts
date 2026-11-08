@@ -608,6 +608,7 @@ describe("spaces", () => {
       gateway_device: "anon-abc",
       remote_token: "remotetoken",
       vaults: ["acme", "beta"],
+      vault_kinds: ["value", "code"] as Array<"value" | "secret" | "code">,
     };
     const script = entrypointScript(space);
     expect(script).toContain("cat /run/prime/token");

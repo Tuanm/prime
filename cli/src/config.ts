@@ -78,6 +78,8 @@ export interface SpaceEntry {
   secret_dir?: string;
   /** Companies whose values/secrets/codes this space may use. */
   vaults?: string[];
+  /** Optional subset of categories: value, secret, code (default: all). */
+  vault_kinds?: Array<"value" | "secret" | "code">;
   /** Publish this space through a gateway as an anonymous device. */
   expose?: boolean;
   /** Gateway origin used for --expose. */
@@ -181,6 +183,13 @@ export function parseConfig(text: string, source: string): Config {
         : {}),
       ...(asString(entry.secret_dir) ? { secret_dir: asString(entry.secret_dir) } : {}),
       ...(Array.isArray(entry.vaults) ? { vaults: entry.vaults.filter((flag): flag is string => typeof flag === "string") } : {}),
+      ...(Array.isArray(entry.vault_kinds)
+        ? {
+            vault_kinds: entry.vault_kinds.filter(
+              (kind): kind is "value" | "secret" | "code" => kind === "value" || kind === "secret" || kind === "code",
+            ),
+          }
+        : {}),
       ...(entry.expose === true ? { expose: true } : {}),
       ...(asString(entry.gateway) ? { gateway: asString(entry.gateway) } : {}),
       ...(asString(entry.gateway_device) ? { gateway_device: asString(entry.gateway_device) } : {}),
@@ -277,6 +286,9 @@ export function serializeConfig(config: Config): string {
       out += `  ${/^[A-Za-z0-9._-]+$/.test(name) ? name : yamlScalar(name)}:\n`;
       if (space.vaults && space.vaults.length > 0) {
         out += "    vaults: [" + space.vaults.map((name) => yamlScalar(name)).join(", ") + "]\n";
+      }
+      if (space.vault_kinds && space.vault_kinds.length > 0) {
+        out += "    vault_kinds: [" + space.vault_kinds.map((kind) => yamlScalar(kind)).join(", ") + "]\n";
       }
       for (const [key, value] of [
         ["id", space.id],

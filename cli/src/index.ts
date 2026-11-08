@@ -30,7 +30,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.22-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.23-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -80,6 +80,7 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("offline", "boolean", "No network access (Apple internal network or podman internal)"),
   flag("vault", "string", "Company whose values/secrets/codes the run tool may use; repeatable", { placeholder: "<company>", repeatable: true }),
   flag("vault-all", "boolean", "Assign every vault company to the space"),
+  flag("vault-kind", "string", "Limit --vault to values, secrets or codes (repeatable)", { placeholder: "<kind>", repeatable: true }),
   flag("expose", "boolean", "Publish the space through the gateway as an anonymous device"),
   flag("gateway", "string", "Gateway for --expose (default: saved default or the managed gateway)", { placeholder: "<url>" }),
   flag("gateway-token", "string", "Gateway credential for --expose, only if the gateway needs one", { placeholder: "<token>" }),
@@ -96,6 +97,7 @@ const VAULTS_FLAGS: FlagSpec[] = [
   flag("all", "boolean", "Select every company (assign)"),
   flag("clear", "boolean", "Clear the vault assignment"),
   flag("keychain", "boolean", "Store the vault key in the OS keychain (may ask for authorization)"),
+  flag("vault-kind", "string", "Limit the assignment to values, secrets or codes (repeatable)", { placeholder: "<kind>", repeatable: true }),
 ];
 
 const SPACE_TOP_FLAGS: FlagSpec[] = [

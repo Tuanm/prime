@@ -528,6 +528,7 @@ OPTIONS (create)
   --expose            publish through the gateway as an anonymous device
   --vault <company>   let the run tool use a company's values/secrets/codes (repeatable)
   --vault-all         assign every vault company
+  --vault-kind <k>    limit to values, secrets or codes (repeatable)
   --gateway <url>     gateway for --expose
   --runtime <rt>      apple|podman|docker
   --allow-rootful     permit rootful docker (not recommended)
