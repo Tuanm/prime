@@ -509,7 +509,7 @@ function networkGateway(runtime: RuntimeInfo, network: string): string | undefin
  *  real values and enforces the allowed-host list for its HTTP tool. */
 interface PendingBroker {
   token: string;
-  gateway: string;
+  bind: string;
   port: number;
   scope: BrokerScope;
 }
@@ -528,9 +528,21 @@ async function prepareVault(ctx: Ctx, space: SpaceEntry, runtime: RuntimeInfo): 
     space.broker_bind = undefined;
     return undefined;
   }
-  if (!space.network) fail("the space has no network for the vault broker");
-  const gateway = networkGateway(runtime, space.network);
-  if (!gateway) fail("cannot determine the host gateway for the vault broker");
+  let bind: string;
+  let brokerHost: string;
+  if (runtime.kind === "apple") {
+    if (!space.network) fail("the space has no network for the vault broker");
+    const gateway = networkGateway(runtime, space.network);
+    if (!gateway) fail("cannot determine the host gateway for the vault broker");
+    bind = gateway;
+    brokerHost = gateway;
+  } else {
+    // Rootless podman maps the host as host.containers.internal; docker does the
+    // same as host.docker.internal. The broker listens on all host interfaces,
+    // but every request still needs the per-space capability token.
+    bind = "0.0.0.0";
+    brokerHost = runtime.kind === "podman" ? "host.containers.internal" : "host.docker.internal";
+  }
   const port = await freePort();
   const token = newToken();
   const prefix = token.slice(0, 8);
@@ -548,20 +560,20 @@ async function prepareVault(ctx: Ctx, space: SpaceEntry, runtime: RuntimeInfo): 
     codePayload[name] = { code: placeholder, expires_at: null };
     codeScope[placeholder] = scope.codes[name]!;
   }
-  const brokerUrl = "http://" + gateway + ":" + port;
+  const brokerUrl = "http://" + brokerHost + ":" + port;
   writeFileSync(file, JSON.stringify({ values: scope.values, secrets: secretPayload, codes: codePayload, broker: { url: brokerUrl, token } }), { mode: 0o600 });
   chmodSync(file, 0o600);
   space.broker_token = token;
   space.broker_url = brokerUrl;
-  space.broker_bind = gateway;
-  return { token, gateway, port, scope: { values: scope.values, secrets: secretScope, codes: codeScope } };
+  space.broker_bind = bind;
+  return { token, bind, port, scope: { values: scope.values, secrets: secretScope, codes: codeScope } };
 }
 
 /** Bind the broker listener only after the space's network interface exists. */
 async function activateBroker(ctx: Ctx, pending: PendingBroker | undefined): Promise<void> {
   if (!pending) return;
   await ensureBroker(ctx.configPath);
-  await registerBrokerScope(ctx.configPath, pending.token, pending.gateway, pending.port, pending.scope);
+  await registerBrokerScope(ctx.configPath, pending.token, pending.bind, pending.port, pending.scope);
 
 }
 

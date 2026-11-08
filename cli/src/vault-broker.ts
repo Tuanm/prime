@@ -220,7 +220,7 @@ export async function brokerMain(): Promise<void> {
         const bind = String(body.bind ?? "");
         const port = Number(body.port);
         if (!token || !bind || !Number.isInteger(port) || port < 1 || port > 65535) return Response.json({ error: "invalid register" }, { status: 400 });
-        if (bind !== "127.0.0.1" && !isPrivateAddress(bind)) return Response.json({ error: "bind address must be private" }, { status: 400 });
+        if (bind !== "127.0.0.1" && bind !== "0.0.0.0" && !isPrivateAddress(bind)) return Response.json({ error: "bind address must be private" }, { status: 400 });
         const key = bind + ":" + port;
         let listener = listeners.get(key);
         if (!listener) {

@@ -404,7 +404,10 @@ the broker, which substitutes the real value only for hosts listed in that
 secret/code's `--allow-host` metadata and redacts the response. Local shell/file
 tools reject placeholders. The broker is a host process (not in the space), only
 holds scopes for running spaces, and exits after the last scope goes idle. The
-token/vault files are removed from the space as soon as it answers.
+token/vault files are removed from the space as soon as it answers. On rootless
+podman the broker binds the host side of the container network; every request
+still needs the per-space capability token, and secrets can only go to their
+allowed hosts.
 
 ```bash
 prime vaults init
