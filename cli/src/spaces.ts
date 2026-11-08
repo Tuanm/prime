@@ -12,9 +12,9 @@ import { bool, num, str, type ParsedArgs } from "./args.ts";
 import { saveConfig, type Config, type SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
 
 const SPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -310,14 +310,13 @@ function runContainer(
   runtime: RuntimeInfo,
   space: SpaceEntry,
   image: string,
+  secretDir: string,
   note: (text: string) => void,
 ): { code: number; out: string; err: string; cgroup?: "systemd" | "cgroupfs" | "disabled" } {
   const dir = mkdtempSync(join(tmpdir(), "prime-space-"));
-  const envFile = join(dir, "env");
   try {
-    writeFileSync(envFile, "PRIME_SPACE_TOKEN=" + space.token + "\n", { mode: 0o600 });
     if (runtime.kind !== "podman") {
-      return runtimeExec(runtime, containerArgs(runtime, space, image, envFile), 300_000);
+      return runtimeExec(runtime, containerArgs(runtime, space, image, secretDir), 300_000);
     }
     // Rootless podman wants a user systemd for cgroup handling. WSL2 often has
     // none: try the default, then cgroupfs, then disabled cgroups (no limits).
@@ -348,7 +347,7 @@ function runContainer(
       seen.add(key);
       // containerArgs already starts with "run": globals go before it, the
       // run-only flags (--cgroups) right after it.
-      const base = containerArgs(runtime, space, image, envFile, attempt.limits);
+      const base = containerArgs(runtime, space, image, secretDir, attempt.limits);
       const env = attempt.crun ? crunEnv(dir) : undefined;
       last = runtimeExec(runtime, [...attempt.globals, base[0]!, ...attempt.flags, ...base.slice(1)], 300_000, env);
       if (last.code === 0) return { ...last, cgroup: attempt.mode };
@@ -409,14 +408,38 @@ function networkDelete(runtime: RuntimeInfo, name: string | undefined): void {
   runtimeExec(runtime, ["network", "rm", name], 60_000);
 }
 
-function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, envFile: string, limits = true): string[] {
+const TOKEN_SCRIPT =
+  'set -e; token=$(cat /run/prime/token); [ -n "$token" ] || { echo "prime: token file missing" >&2; exit 1; }; ' +
+  'exec /usr/local/bin/prime code-mcp --bind 0.0.0.0 --port 7777 --token "$token"';
+
+/** Host directory (0700) with a 0600 token file, mounted read-only into the
+ *  space, so the token never appears in the container config or env. */
+function secretDirFor(ctx: Ctx, container: string): string {
+  const dir = join(dirname(ctx.configPath), "spaces", container);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  return dir;
+}
+
+function ensureSecret(dir: string, token: string): void {
+  const file = join(dir, "token");
+  writeFileSync(file, token + "\n", { mode: 0o600 });
+  chmodSync(file, 0o600);
+}
+
+function removeSecret(dir: string | undefined): void {
+  if (dir) rmSync(dir, { recursive: true, force: true });
+}
+
+function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, secretDir: string, limits = true): string[] {
   const args: string[] = ["run", "-d", "--name", space.container, "--label", "prime.space=" + space.id];
-  args.push("--env-file", envFile);
+  args.push("--entrypoint", "/bin/sh");
+  args.push("-v", secretDir + ":/run/prime:ro");
   if (runtime.kind === "apple") {
     args.push("-c", String(space.cpus ?? 2), "-m", space.memory ?? "4g");
     if (space.network) args.push("--network", space.network);
     if (space.volume) args.push("-v", space.volume + ":/root/work");
-    return args.concat([image]);
+    return args.concat([image, "-c", TOKEN_SCRIPT]);
   }
   const podmanNetwork = space.network && space.network !== "none" ? space.network : "none";
   args.push("--network", podmanNetwork);
@@ -424,7 +447,7 @@ function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, e
   if (limits) args.push("--cpus", String(space.cpus ?? 2), "--memory", space.memory ?? "4g");
   args.push(...(limits ? ["--pids-limit", "512"] : []), "--security-opt", "no-new-privileges");
   if (space.volume) args.push("-v", space.volume + ":/root/work");
-  return args.concat([image]);
+  return args.concat([image, "-c", TOKEN_SCRIPT]);
 }
 
 async function waitReady(url: string, token: string, quiet: boolean): Promise<void> {
@@ -553,17 +576,22 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   await ensureImage(runtime, image, (text) => ctx.note(text));
   if (volume) volumeCreate(runtime, volume);
   networkCreate(runtime, network, offline);
+  const secretDir = secretDirFor(ctx, container);
+  ensureSecret(secretDir, token);
+  space.secret_dir = secretDir;
   const started = Date.now();
-  const run = runContainer(runtime, space, image, (text) => ctx.note(text));
+  const run = runContainer(runtime, space, image, secretDir, (text) => ctx.note(text));
   if (run.code !== 0) {
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
+    removeSecret(secretDir);
     fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
   }
   if (run.cgroup === "disabled" && !bool(ctx.parsed, "allow-no-limits")) {
     runtimeExec(runtime, ["rm", "-f", container], 120_000);
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
+    removeSecret(secretDir);
     fail("this runtime cannot enforce the cpu/memory limits", "Enable systemd cgroups (run 'prime spaces doctor') and retry, or pass --allow-no-limits to accept a space without resource limits.");
   }
   let url: string | undefined;
@@ -575,6 +603,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     runtimeExec(runtime, ["rm", "-f", container], 120_000);
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
+    removeSecret(secretDir);
     throw err;
   }
   space.local_url = url;
@@ -603,28 +632,32 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
   const allowNoLimits = bool(ctx.parsed, "allow-no-limits");
   await ensureImage(runtime, space.image, (text) => ctx.note(text));
   const existing = containerInfo(runtime, space.container);
+  if (existing.state !== "missing") {
+    if (runtime.kind !== "apple" && space.cgroup_mode !== "systemd" && space.cgroup_mode !== "cgroupfs" && !allowNoLimits) {
+      fail("space \"" + name + "\" predates enforced cpu/memory limits", "Recreate it (delete + create) to record enforcement, or pass --allow-no-limits to start it anyway.");
+    }
+    if (!space.secret_dir) ctx.note("  legacy space: recreate it to move the token out of the container config");
+  }
+  if (!space.secret_dir) space.secret_dir = secretDirFor(ctx, space.container);
+  ensureSecret(space.secret_dir, space.token);
   const started = Date.now();
   if (existing.state === "missing") {
     if (space.mode === "persistent") {
       fail('the persistent container for space "' + name + '" is gone', "Its volume still exists. Delete the space and create it again to start over.");
     }
-    // Spaces created before per-space networks keep working: give them one now.
-    if (!space.network || space.network === "none") {
-      space.network = space.container + "-net";
-      networkCreate(runtime, space.network, space.offline === true);
-    }
-    const run = runContainer(runtime, space, space.image, (text) => ctx.note(text));
+    // An ephemeral stop removes the container and its network; recreate both.
+    if (!space.network || space.network === "none") space.network = space.container + "-net";
+    networkCreate(runtime, space.network, space.offline === true);
+    const run = runContainer(runtime, space, space.image, space.secret_dir, (text) => ctx.note(text));
     if (run.code === 0) space.cgroup_mode = run.cgroup;
     if (run.code === 0 && run.cgroup === "disabled" && !allowNoLimits) {
       runtimeExec(runtime, ["rm", "-f", space.container], 120_000);
       networkDelete(runtime, space.network);
+      removeSecret(space.secret_dir);
       fail("this runtime cannot enforce the cpu/memory limits", "Enable systemd cgroups (run 'prime spaces doctor') and retry, or pass --allow-no-limits to accept a space without resource limits.");
     }
     if (run.code !== 0) fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
   } else if (existing.state === "stopped") {
-    if (space.cgroup_mode === "disabled" && !allowNoLimits) {
-      fail("space \"" + name + "\" was created without enforced cpu/memory limits", "Enable systemd cgroups and recreate it, or pass --allow-no-limits to start it anyway.");
-    }
     const globalFlags = runtime.kind === "podman" && !hasUserSystemd() ? ["--cgroup-manager=cgroupfs"] : [];
     let start = runtimeExec(runtime, [...globalFlags, "start", space.container], 120_000);
     if (start.code !== 0 && runtime.kind === "podman" && isPodmanCgroupFailure(start.err + start.out)) {
@@ -668,6 +701,7 @@ export async function spacesStop(ctx: Ctx): Promise<void> {
       wiped = true;
     }
   }
+  if (space.mode === "ephemeral") networkDelete(runtime, space.network);
   space.local_url = undefined;
   saveConfig(ctx.configPath, ctx.config);
   if (ctx.json) {
@@ -685,6 +719,8 @@ export async function spacesDelete(ctx: Ctx): Promise<void> {
   runtimeExec(runtime, ["rm", "-f", space.container], 120_000);
   if (space.volume) volumeDelete(runtime, space.volume);
   networkDelete(runtime, space.network);
+  removeSecret(space.secret_dir);
+  if (!space.secret_dir && space.container) removeSecret(secretDirFor(ctx, space.container));
   delete ctx.config.spaces[name];
   delete ctx.config.devices[space.id];
   saveConfig(ctx.configPath, ctx.config);
@@ -800,6 +836,7 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
         mode: space.mode,
         runtime: space.runtime,
         cgroup_mode: space.cgroup_mode ?? null,
+        token_in_file: Boolean(space.secret_dir),
         limits_enforced:
           space.runtime === "apple"
             ? true
@@ -825,6 +862,9 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
   }
   if (spaces.some((space) => space.limits_enforced === null)) {
     hints.push("Some spaces predate limit tracking; recreate them to record and enforce limits.");
+  }
+  if (spaces.some((space) => !space.token_in_file)) {
+    hints.push("Some spaces keep their token in the container config (legacy); recreate them to mount it as a read-only file instead.");
   }
   if (ctx.json) {
     printJson({

@@ -114,8 +114,8 @@ prime spaces delete work
 
 Spaces are rootless on the host: Apple's container micro-VM on macOS (root inside
 is not root on the host) and rootless podman on Linux. Each space has its own
-network, a random token (passed in a 0600 env file, never on a process list), no
-host mounts, no docker socket, and cpus/memory limits; when the runtime cannot
+network, a random token (a 0600 file mounted read-only, never in the container
+config or env), no host mounts, no docker socket, and cpus/memory limits; when the runtime cannot
 enforce those limits, create refuses unless `--allow-no-limits` is passed. The
 runtime's private address is the only way in: nothing is published to the LAN.
 Online spaces have NAT (internet and host services on 0.0.0.0, not the host

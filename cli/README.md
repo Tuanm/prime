@@ -348,7 +348,9 @@ the space's private address; nothing is published to the LAN. `--offline` switch
 to an internal network (no internet) on both runtimes while the host keeps access.
 
 **Security.** Rootless runtime, no host mounts, no docker socket, per-space
-network; the space token travels in a 0600 env file, not on a process list.
+network; the space token lives in a 0600 file mounted read-only at
+`/run/prime/token`, so it never appears in the container config, env or inspect
+output.
 `--cpus` and `--memory` bound the container, and **limits are required**: when the
 runtime cannot enforce cgroups (podman without systemd, WSL2 crun fallback),
 create refuses instead of silently running unlimited, unless you pass
@@ -375,7 +377,9 @@ fails while applying cgroup configuration or moving the rootless netns. Two fixe
    flag.
 
 prime tries the default, then cgroupfs, then the crun fallback; the hint prints
-if every attempt fails.
+if every attempt fails. Spaces created before limit/token tracking can be listed
+(and show `unknown`), but `start` refuses them until they are recreated or
+`--allow-no-limits` is passed.
 
 **Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`, `--allow-no-limits`.
 

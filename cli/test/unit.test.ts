@@ -564,6 +564,7 @@ describe("spaces", () => {
       cpus: 2,
       memory: "4g",
       cgroup_mode: "disabled",
+      secret_dir: "/home/me/.prime/spaces/prime-space-1234abcd",
       local_url: "http://192.168.64.4:7777",
     };
     config.devices["space-1234abcd"] = { local_url: "http://192.168.64.4:7777", token: "t0k", space: "dev" };

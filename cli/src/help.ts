@@ -436,14 +436,16 @@ SECURITY
   (default 4g); podman also pins --pids-limit 512 and no-new-privileges. If the
   runtime cannot enforce cgroups (rootless podman without systemd, WSL2), create
   refuses unless --allow-no-limits is passed. The MCP server needs a random
-  per-space token; it is passed in a 0600 env file, not on a process list.
+  per-space token; it lives in a 0600 file mounted read-only at /run/prime/token,
+  so it never shows up in the container config, env or inspect output.
   Online spaces have NAT: they reach the internet and host services on 0.0.0.0.
   --offline puts a space on an internal network (Apple internal vmnet or podman
   internal): no internet, but the host can still reach it.
   WSL2 without systemd: enable systemd, or install crun - prime then forces
   engine.runtime=crun and retries with --cgroups=disabled (no limits: refused
   unless --allow-no-limits). runc cannot do NoCgroups, and podman has no
-  per-container --runtime flag.
+  per-container --runtime flag. Spaces created before limit/token tracking must
+  be recreated (or started with --allow-no-limits) so both guarantees apply.
 
 OPTIONS (create)
   --name <name>       space name (default: a generated device id)
