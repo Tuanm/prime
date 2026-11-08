@@ -29,6 +29,7 @@ interface ListenerInfo {
   port: number;
   server: ReturnType<typeof Bun.serve>;
   tokens: Set<string>;
+  unix?: string;
 }
 
 const IDLE_MS = Math.max(1_000, Number(process.env.PRIME_BROKER_IDLE_MS) || 10 * 60_000);
@@ -217,45 +218,47 @@ export async function brokerMain(): Promise<void> {
       }
       if (body?.op === "register") {
         const token = String(body.token ?? "");
-        const bind = String(body.bind ?? "");
-        const port = Number(body.port);
-        if (!token || !bind || !Number.isInteger(port) || port < 1 || port > 65535) return Response.json({ error: "invalid register" }, { status: 400 });
-        if (bind !== "127.0.0.1" && bind !== "0.0.0.0" && !isPrivateAddress(bind)) return Response.json({ error: "bind address must be private" }, { status: 400 });
-        const key = bind + ":" + port;
+        const unix = typeof body.unix === "string" && body.unix.length > 0 ? body.unix : undefined;
+        const bind = unix ? "unix" : String(body.bind ?? "");
+        const port = unix ? 0 : Number(body.port);
+        if (!token || (!unix && (!bind || !Number.isInteger(port) || port < 1 || port > 65535))) {
+          return Response.json({ error: "invalid register" }, { status: 400 });
+        }
+        if (!unix && bind !== "127.0.0.1" && bind !== "0.0.0.0" && !isPrivateAddress(bind)) {
+          return Response.json({ error: "bind address must be private" }, { status: 400 });
+        }
+        const key = unix ? "unix:" + unix : bind + ":" + port;
         let listener = listeners.get(key);
         if (!listener) {
+          const handler = async (req: Request) => {
+            if (req.method !== "POST" || new URL(req.url).pathname !== "/http") return Response.json({ error: "not found" }, { status: 404 });
+            const tokenHeader = req.headers.get("x-prime-broker-token") ?? "";
+            const registration = scopes.get(tokenHeader);
+            if (!registration) return Response.json({ error: "unauthorized" }, { status: 401 });
+            const now = Date.now();
+            const bucket = rate.get(tokenHeader);
+            if (!bucket || now - bucket.start >= 60_000) rate.set(tokenHeader, { count: 1, start: now });
+            else if (++bucket.count > 120) return Response.json({ error: "broker rate limit exceeded" }, { status: 429 });
+            const declared = Number(req.headers.get("content-length") ?? "0");
+            if (Number.isFinite(declared) && declared > 64_000) return Response.json({ error: "request too large" }, { status: 413 });
+            return httpTool(req, registration.scope);
+          };
           let server: ReturnType<typeof Bun.serve>;
           try {
-            server = Bun.serve({
-            hostname: bind,
-            port,
-              fetch: async (req) => {
-                if (req.method !== "POST" || new URL(req.url).pathname !== "/http") return Response.json({ error: "not found" }, { status: 404 });
-                const tokenHeader = req.headers.get("x-prime-broker-token") ?? "";
-                const registration = scopes.get(tokenHeader);
-                if (!registration) return Response.json({ error: "unauthorized" }, { status: 401 });
-                const now = Date.now();
-                const bucket = rate.get(tokenHeader);
-                if (!bucket || now - bucket.start >= 60_000) rate.set(tokenHeader, { count: 1, start: now });
-                else if (++bucket.count > 120) return Response.json({ error: "broker rate limit exceeded" }, { status: 429 });
-                const declared = Number(req.headers.get("content-length") ?? "0");
-                if (Number.isFinite(declared) && declared > 64_000) return Response.json({ error: "request too large" }, { status: 413 });
-                return httpTool(req, registration.scope);
-              },
-            });
+            server = unix ? Bun.serve({ unix, fetch: handler }) : Bun.serve({ hostname: bind, port, fetch: handler });
           } catch (err) {
-            return Response.json({ error: "cannot bind " + bind + ":" + port + ": " + (err instanceof Error ? err.message : String(err)) }, { status: 500 });
+            return Response.json({ error: "cannot bind " + (unix ?? bind + ":" + port) + ": " + (err instanceof Error ? err.message : String(err)) }, { status: 500 });
           }
-          listener = { bind, port, server, tokens: new Set() };
+          listener = { bind: unix ?? bind, port, server, tokens: new Set(), ...(unix ? { unix } : {}) };
           listeners.set(key, listener);
         }
         listener.tokens.add(token);
-        scopes.set(token, { scope: body.scope as BrokerScope, bind, port, listenerKey: key });
+        scopes.set(token, { scope: body.scope as BrokerScope, bind: unix ?? bind, port, listenerKey: key });
         if (idleTimer) {
           clearTimeout(idleTimer);
           idleTimer = null;
         }
-        return Response.json({ ok: true, url: "http://" + bind + ":" + port });
+        return Response.json({ ok: true });
       }
       if (body?.op === "unregister") {
         const token = String(body.token ?? "");
@@ -268,6 +271,7 @@ export async function brokerMain(): Promise<void> {
             try {
               listener.server.stop(true);
             } catch {}
+            if (listener.unix) rmSync(listener.unix, { force: true });
             listeners.delete(registration.listenerKey);
           }
         }
@@ -436,13 +440,13 @@ export async function ensureBroker(configPath: string): Promise<BrokerState> {
 export async function registerBrokerScope(
   configPath: string,
   token: string,
-  bind: string,
-  port: number,
+  bind: string | undefined,
+  port: number | undefined,
   scope: BrokerScope,
-): Promise<string> {
-  const result = await control(configPath, { op: "register", token, bind, port, scope }, 3000);
-  if (!result?.ok || typeof result.url !== "string") throw new Error(result?.error ?? "broker registration failed");
-  return result.url;
+  unix?: string,
+): Promise<void> {
+  const result = await control(configPath, { op: "register", token, bind, port, scope, unix }, 3000);
+  if (!result?.ok) throw new Error(result?.error ?? "broker registration failed");
 }
 
 export async function unregisterBrokerScope(configPath: string, token: string | undefined): Promise<void> {

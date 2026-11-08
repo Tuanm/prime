@@ -20,7 +20,7 @@ export interface RunVault {
   values: Record<string, string>;
   secrets: Record<string, string>;
   codes: Record<string, unknown>;
-  broker?: { url: string; token: string };
+  broker?: { url?: string; unix?: string; token: string };
 }
 
 export interface RunToolDef {
@@ -50,7 +50,7 @@ export function loadRunVault(): RunVault {
       values: parsed.values ?? {},
       secrets: parsed.secrets ?? {},
       codes: parsed.codes ?? {},
-      ...(parsed.broker && typeof parsed.broker === "object" ? { broker: parsed.broker as { url: string; token: string } } : {}),
+      ...(parsed.broker && typeof parsed.broker === "object" ? { broker: parsed.broker as { url?: string; unix?: string; token: string } } : {}),
     };
   } catch {
     try {
@@ -136,15 +136,18 @@ function stringify(value: unknown): string {
 }
 
 /** Only the broker sees real secrets; the space forwards the HTTP operation. */
-async function callBroker(broker: { url: string; token: string }, args: unknown): Promise<unknown> {
+async function callBroker(broker: { url?: string; unix?: string; token: string }, args: unknown): Promise<unknown> {
   let response: Response;
+  const target = broker.unix ? "http://broker/http" : (broker.url ?? "") + "/http";
+  const unixOption = broker.unix ? { unix: broker.unix } : {};
   try {
-    response = await fetch(broker.url + "/http", {
+    response = await fetch(target, {
       method: "POST",
       headers: { "content-type": "application/json", "x-prime-broker-token": broker.token },
       body: JSON.stringify(args ?? {}),
       signal: AbortSignal.timeout(15_000),
-    });
+      ...unixOption,
+    } as RequestInit & { unix?: string });
   } catch {
     throw new Error("the vault broker is not reachable");
   }
