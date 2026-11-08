@@ -63,6 +63,7 @@ prime files upload <path> [--name <n>] [--key <k>] [--expiry-days <n>]
 prime files download <id|name> [-o <path>] [--key <k>] [--resume]
 prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
 prime spaces list|start|stop|delete|logs <name>
+prime spaces doctor [--json]
 prime tools list <device-id>
 prime tools view <device-id>.<tool-id>
 prime tools call <device-id>.<tool-id> [<json>] [options]
@@ -326,6 +327,7 @@ prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
 prime spaces stop dev                             # ephemeral: wipes the container
 prime spaces start work                           # persistent: resumes the container
 prime spaces logs work
+prime spaces doctor                               # rootless? systemd? crun? limits?
 prime spaces delete work                          # container + volume + device entry
 ```
 
@@ -349,6 +351,10 @@ network. `--cpus` and
 `no-new-privileges`. The MCP server only answers with the random per-space token,
 and `--offline` (podman/docker) puts it on an internal network. The image is
 `ghcr.io/tuanm/prime-space:<version>`, built multi-arch by the release workflow.
+
+**Diagnose.** `prime spaces doctor` prints the platform (including WSL2 detection),
+uid, podman version/rootless flag, cgroup manager and OCI runtime, the user
+systemd bus, crun availability, and whether each space enforces limits.
 
 **WSL2.** Rootless podman there needs a user systemd for cgroups; without one it
 fails while applying cgroup configuration or moving the rootless netns. Two fixes:

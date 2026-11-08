@@ -105,6 +105,7 @@ inside it with no gateway, and the container is registered like any other device
 prime spaces create --name dev                  # ephemeral: stop wipes it
 prime spaces create --name work --persistent    # keeps /root/work across stop/start
 prime spaces list
+prime spaces doctor                              # rootless? systemd? limits?
 prime devices list                              # the space is a local device
 prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
 prime spaces stop dev

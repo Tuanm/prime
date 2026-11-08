@@ -24,12 +24,12 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { isSpaceCommand, spacesCreate, spacesDelete, spacesList, spacesLogs, spacesStart, spacesStop } from "./spaces.ts";
+import { isSpaceCommand, spacesCreate, spacesDelete, spacesDoctor, spacesList, spacesLogs, spacesStart, spacesStop } from "./spaces.ts";
 import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.13-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.14-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -276,8 +276,10 @@ async function main(argv: string[]): Promise<void> {
           return spacesList(ctx);
         case "logs":
           return spacesLogs(ctx);
+        case "doctor":
+          return spacesDoctor(ctx);
         default:
-          throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, logs. ${usageLine("spaces")}`);
+          throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, logs, doctor. ${usageLine("spaces")}`);
       }
     case "files":
       switch (sub) {

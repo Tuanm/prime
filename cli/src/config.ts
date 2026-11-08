@@ -72,6 +72,8 @@ export interface SpaceEntry {
   cpus?: number;
   memory?: string;
   offline?: boolean;
+  /** How the container manager applied limits: systemd, cgroupfs, or disabled. */
+  cgroup_mode?: "systemd" | "cgroupfs" | "disabled";
   /** Where the MCP server answers right now; recomputed on every start. */
   local_url?: string;
   created_at?: string;
@@ -160,6 +162,9 @@ export function parseConfig(text: string, source: string): Config {
       ...(typeof entry.cpus === "number" ? { cpus: entry.cpus } : {}),
       ...(asString(entry.memory) ? { memory: asString(entry.memory) } : {}),
       ...(entry.offline === true ? { offline: true } : {}),
+      ...(entry.cgroup_mode === "systemd" || entry.cgroup_mode === "cgroupfs" || entry.cgroup_mode === "disabled"
+        ? { cgroup_mode: entry.cgroup_mode }
+        : {}),
       ...(asString(entry.local_url) ? { local_url: asString(entry.local_url) } : {}),
       ...(asString(entry.created_at) ? { created_at: asString(entry.created_at) } : {}),
     };
@@ -262,6 +267,7 @@ export function serializeConfig(config: Config): string {
         ["cpus", space.cpus],
         ["memory", space.memory],
         ["offline", space.offline === true ? true : undefined],
+        ["cgroup_mode", space.cgroup_mode],
         ["local_url", space.local_url],
         ["created_at", space.created_at],
       ] as const) {

@@ -406,6 +406,8 @@ USAGE
   prime spaces stop <name>
   prime spaces delete <name>
   prime spaces logs <name>
+  prime spaces doctor
+  prime spaces doctor [--json]
 
 A space is a rootless Linux container that runs the device buddy (no gateway)
 and registers itself as a local device, so "prime devices list" and
@@ -457,6 +459,7 @@ EXAMPLES
   prime spaces stop dev                             # deletes the container state
   prime spaces start work                           # resumes the persistent space
   prime spaces delete work                          # container, volume, device entry
+  prime spaces doctor                               # rootless? systemd? crun? limits?
 `;
 export function rootHelp(): string {
   return ROOT;
@@ -495,7 +498,8 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "create") return "Usage: prime spaces create [--name <name>] [--persistent] [--cpus <n>] [--memory <4g>]";
     if (sub === "list") return "Usage: prime spaces list [--json]";
     if (sub === "logs") return "Usage: prime spaces logs <name>";
-    return "Usage: prime spaces <create|start|stop|delete|list|logs> [args]";
+    if (sub === "doctor") return "Usage: prime spaces doctor [--json]";
+    return "Usage: prime spaces <create|start|stop|delete|list|logs|doctor> [args]";
   }
   if (topic === "files" || topic === "upload" || topic === "download") {
     if (sub === "list") return "Usage: prime files list [--device <id>] [--json]";
