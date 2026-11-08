@@ -33,6 +33,9 @@ interface ListenerInfo {
 }
 
 const IDLE_MS = Math.max(1_000, Number(process.env.PRIME_BROKER_IDLE_MS) || 10 * 60_000);
+// A host CLI can crash between registering a scope and unregistering it. Bound
+// how long an abandoned scope can keep secrets in broker memory.
+const SCOPE_TTL_MS = Math.max(1_000, Number(process.env.PRIME_BROKER_SCOPE_TTL_MS) || 24 * 60 * 60_000);
 const MAX_BODY = 1_000_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const DANGEROUS_METHODS = new Set(["CONNECT", "TRACE"]);
@@ -163,7 +166,7 @@ export async function brokerMain(): Promise<void> {
   rmSync(socketPath, { force: true });
 
   const controlToken = randomToken();
-  const scopes = new Map<string, { scope: BrokerScope; bind: string; port: number; listenerKey: string }>();
+  const scopes = new Map<string, { scope: BrokerScope; bind: string; port: number; listenerKey: string; expires: number }>();
   const rate = new Map<string, { count: number; start: number }>();
   const listeners = new Map<string, ListenerInfo>();
   const stats = { requests: 0, startedAt: Date.now() };
@@ -236,6 +239,8 @@ export async function brokerMain(): Promise<void> {
             const registration = scopes.get(tokenHeader);
             if (!registration) return Response.json({ error: "unauthorized" }, { status: 401 });
             const now = Date.now();
+            if (registration.expires < now) return Response.json({ error: "scope expired" }, { status: 401 });
+            registration.expires = now + SCOPE_TTL_MS;
             const bucket = rate.get(tokenHeader);
             if (!bucket || now - bucket.start >= 60_000) rate.set(tokenHeader, { count: 1, start: now });
             else if (++bucket.count > 120) return Response.json({ error: "broker rate limit exceeded" }, { status: 429 });
@@ -253,7 +258,7 @@ export async function brokerMain(): Promise<void> {
           listeners.set(key, listener);
         }
         listener.tokens.add(token);
-        scopes.set(token, { scope: body.scope as BrokerScope, bind: unix ?? bind, port, listenerKey: key });
+        scopes.set(token, { scope: body.scope as BrokerScope, bind: unix ?? bind, port, listenerKey: key, expires: Date.now() + SCOPE_TTL_MS });
         if (idleTimer) {
           clearTimeout(idleTimer);
           idleTimer = null;
@@ -290,6 +295,24 @@ export async function brokerMain(): Promise<void> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
   scheduleIdle();
+  const prune = setInterval(() => {
+    const now = Date.now();
+    for (const [token, registration] of scopes) {
+      if (registration.expires >= now) continue;
+      scopes.delete(token);
+      const listener = listeners.get(registration.listenerKey);
+      if (!listener) continue;
+      listener.tokens.delete(token);
+      if (listener.tokens.size > 0) continue;
+      try {
+        listener.server.stop(true);
+      } catch {}
+      if (listener.unix) rmSync(listener.unix, { force: true });
+      listeners.delete(registration.listenerKey);
+    }
+    if (scopes.size === 0) scheduleIdle();
+  }, Math.min(60_000, Math.max(1_000, Math.floor(SCOPE_TTL_MS / 4))));
+  (prune as any).unref?.();
   await new Promise<void>(() => {});
 }
 
