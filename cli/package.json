@@ -1,6 +1,6 @@
 {
   "name": "prime",
-  "version": "26.11.20",
+  "version": "26.11.21",
   "private": true,
   "description": "mcp - command line client for the Prime gateway: devices and MCP tools",
   "type": "module",

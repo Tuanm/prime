@@ -17,6 +17,7 @@
 //   --domain <host>    use the given public hostname (assumes tunnel already routes it to this port). Mutex with --public.
 //   --mcp <path>       aggregate tools from external MCP servers defined in the given JSON config (Claude Desktop format).
 
+import { loadRunVault, runCodeInChild } from "./run-tool.ts";
 import { spawn, spawnSync, file, write } from "bun";
 import { chmodSync, mkdtempSync, readdirSync, statSync, mkdirSync, rmdirSync, rmSync, realpathSync, lstatSync, constants as fsConstants } from "node:fs";
 import { opendir as fsOpenDir, open as fsOpen, rename as fsRename, unlink as fsUnlink, stat as fsStat } from "node:fs/promises";
@@ -5449,6 +5450,25 @@ const tools: Record<string, Tool> = {
       throw new Error(`unknown action: ${action}`);
     },
   },
+  run: {
+    description:
+      "Run a JavaScript program with tools.<name>({ ... }) and the assigned vault values/secrets/codes. Return a value; secrets are placeholders resolved by the server and redacted from results. Tools must be called with await.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "JavaScript body; use return for the result. tools.<name>({...}) calls are awaited." },
+        timeout_ms: { type: "number", description: "Wall-clock limit in milliseconds (default 5000, max 30000)" },
+      },
+      required: ["code"],
+    },
+    handler: async (args: any) => {
+      const timeout = Math.min(Math.max(Number(args?.timeout_ms) || 5000, 1000), 30_000);
+      const outcome = await runCodeInChild(String(args?.code ?? ""), timeout, tools as any, RUN_VAULT);
+      if (!outcome.ok) return "ERROR: " + (outcome.error ?? "run failed");
+      if (outcome.logs && outcome.logs.length > 0) return JSON.stringify({ result: outcome.result, logs: outcome.logs });
+      return JSON.stringify(outcome.result);
+    },
+  },
 };
 
 // Startup services remain usable when their corresponding agent tool is hidden.
@@ -5970,6 +5990,10 @@ function trustedAnonymousHost(authority: string | null): boolean {
   const host = match[1].replace(/^\[|\]$/g, "").toLowerCase();
   return host === "localhost" || host === bindAddr.toLowerCase() || isIP(host) !== 0;
 }
+
+// The host removes the vault file once the server answers; read it before
+// Bun.serve so values live in memory only.
+const RUN_VAULT = loadRunVault();
 
 const httpServer = Bun.serve({
   port,

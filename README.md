@@ -105,6 +105,7 @@ inside it with no gateway, and the container is registered like any other device
 prime spaces create --name dev                  # ephemeral: stop wipes it
 prime spaces create --name work --persistent    # keeps /root/work across stop/start
 prime spaces create --name pub --expose         # anonymous device via the gateway
+prime spaces create --name dev --vault acme     # vault values for the run tool
 prime spaces list
 prime spaces top dev                             # live cpu/mem/processes
 prime spaces doctor                              # rootless? systemd? limits?
@@ -125,6 +126,26 @@ filesystem); `--offline` is the no-internet mode on Apple and podman alike.
 `--expose` makes a space reachable through the gateway as an anonymous device
 (its connect URL is a credential: treat it like root access). The
 image is public: `ghcr.io/tuanm/prime-space:<version>`.
+
+## Vaults and the run tool
+
+`prime vaults` keeps values, secrets and TOTP codes in an encrypted local SQLite
+database (~/.prime/vaults.db), grouped into companies. The key is kept in the OS
+keychain when possible. A space can be assigned companies at creation
+(`--vault <company>`, repeatable, or `--vault-all`); its `run` tool executes
+JavaScript with `tools.<name>({...})`, `values.<name>`, `secrets.<name>` and
+`codes.<name>`. Inside the sandbox secrets are opaque placeholders; the server
+substitutes them only for approved integrations and redacts them from results.
+Token/vault files are removed from the space once the server has read them.
+
+```bash
+prime vaults init
+prime vaults company add acme
+prime vaults set acme value region --value eu-west-1
+printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin
+prime spaces create --name dev --vault acme
+prime tools call dev.run '{"code":"return values.region"}'
+```
 
 ## Access control
 

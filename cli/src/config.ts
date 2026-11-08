@@ -76,6 +76,8 @@ export interface SpaceEntry {
   cgroup_mode?: "systemd" | "cgroupfs" | "disabled";
   /** Host directory (0700) holding the token file mounted read-only. */
   secret_dir?: string;
+  /** Companies whose values/secrets/codes this space may use. */
+  vaults?: string[];
   /** Publish this space through a gateway as an anonymous device. */
   expose?: boolean;
   /** Gateway origin used for --expose. */
@@ -178,6 +180,7 @@ export function parseConfig(text: string, source: string): Config {
         ? { cgroup_mode: entry.cgroup_mode }
         : {}),
       ...(asString(entry.secret_dir) ? { secret_dir: asString(entry.secret_dir) } : {}),
+      ...(Array.isArray(entry.vaults) ? { vaults: entry.vaults.filter((flag): flag is string => typeof flag === "string") } : {}),
       ...(entry.expose === true ? { expose: true } : {}),
       ...(asString(entry.gateway) ? { gateway: asString(entry.gateway) } : {}),
       ...(asString(entry.gateway_device) ? { gateway_device: asString(entry.gateway_device) } : {}),
@@ -272,6 +275,9 @@ export function serializeConfig(config: Config): string {
     for (const name of spaceNames) {
       const space = config.spaces[name]!;
       out += `  ${/^[A-Za-z0-9._-]+$/.test(name) ? name : yamlScalar(name)}:\n`;
+      if (space.vaults && space.vaults.length > 0) {
+        out += "    vaults: [" + space.vaults.map((name) => yamlScalar(name)).join(", ") + "]\n";
+      }
       for (const [key, value] of [
         ["id", space.id],
         ["runtime", space.runtime],

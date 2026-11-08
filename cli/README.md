@@ -65,6 +65,8 @@ prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
 prime spaces list|start|stop|delete|logs <name>
 prime spaces top <name> [--once] [--json]
 prime spaces create --expose [--gateway <url>]
+prime spaces create --vault <company> [--vault <company>...]
+prime vaults init|company|set|list|get|code|rm|assign|status
 prime spaces doctor [--json]
 prime tools list <device-id>
 prime tools view <device-id>.<tool-id>
@@ -386,6 +388,31 @@ if every attempt fails. Spaces created before limit/token tracking can be listed
 `--allow-no-limits` is passed.
 
 **Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`, `--allow-no-limits`.
+
+**Vaults and run.** The local vault is an encrypted SQLite database at
+`~/.prime/vaults.db` (AES-256-GCM); the key lives in the OS keychain when one is
+available, otherwise in a 0600 file under ~/.prime/keys/ (a separate 0700 directory) with a warning. Companies group values,
+secrets and TOTP codes. A space created with `--vault acme` (repeatable) or
+`--vault-all` gets the `run` tool: JavaScript with `tools.<name>({...})`,
+`values.<name>`, `secrets.<name>` and `codes.<name>` (`{code, expires_at}`).
+Inside the sandbox secrets are placeholders; the server substitutes them only for
+approved integrations (the `mcp` tool) and redacts them from every result, so
+clients never receive the raw value. The vault payload is read by the device
+buddy at startup and the host removes the token/vault files before the space
+answers, so shell/file tools cannot read them afterwards. Codes are short-lived
+TOTP values. Assign only companies whose credentials a space's clients may use.
+
+```bash
+prime vaults init
+prime vaults company add acme
+prime vaults set acme value region --value eu-west-1
+printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin
+prime vaults set acme code deploy --uri 'otpauth://totp/Acme:deploy?secret=...&issuer=Acme'
+prime vaults code acme deploy --json
+prime spaces create --name dev --vault acme
+prime tools call dev.run '{"code":"return {region: values.region, code: codes.deploy.code}"}'
+prime vaults assign dev acme beta      # afterwards, restart the space
+```
 
 **Expose.** `--expose` publishes the space through the gateway as an anonymous
 device: the device buddy inside the space opens an outbound tunnel, so any MCP

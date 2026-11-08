@@ -8,7 +8,7 @@
 // (podman/docker). The space's token is the only credential and is generated per
 // space.
 
-import { bool, num, str, type ParsedArgs } from "./args.ts";
+import { bool, num, str, strList, type ParsedArgs } from "./args.ts";
 import { saveConfig, type Config, type SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
@@ -19,6 +19,7 @@ import { bold, cyan, dim, green, printJson, red, table, yellow } from "./output.
 import { formatBytes } from "./files.ts";
 import { connectUrlFor, probeCredential, registerAnonymous, type AnonymousDevice } from "./connect.ts";
 import { ENV, resolveGateway } from "./target.ts";
+import { allVaultCompanies, vaultPayloadFor } from "./vaults.ts";
 
 const SPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CONTAINER_PORT = 7777;
@@ -427,7 +428,8 @@ function shellArg(value: string): string {
  *  gateway origin and device id are command-line arguments. */
 export function entrypointScript(space: SpaceEntry): string {
   const base =
-    'set -e; token=$(cat /run/prime/token); [ -n "$token" ] || { echo "prime: token file missing" >&2; exit 1; }; ';
+    'set -e; token=$(cat /run/prime/token); [ -n "$token" ] || { echo "prime: token file missing" >&2; exit 1; }; ' +
+    'export PRIME_VAULT_FILE=/run/prime/vault.json; ';
   if (space.expose && space.gateway && space.gateway_device) {
     return (
       base +
@@ -465,6 +467,23 @@ function ensureSecret(dir: string, token: string, remoteToken?: string): void {
 
 function removeSecret(dir: string | undefined): void {
   if (dir) rmSync(dir, { recursive: true, force: true });
+}
+
+/** Plaintext secret files only need to exist until the entrypoint read them.
+ *  Removing them while the container runs keeps bash/file tools from reading
+ *  the tokens or the vault payload. The directory itself stays mounted so a
+ *  later start can write them again. */
+function wipeSecretFiles(dir: string | undefined): void {
+  if (!dir) return;
+  for (const name of ["token", "gateway-token", "vault.json"]) rmSync(join(dir, name), { force: true });
+}
+
+function writeVaultFile(ctx: Ctx, space: SpaceEntry): void {
+  if (!space.vaults || space.vaults.length === 0 || !space.secret_dir) return;
+  const payload = vaultPayloadFor(ctx.configPath, space.vaults);
+  const file = join(space.secret_dir, "vault.json");
+  writeFileSync(file, JSON.stringify(payload), { mode: 0o600 });
+  chmodSync(file, 0o600);
 }
 
 function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, secretDir: string, limits = true): string[] {
@@ -680,6 +699,9 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const runtime = await detectRuntime(str(ctx.parsed, "runtime"), bool(ctx.parsed, "allow-rootful"));
   const gateway = expose ? resolveGateway(ctx.config, str(ctx.parsed, "gateway")) : undefined;
   const gatewayToken = expose ? resolveGatewayToken(ctx) : undefined;
+  let vaultCompanies = strList(ctx.parsed, "vault");
+  if (bool(ctx.parsed, "vault-all")) vaultCompanies = allVaultCompanies(ctx.configPath);
+  vaultCompanies = [...new Set(vaultCompanies)].sort();
   const image = str(ctx.parsed, "image") ?? defaultImage(version);
   const cpus = num(ctx.parsed, "cpus") ?? 2;
   const memory = str(ctx.parsed, "memory") ?? "4g";
@@ -704,6 +726,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     cpus,
     memory,
     ...(offline ? { offline: true } : {}),
+    ...(vaultCompanies.length > 0 ? { vaults: vaultCompanies } : {}),
     created_at: new Date().toISOString(),
   };
 
@@ -713,6 +736,16 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const secretDir = secretDirFor(ctx, container);
   ensureSecret(secretDir, token);
   space.secret_dir = secretDir;
+  if (vaultCompanies.length > 0) {
+    try {
+      writeVaultFile(ctx, space);
+    } catch (err) {
+      removeSecret(secretDir);
+      networkDelete(runtime, network);
+      if (volume) volumeDelete(runtime, volume);
+      throw err;
+    }
+  }
   let exposed: AnonymousDevice | undefined;
   if (expose) {
     try {
@@ -755,6 +788,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   }
   space.local_url = url;
   space.cgroup_mode = run.cgroup;
+  wipeSecretFiles(secretDir);
   const bootMs = Date.now() - started;
   let exposedOnline = false;
   if (expose && exposed) {
@@ -792,6 +826,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   ctx.out("  image     " + image);
   ctx.out("  limits    " + cpus + " cpu, " + memory + (offline ? ", offline" : ""));
   ctx.out("  boot      " + (bootMs / 1000).toFixed(1) + "s");
+  if (space.vaults && space.vaults.length > 0) ctx.out("  vaults    " + space.vaults.join(", "));
   if (expose && exposed) {
     ctx.out("  exposed   " + bold(exposed.deviceId) + (exposedOnline ? green(" (online)") : yellow(" (tunnel starting)")));
     ctx.out("  connect   " + cyan(connectUrlFor(gateway!, exposed.deviceId, exposed.token)));
@@ -822,7 +857,10 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     await refreshExposure(ctx, name, space, gatewayToken);
   }
   ensureSecret(space.secret_dir, space.token, expose ? space.remote_token : undefined);
-  const started = Date.now();
+  writeVaultFile(ctx, space);
+  let started = 0;
+  try {
+    started = Date.now();
   if (existing.state === "missing") {
     if (space.mode === "persistent") {
       fail('the persistent container for space "' + name + '" is gone', "Its volume still exists. Delete the space and create it again to start over.");
@@ -859,6 +897,7 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
   if (!url) fail("the space container is running but has no address yet");
   await waitReady(url, space.token, ctx.quiet);
   space.local_url = url;
+  wipeSecretFiles(space.secret_dir);
   let exposedOnline = false;
   if (expose && space.gateway && space.gateway_device && space.remote_token) {
     exposedOnline = await waitGatewayOnline(space.gateway, space.gateway_device, space.remote_token, gatewayToken);
@@ -890,6 +929,11 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
   if (expose && space.gateway && space.gateway_device && space.remote_token) {
     ctx.out("  exposed   " + bold(space.gateway_device) + (exposedOnline ? green(" (online)") : yellow(" (tunnel starting)")));
     ctx.out("  connect   " + cyan(connectUrlFor(space.gateway, space.gateway_device, space.remote_token)));
+  }
+  } catch (err) {
+    // Never leave the decrypted token/vault files on the host after a failed start.
+    wipeSecretFiles(space.secret_dir);
+    throw err;
   }
 }
 
@@ -1046,6 +1090,7 @@ export async function spacesDoctor(ctx: Ctx): Promise<void> {
         runtime: space.runtime,
         cgroup_mode: space.cgroup_mode ?? null,
         token_in_file: Boolean(space.secret_dir),
+        vaults: space.vaults ?? [],
         exposed: space.gateway_device
           ? {
               device: space.gateway_device,

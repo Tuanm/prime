@@ -15,6 +15,7 @@ import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
 import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
 import { defaultImage, entrypointScript, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace } from "../src/spaces.ts";
+import { parseOtpAuth, totpAt } from "../src/vaults.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
 import { splitLabel } from "../src/labels.ts";
@@ -606,6 +607,7 @@ describe("spaces", () => {
       gateway: "https://gw.example.dev",
       gateway_device: "anon-abc",
       remote_token: "remotetoken",
+      vaults: ["acme", "beta"],
     };
     const script = entrypointScript(space);
     expect(script).toContain("cat /run/prime/token");
@@ -614,6 +616,16 @@ describe("spaces", () => {
     expect(script).not.toContain("localtoken");
     expect(script).not.toContain("remotetoken");
     expect(entrypointScript({ ...space, expose: false }).includes("--gateway")).toBe(false);
+  });
+
+  test("vaults generate standard TOTP codes and parse otpauth URIs", () => {
+    const code = totpAt({ secret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", digits: 8, period: 30, algorithm: "SHA1" }, 59_000);
+    expect(code.code).toBe("94287082");
+    expect(code.expires_at).toBe(new Date(60_000).toISOString());
+    const parsed = parseOtpAuth("otpauth://totp/Acme:deploy?secret=JBSWY3DPEHPK3PXP&issuer=Acme&digits=6&period=30&algorithm=SHA1");
+    expect(parsed.digits).toBe(6);
+    expect(parsed.issuer).toBe("Acme");
+    expect(() => parseOtpAuth("https://example.com")).toThrow(/TOTP/);
   });
 
   test("podman cgroup failures are recognised for the WSL fallbacks", () => {

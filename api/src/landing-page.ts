@@ -82,6 +82,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
       <li><code>prime service install</code> keeps it running at every login.</li>
       <li><code>prime serve</code> exposes every connected device to a local MCP client.</li>
       <li><code>prime spaces create</code> runs a rootless Linux codespace as a local device.</li>
+      <li><code>prime vaults</code> keeps encrypted values, secrets and TOTP codes for the run tool.</li>
     </ul>
 
     <script>

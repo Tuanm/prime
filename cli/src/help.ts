@@ -28,8 +28,10 @@ COMMANDS
   files list                              List uploaded files and their metadata
   files upload <path> [options]           Upload a file through the files API
   files download <id|name> [options]      Download an uploaded file
+  vaults <cmd>                            Encrypted values, secrets and TOTP codes
   spaces create [--name <n>] [--persistent] A rootless Linux codespace running the device buddy
   spaces list|start|stop|delete|logs|top  Manage the codespaces (local devices)
+  vaults <cmd>                            Encrypted values, secrets and TOTP
   service install [options]               Run the device buddy as a user service (starts at
                                           login, restarts on failure)
   service uninstall                       Stop and remove that service
@@ -397,6 +399,45 @@ EXIT CODES
   0 success   1 error   2 usage   3 authentication   4 device offline   5 timeout
 `;
 
+const VAULTS = `prime vaults - encrypted local values, secrets and TOTP codes
+
+USAGE
+  prime vaults init
+  prime vaults company add|list|rm <name>
+  prime vaults set <company> <value|secret|code> <name> [--value <v> | --stdin | --uri <otpauth://...>]
+  prime vaults list [company] [--json]
+  prime vaults get <company> <value|secret|code> <name> [--reveal] [--json]
+  prime vaults code <company> <name> [--json]
+  prime vaults rm <company> <value|secret|code> <name>
+  prime vaults assign <space> <company...> [--all] [--clear]
+  prime vaults status [--json]
+
+The vault is one AES-256-GCM encrypted SQLite database under ~/.prime/vaults.db.
+The key lives in the OS keychain when available (macOS Keychain, Secret
+Service); otherwise it is a 0600 file next to the database (a warning is shown).
+PRIME_VAULT_KEY (base64) and PRIME_VAULT_KEY_FILE exist for automation and
+tests; do not put the key in shell history.
+
+Companies group entries. A space assigned to one or more companies receives
+their values, secrets and TOTP codes in its 'run' tool as values.{name},
+secrets.{name} and codes.{name}. Two companies with the same entry name cannot
+be assigned to the same space (the flat maps would be ambiguous).
+
+SECRETS
+  --value is refused for secrets (it would show up in the process list); pipe
+  them with --stdin instead. 'prime vaults get' masks values unless --reveal is
+  passed. The key is never printed by status or init.
+
+EXAMPLES
+  prime vaults init
+  prime vaults company add acme
+  prime vaults set acme value region --value eu-west-1
+  printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin
+  prime vaults set acme code deploy --uri 'otpauth://totp/acme:deploy?secret=...&issuer=acme'
+  prime vaults code acme deploy --json
+  prime vaults assign dev acme
+`;
+
 const SPACES = `prime spaces - disposable or persistent Linux codespaces
 
 USAGE
@@ -459,6 +500,15 @@ SECURITY
   per-container --runtime flag. Spaces created before limit/token tracking must
   be recreated (or started with --allow-no-limits) so both guarantees apply.
 
+VAULTS AND RUN
+  prime spaces create --vault acme (repeatable) or --vault-all assigns companies.
+  The space's MCP server gains a run tool: JavaScript with tools.<name>({...}),
+  values.<name>, secrets.<name> and codes.<name> ({code, expires_at}). Secrets
+  are placeholders inside the sandbox; the server substitutes them only for
+  approved integrations (mcp) and redacts them from all results, so a client
+  never receives the raw value. codes.<name> is a short-lived TOTP object.
+  Manage the vault with 'prime vaults --help'.
+
 TOP
   prime spaces top <name> opens a live activity monitor: container cpu/memory/io,
   and a process list from inside the space (ps), sorted by cpu. It refreshes every
@@ -474,6 +524,8 @@ OPTIONS (create)
   --memory <size>     default 4g, e.g. 512m, 2g
   --offline           internal network only (no internet), host still connects
   --expose            publish through the gateway as an anonymous device
+  --vault <company>   let the run tool use a company's values/secrets/codes (repeatable)
+  --vault-all         assign every vault company
   --gateway <url>     gateway for --expose
   --runtime <rt>      apple|podman|docker
   --allow-rootful     permit rootful docker (not recommended)
@@ -502,12 +554,13 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "call") return TOOLS;
   if (topic === "files" || topic === "upload" || topic === "download") return FILES;
   if (topic === "spaces") return SPACES;
+  if (topic === "vaults") return VAULTS;
   if (topic === "update" || topic === "upgrade") return UPDATE;
   if (topic === "connect") return CONNECT;
   if (topic === "serve") return SERVE;
   if (topic === "code-mcp") return CODE_MCP;
   if (topic === "service") return SERVICE;
-  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|files|spaces|call|update|code-mcp]")}`;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|files|spaces|vaults|call|update|code-mcp]")}`;
   void sub;
   return undefined;
 }
@@ -524,6 +577,11 @@ export function usageLine(topic: string, sub?: string): string {
   if (topic === "update" || topic === "upgrade") return "Usage: prime update [--check] [--force] [--to <path>]";
   if (topic === "connect") return "Usage: prime connect [--gateway <url>] [--new] [-- <device flags>]";
   if (topic === "serve") return "Usage: prime serve [<device-id>...] [--port <n>] [--host <addr>]";
+  if (topic === "vaults") {
+    if (sub === "set") return "Usage: prime vaults set <company> <value|secret|code> <name> [--value <v> | --stdin | --uri <otpauth://...>]";
+    if (sub === "assign") return "Usage: prime vaults assign <space> <company...> [--all] [--clear]";
+    return "Usage: prime vaults <init|company|set|list|get|code|rm|assign|status> [args]";
+  }
   if (topic === "spaces") {
     if (sub === "create") return "Usage: prime spaces create [--name <name>] [--persistent] [--cpus <n>] [--memory <4g>]";
     if (sub === "list") return "Usage: prime spaces list [--json]";

@@ -16,6 +16,7 @@ import { bool, flag, parseArgs, str, type FlagSpec } from "./args.ts";
 import { runCodeMcp } from "./code-mcp-host.ts";
 import { serviceInstall, serviceStatusCommand, serviceUninstall } from "./service-command.ts";
 import { connectCommand } from "./connect.ts";
+import { vaultsCommand } from "./vaults.ts";
 import { serveCommand } from "./serve.ts";
 import { type Ctx, makeCtx } from "./context.ts";
 import { devicesConnect, devicesDisconnect, devicesList, devicesStatus } from "./devices.ts";
@@ -29,7 +30,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.20-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.21-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -77,12 +78,23 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("cpus", "number", "CPUs for the container (default 2)", { placeholder: "<n>" }),
   flag("memory", "string", "Memory limit, e.g. 4g (default 4g)", { placeholder: "<size>" }),
   flag("offline", "boolean", "No network access (Apple internal network or podman internal)"),
+  flag("vault", "string", "Company whose values/secrets/codes the run tool may use; repeatable", { placeholder: "<company>", repeatable: true }),
+  flag("vault-all", "boolean", "Assign every vault company to the space"),
   flag("expose", "boolean", "Publish the space through the gateway as an anonymous device"),
   flag("gateway", "string", "Gateway for --expose (default: saved default or the managed gateway)", { placeholder: "<url>" }),
   flag("gateway-token", "string", "Gateway credential for --expose, only if the gateway needs one", { placeholder: "<token>" }),
   flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
   flag("runtime", "string", "Runtime: apple|podman|docker", { placeholder: "<runtime>" }),
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
+];
+
+const VAULTS_FLAGS: FlagSpec[] = [
+  flag("value", "string", "Value for a non-secret entry", { placeholder: "<value>" }),
+  flag("stdin", "boolean", "Read the value (or otpauth URI) from stdin"),
+  flag("uri", "string", "otpauth:// URI for a code entry", { placeholder: "<uri>" }),
+  flag("reveal", "boolean", "Print the raw value instead of masking it"),
+  flag("all", "boolean", "Select every company (assign)"),
+  flag("clear", "boolean", "Clear the vault assignment"),
 ];
 
 const SPACE_TOP_FLAGS: FlagSpec[] = [
@@ -172,6 +184,13 @@ async function main(argv: string[]): Promise<void> {
     process.stdout.write(rootHelp().trimEnd() + "\n");
     return;
   }
+  // Hidden: the JavaScript child used by the run tool. It shares stdin/stdout
+  // with the parent over a small JSON protocol and must not parse normal CLI args.
+  if (argv[0] === "__run-sandbox") {
+    const { runSandboxChild } = await import("./run-tool.ts");
+    await runSandboxChild();
+    return;
+  }
   // Hidden/advanced: run the bundled device buddy. Every argument
   // belongs to code-mcp (including --help), so mcp's parser must not see them.
   if (argv[0] === "code-mcp") {
@@ -246,7 +265,7 @@ async function main(argv: string[]): Promise<void> {
     }
   }
 
-  if (topic === "devices" || topic === "tools" || topic === "files" || topic === "spaces") {
+  if (topic === "devices" || topic === "tools" || topic === "files" || topic === "spaces" || topic === "vaults") {
     if (wantHelp) {
       showHelp(helpFor(topic, sub), topic, sub);
       return;
@@ -275,6 +294,8 @@ async function main(argv: string[]): Promise<void> {
         default:
           throw new UsageError(`unknown devices command "${sub}"`, `Valid: connect, disconnect, status, list. ${usageLine("devices")}`);
       }
+    case "vaults":
+      return vaultsCommand(ctx);
     case "spaces":
       switch (sub) {
         case "create":
@@ -366,6 +387,7 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "download") return FILES_DOWNLOAD_FLAGS;
     return [];
   }
+  if (topic === "vaults") return VAULTS_FLAGS;
   if (topic === "update") return UPDATE_FLAGS;
   if (topic === "connect") return ANON_CONNECT_FLAGS;
   if (topic === "serve") return SERVE_FLAGS;
