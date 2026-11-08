@@ -84,12 +84,14 @@ function systemdBus(): string | undefined {
 function podmanEnv(): Record<string, string | undefined> | undefined {
   const bus = systemdBus();
   if (!bus) return undefined;
-  if (process.env.XDG_RUNTIME_DIR && process.env.DBUS_SESSION_BUS_ADDRESS) return undefined;
+  // Always point podman at the user manager's bus. A shell can inherit an
+  // ad-hoc dbus-launch bus instead; podman then cannot activate
+  // org.freedesktop.systemd1 ("exited with status 1"), so cgroup setup fails.
   const uid = process.getuid!();
   return {
     ...process.env,
-    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR ?? "/run/user/" + uid,
-    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS ?? "unix:path=" + bus,
+    XDG_RUNTIME_DIR: "/run/user/" + uid,
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=" + bus,
   };
 }
 
