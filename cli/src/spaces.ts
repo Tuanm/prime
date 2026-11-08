@@ -312,6 +312,7 @@ function runContainer(
   space: SpaceEntry,
   image: string,
   secretDir: string,
+  allowNoLimits: boolean,
   note: (text: string) => void,
 ): { code: number; out: string; err: string; cgroup?: "systemd" | "cgroupfs" | "disabled" } {
   const dir = mkdtempSync(join(tmpdir(), "prime-space-"));
@@ -334,18 +335,19 @@ function runContainer(
     }> = [];
     if (!systemd) attempts.push({ globals: ["--cgroup-manager=cgroupfs"], flags: [], limits: true, mode: "cgroupfs" });
     attempts.push({ globals: [], flags: [], limits: true, mode: "systemd" });
+    // A second default attempt: the rootless systemd cgroup setup occasionally
+    // fails once right after a restart and succeeds on the immediate retry.
+    attempts.push({ globals: [], flags: [], limits: true, mode: "systemd" });
     // NoCgroups only works with crun; runc rejects it ("not compatible with
     // NoCgroups") and podman has no per-container --runtime flag any more, so
-    // the runtime is forced through a config override. Without crun, the real
-    // fix is enabling systemd in WSL.
-    if (crun) attempts.push({ globals: [], flags: ["--cgroups=disabled"], limits: false, crun: true, mode: "disabled" });
-    const seen = new Set<string>();
+    // the runtime is forced through a config override. Only when the caller
+    // explicitly accepted running without limits.
+    if (crun && allowNoLimits) {
+      attempts.push({ globals: [], flags: ["--cgroups=disabled"], limits: false, crun: true, mode: "disabled" });
+    }
     let warnedLimits = false;
     let last = { code: 1, out: "", err: "" };
     for (const attempt of attempts) {
-      const key = JSON.stringify([attempt.globals, attempt.flags, attempt.limits]);
-      if (seen.has(key)) continue;
-      seen.add(key);
       // containerArgs already starts with "run": globals go before it, the
       // run-only flags (--cgroups) right after it.
       const base = containerArgs(runtime, space, image, secretDir, attempt.limits);
@@ -353,6 +355,9 @@ function runContainer(
       last = runtimeExec(runtime, [...attempt.globals, base[0]!, ...attempt.flags, ...base.slice(1)], 300_000, env);
       if (last.code === 0) return { ...last, cgroup: attempt.mode };
       runtimeExec(runtime, ["rm", "-f", space.container], 60_000);
+      if (process.env.PRIME_DEBUG === "1") {
+        note("  debug: " + attempt.mode + " attempt failed: " + (last.err || last.out).trim().slice(0, 400));
+      }
       if (!isPodmanCgroupFailure(last.err + last.out)) return last;
       if (!attempt.limits && !warnedLimits) {
         warnedLimits = true;
@@ -581,7 +586,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   ensureSecret(secretDir, token);
   space.secret_dir = secretDir;
   const started = Date.now();
-  const run = runContainer(runtime, space, image, secretDir, (text) => ctx.note(text));
+  const run = runContainer(runtime, space, image, secretDir, bool(ctx.parsed, "allow-no-limits"), (text) => ctx.note(text));
   if (run.code !== 0) {
     if (volume) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
@@ -649,7 +654,7 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     // An ephemeral stop removes the container and its network; recreate both.
     if (!space.network || space.network === "none") space.network = space.container + "-net";
     networkCreate(runtime, space.network, space.offline === true);
-    const run = runContainer(runtime, space, space.image, space.secret_dir, (text) => ctx.note(text));
+    const run = runContainer(runtime, space, space.image, space.secret_dir, allowNoLimits, (text) => ctx.note(text));
     if (run.code === 0) space.cgroup_mode = run.cgroup;
     if (run.code === 0 && run.cgroup === "disabled" && !allowNoLimits) {
       runtimeExec(runtime, ["rm", "-f", space.container], 120_000);
