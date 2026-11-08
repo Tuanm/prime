@@ -1,16 +1,16 @@
 # Prime
 
-**A toolkit that turns a machine, a file and a browser into tools - with limits you set.**
+**A light toolkit for secure execution environments.**
 
 [![CI](https://github.com/Tuanm/prime/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuanm/prime/actions/workflows/ci.yml)
 
 | What you get | In one line |
 | --- | --- |
 | **[File sharing](#file-sharing)** | Devices park temporary files and hand out a link - optionally protected by a key, always expiring. |
-| **[MCP device management](#prime-device-management)** | Any machine becomes an MCP device: connect it once, then reach its tools from any MCP client, anywhere. |
+| **[Device management](#device-management)** | Any machine becomes a device: connect it once, then reach its tools from any client, anywhere. |
 | **[Browser sandbox](#browser-sandbox)** | A locked-down browser tab where tools you write run with a real UI - and no access to your pages, cookies or data. |
 | **[Access control](#access-control)** | Per-device tokens, an admin page, anonymous devices, and a switch to cut a device or an address off. |
-| **[One server for every device](#one-server-for-every-device)** | `prime serve` presents every device's tools as a single MCP server to a client that only knows one. |
+| **[One server for every device](#one-server-for-every-device)** | `prime serve` presents every device's tools as a single tool server to a client that only knows one. |
 | **[Local use](#local-use-no-account)** | The same server runs on its own, without the hosted service, for one machine. |
 
 ---
@@ -39,13 +39,13 @@ prime files download report.pdf -o copy.pdf
   files are deleted automatically and never listed.
 - **A page to manage them.** `/files` lists what the device holds, with upload, download,
   rename, protection and delete.
-- **Even an MCP client can download** through a short-lived, single-use ticket, for clients
+- **Even a plain client can download** through a short-lived, single-use ticket, for clients
   that cannot send Basic auth (`GET /device/<deviceId>/download/<ticket>`).
 
-## MCP device management
+## Device management
 
 Run `prime connect` on a machine and it becomes a **device**: a named endpoint whose tools
-(file read/write, shell, search, jobs, preview, memory) any MCP client can call through
+(file read/write, shell, search, jobs, preview, memory) any client can call through
 `POST /device/<deviceId>`. No ports, no tunnels, no firewall rules - the device connects out
 and stays connected.
 
@@ -86,7 +86,7 @@ export default async function add(a, b = 1) { return a + b; }
   Starter tools for building a dashboard are offered on the first visit.
 - **An interface, not just a log.** Tools build UI with `ui.add(...)` - headings, text,
   code, images, badges, stats, progress, buttons, inputs, tables, lists, grids, cards,
-  tabs, modals - and drive a named cursor per MCP client (`click`, `type`, `fill`,
+  tabs, modals - and drive a named cursor per client (`click`, `type`, `fill`,
   `select`, `drag`, `hover`, `scroll`). `ui.wait(id)` waits for the person to act.
 - **Interactive without an agent.** `on: { click: { tool, args } }` handlers run in the
   browser, and `ui.events()` tells the agent what happened afterwards.
@@ -97,9 +97,10 @@ export default async function add(a, b = 1) { return a + b; }
 
 ## Codespaces
 
-`prime spaces` turns a Linux container into a local device: the device buddy runs
-inside it with no gateway, and the container is registered like any other device, so
-`prime devices list` and `prime tools call <space-id>.<tool>` work unchanged.
+Spaces are rootless Linux containers registered as local devices: the device buddy
+runs inside with no gateway, so `prime devices list` and
+`prime tools call <space-id>.<tool>` work unchanged. Create one with
+`prime spaces create`.
 
 ```bash
 prime spaces create --name dev                  # ephemeral: stop wipes it
@@ -145,9 +146,9 @@ Token/vault files are removed from the space once the server has read them.
 prime vaults init
 prime vaults company add acme
 prime vaults set acme value region --value eu-west-1
-printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin
+printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin --allow-host api.example.com
 prime spaces create --name dev --vault acme
-prime tools call dev.run '{"code":"return values.region"}'
+prime tools call dev.run '{"code":"return await tools.http({url: \"https://api.example.com/me\", headers: {Authorization: \"Bearer \" + secrets.api}})"}'
 ```
 
 ## Access control
@@ -185,11 +186,12 @@ those origin lines printed to the platform console - off by default.
 
 ## One server for every device
 
-`prime serve` presents every device's tools as one MCP server, so a client that knows a
+`prime serve` presents every device's tools as one tool server, so a client that knows a
 single server sees all machines:
 
 ```bash
-claude mcp add devices -- prime serve
+prime serve                     # stdio endpoint for any client
+prime serve --port 7800         # or HTTP on http://127.0.0.1:7800/mcp
 ```
 
 ## Local use (no account)
@@ -197,7 +199,7 @@ claude mcp add devices -- prime serve
 The same server runs on its own for one machine - no service, no account:
 
 ```bash
-bun cli/src/code-mcp.ts --port 7777 --token secret        # HTTP MCP at http://127.0.0.1:7777/mcp
+bun cli/src/code-mcp.ts --port 7777 --token secret        # HTTP tool endpoint at http://127.0.0.1:7777/mcp
 bun cli/src/code-mcp.ts --gateway --id my-laptop --token t # ...or as a device on the service
 ```
 
@@ -229,7 +231,6 @@ section. `prime --help` lists everything, and `prime call` is an alias for `prim
 - [cli/SERVER.md](cli/SERVER.md) - the device buddy: tools, flags, behaviour
 - [cli/README.md](cli/README.md) - the `prime` CLI: install, commands, configuration, exit codes
 - [api/README.md](api/README.md) - internals, deployment, tunables, tests
-- [MCP specification](https://modelcontextprotocol.io) - the protocol all of this speaks
 
 ## Development
 

@@ -31,13 +31,13 @@ __CSS__
   </head>
   <body>
     <h1>Prime</h1>
-    <div class="sub">devices, files, sandbox</div>
-    <p class="desc">A toolkit that turns a machine, a file and a browser into tools - with limits you set.</p>
+    <div class="sub">devices, files, sandbox, spaces</div>
+    <p class="desc">A light toolkit for secure execution environments.</p>
 
     <div class="cards">
       <a class="card" href="/connect">
         <div class="t">Device Connect</div>
-        <div class="d">Any machine becomes a device: its files, shell and tools, reachable from any MCP client.</div>
+        <div class="d">Any device becomes a buddy.</div>
         <div class="u">/connect</div>
       </a>
       <a class="card" href="/files">
@@ -52,13 +52,8 @@ __CSS__
       </a>
       <a class="card" href="https://github.com/Tuanm/prime/blob/main/cli/README.md#spaces---disposable-or-persistent-codespaces">
         <div class="t">Codespaces</div>
-        <div class="d">prime spaces create runs a rootless Linux container as a local device: disposable or persistent, with its own token and limits.</div>
-        <div class="u">prime spaces</div>
-      </a>
-      <a class="card" href="https://github.com/Tuanm/prime/blob/main/cli/README.md#vaults-and-run">
-        <div class="t">Vaults</div>
-        <div class="d">Encrypted local values, secrets and TOTP codes, assigned to a space for its run tool.</div>
-        <div class="u">prime vaults</div>
+        <div class="d">Spaces are rootless Linux containers with their own network, limits and an encrypted vault, registered as local buddies.</div>
+        <div class="u">spaces</div>
       </a>
     </div>
 

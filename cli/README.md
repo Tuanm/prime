@@ -1,17 +1,17 @@
 # prime - the CLI
 
 A small, fast command line client for the [Prime gateway](../README.md). It talks
-to devices through the gateway's MCP relay and lets you list, inspect and call
-their MCP tools from a terminal or a script.
+to devices through the gateway's relay and lets you list, inspect and call
+their tools from a terminal or a script.
 
 - **Fast**: ~11 ms cold start, ~15 MB resident, one HTTP round trip per command.
-- **Light**: no runtime dependencies, no MCP SDK, no YAML library.
+- **Light**: no runtime dependencies, no SDK, no YAML library.
 - **Cross-platform**: one self-contained binary per OS/arch.
 - **Scriptable**: typed exit codes, JSON output, stdin batching.
 
 ```text
 prime connect                                   # THIS machine as an anonymous device
-claude mcp add gateway -- prime serve           # every device's tools in Claude Code
+prime serve                                    # every device's tools behind one endpoint
 prime devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
 prime devices connect my-laptop                 # later: defaults already stored
 prime devices list
@@ -141,18 +141,17 @@ environment, so its own subprocesses never inherit it.
 - The connect URL and code grant shell access to this machine: keep them secret.
   Anonymous devices get a lower request budget and cannot use file storage.
 
-### serve - every device as one MCP server
+### serve - every device as one tool server
 
 ```bash
-claude mcp add gateway -- prime serve          # Claude Code (stdio)
-codex mcp add gateway -- prime serve           # Codex (stdio)
+prime serve                                    # stdio endpoint for any client
 prime serve laptop staging                     # only these devices
-prime serve --port 7800                        # Streamable HTTP on http://127.0.0.1:7800/mcp
+prime serve --port 7800                        # HTTP on http://127.0.0.1:7800/mcp
 ```
 
 `prime serve` aggregates the tools of every configured device (the same devices
 and credentials `prime tools list` / `prime call` use, or just the ids given) into
-**one** MCP server.
+**one** tool server.
 
 - **stdio** (default): newline-delimited JSON-RPC 2.0 - `initialize`,
   `tools/list`, `tools/call`, `ping`; notifications get no response. stdout
@@ -271,7 +270,7 @@ stored rather than clearing it.
 
 ### devices list / status
 
-`status` sends an MCP `ping` and reports reachability plus round-trip time.
+`status` sends a `ping` and reports reachability plus round-trip time.
 `list` probes every configured device concurrently and prints a table;
 `--no-probe` skips the probes for an instant offline listing.
 
@@ -362,7 +361,7 @@ runtime cannot enforce cgroups (podman without systemd, WSL2 crun fallback),
 create refuses instead of silently running unlimited, unless you pass
 `--allow-no-limits`. Online spaces have NAT (internet and host services on
 0.0.0.0, not the host filesystem); `--offline` gives a no-internet internal
-network on Apple and podman alike. The MCP server only answers with the random
+network on Apple and podman alike. The tool server only answers with the random
 per-space token. The image is `ghcr.io/tuanm/prime-space:<version>`, built
 multi-arch by the release workflow.
 
@@ -425,7 +424,7 @@ prime vaults assign dev acme beta      # afterwards, restart the space
 ```
 
 **Expose.** `--expose` publishes the space through the gateway as an anonymous
-device: the device buddy inside the space opens an outbound tunnel, so any MCP
+device: the device buddy inside the space opens an outbound tunnel, so any
 client with the printed connect URL can call its tools (the local direct device
 stays too). The connect URL is a credential: anyone who has it can run commands
 as root in the space. Anonymous devices have a lower request budget and expire
@@ -510,7 +509,7 @@ prime tools call --stdin < calls.json
 
 Output follows the input: a single call prints the tool's text content on stdout;
 a batch labels each result with its `id` in the specified order. `--json`
-prints the raw MCP result for a single call and an array of
+prints the raw result for a single call and an array of
 `{ id, name, ok, result | error }` for a batch.
 
 A tool that reports failure (`isError`) is printed and exits 1. In a batch, one
@@ -526,7 +525,7 @@ editors emit them.
 
 Output follows the input: a single call prints the tool's text content on stdout;
 a batch labels each result with its `id` in the specified order. `--json`
-prints the raw MCP result for a single call and an array of
+prints the raw result for a single call and an array of
 `{ id, name, ok, result | error }` for a batch.
 
 **Failures are per call and never cascade.** If three calls are requested and the
@@ -693,7 +692,7 @@ Design choices behind those numbers:
 - **No dependencies.** JSON-RPC over `fetch` is ~150 lines; the config file is
   parsed with Bun's built-in `Bun.YAML.parse`, and the CLI writes YAML with a
   small emitter. Nothing to resolve, nothing to load.
-- **One round trip per command.** MCP servers *should* require `initialize`
+- **One round trip per command.** Tool servers *should* require `initialize`
   before other requests, but current devices do not. `--handshake auto`
   (the default) therefore calls directly and only handshakes if the server
   actually complains - see `--handshake always|never` to force it.

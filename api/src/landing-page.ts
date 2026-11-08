@@ -12,7 +12,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Device Connect</title>
-    <meta name="description" content="Connect this machine as a device and use its files and shell as MCP tools - from anywhere." />
+    <meta name="description" content="Connect this machine as a device and use its files and shell as tools - from anywhere." />
     <link rel="icon" href="__FAVICON__" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -63,8 +63,8 @@ export const LANDING_HTML = String.raw`<!doctype html>
   </head>
   <body>
     <h1>Device Connect</h1>
-    <div class="sub">this machine as MCP tools, anywhere</div>
-    <p class="desc">Connect this machine's files and shell as MCP tools - from anywhere. Download <b>prime</b>, run <code>prime connect</code>, and add the URL it prints to Claude Code, Codex or any MCP client.</p>
+    <div class="sub">this machine as tools, anywhere</div>
+    <p class="desc">Connect this machine's files and shell as tools - from anywhere. Download <b>prime</b>, run <code>prime connect</code>, and use the URL it prints from your client.</p>
 
     <div class="cg" id="cg">
       <button type="button" class="main" id="connect">Connect</button>
@@ -80,7 +80,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
     <ul class="more">
       <li><code>prime connect</code> registers this machine as a device and serves its tools until you stop it.</li>
       <li><code>prime service install</code> keeps it running at every login.</li>
-      <li><code>prime serve</code> exposes every connected device to a local MCP client.</li>
+      <li><code>prime serve</code> exposes every connected device to a local client.</li>
       <li><code>prime spaces create</code> runs a rootless Linux codespace as a local device.</li>
       <li><code>prime vaults</code> keeps encrypted values, secrets and TOTP codes for the run tool.</li>
     </ul>
@@ -187,7 +187,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
           else targetEl.textContent = "For " + name(current);
           var metaEl = document.getElementById("meta");
           if (metaEl) metaEl.innerHTML = release
-            ? '<a href="' + release.url + '">mcp ' + release.version + '</a> \u00b7 <a href="' + RELEASES + '">all releases</a>'
+            ? '<a href="' + release.url + '">prime ' + release.version + '</a> \u00b7 <a href="' + RELEASES + '">all releases</a>'
             : '<a href="' + RELEASES + '">All releases</a>';
           if (guide.classList.contains("show")) showGuide();
         }
@@ -240,8 +240,8 @@ export const LANDING_HTML = String.raw`<!doctype html>
             guide.appendChild(block(lines.join("\n")));
             guide.appendChild(para('<span class="hint">Add <code>~/.local/bin</code> to your PATH to run <code>prime</code> from anywhere.</span>'));
           }
-          guide.appendChild(para("<code>prime connect</code> prints a device id, a 6-character device code and a <b>connect URL</b>. Add that URL to your MCP client, e.g.:"));
-          guide.appendChild(block("claude mcp add --transport http my-machine '<connect URL>'"));
+          guide.appendChild(para("<code>prime connect</code> prints a device id, a 6-character device code and a <b>connect URL</b>. Use the URL from your client, or:"));
+          guide.appendChild(block("prime tools call <device-id>.bash '{\"cwd\":\"/tmp\",\"command\":\"uname -a\"}'"));
           guide.appendChild(para('<span class="hint">Keep the URL and code private: they give access to this machine\'s files and shell.</span>'));
           guide.classList.add("show");
         }
