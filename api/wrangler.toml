@@ -26,6 +26,7 @@ bindings = [
   { name = "REGISTRY", class_name = "RegistryDO" },
   { name = "CODING_SANDBOX", class_name = "CodingSandbox" },
   { name = "FILES", class_name = "FilesDO" },
+  { name = "FLEET", class_name = "FleetDO" },
 ]
 
 # Temporary file contents (see src/files-do.ts + src/files-routes.ts). Uploads
@@ -46,6 +47,10 @@ new_sqlite_classes = ["CodingSandbox"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["FilesDO"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["FleetDO"]
 
 # Coding sandbox container: the dev image the cloud device's shell/fs/jobs
 # tools exec into. Built from ./Dockerfile (needs a local Docker daemon or

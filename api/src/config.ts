@@ -131,6 +131,8 @@ export interface GatewayConfig {
 }
 
 export interface Env {
+  /** One Durable Object per fleet: membership, invites, lease, head. */
+  FLEET?: DurableObjectNamespace;
   GATEWAY_TOKEN?: string;
   DEVICE_TOKEN?: string;
   DEVICE_TOKENS?: string; // JSON map { deviceId: token } - per-device secrets (secret)

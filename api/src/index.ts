@@ -29,6 +29,7 @@ import { LANDING_HTML } from "./landing-page";
 import { HOME_HTML } from "./home-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
+import { handleFleetRoutes } from "./fleets-routes";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { ipBlockKey } from "./config";
@@ -39,6 +40,7 @@ export { DeviceDO } from "./device-do";
 export { RegistryDO } from "./registry-do";
 export { CodingSandbox } from "./coding-sandbox";
 export { FilesDO } from "./files-do";
+export { FleetDO } from "./fleet-do";
 
 const unauthorized = () => Response.json({ error: "unauthorized" }, { status: 401 });
 
@@ -391,6 +393,25 @@ export default {
         },
         { status: 201, headers: { "cache-control": "no-store" } },
       );
+    }
+
+    // ---- Fleets ----
+    // Membership and bootstrap. The Worker proves the credential here; the
+    // Durable Object only ever sees an identity this Worker established.
+    if (url.pathname.startsWith("/fleets/") || url.pathname.startsWith("/api/fleets/") || url.pathname === "/fleets") {
+      if (url.pathname === "/fleets") return Response.json({ error: "fleet id required" }, { status: 400 });
+      const fleetResponse = await handleFleetRoutes({
+        request,
+        env,
+        url,
+        cfg,
+        unauthorized,
+        authorizeDevice: async (deviceId) => {
+          const auth = await authorizeDevice(deviceId, request, url, cfg, env);
+          return auth.denied ? { ok: false as const, response: auth.denied } : { ok: true as const };
+        },
+      });
+      if (fleetResponse) return fleetResponse;
     }
 
     // ---- Temporary files (REST API + pages) ----
