@@ -538,15 +538,54 @@ ${UI_CSS}    </style>
         var fleetListEl = document.getElementById("fleetList");
         var fleetAddBtn = document.getElementById("fleetAddBtn");
         var fleets = [];
+        // The fleets being set up, kept across re-renders so that typing is
+        // never lost.
+        var pendingFleets = [];
 
-        function fleetBtn(text, onClick, danger) {
-          var b = document.createElement("button");
-          b.type = "button";
-          b.className = "fleet-btn" + (danger ? " danger" : "");
-          b.textContent = text;
-          b.addEventListener("click", onClick);
-          return b;
+        // The menu of a row, the way the device rows do it: a button that
+        // opens a list of actions.
+        function fleetMenu(items) {
+          var wrap = document.createElement("span");
+          wrap.className = "menu-wrap";
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "menu-btn";
+          btn.textContent = "\u22ee";
+          var menu = document.createElement("span");
+          menu.className = "menu";
+          items.forEach(function (spec) {
+            var b = document.createElement("button");
+            b.type = "button";
+            b.textContent = spec.text;
+            if (spec.danger) b.className = "danger";
+            if (spec.disabled) b.disabled = true;
+            b.addEventListener("click", function (e) {
+              e.stopPropagation();
+              closeFleetMenus();
+              spec.onClick();
+            });
+            menu.appendChild(b);
+          });
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var wasOpen = menu.classList.contains("open");
+            closeFleetMenus();
+            if (!wasOpen) menu.classList.add("open");
+          });
+          wrap.appendChild(btn);
+          wrap.appendChild(menu);
+          document.addEventListener("click", function handler(ev) {
+            if (!wrap.contains(ev.target)) closeFleetMenus();
+            document.removeEventListener("click", handler);
+          });
+          return wrap;
         }
+
+        function closeFleetMenus() {
+          var open = document.querySelectorAll(".menu.open");
+          for (var i = 0; i < open.length; i++) open[i].classList.remove("open");
+        }
+
 
         function fleetName(m) {
           return m.label || m.deviceId || "?";
@@ -554,7 +593,7 @@ ${UI_CSS}    </style>
 
         function fleetRender() {
           fleetListEl.innerHTML = "";
-          if (!fleets.length) {
+          if (!fleets.length && !pendingFleets.length) {
             var empty = document.createElement("li");
             empty.className = "empty";
             empty.textContent = "No fleets yet. Click + to create one.";
@@ -562,6 +601,65 @@ ${UI_CSS}    </style>
             return;
           }
           fleets.forEach(fleetCard);
+          pendingFleets.forEach(fleetNewCard);
+        }
+
+        // The card that is filled in to make a new fleet.
+        function fleetNewCard(pending) {
+          var li = document.createElement("li");
+          li.className = "fleet new";
+
+          var head = document.createElement("div");
+          head.className = "fleet-head";
+          var title = document.createElement("span");
+          title.className = "fleet-name";
+          title.textContent = "New fleet";
+          head.appendChild(title);
+          var hint = document.createElement("span");
+          hint.className = "fleet-meta";
+          hint.textContent = "the name the spaces use to join it";
+          head.appendChild(hint);
+
+          head.appendChild(
+            fleetMenu([
+              {
+                text: "Create",
+                onClick: function () {
+                  fleetCreate(pending);
+                },
+              },
+              {
+                text: "Cancel",
+                onClick: function () {
+                  fleetDrop(pending);
+                },
+              },
+            ]),
+          );
+          li.appendChild(head);
+
+          var form = document.createElement("div");
+          form.className = "fleet-form";
+          var box = document.createElement("div");
+          box.className = "box";
+          var input = document.createElement("input");
+          input.className = "id-input";
+          input.placeholder = "fleet name: a-z, 0-9 and dashes";
+          input.value = pending.name || "";
+          input.addEventListener("input", function () { pending.name = input.value; });
+          input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") fleetCreate(pending);
+          });
+          box.appendChild(input);
+          form.appendChild(box);
+          li.appendChild(form);
+          return li;
+        }
+
+        function fleetDrop(pending) {
+          var i = pendingFleets.indexOf(pending);
+          if (i >= 0) pendingFleets.splice(i, 1);
+          fleetRender();
         }
 
         function fleetCard(f) {
@@ -591,15 +689,23 @@ ${UI_CSS}    </style>
           meta.textContent = bits.join(" · ");
           head.appendChild(meta);
 
-          var actions = document.createElement("span");
-          actions.className = "fleet-actions";
-          actions.appendChild(fleetBtn("Invite", function () {
-            fleetInvite(f.fleet);
-          }));
-          actions.appendChild(fleetBtn("Delete", function () {
-            fleetDelete(f.fleet);
-          }, true));
-          head.appendChild(actions);
+          head.appendChild(
+            fleetMenu([
+              {
+                text: "Invite",
+                onClick: function () {
+                  fleetInvite(f.fleet);
+                },
+              },
+              {
+                text: "Delete",
+                danger: true,
+                onClick: function () {
+                  fleetDelete(f.fleet);
+                },
+              },
+            ]),
+          );
           li.appendChild(head);
 
           // The tree of spaces: the primary at the top, the mirrors under it.
@@ -612,12 +718,18 @@ ${UI_CSS}    </style>
             return (a.addedAt || 0) - (b.addedAt || 0);
           });
           ordered.forEach(function (m) {
-            tree.appendChild(fleetNode(m, m.deviceId === f.primary));
+            tree.appendChild(fleetNode(f.fleet, m, m.deviceId === f.primary));
           });
           if (!ordered.length) {
             var none = document.createElement("li");
-            none.className = "fleet-node child";
-            none.textContent = "No spaces yet. Mint an invite code and give it to a space.";
+            none.className = "row fleet-row";
+            var noneBox = document.createElement("div");
+            noneBox.className = "box";
+            var noneText = document.createElement("span");
+            noneText.className = "fleet-meta";
+            noneText.textContent = "No spaces yet. Mint an invite code and give it to a space.";
+            noneBox.appendChild(noneText);
+            none.appendChild(noneBox);
             tree.appendChild(none);
           }
           li.appendChild(tree);
@@ -642,80 +754,145 @@ ${UI_CSS}    </style>
           fleetListEl.appendChild(li);
         }
 
-        function fleetNode(m, isPrimary) {
+        // A space in the fleet, drawn as a row of the device list: the status
+        // outside, the box with the name and the device id, and the actions in
+        // the menu.
+        function fleetNode(fleet, m, isPrimary) {
           var li = document.createElement("li");
-          li.className = "fleet-node" + (isPrimary ? " primary" : " child");
+          li.className = "row fleet-row" + (isPrimary ? " primary" : "");
           var dot = document.createElement("span");
           dot.className = "dot " + (m.online ? "on" : "off");
+          var box = document.createElement("div");
+          box.className = "box";
+
+          var nameInput = document.createElement("input");
+          nameInput.className = "id-input";
+          nameInput.readOnly = true;
+          nameInput.value = fleetName(m);
+          nameInput.title = isPrimary
+            ? "the primary: it holds the lease, so it is the one that writes"
+            : m.role === "owner"
+              ? "the owner of the fleet"
+              : "a member of the fleet";
+
+          var idInput = document.createElement("input");
+          idInput.className = "tok-input";
+          idInput.readOnly = true;
+          idInput.value = m.deviceId;
+          idInput.title = "the device id of this space";
+
+          var menu = fleetMenu([
+            {
+              text: "Tools",
+              disabled: !m.online,
+              onClick: function () {
+                showToolsDialog(m.deviceId, "");
+              },
+            },
+            {
+              text: "Remove",
+              danger: true,
+              onClick: function () {
+                fleetAction(fleet, "remove", { deviceId: m.deviceId }, "removed " + fleetName(m));
+              },
+            },
+          ]);
+
+          box.appendChild(nameInput);
+          box.appendChild(idInput);
+          box.appendChild(menu);
           li.appendChild(dot);
-          var who = document.createElement("span");
-          who.className = "who";
-          who.textContent = fleetName(m);
-          li.appendChild(who);
-          var tag = document.createElement("span");
-          tag.className = "tag" + (isPrimary ? " primary" : "");
-          tag.textContent = isPrimary ? "primary" : m.role === "owner" ? "owner" : "member";
-          li.appendChild(tag);
-          if (!m.online) {
-            var off = document.createElement("span");
-            off.className = "tag";
-            off.textContent = "offline";
-            li.appendChild(off);
-          }
-          var id = document.createElement("span");
-          id.className = "id";
-          id.textContent = m.deviceId;
-          li.appendChild(id);
+          li.appendChild(box);
           return li;
         }
 
+        // A space that asked to join: the same row, with the two answers in
+        // the menu.
         function fleetPendingNode(fleet, p) {
           var li = document.createElement("li");
-          li.className = "fleet-node child";
+          li.className = "row fleet-row";
           var dot = document.createElement("span");
           dot.className = "dot " + (p.online ? "on" : "off");
+          var box = document.createElement("div");
+          box.className = "box";
+
+          var nameInput = document.createElement("input");
+          nameInput.className = "id-input";
+          nameInput.readOnly = true;
+          nameInput.value = p.label || p.deviceId;
+          nameInput.title = "waiting to be admitted";
+
+          var idInput = document.createElement("input");
+          idInput.className = "tok-input";
+          idInput.readOnly = true;
+          idInput.value = p.deviceId;
+          idInput.title = "the device id that asked to join";
+
+          var menu = fleetMenu([
+            {
+              text: "Admit",
+              onClick: function () {
+                fleetAction(fleet, "approve", { deviceId: p.deviceId }, "admitted " + (p.label || p.deviceId));
+              },
+            },
+            {
+              text: "Decline",
+              danger: true,
+              onClick: function () {
+                fleetAction(fleet, "remove", { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
+              },
+            },
+          ]);
+
+          box.appendChild(nameInput);
+          box.appendChild(idInput);
+          box.appendChild(menu);
           li.appendChild(dot);
-          var who = document.createElement("span");
-          who.className = "who";
-          who.textContent = p.label || p.deviceId;
-          li.appendChild(who);
-          var id = document.createElement("span");
-          id.className = "id";
-          id.textContent = p.deviceId;
-          li.appendChild(id);
-          var actions = document.createElement("span");
-          actions.className = "fleet-actions";
-          actions.appendChild(fleetBtn("Admit", function () {
-            fleetAction(fleet, "approve", { deviceId: p.deviceId }, "admitted " + (p.label || p.deviceId));
-          }));
-          actions.appendChild(fleetBtn("Decline", function () {
-            fleetAction(fleet, "remove", { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId), true);
-          }, true));
-          li.appendChild(actions);
+          li.appendChild(box);
           return li;
         }
 
-        function fleetCreate() {
-          var name = window.prompt("The name of the new fleet (a-z, 0-9 and dashes):");
-          if (!name) return;
-          name = name.trim();
+        function fleetCreate(pending) {
+          var name = (pending.name || "").trim();
+          if (!name) {
+            setStatus("enter a name for the fleet", true);
+            return;
+          }
           if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) {
-            setStatus("that is not a fleet name", true);
+            setStatus("that is not a fleet name: a-z, 0-9 and dashes, up to 32 characters", true);
             return;
           }
           api("/admin/api/fleets/" + encodeURIComponent(name), { method: "POST", body: "{}" })
             .then(function () {
               setStatus("created fleet " + name);
+              fleetDrop(pending);
               loadFleets();
             })
             .catch(function (e) { setStatus("could not create the fleet: " + e.message, true); });
         }
 
+        // The + button opens the card that is filled in to make a fleet.
+        function fleetAddCard() {
+          var pending = { name: "" };
+          pendingFleets.push(pending);
+          fleetRender();
+          var inputs = fleetListEl.querySelectorAll(".fleet.new .id-input");
+          var last = inputs[inputs.length - 1];
+          if (last) last.focus();
+        }
+
         function fleetInvite(fleet) {
           api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/invite", { method: "POST", body: "{}" })
             .then(function (j) {
-              window.prompt("Invite code for " + fleet + " (single use, it expires):", j.code || "");
-              loadFleets();
+              var d = openDialog("Invite code", fleet);
+              var expires = j.expiresAt ? Math.max(0, Math.round((j.expiresAt - Date.now()) / 1000)) : 0;
+              d.bodyEl.innerHTML =
+                '<div class="dlg-msg">This code admits one space to the fleet. It expires in ' +
+                expires +
+                ' seconds.</div>' +
+                '<div class="dlg-code">' +
+                esc(j.code || "") +
+                "</div>";
             })
             .catch(function (e) { setStatus("could not mint an invite: " + e.message, true); });
         }
@@ -931,7 +1108,7 @@ ${UI_CSS}    </style>
           renderRow({ deviceId: "", token: "", online: false }, true, p);
         });
 
-        fleetAddBtn.addEventListener("click", fleetCreate);
+        fleetAddBtn.addEventListener("click", fleetAddCard);
 
         load();
         setInterval(refreshDots, 5000);
