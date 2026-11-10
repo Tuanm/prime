@@ -195,20 +195,21 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   const admin = adminOnly(cfg, request, url);
   const adminRoute = isAdminRoute(request.method, action);
 
-  // Operator routes need the gateway token; without one, refuse rather than
-  // silently degrade to "anyone may mint invites".
-  if (adminRoute && !admin) {
-    if (cfg.gatewayToken) return deps.unauthorized();
-    return Response.json({ error: "fleet administration requires a gateway token" }, { status: 403 });
-  }
-
+  // The routes that run a fleet are open to the operator and to the owner of
+  // that fleet. A member it invited would have no way to admit anyone if only
+  // the operator could, so the device path proves the credential and the
+  // object decides whether this device owns the fleet.
+  //
   // Device routes need a proven device credential. The device names itself, but
   // the credential proves the name: authorizeDevice checks the token against the
   // registry entry for exactly that id.
   let caller: FleetAuth = { admin };
   if (!admin) {
     const claimed = request.headers.get("x-prime-device") ?? url.searchParams.get("device") ?? "";
-    if (!claimed) return deps.unauthorized();
+    if (!claimed) {
+      if (adminRoute) return deps.unauthorized();
+      return deps.unauthorized();
+    }
     const verdict = await deps.authorizeDevice(claimed);
     if (!verdict.ok) return verdict.response;
     caller = { admin: false, deviceId: claimed };

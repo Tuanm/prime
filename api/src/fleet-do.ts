@@ -163,6 +163,21 @@ export class FleetDO implements DurableObject {
     return null;
   }
 
+  // The operator, or the owner of this fleet.
+  //
+  // The operator holds the gateway token, which is the authority of the whole
+  // deployment. The owner is the device that created the fleet, and it runs
+  // its own fleet: a member it invited would have no way to admit anyone if
+  // only the operator could.
+  private async requireOperatorOrOwner(caller: Caller): Promise<Response | null> {
+    if (caller.kind === "admin") return null;
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    const member = members[caller.deviceId];
+    if (!member || member.role !== "owner") return this.deny();
+    return null;
+  }
+
   private async create(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     // Both the operator and a proven device may create a fleet: the first
     // member of a fleet is usually a space, and it has to be able to bring
@@ -195,7 +210,7 @@ export class FleetDO implements DurableObject {
   }
 
   private async invite(caller: Caller, body: Record<string, unknown>): Promise<Response> {
-    const denied = await this.requireAdmin(caller);
+    const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
 
     const ttlMs = clampTtl(typeof body.ttlMs === "number" ? body.ttlMs : undefined);
@@ -297,7 +312,7 @@ export class FleetDO implements DurableObject {
   }
 
   private async approve(caller: Caller, body: Record<string, unknown>): Promise<Response> {
-    const denied = await this.requireAdmin(caller);
+    const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
 
@@ -331,7 +346,7 @@ export class FleetDO implements DurableObject {
   }
 
   private async remove(caller: Caller, body: Record<string, unknown>): Promise<Response> {
-    const denied = await this.requireAdmin(caller);
+    const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
 
@@ -365,7 +380,7 @@ export class FleetDO implements DurableObject {
 
   private async revoke(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     // Invalidate every outstanding invite.
-    const denied = await this.requireAdmin(caller);
+    const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
     const before = Object.keys((await this.state.storage.get<Record<string, Invite>>("invites")) ?? {}).length;
     await this.state.storage.put("invites", {});
@@ -397,7 +412,7 @@ export class FleetDO implements DurableObject {
   }
 
   private async listPending(caller: Caller): Promise<Response> {
-    const denied = await this.requireAdmin(caller);
+    const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
     const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
     return Response.json({ ok: true, pending: Object.values(pending) });

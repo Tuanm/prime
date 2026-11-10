@@ -232,11 +232,16 @@ describe("invites", () => {
     expect(stored).toContain(await hashCode(inv.json.code));
   });
 
-  test("a device cannot mint an invite", async () => {
+  test("the owner of a fleet can mint an invite, and a stranger cannot", async () => {
     const { doInstance } = makeDo();
     await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
-    const inv = await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
-    expect(inv.status).toBe(403);
+    // The device that created the fleet runs it.
+    const own = await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
+    expect(own.status).toBe(200);
+    expect(inviteShape(own.json.code)).toBe(true);
+    // A device that is not the owner has no say in the fleet.
+    const stranger = await call(doInstance, "/invite", { caller: "device", device: "dev-stranger", body: {} });
+    expect(stranger.status).toBe(403);
   });
 
   test("an invite on a fleet that does not exist is refused", async () => {

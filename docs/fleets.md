@@ -38,6 +38,12 @@ This matters: a lease whose holder is a client-supplied string can be
 hijacked by anyone who repeats the string. Deriving the holder from a proven
 credential is the whole point.
 
+The operator is not the only one who may run a fleet. The device that
+created a fleet owns it, and the owner may mint invites, approve requests,
+remove members and revoke codes with its own device credential. A member it
+invited would otherwise have no way to admit anyone else, which would make
+the gateway token a requirement for a fleet to work at all.
+
 ## Joining
 
 ```
@@ -92,23 +98,35 @@ same time cannot both conclude "I am first":
 
 ```
 POST /fleets/:f/bootstrap   (device token)
-  no head yet, no lease        -> { role: "primary", epoch: 1 }
-  head exists                  -> { role: "replica", head: {...} }
-  a lease is already held      -> { role: "replica", head: {...} }
+  a lease is already held      -> { role: "replica", reason: "lease-held", head: {...} }
+  no lease is held             -> { role: "primary", epoch: N, head: {...} }
+                                   and, when a head exists,
+                                   { catchUpTo: <the sequence to apply> }
 ```
 
 - **No state at all.** The first member to bootstrap takes the lease, becomes
   primary, and publishes the initial snapshot. Its work directory *is* the
   fleet's state, so there is nothing to fetch.
-- **State exists.** The new space is a replica. It fetches the head manifest,
-  then the packs it is missing, decrypts and applies them, and only then is
-  reported ready. A replica that has not caught up must never be promoted.
+- **State exists and the lease is free.** This is what a takeover looks like:
+  the member takes the lease, and the fleet tells it which sequence it has
+  to apply first. It may not publish until it says it has.
+- **The lease is held.** The member is a replica. It fetches the head
+  manifest, then the packs it is missing, decrypts and applies them, and
+  only then is reported ready.
 
 The rule that keeps this honest:
 
 > **Catch up before promoting.** A new primary applies every snapshot up to
 > the current head before it accepts a single write. A primary that starts
 > behind the head forks the fleet.
+
+The Durable Object enforces it rather than trusting the client: it records
+how far each member has got, and refuses a head advance from a member that
+has not applied the state it is about to replace.
+
+A member without a public key may not hold the lease at all. It could never
+open a snapshot, so it could never catch up, so it would publish on top of
+state it cannot read.
 
 ### Why bootstrap is a state-machine decision, not a guess
 
@@ -139,6 +157,10 @@ An operator sees full device ids. A member sees the roster only if it is in
 it, and other members are truncated to a prefix - enough to recognise a peer,
 not enough to impersonate one.
 
+The member that publishes snapshots needs the members' public keys, and it
+gets them from their own route, which only the lease holder may read. The
+roster keeps the ids cut short for everybody else.
+
 ## Nested repositories
 
 A repository inside the work tree belongs to the member, not to the fleet.
@@ -159,8 +181,8 @@ around it stays correct.
 | invite already used | refused; one code admits once |
 | fleet full | refused (cap 32 members) |
 | owner removed | refused; a fleet with no owner cannot be administered |
-| owner device gone | another device must be promoted by re-creating the fleet, or the operator mints invites with the gateway token |
-| primary dies | lease expires; a replica bootstraps, catches up, then takes over |
+| owner device gone | the operator takes over the fleet with the gateway token and mints the next invite |
+| primary dies | the lease expires; a member that finds no lease takes it, applies the state it is replacing, and only then may publish |
 | object storage lost | head and epoch re-read from R2; membership is rebuilt by re-inviting |
 
 ## Limits
