@@ -77,6 +77,9 @@ function makeDo(bucket = fakeBucket()) {
   return { doInstance, state, bucket };
 }
 
+/** A key shaped like a real one: base64 of 32 bytes. */
+const TEST_PUBKEY = "A".repeat(43) + "=";
+
 async function call(
   doInstance: FleetDO,
   path: string,
@@ -90,8 +93,16 @@ async function call(
   // still a POST, so the method cannot be inferred from the body alone.
   const READ_ONLY = ["/members", "/pending", "/me"];
   const method = opts.method ?? (READ_ONLY.includes(path) ? "GET" : "POST");
+  // A member publishes snapshots sealed for the members' keys, so a member
+  // without one may not hold the lease. Real members always have one.
+  let body = opts.body;
+  if (body === undefined && (path === "/create" || path === "/join")) {
+    body = { pubkey: TEST_PUBKEY };
+  } else if (body !== undefined && typeof body === "object" && !("pubkey" in body)) {
+    body = { ...body, pubkey: TEST_PUBKEY };
+  }
   const response = await doInstance.fetch(
-    new Request("https://fleet" + path, { method, headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) }),
+    new Request("https://fleet" + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }),
   );
   return { status: response.status, json: (await response.json()) as Record<string, any> };
 }
@@ -383,6 +394,66 @@ describe("bootstrap", () => {
     await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
     const boot = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-intruder", body: {} });
     expect(boot.status).toBe(403);
+  });
+});
+
+describe("catch up before promoting", () => {
+  test("a member that takes over must apply the state it replaces", async () => {
+    const { doInstance } = makeDo();
+    await call(doInstance, "/create", { caller: "device", device: "dev-one" });
+    const first = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-one" });
+    expect(first.json.role).toBe("primary");
+    await call(doInstance, "/head/advance", {
+      caller: "device",
+      device: "dev-one",
+      body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1" },
+    });
+
+    // A second member joins, so there is somebody to take over.
+    const invite = await call(doInstance, "/invite", { caller: "admin", device: "dev-one", body: { autoApprove: true } });
+    await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: invite.json.code } });
+
+    // The primary lets go, and another member takes over.
+    await call(doInstance, "/lease/release", { caller: "device", device: "dev-one" });
+    const takeover = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two" });
+    expect(takeover.json.role).toBe("primary");
+    expect(takeover.json.catchUpTo).toBe(1);
+
+    // It may not publish before it has applied what it is replacing.
+    const tooEarly = await call(doInstance, "/head/advance", {
+      caller: "device",
+      device: "dev-two",
+      body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2" },
+    });
+    expect(tooEarly.status).toBe(409);
+    expect(tooEarly.json.error).toBe("catch up first");
+
+    // Once it says it has applied the state, it may publish.
+    const applied = await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1 } });
+    expect(applied.status).toBe(200);
+    const ok = await call(doInstance, "/head/advance", {
+      caller: "device",
+      device: "dev-two",
+      body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2" },
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  test("a member that has not applied the head cannot publish over it", async () => {
+    const { doInstance } = makeDo();
+    await call(doInstance, "/create", { caller: "device", device: "dev-one" });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-one" });
+    await call(doInstance, "/head/advance", {
+      caller: "device",
+      device: "dev-one",
+      body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1" },
+    });
+    const blocked = await call(doInstance, "/head/advance", {
+      caller: "device",
+      device: "dev-one",
+      body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2" },
+    });
+    expect(blocked.status).toBe(409);
   });
 });
 

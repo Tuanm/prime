@@ -132,6 +132,17 @@ export async function advanceHead(
   return { ok: true, seq: body.seq };
 }
 
+/**
+ * Tell the fleet how far this member has got.
+ *
+ * The fleet uses this to fence a member that took over: it may not publish
+ * until it has applied the state it is about to replace.
+ */
+export async function reportApplied(creds: FleetCredentials, fleet: string, seq: number): Promise<boolean> {
+  const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/applied", JSON.stringify({ seq }));
+  return res.ok;
+}
+
 /** Ask the fleet which role this device has. */
 export async function fetchRole(
   creds: FleetCredentials,

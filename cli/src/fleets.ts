@@ -337,7 +337,7 @@ export async function fleetsSync(ctx: Ctx): Promise<void> {
 
   const state = readFleetState(ctx, fleetId, spaceName);
   if (role.primary) {
-    const result = await publish(creds, fleetId, paths, state.base ?? null);
+    const result = await publish(creds, fleetId, paths, state.base ?? null, state.seq ?? 0);
     writeFleetState(ctx, fleetId, spaceName, { ...state, base: result.commit, seq: result.seq });
     if (ctx.json) {
       printJson({ fleet: fleetId, role: "primary", published: result });

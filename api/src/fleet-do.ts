@@ -105,6 +105,20 @@ export class FleetDO implements DurableObject {
     });
   }
 
+  // How far this member has got. The Durable Object uses it to fence a
+  // member that took over: it may not publish until it has applied the state
+  // it is about to replace.
+  private async applied(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    if (!members[caller.deviceId]) return this.deny();
+    const seq = typeof body.seq === "number" && body.seq >= 0 ? Math.floor(body.seq) : 0;
+    const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+    if (seq > (applied[caller.deviceId] ?? 0)) applied[caller.deviceId] = seq;
+    await this.state.storage.put("applied", applied);
+    return Response.json({ ok: true, applied: applied[caller.deviceId] ?? 0 });
+  }
+
   private async members(): Promise<Members> {
     return (await this.state.storage.get<Members>("members")) ?? {};
   }
@@ -134,6 +148,7 @@ export class FleetDO implements DurableObject {
     if (path === "/lease/release" && request.method === "POST") return this.release(caller);
     if (path === "/head/advance" && request.method === "POST") return this.advance(caller, body, request);
     if (path === "/head" && request.method === "GET") return this.head(caller, request);
+    if (path === "/applied" && request.method === "POST") return this.applied(caller, body);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
 
     return Response.json({ error: "not found" }, { status: 404 });
@@ -413,17 +428,32 @@ export class FleetDO implements DurableObject {
         out = Response.json({ ok: true, role: "replica", reason: "lease-held", head, epoch: head.epoch });
         return;
       }
-      if (head.seq > 0 && !held) {
-        // State exists and nobody holds the lease: a replica first, promoted
-        // only after it has caught up. Promotion is a separate, explicit step.
-        out = Response.json({ ok: true, role: "replica", reason: "head-exists", head, epoch: head.epoch });
+      // A member without a public key can never open a snapshot, so it can
+      // never catch up. It may not hold the lease: it would publish on top
+      // of state it cannot read.
+      const member = members[caller.deviceId]!;
+      if (!member.pubkey) {
+        out = Response.json({ error: "this member has no key for content encryption" }, { status: 409 });
         return;
       }
+      // Nobody holds the lease, so this member takes it. State may exist:
+      // that is what a takeover looks like, and a member that took over
+      // without the state would fork the fleet. It is told what it has to
+      // catch up to, and the Durable Object refuses to let it publish until
+      // it says it has.
       const epoch = head.epoch + 1;
       const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs };
       await this.state.storage.put("lease", lease);
       await this.state.storage.put("epoch", epoch);
-      out = Response.json({ ok: true, role: "primary", epoch, head, ttlMs });
+      out = Response.json({
+        ok: true,
+        role: "primary",
+        epoch,
+        head,
+        ttlMs,
+        // The sequence this member must have applied before it may publish.
+        ...(head.seq > 0 ? { catchUpTo: head.seq } : {}),
+      });
     });
     return out;
   }
@@ -472,6 +502,16 @@ export class FleetDO implements DurableObject {
     const currentHead = current ? ((await current.json()) as Head) : { ...EMPTY_HEAD };
     if (currentHead.seq !== expectedSeq) {
       return Response.json({ error: "stale sequence", current: currentHead.seq }, { status: 409 });
+    }
+    // A member that took over has to have applied the state it is about to
+    // replace. Without this, a new primary could publish on top of state it
+    // never fetched, and the fleet would lose whatever it had missed.
+    const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+    if ((applied[caller.deviceId] ?? 0) < currentHead.seq) {
+      return Response.json(
+        { error: "catch up first", required: currentHead.seq, applied: applied[caller.deviceId] ?? 0 },
+        { status: 409 },
+      );
     }
     const next: Head = { seq: currentHead.seq + 1, manifestKey, manifestHash, epoch: held.epoch };
     let written: R2Object | null;

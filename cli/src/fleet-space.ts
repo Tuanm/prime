@@ -115,7 +115,7 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   if (isPrimary) {
     // The primary publishes the state it already holds, so a replica that
     // arrives later has something to fetch.
-    const published = await publish(creds, opts.fleet, paths, state.base ?? null);
+    const published = await publish(creds, opts.fleet, paths, state.base ?? null, state.seq ?? 0);
     writeFleetState(ctx, opts.fleet, opts.spaceName, { base: published.commit, seq: published.seq });
     return {
       deviceId: opts.deviceId,

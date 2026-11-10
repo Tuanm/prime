@@ -18,6 +18,7 @@ import {
   advanceHead,
   fetchHead,
   fetchMemberKeys,
+  reportApplied,
   getPayload,
   payloadHash,
   putPayload,
@@ -74,10 +75,25 @@ export async function publish(
   fleet: string,
   paths: MemberPaths,
   base: string | null,
+  /** The sequence this member has already applied. */
+  appliedSeq = 0,
 ): Promise<PublishResult> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
   const members = await fetchMemberKeys(creds, fleet);
   const head = await fetchHead(creds, fleet).catch(() => null);
+
+  // A member that took over has to fetch the state it is about to replace
+  // before it publishes on top of it. Otherwise the fleet would lose
+  // whatever this member never saw.
+  if (head !== null && head.seq > appliedSeq) {
+    const caught = await pull(creds, fleet, paths, appliedSeq);
+    if (!caught.applied) {
+      throw new Error("the fleet is at sequence " + head.seq + " and this member has only applied " + appliedSeq);
+    }
+    await reportApplied(creds, fleet, caught.seq);
+    appliedSeq = caught.seq;
+  }
+
   const seq = (head?.seq ?? 0) + 1;
 
   const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base });
@@ -108,6 +124,7 @@ export async function publish(
   if (!moved.ok) {
     throw new Error("the fleet head moved while publishing: " + (moved.error ?? "another member won"));
   }
+  await reportApplied(creds, fleet, seq);
   return { seq, commit: snap.commit, bytes: sealed.ciphertext.length, members: sealed.wrapped.length };
 }
 
@@ -156,6 +173,7 @@ export async function pull(
   // the apply untouched.
   const exclude = findNestedRepos(paths.work);
   await applyPack(paths.work, paths.gitDir, manifest.tipCommit, plain, exclude);
+  await reportApplied(creds, fleet, manifest.seq);
   return { seq: manifest.seq, commit: manifest.tipCommit, applied: true, upToDate: false };
 }
 

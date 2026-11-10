@@ -18,6 +18,7 @@ class FakeGateway {
   head: { seq: number; manifestKey: string; manifestHash: string; epoch: number } | null = null;
   members = new Map<string, { deviceId: string; role: string; pubkey?: string }>();
   primary = "";
+  applied = new Map<string, number>();
 
   seed(deviceId: string, pubkey: string): void {
     this.members.set(deviceId, { deviceId, role: "member", pubkey });
@@ -33,6 +34,11 @@ class FakeGateway {
     }
     if (kind === "role" && method === "GET") {
       return Response.json({ member: this.members.has(creds.deviceId), primary: creds.deviceId === this.primary, epoch: 1 });
+    }
+    if (kind === "applied" && method === "POST") {
+      const body_ = JSON.parse(String(body ?? "{}")) as { seq: number };
+      this.applied.set(creds.deviceId, Math.max(this.applied.get(creds.deviceId) ?? 0, body_.seq ?? 0));
+      return Response.json({ ok: true, applied: this.applied.get(creds.deviceId) });
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()] });
@@ -59,6 +65,9 @@ class FakeGateway {
       const body_ = JSON.parse(String(body ?? "{}")) as { expectedSeq: number; manifestKey: string; manifestHash: string };
       const current = this.head?.seq ?? 0;
       if (body_.expectedSeq !== current) return Response.json({ error: "stale head" }, { status: 409 });
+      if ((this.applied.get(creds.deviceId) ?? 0) < current) {
+        return Response.json({ error: "catch up first", required: current }, { status: 409 });
+      }
       this.head = { seq: current + 1, manifestKey: body_.manifestKey, manifestHash: body_.manifestHash, epoch: 1 };
       return Response.json({ ok: true, seq: this.head.seq });
     }
