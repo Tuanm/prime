@@ -29,7 +29,7 @@ import { LANDING_HTML } from "./landing-page";
 import { HOME_HTML } from "./home-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
-import { handleFleetRoutes } from "./fleets-routes";
+import { handleFleetRoutes, markSeen } from "./fleets-routes";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { ipBlockKey } from "./config";
@@ -233,6 +233,94 @@ interface DeviceAuth {
  * Callers have already checked the gateway token, the IP limiter and the id
  * format.
  */
+/**
+ * Relay a call that addressed a fleet to the member that holds the lease.
+ *
+ * The caller proves it is a device, and that it is a member of the fleet.
+ * The gateway then talks to the primary on the caller's behalf, because the
+ * caller's own credential is not the primary's.
+ *
+ * When the primary is gone and no one has taken over yet, the call fails
+ * rather than going somewhere that is not the fleet's state.
+ */
+async function relayToFleet(
+  env: Env,
+  request: Request,
+  url: URL,
+  cfg: GatewayConfig,
+  fleetId: string,
+  callerId: string,
+): Promise<Response> {
+  const auth = await authorizeDevice(callerId, request, url, cfg, env);
+  if (auth.denied) return auth.denied;
+  // The caller is alive: it just proved it.
+  await markSeen(env, callerId);
+  if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+  // The name is checked before the Durable Object is touched: an unchecked
+  // name would let a caller create an object per name, and every object
+  // costs something to keep.
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(fleetId)) {
+    return Response.json({ error: "invalid fleet id" }, { status: 400 });
+  }
+  const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
+  const headers = new Headers({ "content-type": "application/json" });
+  headers.set("x-prime-caller", "device");
+  headers.set("x-prime-device", callerId);
+  headers.set("x-prime-fleet", fleetId);
+  const info = await stub.fetch("https://fleet/primary", { method: "GET", headers });
+  if (!info.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
+  const body = (await info.json()) as { member?: boolean; primary?: string | null };
+  if (!body.member) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+  if (!body.primary) {
+    return Response.json(
+      { error: "the fleet has no primary right now: none has taken over yet" },
+      { status: 503 },
+    );
+  }
+
+  // The gateway relays on the primary's behalf, so it uses the primary's
+  // own credential.
+  const snap = await effectiveSnapshot(env);
+  const primaryToken = snap.map.get(body.primary) ?? cfg.deviceToken;
+  if (!primaryToken) return Response.json({ error: "the fleet's primary has no credential" }, { status: 503 });
+
+  const deviceStub = env.DEVICES.get(env.DEVICES.idFromName(body.primary));
+  const doUrl = new URL(url);
+  doUrl.pathname = "/mcp";
+  // The credential travels in the header, the same way it does for a call
+  // that names a device: the object forwards it to the device, and the
+  // device checks it.
+  doUrl.search = "";
+  const relayHeaders = new Headers();
+  relayHeaders.set("content-type", request.headers.get("content-type") || "application/json");
+  relayHeaders.set("x-device-id", body.primary);
+  relayHeaders.set("x-device-token", primaryToken);
+  const cip = clientIp(request);
+  if (cip && cip !== "unknown") relayHeaders.set("x-client-ip", cip);
+  const sid = request.headers.get("mcp-session-id");
+  if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) relayHeaders.set("mcp-session-id", sid);
+  markAnonymous(relayHeaders, request, cfg, env);
+  const relayBody = await readBounded(request, cfg.maxBodyBytes);
+  if (relayBody instanceof Response) return relayBody;
+  const relayed = await deviceStub.fetch(new Request(doUrl, { method: "POST", headers: relayHeaders, body: relayBody }));
+  // A primary that cannot be reached is the fleet's problem, not the
+  // caller's: say so, and say which member it was.
+  if (relayed.status === 503) {
+    const detail = await relayed.clone().text().catch(() => "");
+    if (detail.includes("device offline")) {
+      return Response.json(
+        {
+          error: "the fleet's primary is not reachable right now: " + body.primary,
+          primary: body.primary,
+          hint: "the member that holds the lease is not connected; another member takes over when the lease runs out",
+        },
+        { status: 503 },
+      );
+    }
+  }
+  return relayed;
+}
+
 async function authorizeDevice(deviceId: string, request: Request, url: URL, cfg: GatewayConfig, env: Env): Promise<DeviceAuth> {
   const snap = await resolveSnapshot(env, deviceId);
   const anonymous = snap.anon.has(deviceId);
@@ -372,11 +460,32 @@ export default {
       if (!getLimiter(cfg).allow(clientIp(request))) {
         return Response.json({ error: "rate limited" }, { status: 429 });
       }
+      // A space that is about to join a fleet is a first-class device, not a
+      // throwaway one, so the limit on how many anonymous devices one
+      // address may make does not apply to it. The invite code is the proof:
+      // it is single-use, it expires, and the fleet has its own limits.
+      let exempt = false;
+      try {
+        const wanted = (await request.clone().json().catch(() => ({}))) as { fleet?: unknown; code?: unknown };
+        const fleet = typeof wanted.fleet === "string" ? wanted.fleet : "";
+        const code = typeof wanted.code === "string" ? wanted.code : "";
+        if (fleet && code && env.FLEET && /^[a-z0-9][a-z0-9-]{0,31}$/.test(fleet)) {
+          const stub = env.FLEET.get(env.FLEET.idFromName(fleet));
+          const headers = new Headers({ "content-type": "application/json" });
+          headers.set("x-prime-caller", "admin");
+          const checked = await stub.fetch("https://fleet/invite-check", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ code }),
+          });
+          exempt = checked.ok;
+        }
+      } catch {}
       const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
       const created = await reg.fetch("https://registry/anon/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ip: clientIp(request) }),
+        body: JSON.stringify({ ip: clientIp(request), exempt }),
       });
       if (created.status !== 201) return created;
       const { deviceId, token } = (await created.json()) as { deviceId: string; token: string };
@@ -742,6 +851,14 @@ export default {
       // Object for them (no DO churn / cost).
       // Deactivated devices are rejected outright (admin UI toggle), inside
       // authorizeDevice, after the credential check.
+      // A client may address a fleet instead of a device. The call goes to
+      // the member that holds the lease, so a client talks to the fleet and
+      // not to one machine that happens to be up.
+      const fleetId = url.searchParams.get("fleet");
+      if (fleetId) {
+        return await relayToFleet(env, request, url, cfg, fleetId, deviceId);
+      }
+
       const auth = await authorizeDevice(deviceId, request, url, cfg, env);
       if (auth.denied) return auth.denied;
       if (auth.anonymous) anonymousRequests.add(request);

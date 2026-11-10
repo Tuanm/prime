@@ -239,6 +239,19 @@ export class RegistryDO extends DurableObject<Env> {
 
     // ---- device registry (admin UI) ----
 
+    // A device that proves itself to the fleet is still in use, even though
+    // it never opens a tunnel. Without this it would be collected as unused
+    // and the fleet would lose its members.
+    if (request.method === "POST" && path === "/anon/seen") {
+      const id = url.searchParams.get("id") || "";
+      if (!validDeviceId(id)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      const rec = this.anon.get(id);
+      if (!rec) return Response.json({ ok: true, seen: false });
+      rec.lastSeenAt = Date.now();
+      await this.persistAnon();
+      return Response.json({ ok: true, seen: true });
+    }
+
     if (request.method === "GET" && path === "/map") {
       // Expire anonymous devices here too: this is what the entry authenticates
       // against, so a deleted one stops working within the cache TTL.
@@ -256,13 +269,15 @@ export class RegistryDO extends DurableObject<Env> {
     if (request.method === "POST" && path === "/anon/create") {
       const policy = anonConfig(this.env);
       if (!policy.enabled) return Response.json({ error: "anonymous devices are disabled" }, { status: 403 });
-      const body = (await request.json().catch(() => ({}))) as { ip?: unknown };
+      const body = (await request.json().catch(() => ({}))) as { ip?: unknown; exempt?: unknown };
       const ip = String(body.ip || "unknown").slice(0, 64);
       const now = Date.now();
       await this.gcAnon();
 
       // Per-IP creation limit, held here so it is global rather than per isolate.
-      const recent = (this.anonCreates.get(ip) || []).filter((t) => now - t < policy.createWindowMs);
+      // A device that is about to join a fleet is exempt: the Worker has
+      // checked the invite, and the fleet has limits of its own.
+      const recent = body.exempt === true ? [] : (this.anonCreates.get(ip) || []).filter((t) => now - t < policy.createWindowMs);
       if (recent.length >= policy.createMax) {
         const retry = Math.max(1, policy.createWindowMs - (now - recent[0]));
         return Response.json(

@@ -108,6 +108,30 @@ async function call(
   return { status: response.status, json: (await response.json()) as Record<string, any> };
 }
 
+describe("a member that comes back with a new key", () => {
+  test("the fleet learns the new key when it joins again", async () => {
+    const { doInstance, state } = makeDo();
+    await call(doInstance, "/create", { caller: "admin", device: "owner-1" });
+    const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: { autoApprove: true } });
+    await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
+    const joined = await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: "B".repeat(43) + "=" } });
+    expect(joined.status).toBe(200);
+    // The key it came back with is the key the fleet seals for.
+    const members = state.data.get("members") as Record<string, { pubkey?: string }>;
+    expect(members["member-1"]?.pubkey).toBe("B".repeat(43) + "=");
+  });
+
+  test("the fleet learns the new key when it takes its place", async () => {
+    const { doInstance, state } = makeDo();
+    await call(doInstance, "/create", { caller: "admin", device: "owner-1" });
+    const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: { autoApprove: true } });
+    await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: "C".repeat(43) + "=" } });
+    const members = state.data.get("members") as Record<string, { pubkey?: string }>;
+    expect(members["member-1"]?.pubkey).toBe("C".repeat(43) + "=");
+  });
+});
+
 // ---- pure helpers --------------------------------------------------------
 
 describe("fleet ids", () => {
@@ -489,11 +513,13 @@ describe("catch up before promoting", () => {
     const invite = await call(doInstance, "/invite", { caller: "admin", device: "dev-one", body: { autoApprove: true } });
     await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: invite.json.code } });
 
-    // The primary lets go, and another member takes over.
+    // The primary lets go. The member that is left has not applied the state,
+    // so it is not given the lease: it would block the one that can publish.
     await call(doInstance, "/lease/release", { caller: "device", device: "dev-one" });
-    const takeover = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two" });
-    expect(takeover.json.role).toBe("primary");
-    expect(takeover.json.catchUpTo).toBe(1);
+    const notYet = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two" });
+    expect(notYet.json.role).toBe("replica");
+    expect(notYet.json.reason).toBe("not-caught-up");
+    expect(notYet.json.catchUpTo).toBe(1);
 
     // It may not publish before it has applied what it is replacing.
     const tooEarly = await call(doInstance, "/head/advance", {
@@ -502,11 +528,12 @@ describe("catch up before promoting", () => {
       body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2" },
     });
     expect(tooEarly.status).toBe(409);
-    expect(tooEarly.json.error).toBe("catch up first");
 
-    // Once it says it has applied the state, it may publish.
+    // It catches up, and only then takes the lease.
     const applied = await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1 } });
     expect(applied.status).toBe(200);
+    const takeover = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two" });
+    expect(takeover.json.role).toBe("primary");
     const ok = await call(doInstance, "/head/advance", {
       caller: "device",
       device: "dev-two",

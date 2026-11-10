@@ -24,6 +24,7 @@ import {
   inviteShape,
   MAX_MEMBERS,
   OWNER_SILENCE_MS,
+  RECENT_SNAPSHOTS,
   MAX_PENDING,
   newInviteCode,
 } from "./fleets";
@@ -117,6 +118,23 @@ export class FleetDO implements DurableObject {
     return Response.json({ ok: true, deleted: fleetId });
   }
 
+  //
+  // Who holds the lease, for a client that wants to talk to the fleet.
+  //
+  // A client that is not a member learns nothing: it is told that there is
+  // no primary, not who it is.
+  private async primary(caller: Caller): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    if (!members[caller.deviceId]) return Response.json({ member: false, primary: null });
+    const held = await this.lease();
+    return Response.json({
+      member: true,
+      primary: held ? held.holder : null,
+      epoch: held ? held.epoch : 0,
+    });
+  }
+
   // The head, for a member that wants to know what state the fleet is at.
   private async head(caller: Caller, request: Request): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
@@ -140,10 +158,14 @@ export class FleetDO implements DurableObject {
     if (!held || held.holder !== caller.deviceId) {
       return Response.json({ error: "only the primary may read the members' keys" }, { status: 409 });
     }
+    const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
     return Response.json({
       members: Object.values(members).map((m) => ({
         deviceId: m.deviceId,
         ...(m.pubkey ? { pubkey: m.pubkey } : {}),
+        // How far this member has got, so the publisher knows who needs a
+        // whole tree rather than a delta.
+        applied: applied[m.deviceId] ?? 0,
       })),
     });
   }
@@ -178,6 +200,7 @@ export class FleetDO implements DurableObject {
 
     if (path === "/create" && request.method === "POST") return this.create(caller, body);
     if (path === "/invite" && request.method === "POST") return this.invite(caller, body);
+    if (path === "/invite-check" && request.method === "POST") return this.inviteCheck(body);
     if (path === "/join" && request.method === "POST") {
       await this.touch();
       return this.join(caller, body);
@@ -189,9 +212,10 @@ export class FleetDO implements DurableObject {
     if (path === "/pending" && request.method === "GET") return this.listPending(caller);
     if (path === "/me" && request.method === "GET") return this.me(caller);
     if (path === "/role") return this.role(caller);
+    if (path === "/primary" && request.method === "GET") return this.primary(caller);
     if (path === "/bootstrap" && request.method === "POST") {
       await this.touch();
-      return this.bootstrap(caller, request);
+      return this.bootstrap(caller, request, body);
     }
     if (path === "/lease/renew" && request.method === "POST") return this.renew(caller, body);
     if (path === "/lease/release" && request.method === "POST") return this.release(caller);
@@ -295,6 +319,22 @@ export class FleetDO implements DurableObject {
     return out;
   }
 
+  //
+  // Whether an invite is worth having, without using it.
+  //
+  // The code is the proof, so this needs no credential of its own: a caller
+  // that holds a valid code learns the same thing by joining.
+  private async inviteCheck(body: Record<string, unknown>): Promise<Response> {
+    const code = typeof body.code === "string" ? body.code : "";
+    if (!inviteShape(code)) return Response.json({ ok: false, error: "invalid invite code" }, { status: 400 });
+    const codeHash = await hashCode(code);
+    const invites = (await this.state.storage.get<Record<string, Invite>>("invites")) ?? {};
+    const invite = invites[codeHash];
+    if (!invite) return Response.json({ ok: false, error: "unknown or already-used invite" }, { status: 403 });
+    if (invite.expiresAt <= Date.now()) return Response.json({ ok: false, error: "invite expired" }, { status: 403 });
+    return Response.json({ ok: true, autoApprove: invite.autoApprove, expiresAt: invite.expiresAt });
+  }
+
   private async join(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
     const code = typeof body.code === "string" ? body.code : "";
@@ -312,6 +352,13 @@ export class FleetDO implements DurableObject {
       const existing = members[caller.deviceId];
       if (existing) {
         // Idempotent re-join: already a member is not an error.
+        // A member that comes back with a new key takes the new key: it is
+        // proving itself, and the snapshots it cannot open are its own.
+        if (pubkey && existing.pubkey !== pubkey) {
+          existing.pubkey = pubkey;
+          members[caller.deviceId] = existing;
+          await this.state.storage.put("members", members);
+        }
         out = Response.json({ ok: true, status: "member", member: existing });
         return;
       }
@@ -424,6 +471,12 @@ export class FleetDO implements DurableObject {
         return;
       }
       delete members[deviceId];
+      // A member that leaves gives up the lease, so the fleet is not held by
+      // somebody who is no longer there.
+      const held = await this.lease();
+      if (held && held.holder === deviceId) {
+        await this.state.storage.delete("lease");
+      }
       // Removing the owner hands the fleet to the member that has been in it
       // the longest. A fleet whose owner is gone and that nobody can take
       // over is a fleet nobody can run.
@@ -459,11 +512,13 @@ export class FleetDO implements DurableObject {
   private async listMembers(caller: Caller): Promise<Response> {
     const members = await this.members();
     if (caller.kind === "admin") return Response.json({ ok: true, members: Object.values(members) });
-    // A member sees the roster with the other devices' ids cut short: knowing
-    // a member's full id is not something a member needs, and the primary
-    // gets the keys it needs from the dedicated route instead.
+    // The owner runs the fleet: it admits and removes members, so it needs
+    // their ids in full. Any other member sees the other ids cut short:
+    // knowing a member's full id is not something a member needs, and the
+    // primary gets the keys it needs from the dedicated route instead.
     if (caller.kind === "device" && members[caller.deviceId]) {
       const self = members[caller.deviceId]!;
+      if (self.role === "owner") return Response.json({ ok: true, members: Object.values(members) });
       const redacted = Object.values(members).map((m) =>
         m.deviceId === self.deviceId ? m : { ...m, deviceId: m.deviceId.slice(0, 8) + "…" },
       );
@@ -495,7 +550,7 @@ export class FleetDO implements DurableObject {
 
   // One atomic decision, so two spaces created at the same moment cannot both
   // conclude that they are the first. Only storage reads inside the lock.
-  private async bootstrap(caller: Caller, request: Request): Promise<Response> {
+  private async bootstrap(caller: Caller, request: Request, body: Record<string, unknown>): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
     // The lease is short-lived on purpose: a member that stops speaking
@@ -504,6 +559,15 @@ export class FleetDO implements DurableObject {
     const head = await this.readHead(fleetId);
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();
+
+    // A member that comes back with a new key takes the new key: it is
+    // proving itself, and the snapshots sealed for the old key are of no use
+    // to it.
+    const pubkey = cleanPubkey(body.pubkey);
+    if (pubkey && members[caller.deviceId]!.pubkey !== pubkey) {
+      members[caller.deviceId]!.pubkey = pubkey;
+      await this.state.storage.put("members", members);
+    }
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {
@@ -520,6 +584,21 @@ export class FleetDO implements DurableObject {
       const member = members[caller.deviceId]!;
       if (!member.pubkey) {
         out = Response.json({ error: "this member has no key for content encryption" }, { status: 409 });
+        return;
+      }
+      // A member that has not applied the head cannot hold the lease: it
+      // would block the member that can publish, and it could not publish
+      // itself. It catches up first, and takes the lease on a later round.
+      const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+      if (head.seq > 0 && (applied[caller.deviceId] ?? 0) < head.seq) {
+        out = Response.json({
+          ok: true,
+          role: "replica",
+          reason: "not-caught-up",
+          head,
+          epoch: head.epoch,
+          catchUpTo: head.seq,
+        });
         return;
       }
       // Nobody holds the lease, so this member takes it. State may exist:
@@ -577,6 +656,7 @@ export class FleetDO implements DurableObject {
     const expectedSeq = typeof body.expectedSeq === "number" ? body.expectedSeq : -1;
     const manifestKey = typeof body.manifestKey === "string" ? body.manifestKey : "";
     const manifestHash = typeof body.manifestHash === "string" ? body.manifestHash : "";
+    const packKey = typeof body.packKey === "string" ? body.packKey : "";
     if (!manifestKey || !manifestHash) return Response.json({ error: "manifest required" }, { status: 400 });
 
     const held = await this.lease();
@@ -610,6 +690,22 @@ export class FleetDO implements DurableObject {
     // CAS losing the race, not an error.
     if (!written) return Response.json({ error: "head changed" }, { status: 409 });
     await this.state.storage.put("epoch", next.epoch);
+
+    // Keep a bounded number of snapshots. A member that falls further behind
+    // than this is given a whole tree again, so the old ones are of no use.
+    const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
+    recent.push(manifestKey + (packKey ? "\n" + packKey : ""));
+    const evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
+    await this.state.storage.put("recent", recent);
+    for (const entry of evicted) {
+      for (const key of entry.split("\n")) {
+        if (!key) continue;
+        try {
+          await this.bucket().delete(key);
+        } catch {}
+      }
+    }
+
     return Response.json({ ok: true, head: next });
   }
 

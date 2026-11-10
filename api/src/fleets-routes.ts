@@ -35,6 +35,9 @@ const ALLOWED_ACTIONS = new Set([
   "head",
   "role",
   "applied",
+  "snapshot",
+  "invite-check",
+  "primary",
   "delete",
   "packs",
   "manifests",
@@ -64,6 +67,84 @@ interface PayloadDeps {
   action: string | undefined;
   authorizeDevice: FleetDeps["authorizeDevice"];
   unauthorized: () => Response;
+}
+
+/**
+ * Publish a snapshot: the sealed pack and its manifest, in one request.
+ *
+ * The body is framed so that both parts travel together: four bytes of
+ * manifest length, then the manifest, then the pack. The Worker stores the
+ * two objects and moves the head, so the member spends one round trip rather
+ * than six. That is most of the time a change takes to travel.
+ */
+async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Response> {
+  const bucket = deps.env.BUCKET;
+  if (!bucket) return Response.json({ error: "storage is not configured" }, { status: 503 });
+  const deviceId = deps.request.headers.get("x-prime-device") ?? "";
+  const deviceToken = deps.request.headers.get("x-device-token") ?? "";
+  if (!deviceId || !deviceToken) return deps.unauthorized();
+  const verdict = await deps.authorizeDevice(deviceId);
+  if (!verdict.ok) return verdict.response;
+
+  // Only the member that holds the lease may publish. The check is before
+  // anything is written: a member that is not the primary must not be able
+  // to fill the account's storage.
+  const role = await fleetRole({ request: deps.request, env: deps.env, url: deps.url, cfg: deps.cfg, fleetId, action: "role", authorizeDevice: deps.authorizeDevice, unauthorized: deps.unauthorized }, deviceId);
+  if (!role) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+  if (!role.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
+
+  const body = Buffer.from(await deps.request.arrayBuffer());
+  if (body.length < 4) return Response.json({ error: "malformed snapshot" }, { status: 400 });
+  const manifestLength = body.readUInt32BE(0);
+  if (manifestLength === 0 || manifestLength + 4 > body.length) {
+    return Response.json({ error: "malformed snapshot" }, { status: 400 });
+  }
+  const manifestBytes = body.subarray(4, 4 + manifestLength);
+  const pack = body.subarray(4 + manifestLength);
+  if (pack.length === 0) return Response.json({ error: "empty pack" }, { status: 400 });
+
+  let manifest: { seq?: number; packKey?: string; packHash?: string };
+  try {
+    manifest = JSON.parse(manifestBytes.toString("utf8")) as { seq?: number; packKey?: string; packHash?: string };
+  } catch {
+    return Response.json({ error: "malformed manifest" }, { status: 400 });
+  }
+  const seq = typeof manifest.seq === "number" ? manifest.seq : 0;
+  if (seq < 1) return Response.json({ error: "manifest has no sequence" }, { status: 400 });
+
+  // The two objects are addressed by their contents, so writing the same bytes
+  // twice is free.
+  const packHash = await sha256Hex(pack);
+  const packKey = "fleets/" + fleetId + "/packs/" + packHash;
+
+  // The manifest says where its pack is. The member cannot know that - only
+  // the gateway knows where the bytes ended up - so it is filled in here.
+  manifest.packKey = packKey;
+  manifest.packHash = packHash;
+  const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
+  const manifestHash = await sha256Hex(finalManifest);
+  const manifestKey = "fleets/" + fleetId + "/manifests/" + manifestHash;
+
+  await bucket.put(packKey, pack, { httpMetadata: { contentType: "application/octet-stream" } });
+  await bucket.put(manifestKey, finalManifest, { httpMetadata: { contentType: "application/json" } });
+
+  // Move the head. The object decides: it checks the sequence, the lease and
+  // whether this member has caught up.
+  const namespace = deps.env.FLEET;
+  if (!namespace) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+  const stub = namespace.get(namespace.idFromName(fleetId));
+  const headers = new Headers({ "content-type": "application/json" });
+  headers.set("x-prime-caller", "device");
+  headers.set("x-prime-device", deviceId);
+  headers.set("x-prime-fleet", fleetId);
+  const moved = await stub.fetch("https://fleet/head/advance", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ expectedSeq: seq - 1, manifestKey, manifestHash, packKey }),
+  });
+  const result = (await moved.json().catch(() => ({}))) as { ok?: boolean; head?: unknown; error?: string };
+  if (!moved.ok) return Response.json({ ok: false, error: result.error ?? "the head did not move" }, { status: moved.status });
+  return Response.json({ ok: true, head: result.head, seq, manifestKey });
 }
 
 async function fleetRole(deps: PayloadDeps, deviceId: string): Promise<FleetRole | null> {
@@ -145,6 +226,21 @@ async function sha256Hex(data: ArrayBuffer): Promise<string> {
   return hex;
 }
 
+/** When each device was last seen, so the registry is told at most once a minute. */
+const lastSeen = new Map<string, number>();
+
+/** Tell the registry that a device is still in use. */
+export async function markSeen(env: Env, deviceId: string): Promise<void> {
+  const now = Date.now();
+  const previous = lastSeen.get(deviceId) ?? 0;
+  if (now - previous < 60_000) return;
+  lastSeen.set(deviceId, now);
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    await reg.fetch("https://registry/anon/seen?id=" + encodeURIComponent(deviceId), { method: "POST" });
+  } catch {}
+}
+
 export interface FleetDeps {
   request: Request;
   env: Env;
@@ -214,6 +310,9 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     const verdict = await deps.authorizeDevice(claimed);
     if (!verdict.ok) return verdict.response;
     caller = { admin: false, deviceId: claimed };
+    // The device is alive: it just proved it. Without this a device that
+    // only ever talks to the fleet would be collected as unused.
+    await markSeen(env, claimed);
   } else if (isCreateRoute(request.method, action)) {
     // The operator may create a fleet on behalf of a device it names.
     const named = request.headers.get("x-prime-device") ?? url.searchParams.get("device") ?? "";
@@ -234,6 +333,40 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     if ((body.count ?? 0) >= MAX_FLEETS_PER_DEVICE) {
       return Response.json({ error: "too many fleets created by this device" }, { status: 429 });
     }
+  }
+
+  // Who holds the lease. A member may ask; anyone else learns nothing.
+  if (action === "primary" && request.method === "GET") {
+    const namespace = deps.env.FLEET;
+    if (!namespace) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+    const caller = await provenDevice({ ...deps, fleetId, action });
+    if (!caller) return deps.unauthorized();
+    const stub = namespace.get(namespace.idFromName(fleetId));
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.set("x-prime-caller", "device");
+    headers.set("x-prime-device", caller);
+    headers.set("x-prime-fleet", fleetId);
+    return await stub.fetch("https://fleet/primary", { method: "GET", headers });
+  }
+
+  // Whether an invite is worth having. It needs no credential: the code is
+  // the proof, and a caller that holds a valid code learns the same thing by
+  // joining.
+  if (action === "invite-check" && request.method === "POST") {
+    const namespace = deps.env.FLEET;
+    if (!namespace) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+    const stub = namespace.get(namespace.idFromName(fleetId));
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.set("x-prime-caller", "admin");
+    const body = await request.clone().text();
+    return await stub.fetch("https://fleet/invite-check", { method: "POST", headers, body });
+  }
+
+  // A snapshot is the pack and its manifest, stored together and the head
+  // moved in one call. The member would otherwise spend six round trips on
+  // it, and that is most of the time a change takes to travel.
+  if (action === "snapshot" && request.method === "POST") {
+    return await publishSnapshot(deps, fleetId);
   }
 
   // Payloads (encrypted packs and manifests) are stored in R2 by this Worker,

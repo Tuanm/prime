@@ -28,6 +28,14 @@ export const MAX_PENDING = 32;
  */
 export const OWNER_SILENCE_MS = 24 * 60 * 60_000;
 
+/**
+ * How many snapshots a fleet keeps.
+ *
+ * A member that falls further behind than this is given a whole tree again,
+ * so the older snapshots are of no use to anybody.
+ */
+export const RECENT_SNAPSHOTS = 64;
+
 /** How many fleets one device may create in an hour. */
 export const MAX_FLEETS_PER_DEVICE = 5;
 
