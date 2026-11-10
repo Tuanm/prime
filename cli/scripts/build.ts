@@ -3,6 +3,7 @@
 //   bun scripts/build.ts              full cross-platform compile + JS bundle
 //   bun scripts/build.ts --host-only  just this machine's binary (fast, for tests)
 //   bun scripts/build.ts --bundle-only  just the portable JS bundle
+//   bun scripts/build.ts --target linux-x64  just that platform's binary
 //
 // The code-mcp device buddy ("prime code-mcp" / "prime connect") is built in from
 // src/code-mcp.ts in this package - so an artifact is reproducible
@@ -43,6 +44,15 @@ const TARGETS: BuildTarget[] = [
 const args = new Set(process.argv.slice(2));
 const hostOnly = args.has("--host-only");
 const bundleOnly = args.has("--bundle-only");
+
+// --target <platform>[-<arch>] builds for one platform only, so a machine
+// that is not this one can be given a binary without building all of them.
+const targetIndex = process.argv.indexOf("--target");
+const wanted = targetIndex === -1 ? undefined : process.argv[targetIndex + 1];
+if (targetIndex !== -1 && !wanted) {
+  console.error("--target needs a platform, for example: --target linux-x64");
+  process.exit(1);
+}
 
 // Version precedence: --version <value> flag, MCP_CLI_VERSION env, package.json.
 const versionFlagIndex = process.argv.indexOf("--version");
@@ -112,7 +122,15 @@ if (bundleOnly) process.exit(0);
 
 // process.platform says "win32" where Bun's target says "windows".
 const hostTarget = `bun-${process.platform === "win32" ? "windows" : process.platform}-${process.arch === "arm64" ? "arm64" : "x64"}`;
-const selected = hostOnly ? TARGETS.filter((t) => t.target === hostTarget) : TARGETS;
+const selected = wanted
+  ? TARGETS.filter((t) => t.target === `bun-${wanted}`)
+  : hostOnly
+    ? TARGETS.filter((t) => t.target === hostTarget)
+    : TARGETS;
+if (wanted && selected.length === 0) {
+  console.error(`no target for ${wanted}; known: ${TARGETS.map((t) => t.out.replace(/^prime-?/, "").replace(/\.exe$/, "")).join(", ")}`);
+  process.exit(1);
+}
 
 if (selected.length === 0) {
   // Fall back to the compiler's own default target when the host pair is unusual.

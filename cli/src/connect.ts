@@ -164,13 +164,17 @@ function authHeaders(gatewayToken: string | undefined): Record<string, string> {
   return headers;
 }
 
-export async function registerAnonymous(gateway: string, gatewayToken: string | undefined): Promise<AnonymousDevice> {
+export async function registerAnonymous(
+  gateway: string,
+  gatewayToken: string | undefined,
+  fleet?: { id: string; code: string },
+): Promise<AnonymousDevice> {
   let response: Response;
   try {
     response = await fetch(`${gateway}/api/devices/anonymous`, {
       method: "POST",
       headers: { ...authHeaders(gatewayToken), "content-type": "application/json" },
-      body: "{}",
+      body: JSON.stringify(fleet ? { fleet: fleet.id, code: fleet.code } : {}),
       signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
     });
   } catch (err) {

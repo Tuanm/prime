@@ -87,6 +87,15 @@ export class GatewayClient {
   }
 
   private endpoint(): string {
+    // A call to a fleet goes through the gateway's fleet route, which sends
+    // it to the member that holds the lease.
+    if (this.target.fleet) {
+      // The device in the path is the caller; the fleet says where the call
+      // should go. The gateway sends it to the member holding the lease.
+      const url = new URL(this.target.gateway + "/device/" + encodeURIComponent(this.target.deviceId));
+      url.searchParams.set("fleet", this.target.fleet);
+      return url.toString();
+    }
     return `${this.target.gateway}/device/${encodeURIComponent(this.target.deviceId)}`;
   }
 
@@ -316,6 +325,14 @@ export class GatewayClient {
       case 429:
         return new CliError("rate limited by the gateway (429)", "Retry shortly, or raise RATE_LIMIT_MAX on the gateway.");
       case 503:
+        // A call that addressed a fleet gets the fleet's own answer: which
+        // member holds the lease, and that it cannot be reached.
+        if (!this.isLocal && this.target.fleet) {
+          return new OfflineError(
+            detail ? `the fleet's primary is not reachable: ${detail}` : "the fleet's primary is not reachable right now",
+            "The member that holds the lease is not connected. Another member takes over when the lease runs out; retry in a moment.",
+          );
+        }
         return new OfflineError(
           this.isLocal ? "space is not running" : detail === "device busy" ? "device is busy (too many in-flight requests)" : "device is offline",
           this.isLocal

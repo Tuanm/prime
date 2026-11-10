@@ -2,7 +2,7 @@
 
 import { type ParsedArgs, bool, num, str } from "./args.ts";
 import { type Config, defaultConfigPath, loadConfig } from "./config.ts";
-import { resolveTarget, type Target, type TargetOverrides } from "./target.ts";
+import { fleetCaller, resolveTarget, type Target, type TargetOverrides } from "./target.ts";
 
 export interface Ctx {
   parsed: ParsedArgs;
@@ -52,4 +52,18 @@ export function overridesFrom(parsed: ParsedArgs): TargetOverrides {
 
 export function targetFor(ctx: Ctx, deviceId: string, overrides: TargetOverrides = {}): Target {
   return resolveTarget(ctx.config, deviceId, overrides);
+}
+
+/**
+/**
+ * The target for a call that addresses a fleet.
+ *
+ * A call to a fleet is made as one of the fleet's members, so the credential
+ * has to be one the fleet knows. The configured devices are tried until one of
+ * them answers as a member.
+ */
+export async function fleetTargetFor(ctx: Ctx, fleet: string, overrides: TargetOverrides = {}): Promise<Target> {
+  const target = resolveTarget(ctx.config, "fleet:" + fleet, overrides);
+  const caller = await fleetCaller(ctx.config, fleet, target.gateway, overrides);
+  return { ...target, deviceId: caller.deviceId, deviceToken: caller.token };
 }

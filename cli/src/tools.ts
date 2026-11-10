@@ -2,12 +2,12 @@
 
 import { bool, num, str, strList } from "./args.ts";
 import { type HandshakeMode, GatewayClient } from "./client.ts";
-import { type Ctx, overridesFrom, targetFor } from "./context.ts";
+import { type Ctx, fleetTargetFor, overridesFrom, targetFor } from "./context.ts";
 import { EXIT, McpError, UsageError } from "./errors.ts";
 import { pool } from "./pool.ts";
 import { splitLabel } from "./labels.ts";
 import { bold, cyan, dim, isErrorResult, printJson, red, renderToolResult, table, truncate } from "./output.ts";
-import type { Target } from "./target.ts";
+import { FLEET_PREFIX, isFleetRef, type Target } from "./target.ts";
 
 interface CallRequest {
   id: number | string;
@@ -77,12 +77,26 @@ function editDistance(a: string, b: string, max: number): number {
   return previous[b.length]!;
 }
 
+/**
+ * The target for a device or for a fleet.
+ *
+ * A reference may name a fleet ('fleet:<id>'), and then the call is made as
+ * one of the fleet's members and the gateway sends it to the primary.
+ */
+async function targetForRef(ctx: Ctx, deviceId: string): Promise<Target> {
+  const overrides = overridesFrom(ctx.parsed);
+  if (isFleetRef(deviceId)) {
+    return await fleetTargetFor(ctx, deviceId.slice(FLEET_PREFIX.length), overrides);
+  }
+  return targetFor(ctx, deviceId, overrides);
+}
+
 export async function toolsList(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2);
   if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: prime tools list <device-id>");
   if (positionals.length > 1) throw new UsageError(`unexpected argument "${positionals[1]}"`);
   const deviceId = positionals[0]!;
-  const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
+  const target = await targetForRef(ctx, deviceId);
   const client = new GatewayClient(target);
   const tools = await client.listTools({ handshake: handshakeMode(ctx) });
 
@@ -104,7 +118,7 @@ export async function toolsView(ctx: Ctx): Promise<void> {
     throw new UsageError("missing <device-id>.<tool-id>", "Usage: prime tools view <device-id>.<tool-id>");
   }
   const { deviceId, toolName } = resolveLabel(ctx, positionals[0]!);
-  const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
+  const target = await targetForRef(ctx, deviceId);
   const client = new GatewayClient(target);
   const tools = await client.listTools({ handshake: handshakeMode(ctx) });
   const tool = tools.find((t) => t.name === toolName);
@@ -400,16 +414,18 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
   // One client per device, reused across calls so a batch pays connection setup
   // once per device rather than once per call.
   const clients = new Map<string, GatewayClient>();
-  const plan = requests.map((request) => {
-    const { deviceId, toolName } = resolveLabel(ctx, request.name);
-    let client = clients.get(deviceId);
-    if (!client) {
-      const target: Target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
-      client = new GatewayClient(target);
-      clients.set(deviceId, client);
-    }
-    return { request, deviceId, toolName, client };
-  });
+  const plan = await Promise.all(
+    requests.map(async (request) => {
+      const { deviceId, toolName } = resolveLabel(ctx, request.name);
+      let client = clients.get(deviceId);
+      if (!client) {
+        const target = await targetForRef(ctx, deviceId);
+        client = new GatewayClient(target);
+        clients.set(deviceId, client);
+      }
+      return { request, deviceId, toolName, client };
+    }),
+  );
 
   // A single call propagates its error untouched, so the exit code keeps the
   // failure class (3 auth, 4 offline, 5 timeout) and the hint reaches the user.

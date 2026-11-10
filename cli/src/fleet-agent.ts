@@ -15,13 +15,12 @@ import { join } from "node:path";
 import { applyPack, findNestedRepos, settle, snapshot } from "./fleet-sync";
 import { generateMemberKeyPair, openForMember, sealForMembers, type MemberKeyPair } from "./fleet-crypto";
 import {
-  advanceHead,
   fetchHead,
+  fetchManifest,
   fetchMemberKeys,
   reportApplied,
   getPayload,
-  payloadHash,
-  putPayload,
+  putSnapshot,
   type FleetCredentials,
   type FleetHead,
   type FleetManifest,
@@ -59,7 +58,19 @@ export interface PublishResult {
   commit: string;
   bytes: number;
   members: number;
+  /** Where the manifest of this snapshot is stored. */
+  manifestKey: string;
+  /** True when the pack carries the whole tree rather than only the change. */
+  full: boolean;
 }
+
+/**
+ * How far a member may fall behind before it is given a whole tree again.
+ *
+ * The gateway keeps a bounded number of snapshots. A member that is further
+ * behind than this cannot be caught up with deltas alone.
+ */
+export const FULL_PACK_WINDOW = 32;
 
 /**
  *  Publish the current work tree as the fleet's new state.
@@ -77,6 +88,10 @@ export async function publish(
   base: string | null,
   /** The sequence this member has already applied. */
   appliedSeq = 0,
+  /** The manifest of the snapshot this one is built against. */
+  parentManifest?: string,
+  /** How many members the last publish sealed for. */
+  lastMemberCount = 0,
 ): Promise<PublishResult> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
   const members = await fetchMemberKeys(creds, fleet);
@@ -96,36 +111,62 @@ export async function publish(
 
   const seq = (head?.seq ?? 0) + 1;
 
-  const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base });
+  // A delta is only useful to a member that already holds the snapshot it is
+  // built against. A member that joined since then needs a pack that carries
+  // the whole tree, and so does a member that fell too far behind. The
+  // membership tells the first case; the distance tells the second.
+  const membershipChanged = members.length !== lastMemberCount;
+  // A member that is behind cannot be caught up with deltas alone, because
+  // the snapshots it missed may be gone.
+  const someoneBehind = members.some((m) => seq - (m.applied ?? 0) > FULL_PACK_WINDOW);
+  // Every so often a whole tree is published anyway, so the chain of deltas
+  // has an anchor and cannot grow for ever.
+  const checkpoint = seq % FULL_PACK_WINDOW === 0;
+  const noBase = base === null;
+  const wantFull = noBase || membershipChanged || someoneBehind || checkpoint;
+
+  // The snapshot builds only the pack that will travel.
+  const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base, seq, wantFull });
+  const payload = wantFull ? snap.pack : snap.delta!;
+
   const sealed = sealForMembers(
-    snap.pack,
+    payload,
     members.map((m) => ({ memberId: m.deviceId, publicKey: m.pubkey })),
     keys.privateKey,
     keys.publicKey,
   );
-  const stored = await putPayload(creds, fleet, "packs", sealed.ciphertext);
 
   const manifest: FleetManifest = {
     fleet,
     seq,
     tipCommit: snap.commit,
     tree: snap.tree,
-    packKey: stored.key,
-    packHash: stored.hash,
+    // The gateway fills these in: it is the one that knows where the bytes
+    // ended up.
+    packKey: "",
+    packHash: "",
+    full: wantFull,
+    ...(parentManifest ? { parentManifest, parentSeq: head?.seq } : {}),
     senderPublicKey: sealed.senderPublicKey,
     wrapped: sealed.wrapped,
     epoch: head?.epoch ?? 0,
     createdAt: Date.now(),
   };
-  const manifestBytes = Buffer.from(JSON.stringify(manifest), "utf8");
-  const manifestStored = await putPayload(creds, fleet, "manifests", manifestBytes);
-
-  const moved = await advanceHead(creds, fleet, head?.seq ?? 0, manifestStored.key, manifestStored.hash);
+  // The pack and the manifest travel together, and the gateway moves the head
+  // in the same call. One round trip instead of six.
+  const moved = await putSnapshot(creds, fleet, manifest, sealed.ciphertext);
   if (!moved.ok) {
     throw new Error("the fleet head moved while publishing: " + (moved.error ?? "another member won"));
   }
   await reportApplied(creds, fleet, seq);
-  return { seq, commit: snap.commit, bytes: sealed.ciphertext.length, members: sealed.wrapped.length };
+  return {
+    seq,
+    commit: snap.commit,
+    bytes: sealed.ciphertext.length,
+    members: sealed.wrapped.length,
+    manifestKey: moved.manifestKey ?? "",
+    full: wantFull,
+  };
 }
 
 export interface PullResult {
@@ -134,6 +175,8 @@ export interface PullResult {
   applied: boolean;
   /** True when there was nothing new to fetch. */
   upToDate: boolean;
+  /** The tree that was applied, so the caller knows what it now holds. */
+  tree?: string;
 }
 
 /**
@@ -155,28 +198,57 @@ export async function pull(
   }
   const keys = loadOrCreateKeyPair(paths.keyFile);
 
-  const manifestBytes = await getPayload(creds, fleet, "manifests", manifestIdOf(head.manifestKey));
-  const manifest = JSON.parse(manifestBytes.toString("utf8")) as FleetManifest;
-  const packId = manifestIdOf(manifest.packKey);
-  const sealed = await getPayload(creds, fleet, "packs", packId);
-
-  // The gateway cannot open this: the snapshot key was sealed for us.
-  const plain = openForMember(sealed, manifest.wrapped, manifest.senderPublicKey, creds.deviceId, keys.privateKey);
-  if (!plain) {
-    throw new Error(
-      "this snapshot was not sealed for this member: it was published before this device joined, so the primary has to publish again now that it has",
-    );
+  // Walk back from the head until the snapshot this member already holds.
+  // Each snapshot names the one it was built against, so the chain is walked
+  // backwards until it reaches what is already here.
+  const chain: FleetManifest[] = [];
+  let manifest: FleetManifest | null = await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey));
+  while (manifest !== null && manifest.seq > lastSeq) {
+    chain.push(manifest);
+    if (manifest.full || manifest.parentManifest === undefined) break;
+    const parent: FleetManifest | null = await fetchManifest(creds, fleet, manifestIdOf(manifest.parentManifest)).catch(() => null);
+    if (parent === null) break;
+    manifest = parent;
   }
-  if (payloadHash(plain) !== manifest.packHash && payloadHash(plain) === "") {
-    throw new Error("the pack does not match its manifest");
+  chain.reverse();
+
+  // A member that is too far behind cannot be caught up with deltas: it
+  // needs a snapshot that carries the whole tree.
+  const first = chain[0];
+  if (first === undefined) return { seq: head.seq, commit: "", applied: false, upToDate: true };
+  if (!first.full && first.seq > lastSeq + 1) {
+    throw new Error(
+      "this member is " + (first.seq - lastSeq) + " snapshots behind and the fleet has no whole tree for it; the primary has to publish one",
+    );
   }
 
   // Directories the fleet leaves alone are not mirrored, so they must survive
   // the apply untouched.
   const exclude = findNestedRepos(paths.work);
-  await applyPack(paths.work, paths.gitDir, manifest.tipCommit, plain, exclude);
-  await reportApplied(creds, fleet, manifest.seq);
-  return { seq: manifest.seq, commit: manifest.tipCommit, applied: true, upToDate: false };
+
+  let applied = false;
+  let lastSeqApplied = lastSeq;
+  let lastCommit = "";
+  let lastTree: string | undefined;
+  for (const step of chain) {
+    const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
+
+    // The gateway cannot open this: the snapshot key was sealed for us.
+    const plain = openForMember(sealed, step.wrapped, step.senderPublicKey, creds.deviceId, keys.privateKey);
+    if (!plain) {
+      throw new Error(
+        "this snapshot was not sealed for this member: it was published before this device joined, so the primary has to publish again now that it has",
+      );
+    }
+    await applyPack(paths.work, paths.gitDir, step.tipCommit, plain, exclude);
+    applied = true;
+    lastSeqApplied = step.seq;
+    lastCommit = step.tipCommit;
+    lastTree = step.tree;
+  }
+  if (!applied) return { seq: head.seq, commit: "", applied: false, upToDate: true };
+  await reportApplied(creds, fleet, lastSeqApplied);
+  return { seq: lastSeqApplied, commit: lastCommit, applied: true, upToDate: false, ...(lastTree ? { tree: lastTree } : {}) };
 }
 
 /** The storage id at the end of a payload key. */

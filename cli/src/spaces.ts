@@ -20,6 +20,7 @@ import { bold, cyan, dim, green, printJson, red, table, yellow } from "./output.
 import { formatBytes } from "./files.ts";
 import { connectUrlFor, probeCredential, registerAnonymous, type AnonymousDevice } from "./connect.ts";
 import { fleetWorkDir, setupFleetSpace } from "./fleet-space.ts";
+import { ensureFleetAgent } from "./fleet-daemon.ts";
 import { ENV, resolveGateway } from "./target.ts";
 import { allVaultCompanies, brokerScopeFor } from "./vaults.ts";
 import { type BrokerScope, ensureBroker, registerBrokerScope, unregisterBrokerScope } from "./vault-broker.ts";
@@ -30,7 +31,7 @@ const READY_TIMEOUT_MS = 90_000;
 
 export type RuntimeKind = "apple" | "podman" | "docker";
 
-interface RuntimeInfo {
+export interface RuntimeInfo {
   kind: RuntimeKind;
   bin: string;
 }
@@ -304,6 +305,21 @@ function containerInfo(runtime: RuntimeInfo, container: string): ContainerInfo {
   return runtime.kind === "apple" ? appleInfo(container) : podmanLikeInfo(runtime, container);
 }
 
+/**
+ * Is this space's container running?
+ *
+ * The fleet agent uses it: a space that is not running must not hold the
+ * fleet's lease, or no other member could take over when it dies.
+ */
+export function spaceContainerRunning(runtime: RuntimeInfo, space: SpaceEntry): boolean {
+  if (!space.container) return false;
+  try {
+    return containerInfo(runtime, space.container).state === "running";
+  } catch {
+    return false;
+  }
+}
+
 /** Run the container with its token in a 0600 env file, so it never appears in
  *  the host process list (the file is removed right after the runtime reads it). */
 /** Force podman's OCI runtime to crun for this invocation (NoCgroups needs it).
@@ -433,7 +449,10 @@ export function entrypointScript(space: SpaceEntry): string {
   const base =
     'set -e; token=$(cat /run/prime/token); [ -n "$token" ] || { echo "prime: token file missing" >&2; exit 1; }; ' +
     'export PRIME_VAULT_FILE=/run/prime/vault.json; ';
-  if (space.expose && space.gateway && space.gateway_device) {
+  // A space that is exposed, and a space that is in a fleet, both talk to
+  // the gateway: a fleet's primary has to be reachable, or a client that
+  // addresses the fleet has nothing to call.
+  if ((space.expose || space.fleet) && space.gateway && space.gateway_device) {
     return (
       base +
       'export PRIME_CHILD_DEVICE_TOKEN=$(cat /run/prime/gateway-token); ' +
@@ -726,6 +745,34 @@ function resolveGatewayToken(ctx: Ctx, saved?: string): string | undefined {
   return saved || ctx.config.defaults.gateway_token || undefined;
 }
 
+/** The identity this space already has in that fleet, if it still has one. */
+function existingFleetDevice(config: Config, fleet: string, spaceName: string): AnonymousDevice | undefined {
+  // The identity that was made for this fleet comes first.
+  for (const [id, entry] of Object.entries(config.devices)) {
+    if (entry.fleet !== fleet || entry.space !== spaceName || !entry.token) continue;
+    return { deviceId: id, token: entry.token, connectUrl: entry.gateway ?? "" };
+  }
+  // Then any other remote identity of this space: one that was made before
+  // the fleet was written down still works.
+  for (const [id, entry] of Object.entries(config.devices)) {
+    if (entry.local_url || entry.space !== spaceName || !entry.token) continue;
+    return { deviceId: id, token: entry.token, connectUrl: entry.gateway ?? "" };
+  }
+  // Then any remote identity that no space is using. It is kept in the
+  // configuration, so the gateway is not asked for a new one - and the
+  // gateway limits how many anonymous devices one address may make.
+  const used = new Set<string>();
+  for (const space of Object.values(config.spaces)) {
+    if (space.id) used.add(space.id);
+    if (space.gateway_device) used.add(space.gateway_device);
+  }
+  for (const [id, entry] of Object.entries(config.devices)) {
+    if (entry.local_url || used.has(id) || !entry.token) continue;
+    return { deviceId: id, token: entry.token, connectUrl: entry.gateway ?? "" };
+  }
+  return undefined;
+}
+
 /** Register/update the anonymous device entry for an exposed space. */
 function rememberExposed(
   ctx: Ctx,
@@ -756,6 +803,28 @@ function rememberExposed(
 }
 
 /**
+ * Put the fleet identity back, if it was lost.
+ *
+ * The identity is what the fleet knows the space by, so a space that has
+ * lost it cannot call the fleet. The space entry still holds the
+ * credential, so it can be put back.
+ */
+function restoreFleetDevice(ctx: Ctx, name: string, space: SpaceEntry): void {
+  if (!space.fleet || !space.gateway_device || !space.remote_token) return;
+  if (ctx.config.devices[space.gateway_device]) return;
+  ctx.config.devices[space.gateway_device] = {
+    gateway: space.gateway,
+    ...(space.gateway_token ? { gateway_token: space.gateway_token } : {}),
+    token: space.remote_token,
+    anonymous: true,
+    connected_at: new Date().toISOString(),
+    note: "gateway identity of the fleet space '" + name + "'",
+    space: name,
+    fleet: space.fleet,
+  };
+}
+
+/**
  * Remember the gateway identity a fleet space uses.
  *
  * The fleet is administered by the device that owns it, so the credential
@@ -781,6 +850,9 @@ function rememberFleetDevice(
     connected_at: new Date().toISOString(),
     note: "gateway identity of the fleet space '" + name + "'",
     space: name,
+    // It is the identity the fleet knows this space by, so it survives a
+    // stop: the space can be started again and must still be able to call.
+    ...(space.fleet ? { fleet: space.fleet } : {}),
   };
   space.gateway = gateway;
   space.gateway_device = device.deviceId;
@@ -943,7 +1015,24 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   if (fleet) {
     let device: AnonymousDevice | undefined;
     try {
-      device = await registerAnonymous(gateway!, gatewayToken);
+      // The identity the fleet knows this space by is kept across a
+      // recreate: a new identity would be a new member, and the gateway
+      // limits how many anonymous devices one address may make.
+      const known = existingFleetDevice(ctx.config, fleet, name);
+      if (known) {
+        // It is used only if the gateway still knows it.
+        const probe = await probeCredential(gateway!, known.deviceId, known.token, gatewayToken).catch(() => ({ verdict: "unknown" as const }));
+        if (probe.verdict === "valid" || probe.verdict === "online") {
+          device = known;
+          ctx.note("  reusing the fleet identity " + known.deviceId);
+        }
+      }
+      // A fleet space tells the gateway which fleet it is joining, so the
+      // device is made without the limit that applies to throwaway ones.
+      const code = str(ctx.parsed, "code");
+      device =
+        device ??
+        (await registerAnonymous(gateway!, gatewayToken, code ? { id: fleet, code } : undefined));
       const setup = await setupFleetSpace(ctx, {
         fleet,
         spaceName: name,
@@ -957,6 +1046,23 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
       rememberFleetDevice(ctx, name, space, device, gateway!, gatewayToken);
       ensureSecret(secretDir, token, device.token);
     } catch (err) {
+      // A space that joined a fleet and then failed must not stay in it as a
+      // ghost: it would take up a place in the roster for ever.
+      const joined = device;
+      try {
+        if (joined) {
+          await fetch(gateway! + "/fleets/" + encodeURIComponent(fleet) + "/remove", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-prime-device": joined.deviceId,
+              "x-device-token": joined.token,
+            },
+            body: JSON.stringify({ deviceId: joined.deviceId }),
+            signal: AbortSignal.timeout(15_000),
+          });
+        }
+      } catch {}
       removeSecret(secretDir);
       networkDelete(runtime, network);
       if (volume && !fleetWork) volumeDelete(runtime, volume);
@@ -1014,6 +1120,16 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   registerDevice(ctx.config, name, space, url);
   ctx.config.spaces[name] = space;
   saveConfig(ctx.configPath, ctx.config);
+  // A space in a fleet needs the agent that keeps it in step. It is started
+  // the same way the vault broker is: on demand, and only when there is
+  // something for it to do.
+  if (space.fleet) {
+    try {
+      await ensureFleetAgent(ctx.configPath);
+    } catch (err) {
+      ctx.note(yellow("  the fleet agent did not start: " + (err instanceof Error ? err.message : String(err))));
+    }
+  }
   if (ctx.json) {
     printJson({
       created: true,
@@ -1077,7 +1193,7 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     gatewayToken = resolveGatewayToken(ctx, space.gateway_token);
     await refreshExposure(ctx, name, space, gatewayToken);
   }
-  ensureSecret(space.secret_dir, space.token, expose ? space.remote_token : undefined);
+  ensureSecret(space.secret_dir, space.token, expose || space.fleet ? space.remote_token : undefined);
   let pendingBroker: PendingBroker | undefined;
   try {
     pendingBroker = await prepareVault(ctx, space, runtime);
@@ -1128,7 +1244,18 @@ export async function spacesStart(ctx: Ctx): Promise<void> {
     exposedOnline = await waitGatewayOnline(space.gateway, space.gateway_device, space.remote_token, gatewayToken);
   }
   registerDevice(ctx.config, name, space, url);
+  // A space that lost its fleet identity gets it back, so it can call the
+  // fleet as itself again.
+  restoreFleetDevice(ctx, name, space);
   saveConfig(ctx.configPath, ctx.config);
+  // A space in a fleet needs the agent that keeps it in step.
+  if (space.fleet) {
+    try {
+      await ensureFleetAgent(ctx.configPath);
+    } catch (err) {
+      ctx.note(yellow("  the fleet agent did not start: " + (err instanceof Error ? err.message : String(err))));
+    }
+  }
   if (ctx.json) {
     printJson({
       started: true,
@@ -1235,7 +1362,9 @@ export async function spacesDelete(ctx: Ctx): Promise<void> {
   if (!space.secret_dir && space.container) removeSecret(secretDirFor(ctx, space.container));
   delete ctx.config.spaces[name];
   for (const [deviceId, entry] of Object.entries(ctx.config.devices)) {
-    if (entry.space === name || deviceId === space.id) delete ctx.config.devices[deviceId];
+    // The fleet identity stays: a stopped space can be started again, and it
+    // has to be able to call the fleet as itself.
+    if (deviceId === space.id || (entry.space === name && !entry.fleet)) delete ctx.config.devices[deviceId];
   }
   saveConfig(ctx.configPath, ctx.config);
   if (ctx.json) {

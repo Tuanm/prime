@@ -19,6 +19,7 @@ import { connectCommand } from "./connect.ts";
 import { vaultsCommand } from "./vaults.ts";
 import { serveCommand } from "./serve.ts";
 import { type Ctx, makeCtx } from "./context.ts";
+import { defaultConfigPath } from "./config.ts";
 import { devicesConnect, devicesDisconnect, devicesList, devicesStatus } from "./devices.ts";
 import { filesDownload, filesList, filesUpload } from "./files.ts";
 import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
@@ -27,6 +28,7 @@ import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
 import { isSpaceCommand, spacesCreate, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
 import {
+  fleetsAgent,
   fleetsApprove,
   fleetsCreate,
   fleetsInvite,
@@ -135,6 +137,9 @@ const FLEET_APPROVE_FLAGS: FlagSpec[] = [
 const FLEET_SYNC_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
   flag("space", "string", "The space that belongs to the fleet", { placeholder: "<name>" }),
+  flag("watch", "boolean", "Keep going: publish when primary, pull when replica"),
+  flag("interval", "number", "Seconds between rounds when watching", { placeholder: "<s>" }),
+  flag("force", "boolean", "Publish even when the workspace has not changed"),
 ];
 
 const VAULTS_FLAGS: FlagSpec[] = [
@@ -246,6 +251,13 @@ async function main(argv: string[]): Promise<void> {
   if (argv[0] === "__vault-broker") {
     const { brokerMain } = await import("./vault-broker.ts");
     await brokerMain();
+    return;
+  }
+  // Hidden: the host-side fleet agent. Started on demand by prime spaces.
+  if (argv[0] === "__fleet-agent") {
+    const { runFleetAgent } = await import("./fleet-daemon.ts");
+    const configPath = str(parseArgs(argv.slice(1), []), "config") ?? defaultConfigPath();
+    await runFleetAgent(configPath);
     return;
   }
   // Hidden: the JavaScript child used by the run tool. It shares stdin/stdout
@@ -384,6 +396,8 @@ async function main(argv: string[]): Promise<void> {
           return fleetsSync(ctx);
         case "delete":
           return fleetsDelete(ctx);
+        case "agent":
+          return fleetsAgent(ctx);
         default:
           throw new UsageError(`unknown fleets command "${sub}"`, "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]");
       }

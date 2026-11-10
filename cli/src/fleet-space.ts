@@ -57,6 +57,8 @@ export interface FleetSpaceOptions {
   code?: string;
   /** True when the space is the first member and creates the fleet. */
   create: boolean;
+  /** How long to wait for the publisher to publish a snapshot for this member. */
+  waitMs?: number;
 }
 
 /**
@@ -78,24 +80,31 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   const workDir = fleetWorkDir(ctx, opts.spaceName);
   const paths: MemberPaths = {
     work: workDir,
-    gitDir: fleetStateDir(ctx, opts.fleet, opts.spaceName),
-    keyFile: fleetKeyFile(ctx, opts.fleet, opts.spaceName),
+    gitDir: fleetStateDir(ctx.configPath, opts.fleet, opts.spaceName),
+    keyFile: fleetKeyFile(ctx.configPath, opts.fleet, opts.spaceName),
   };
 
   // The member's key pair exists before it joins, so the roster already
   // carries the key the primary will seal snapshots for.
   const keys = loadOrCreateKeyPair(paths.keyFile);
 
-  if (opts.create) {
-    const created = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet), {
-      pubkey: keys.publicKey,
-    });
-    if (created.status >= 400) {
-      // The fleet already exists: this space joins it instead.
+  // A device that is already a member does not join again: a create that
+  // failed after the join is retried with the same device, and it must not
+  // need a second invite.
+  const already = await fleetCall(creds, "GET", "/fleets/" + encodeURIComponent(opts.fleet) + "/me", undefined);
+  const isMember = already.status === 200 && already.json?.status === "member";
+  if (!isMember) {
+    if (opts.create) {
+      const created = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet), {
+        pubkey: keys.publicKey,
+      });
+      if (created.status >= 400) {
+        // The fleet already exists: this space joins it instead.
+        await joinFleet(ctx, creds, opts);
+      }
+    } else {
       await joinFleet(ctx, creds, opts);
     }
-  } else {
-    await joinFleet(ctx, creds, opts);
   }
 
   const role = await fetchRole(creds, opts.fleet);
@@ -110,13 +119,18 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     throw new CliError("could not take a place in the fleet: " + (bootstrapped.json?.error ?? bootstrapped.status));
   }
   const isPrimary = bootstrapped.json?.role === "primary";
-  const state = readFleetState(ctx, opts.fleet, opts.spaceName);
+  const state = readFleetState(ctx.configPath, opts.fleet, opts.spaceName);
 
   if (isPrimary) {
     // The primary publishes the state it already holds, so a replica that
     // arrives later has something to fetch.
-    const published = await publish(creds, opts.fleet, paths, state.base ?? null, state.seq ?? 0);
-    writeFleetState(ctx, opts.fleet, opts.spaceName, { base: published.commit, seq: published.seq });
+    const published = await publish(creds, opts.fleet, paths, state.base ?? null, state.seq ?? 0, state.manifest, state.memberCount ?? 0);
+    writeFleetState(ctx.configPath, opts.fleet, opts.spaceName, {
+      base: published.commit,
+      seq: published.seq,
+      manifest: published.manifestKey,
+      memberCount: published.members,
+    });
     return {
       deviceId: opts.deviceId,
       deviceToken: opts.deviceToken,
@@ -128,9 +142,37 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   }
 
   // A replica fetches the current state before it starts working.
-  const pulled = await pull(creds, opts.fleet, paths, state.seq ?? 0);
+  //
+  // A member that has just joined cannot open the snapshot that was
+  // published before it arrived: the publisher seals each snapshot for the
+  // members that were there at the time. So the first attempt waits for the
+  // publisher to publish again, which it does as soon as it notices the
+  // membership changed.
+  const deadline = Date.now() + (opts.waitMs ?? 120_000);
+  // The first attempt fails with an error when the snapshot was not sealed
+  // for this member, so it is caught and the wait begins.
+  // The reason the last attempt failed is kept, so the answer says what went
+  // wrong rather than only that something did.
+  let lastError: string | undefined;
+  let pulled = await pull(creds, opts.fleet, paths, state.seq ?? 0).catch((err: unknown) => {
+    lastError = err instanceof Error ? err.message : String(err);
+    return null;
+  });
+  while ((pulled === null || (!pulled.applied && !pulled.upToDate)) && Date.now() < deadline) {
+    await Bun.sleep(2000);
+    pulled = await pull(creds, opts.fleet, paths, state.seq ?? 0).catch((err: unknown) => {
+      lastError = err instanceof Error ? err.message : String(err);
+      return pulled;
+    });
+  }
+  if (pulled === null || (!pulled.applied && !pulled.upToDate)) {
+    throw new CliError(
+      "the fleet has no snapshot this member can open yet" + (lastError ? ": " + lastError : ""),
+      "The publisher has to publish again now that this device has joined. It does so on its next round; try 'prime fleets sync --space " + opts.spaceName + "' in a moment.",
+    );
+  }
   if (pulled.applied) {
-    writeFleetState(ctx, opts.fleet, opts.spaceName, { seq: pulled.seq, base: pulled.commit });
+    writeFleetState(ctx.configPath, opts.fleet, opts.spaceName, { seq: pulled.seq, base: pulled.commit });
   }
   return {
     deviceId: opts.deviceId,
@@ -149,7 +191,7 @@ async function joinFleet(ctx: Ctx, creds: FleetCredentials, opts: FleetSpaceOpti
       "Pass the invite code the operator printed: prime spaces create --fleet " + opts.fleet + " --code <code>.",
     );
   }
-  const keys = loadOrCreateKeyPair(fleetKeyFile(ctx, opts.fleet, opts.spaceName));
+  const keys = loadOrCreateKeyPair(fleetKeyFile(ctx.configPath, opts.fleet, opts.spaceName));
   const joined = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet) + "/join", {
     code: opts.code,
     label: opts.spaceName,

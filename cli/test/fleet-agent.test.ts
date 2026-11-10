@@ -47,6 +47,29 @@ class FakeGateway {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
       return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey })) });
     }
+    if (kind === "snapshot" && method === "POST") {
+      if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
+      const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
+      const manifestLength = bytes.readUInt32BE(0);
+      const manifestBytes = bytes.subarray(4, 4 + manifestLength);
+      const pack = bytes.subarray(4 + manifestLength);
+      const hash = (b: Buffer) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+      const packKey = "fleets/x/packs/" + hash(pack);
+      const manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
+      manifest.packKey = packKey;
+      manifest.packHash = hash(pack);
+      const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
+      const manifestKey = "fleets/x/manifests/" + hash(finalManifest);
+      this.payloads.set(packKey, pack);
+      this.payloads.set(manifestKey, finalManifest);
+      const current = this.head?.seq ?? 0;
+      if ((this.applied.get(creds.deviceId) ?? 0) < current) {
+        return Response.json({ error: "catch up first", required: current }, { status: 409 });
+      }
+      const seq = typeof manifest.seq === "number" ? manifest.seq : current + 1;
+      this.head = { seq, manifestKey, manifestHash: hash(finalManifest), epoch: 1 };
+      return Response.json({ ok: true, seq, manifestKey });
+    }
     if ((kind === "packs" || kind === "manifests") && method === "POST") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));

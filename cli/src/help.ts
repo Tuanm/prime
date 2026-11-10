@@ -414,6 +414,9 @@ USAGE
   prime fleets leave <fleet-id>                  Leave the fleet
   prime fleets revoke <fleet-id>                 Invalidate every outstanding invite
   prime fleets delete <fleet-id>                  Remove the fleet and everything in it
+  prime fleets sync <fleet-id> --space <name>     One round: publish if primary, pull if replica
+  prime fleets sync ... --watch [--interval <s>]  Keep going, so the space stays in step on its own
+  prime fleets agent status|start|stop          The agent that keeps the fleet in step
   prime fleets status <fleet-id>                 Show this device's standing in the fleet
 
 A fleet holds one primary and any number of replicas. The primary has the

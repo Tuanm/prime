@@ -32,6 +32,18 @@ export interface FleetManifest {
   packKey: string;
   /** sha256 of the sealed pack. */
   packHash: string;
+  /**
+   * True when the pack carries the whole tree.
+   *
+   * A member that joins the fleet, or one that has fallen too far behind to
+   * have the base, needs one of these: a delta is only useful to a member
+   * that already holds the snapshot it is built against.
+   */
+  full: boolean;
+  /** The manifest of the snapshot this one is built against. */
+  parentManifest?: string;
+  /** The sequence of that snapshot. */
+  parentSeq?: number;
   /** The sender's public key, so a receiver can derive the shared secret. */
   senderPublicKey: string;
   /** The snapshot key, wrapped for each member. */
@@ -108,6 +120,12 @@ export async function putPayload(
   return (await res.json()) as { key: string; hash: string; size: number };
 }
 
+/** Fetch a manifest by the id it is stored under. */
+export async function fetchManifest(creds: FleetCredentials, fleet: string, id: string): Promise<FleetManifest> {
+  const bytes = await getPayload(creds, fleet, "manifests", id);
+  return JSON.parse(bytes.toString("utf8")) as FleetManifest;
+}
+
 /** Fetch a stored payload. */
 export async function getPayload(creds: FleetCredentials, fleet: string, kind: "packs" | "manifests", id: string): Promise<Buffer> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/" + kind + "/" + encodeURIComponent(id));
@@ -123,8 +141,15 @@ export async function advanceHead(
   expectedSeq: number,
   manifestKey: string,
   manifestHash: string,
+  /** The pack this manifest points at, so the gateway can let the old ones go. */
+  packKey?: string,
 ): Promise<{ ok: boolean; seq?: number; error?: string }> {
-  const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/head/advance", JSON.stringify({ expectedSeq, manifestKey, manifestHash }));
+  const res = await request(
+    creds,
+    "POST",
+    "/fleets/" + encodeURIComponent(fleet) + "/head/advance",
+    JSON.stringify({ expectedSeq, manifestKey, manifestHash, ...(packKey ? { packKey } : {}) }),
+  );
   const body = (await res.json().catch(() => ({}))) as { ok?: boolean; seq?: number; error?: string };
   if (!res.ok) {
     return { ok: false, error: body.error ?? ("status " + res.status) };
@@ -141,6 +166,36 @@ export async function advanceHead(
 export async function reportApplied(creds: FleetCredentials, fleet: string, seq: number): Promise<boolean> {
   const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/applied", JSON.stringify({ seq }));
   return res.ok;
+}
+
+/**
+ * Publish a snapshot: the sealed pack and its manifest, in one request.
+ *
+ * The body is framed: four bytes of manifest length, then the manifest, then
+ * the pack. The gateway stores both and moves the head, so a publish costs
+ * one round trip rather than six - and the round trip is most of the time
+ * a change takes to travel.
+ */
+export async function putSnapshot(
+  creds: FleetCredentials,
+  fleet: string,
+  manifest: FleetManifest,
+  pack: Buffer,
+): Promise<{ ok: boolean; seq?: number; manifestKey?: string; error?: string }> {
+  const manifestBytes = Buffer.from(JSON.stringify(manifest), "utf8");
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(manifestBytes.length, 0);
+  const body = Buffer.concat([header, manifestBytes, pack]);
+  const res = await request(
+    creds,
+    "POST",
+    "/fleets/" + encodeURIComponent(fleet) + "/snapshot",
+    body,
+    "application/octet-stream",
+  );
+  const result = (await res.json().catch(() => ({}))) as { ok?: boolean; seq?: number; manifestKey?: string; error?: string };
+  if (!res.ok) return { ok: false, error: result.error ?? ("status " + res.status) };
+  return { ok: true, seq: result.seq, manifestKey: result.manifestKey };
 }
 
 /** Ask the fleet which role this device has. */
@@ -161,6 +216,18 @@ export async function renewLease(creds: FleetCredentials, fleet: string, ttlMs: 
 }
 
 /**
+ * Give up the lease this device holds.
+ *
+ * A member that is not running should not hold the fleet: the lease would
+ * keep a primary that nobody can reach, and no other member could take
+ * over.
+ */
+export async function releaseLease(creds: FleetCredentials, fleet: string): Promise<boolean> {
+  const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/lease/release", "{}");
+  return res.ok;
+}
+
+/**
  * The members' public keys, which only the primary may read.
  *
  * The roster keeps the other devices' ids cut short for ordinary members,
@@ -169,9 +236,9 @@ export async function renewLease(creds: FleetCredentials, fleet: string, ttlMs: 
 export async function fetchMemberKeys(
   creds: FleetCredentials,
   fleet: string,
-): Promise<Array<{ deviceId: string; pubkey?: string }>> {
+): Promise<Array<{ deviceId: string; pubkey?: string; applied?: number }>> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/keys");
   if (!res.ok) throw new FleetTransportError("could not read the members' keys: " + res.status);
-  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string }> };
+  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number }> };
   return body.members ?? [];
 }

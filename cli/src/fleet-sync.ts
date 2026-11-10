@@ -29,8 +29,20 @@ export interface Snapshot {
   commit: string;
   tree: string;
   parent: string | null;
-  /** Self-contained pack: the replica can apply it without any history. */
+  /**
+   * Self-contained pack: the replica can apply it without any history.
+   *
+   * It carries the whole tree, so it is what a member that joins later needs.
+   */
   pack: Buffer;
+  /**
+   * The same tree as a delta against the previous snapshot.
+   *
+   * It carries only what changed, so it is what the members that are already
+   * caught up want. A member that has the previous snapshot can apply it on
+   * its own.
+   */
+  delta: Buffer | null;
 }
 
 export interface SnapshotOptions {
@@ -42,6 +54,12 @@ export interface SnapshotOptions {
   exclude?: string[];
   /** Previous snapshot commit, for the history. */
   base?: string | null;
+  /** The sequence this snapshot is, so its commit can be kept reachable. */
+  seq?: number;
+  /** Which pack to build: the whole tree, only the change, or both. */
+  wantFull?: boolean;
+  /** Build no pack at all: the caller only wants to know the tree. */
+  treeOnly?: boolean;
 }
 
 function gitEnv(gitDir: string, work: string, indexFile: string): Record<string, string> {
@@ -192,10 +210,26 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   commitArgs.push("-m", "fleet snapshot");
   const commit = await gitText(gitDir, commitArgs, env);
 
-  // A self-contained pack: the replica can apply it on its own, without
-  // any of the history that came before it.
-  const pack = await gitRun(gitDir, ["pack-objects", "--stdout", "--revs"], env, commit + "\n");
-  return { commit, tree, parent, pack };
+  // Only the pack that is needed is built. Building both costs twice the git
+  // work, and the common case is that only one of them travels.
+  const pack =
+    opts.treeOnly || opts.wantFull === false
+      ? Buffer.alloc(0)
+      : await gitRun(gitDir, ["pack-objects", "--stdout", "--revs"], env, commit + "\n");
+
+  // The delta against the previous snapshot: only what changed. A member
+  // that already has the previous snapshot can apply it on its own.
+  const delta =
+    opts.treeOnly || opts.wantFull === true || !parent
+      ? null
+      : await gitRun(gitDir, ["pack-objects", "--stdout", "--revs", "--thin"], env, commit + "\n^" + parent + "\n");
+
+  // Keep the snapshot commit reachable, or the next garbage collection
+  // would take the objects the next delta is built against.
+  if (opts.seq !== undefined) {
+    await gitText(gitDir, ["update-ref", "refs/prime/snapshots/" + opts.seq, commit], env);
+  }
+  return { commit, tree, parent, pack, delta };
 }
 
 export interface Sealed {
@@ -247,7 +281,10 @@ export async function applyPack(
   mkdirSync(gitDir, { recursive: true });
   const env = gitEnv(gitDir, work, join(gitDir, "apply.index"));
   await ensureStore(gitDir, work, env);
-  await gitRun(gitDir, ["index-pack", "--stdin"], env, pack);
+  // --fix-thin: a delta pack names the objects it was built against, and
+  // those live in the replica's own store from the snapshot before it.
+  // Without this the pack cannot be resolved and git refuses it.
+  await gitRun(gitDir, ["index-pack", "--stdin", "--fix-thin"], env, pack);
   await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
   // read-tree only writes what the tree contains. A file the primary deleted
   // is still sitting in the replica, so the replica would keep it forever.

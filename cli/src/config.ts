@@ -44,6 +44,8 @@ export interface DeviceEntry {
   local_url?: string;
   /** The space this local device belongs to. */
   space?: string;
+  /** The fleet this device is a member of, when it is a fleet's identity. */
+  fleet?: string;
 }
 
 export interface Defaults {
@@ -173,6 +175,7 @@ export function parseConfig(text: string, source: string): Config {
       ...(entry.anonymous === true ? { anonymous: true } : {}),
       ...(asString(entry.local_url) ? { local_url: asString(entry.local_url) } : {}),
       ...(asString(entry.space) ? { space: asString(entry.space) } : {}),
+      ...(asString(entry.fleet) ? { fleet: asString(entry.fleet) } : {}),
     };
   }
 
@@ -293,6 +296,7 @@ export function serializeConfig(config: Config): string {
         ["anonymous", entry.anonymous === true ? true : undefined],
         ["local_url", entry.local_url],
         ["space", entry.space],
+        ["fleet", entry.fleet],
       ] as const) {
         if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
       }

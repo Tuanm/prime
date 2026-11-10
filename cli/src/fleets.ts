@@ -12,15 +12,17 @@
 //   2. the config file's defaults and device entries
 //   3. PRIME_GATEWAY_URL / PRIME_GATEWAY_TOKEN / PRIME_DEVICE_TOKEN
 
-import { bool, str } from "./args.ts";
-import type { Config } from "./config.ts";
+import { bool, num, str } from "./args.ts";
+import type { Config, SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pull, publish, type MemberPaths } from "./fleet-agent.ts";
-import { fetchRole, type FleetCredentials } from "./fleet-transport.ts";
+import { snapshot } from "./fleet-sync.ts";
+import { fetchMemberKeys, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
+import { ensureFleetAgent, fleetAgentStatus, stopFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
 
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -278,6 +280,58 @@ export async function fleetsLeave(ctx: Ctx): Promise<void> {
   ctx.out(green("left fleet ") + " " + fleetId);
 }
 
+/**
+ * What the fleet agent is doing, and how to stop it.
+ *
+ * The agent is started on demand: a space that belongs to a fleet brings it
+ * up, and it keeps every space of the fleet in step by itself.
+ */
+export async function fleetsAgent(ctx: Ctx): Promise<void> {
+  const what = ctx.parsed.positionals[2] ?? "status";
+  if (what === "stop") {
+    const stopped = stopFleetAgent(ctx.configPath);
+    if (ctx.json) {
+      printJson({ stopped });
+      return;
+    }
+    ctx.out(stopped ? green("stopped the fleet agent") : dim("the fleet agent was not running"));
+    return;
+  }
+  if (what === "start") {
+    const state = await ensureFleetAgent(ctx.configPath);
+    if (ctx.json) {
+      printJson({ started: true, pid: state.pid });
+      return;
+    }
+    ctx.out(green("started the fleet agent") + " (pid " + state.pid + ")");
+    return;
+  }
+  const status = fleetAgentStatus(ctx.configPath);
+  if (ctx.json) {
+    printJson(status);
+    return;
+  }
+  if (!status.running) {
+    ctx.out(dim("the fleet agent is not running"));
+    return;
+  }
+  ctx.out(green("the fleet agent is running") + " (pid " + status.pid + ")");
+  ctx.out(dim("  started   " + (status.started_at ?? "-")));
+  ctx.out(dim("  spaces    " + (status.spaces ?? 0)));
+  ctx.out(dim("  rounds    " + (status.rounds ?? 0)));
+  if (status.last_action) ctx.out(dim("  last      " + status.last_action));
+  if (status.last_error) ctx.out(yellow("  error     " + status.last_error));
+  const t = status.timing;
+  if (t) {
+    const parts: string[] = [];
+    if (t.bootstrap !== undefined) parts.push("lease " + t.bootstrap + "ms");
+    if (t.snapshot !== undefined) parts.push("snapshot " + t.snapshot + "ms");
+    if (t.publish !== undefined) parts.push("publish " + t.publish + "ms");
+    if (t.pull !== undefined) parts.push("pull " + t.pull + "ms");
+    if (parts.length > 0) ctx.out(dim("  timing    " + parts.join(", ")));
+  }
+}
+
 export async function fleetsDelete(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
   const t = target(ctx, spaceArg(ctx));
@@ -314,12 +368,92 @@ export async function fleetsStatus(ctx: Ctx): Promise<void> {
   ctx.out(bold(fleetId) + ": " + res.json.status);
   if (res.json.member) ctx.out(dim("role: " + res.json.member.role));
 }
+/** One round of synchronisation: take a place, then publish or pull. */
+export async function syncFleetSpace(
+  configPath: string,
+  fleetId: string,
+  spaceName: string,
+  space: SpaceEntry,
+  force = false,
+): Promise<string> {
+  const work = space.work_dir;
+  if (!work) throw new CliError("the space " + spaceName + " has no work directory yet");
+  const gateway = space.gateway;
+  const deviceId = space.gateway_device;
+  const deviceToken = space.remote_token;
+  if (!gateway || !deviceId || !deviceToken) {
+    throw new CliError("the space " + spaceName + " has no gateway credentials");
+  }
+  const creds: FleetCredentials = { gateway, deviceId, deviceToken, timeoutMs: 120_000 };
+  const paths: MemberPaths = {
+    work,
+    gitDir: fleetStateDir(configPath, fleetId, spaceName),
+    keyFile: fleetKeyFile(configPath, fleetId, spaceName),
+  };
+  const role = await fetchRole(creds, fleetId);
+  if (!role.member) throw new CliError("this device is not a member of the fleet " + fleetId);
+
+  const state = readFleetState(configPath, fleetId, spaceName);
+
+  // Take a place in the fleet first. The lease is short-lived, so a member
+  // that has not spoken for a while has to take it again before it may write.
+  const placed = await bootstrap(creds, fleetId);
+  if (placed.primary) {
+    // A snapshot is taken every round: it is what says whether there is
+    // anything to publish at all.
+    const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base: state.base ?? null, seq: state.seq ?? 0 });
+
+    // Nothing changed in the workspace and nobody joined: publishing the
+    // same tree again would cost a pack and a write for nothing. But a
+    // member that has just joined needs a snapshot sealed for it, so the
+    // membership is part of the question.
+    // The roster is part of the question: a member that joined, or that came
+    // back with a new key, needs a snapshot sealed for it.
+    const members = await fetchMemberKeys(creds, fleetId);
+    const roster = members.map((m) => m.deviceId + ":" + (m.pubkey ?? "").slice(0, 12)).join(",");
+    if (state.tree !== undefined && !force) {
+      if (roster === (state.roster ?? "") && snap.tree === state.tree) {
+        return "unchanged";
+      }
+    }
+
+    const result = await publish(
+      creds,
+      fleetId,
+      paths,
+      state.base ?? null,
+      state.seq ?? 0,
+      state.manifest,
+      state.memberCount ?? 0,
+    );
+    writeFleetState(configPath, fleetId, spaceName, {
+      ...state,
+      base: result.commit,
+      seq: result.seq,
+      manifest: result.manifestKey,
+      memberCount: result.members,
+      roster,
+      // Remember the tree, so the next round knows there is nothing to do.
+      tree: snap.tree,
+    });
+    return "published " + result.seq;
+  }
+
+  const pulled = await pull(creds, fleetId, paths, state.seq ?? 0);
+  if (pulled.applied) {
+    writeFleetState(configPath, fleetId, spaceName, { ...state, seq: pulled.seq, base: pulled.commit });
+    return "applied " + pulled.seq;
+  }
+  return "up to date";
+}
+
 /**
- * One synchronisation round for a member.
+ * Keep a space in step with its fleet.
  *
- * The primary publishes its work tree; a replica fetches and applies the
- * fleet's current state. The role comes from the fleet, never from a flag.
- *
+ * With --watch it keeps going: it takes its place in the fleet, publishes
+ * when it is the primary and pulls when it is a replica, until it is asked to
+ * stop. A round that fails is reported and the next one is tried, because a
+ * network that blinks is not a reason to give up on the fleet.
  */
 export async function fleetsSync(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
@@ -337,43 +471,49 @@ export async function fleetsSync(ctx: Ctx): Promise<void> {
   if (!t.device || !t.deviceToken) {
     throw new UsageError("no device credentials for this space", "The space must be exposed to the gateway to take part in a fleet.");
   }
-  const creds: FleetCredentials = { gateway: t.gateway, deviceId: t.device, deviceToken: t.deviceToken, timeoutMs: t.timeoutMs };
-  const paths: MemberPaths = {
-    work,
-    gitDir: fleetStateDir(ctx, fleetId, spaceName),
-    keyFile: fleetKeyFile(ctx, fleetId, spaceName),
-  };
+  if (!t.device || !t.deviceToken) {
+    throw new UsageError("no device credentials for this space", "The space must be exposed to the gateway to take part in a fleet.");
+  }
 
-  const role = await fetchRole(creds, fleetId);
-  if (!role.member) throw new CliError("this device is not a member of the fleet " + fleetId);
-
-  const state = readFleetState(ctx, fleetId, spaceName);
-
-  // Take a place in the fleet first. The lease is short-lived, so a member
-  // that has not spoken for a while has to take it again before it may write.
-  const placed = await bootstrap(creds, fleetId);
-  if (placed.primary) {
-    const result = await publish(creds, fleetId, paths, state.base ?? null, state.seq ?? 0);
-    writeFleetState(ctx, fleetId, spaceName, { ...state, base: result.commit, seq: result.seq });
+  const watch = bool(ctx.parsed, "watch");
+  if (!watch) {
+    const what = await syncFleetSpace(ctx.configPath, fleetId, spaceName, space, bool(ctx.parsed, "force"));
     if (ctx.json) {
-      printJson({ fleet: fleetId, role: "primary", published: result });
+      printJson({ fleet: fleetId, space: spaceName, result: what });
       return;
     }
-    ctx.out(green("published") + " " + bold(fleetId) + " seq " + result.seq + " (" + result.bytes + " bytes, " + result.members + " members)");
+    ctx.out(what);
     return;
   }
 
-  const pulled = await pull(creds, fleetId, paths, state.seq ?? 0);
-  if (pulled.applied) writeFleetState(ctx, fleetId, spaceName, { ...state, seq: pulled.seq, base: pulled.commit });
-  if (ctx.json) {
-    printJson({ fleet: fleetId, role: "replica", pulled });
-    return;
+  // Keep going until asked to stop.
+  const intervalMs = Math.max(1, num(ctx.parsed, "interval") ?? 15) * 1000;
+  let stopping = false;
+  const stop = (): void => {
+    stopping = true;
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  ctx.note(dim("watching " + fleetId + " for " + spaceName + ", every " + Math.round(intervalMs / 1000) + "s; press ctrl-c to stop"));
+  while (!stopping) {
+    try {
+      const what = await syncFleetSpace(ctx.configPath, fleetId, spaceName, space, bool(ctx.parsed, "force"));
+      if (what !== "unchanged" && what !== "up to date") ctx.note(green(what));
+    } catch (err) {
+      ctx.note(yellow("round failed: " + (err instanceof Error ? err.message : String(err))));
+    }
+    // Wait, but wake early if the agent is asked to stop.
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, intervalMs);
+      const onStop = (): void => {
+        clearTimeout(timer);
+        resolve(undefined);
+      };
+      process.once("SIGINT", onStop);
+      process.once("SIGTERM", onStop);
+    });
   }
-  if (pulled.upToDate) {
-    ctx.out(dim("up to date at seq " + pulled.seq));
-    return;
-  }
-  ctx.out(green("applied") + " " + bold(fleetId) + " seq " + pulled.seq);
+  ctx.note(dim("stopped"));
 }
 /**
  * Take a place in the fleet.
@@ -394,15 +534,15 @@ export async function bootstrap(creds: FleetCredentials, fleet: string): Promise
 }
 
 /** Where a member keeps its own state for a fleet, under prime's directory. */
-export function fleetStateDir(ctx: Ctx, fleetId: string, spaceName: string): string {
-  const dir = join(dirname(ctx.configPath), "fleets", fleetId, spaceName);
+export function fleetStateDir(configPath: string, fleetId: string, spaceName: string): string {
+  const dir = join(dirname(configPath), "fleets", fleetId, spaceName);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
 
 /** Where a member keeps the key that opens the snapshots sealed for it. */
-export function fleetKeyFile(ctx: Ctx, fleetId: string, spaceName: string): string {
-  const dir = join(dirname(ctx.configPath), "fleets", fleetId);
+export function fleetKeyFile(configPath: string, fleetId: string, spaceName: string): string {
+  const dir = join(dirname(configPath), "fleets", fleetId);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return join(dir, spaceName + ".key");
 }
@@ -412,11 +552,19 @@ export interface FleetMemberState {
   seq?: number;
   /** The commit this member's store last held. */
   base?: string;
+  /** Where the manifest of that snapshot is stored: the next one names it. */
+  manifest?: string;
+  /** How many members the last publish sealed for. */
+  memberCount?: number;
+  /** The members and their keys, so a member that changed is sealed again. */
+  roster?: string;
+  /** The tree of the last publish, so an unchanged workspace is not published again. */
+  tree?: string;
 }
 
 /** The member's own record of how far it has got. */
-export function readFleetState(ctx: Ctx, fleetId: string, spaceName: string): FleetMemberState {
-  const file = join(fleetStateDir(ctx, fleetId, spaceName), "state.json");
+export function readFleetState(configPath: string, fleetId: string, spaceName: string): FleetMemberState {
+  const file = join(fleetStateDir(configPath, fleetId, spaceName), "state.json");
   if (!existsSync(file)) return {};
   try {
     return JSON.parse(readFileSync(file, "utf8")) as FleetMemberState;
@@ -425,7 +573,7 @@ export function readFleetState(ctx: Ctx, fleetId: string, spaceName: string): Fl
   }
 }
 
-export function writeFleetState(ctx: Ctx, fleetId: string, spaceName: string, state: FleetMemberState): void {
-  const file = join(fleetStateDir(ctx, fleetId, spaceName), "state.json");
+export function writeFleetState(configPath: string, fleetId: string, spaceName: string, state: FleetMemberState): void {
+  const file = join(fleetStateDir(configPath, fleetId, spaceName), "state.json");
   writeFileSync(file, JSON.stringify(state, null, 2), { mode: 0o600 });
 }
