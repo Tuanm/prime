@@ -623,7 +623,7 @@ ${UI_CSS}    </style>
         function fleetNewCard(pending) {
           var row = fleetRootRow(
             pending.name || "",
-            "the name the spaces use to join it",
+            "",
             [
               {
                 text: "Create",
@@ -712,20 +712,6 @@ ${UI_CSS}    </style>
             leaf.appendChild(fleetPendingNode(f.fleet, p));
             leaves.appendChild(leaf);
           });
-          if (!ordered.length && !pending.length) {
-            var none = document.createElement("li");
-            var noneRow = document.createElement("div");
-            noneRow.className = "row fleet-row";
-            var noneBox = document.createElement("div");
-            noneBox.className = "box";
-            var noneText = document.createElement("span");
-            noneText.className = "fleet-meta";
-            noneText.textContent = "No spaces yet. Mint an invite code and give it to a space.";
-            noneBox.appendChild(noneText);
-            noneRow.appendChild(noneBox);
-            none.appendChild(noneRow);
-            leaves.appendChild(none);
-          }
 
           // The fleet card is the root; the leaves are below it, outside it.
           // The branch is a tree, so the lines are drawn between the root
@@ -897,7 +883,25 @@ ${UI_CSS}    </style>
                 ' seconds.</div>' +
                 '<div class="dlg-code">' +
                 esc(j.code || "") +
-                "</div>";
+                "</div>" +
+                '<div class="dlg-msg"><button type="button" class="btn" id="copyInvite">Copy</button></div>';
+              var copy = d.bodyEl.querySelector("#copyInvite");
+              if (copy) {
+                copy.addEventListener("click", function () {
+                  var code = j.code || "";
+                  var done = function () {
+                    copy.textContent = "Copied";
+                    setTimeout(function () {
+                      copy.textContent = "Copy";
+                    }, 1500);
+                  };
+                  if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(code).then(done, done);
+                  } else {
+                    done();
+                  }
+                });
+              }
             })
             .catch(function (e) { setStatus("could not mint an invite: " + e.message, true); });
         }

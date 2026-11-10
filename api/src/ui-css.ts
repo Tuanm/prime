@@ -408,14 +408,15 @@ export const UI_CSS = `      * {
       .fleet-tree .fleet-tree {
         position: relative;
         margin-top: 8px;
-        padding-left: 26px;
+        padding-left: 46px;
       }
-      /* The line the leaves hang from. */
+      /* The line the leaves hang from. It starts under the box of the
+         fleet, so the branch belongs to it and not to what is above. */
       .fleet-tree .fleet-tree::before {
         content: "";
         position: absolute;
-        left: 11px;
-        top: -4px;
+        left: 20px;
+        top: -9px;
         bottom: 14px;
         border-left: 1px solid #dcdcdc;
       }
@@ -426,9 +427,9 @@ export const UI_CSS = `      * {
       .fleet-tree .fleet-tree > li::before {
         content: "";
         position: absolute;
-        left: -15px;
+        left: -26px;
         top: 17px;
-        width: 14px;
+        width: 26px;
         border-top: 1px solid #dcdcdc;
       }
       .fleet-tree .row {
