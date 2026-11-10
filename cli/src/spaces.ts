@@ -1043,6 +1043,12 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
         create: !str(ctx.parsed, "code"),
       });
       space.fleet_role = setup.role;
+      if (setup.role === "pending") {
+        // The operator has not admitted this space yet. It says so, because
+        // otherwise the space looks as if it were in the fleet.
+        ctx.note(yellow("  the fleet has not admitted this space yet"));
+        ctx.note(dim("  the operator admits it in the admin interface; the agent keeps trying until then"));
+      }
       rememberFleetDevice(ctx, name, space, device, gateway!, gatewayToken);
       ensureSecret(secretDir, token, device.token);
     } catch (err) {
