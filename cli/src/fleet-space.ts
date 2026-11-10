@@ -59,6 +59,8 @@ export interface FleetSpaceOptions {
   create: boolean;
   /** How long to wait for the publisher to publish a snapshot for this member. */
   waitMs?: number;
+  /** How long to wait for the operator to admit this member. */
+  approvalWaitMs?: number;
 }
 
 /**
@@ -98,12 +100,32 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
       const created = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet), {
         pubkey: keys.publicKey,
       });
+      if (created.status === 403) {
+        throw new CliError(
+          "only the operator may create a fleet",
+          "The operator sets the fleet up in the admin interface and admits the spaces that join it. Ask for an invite code and run: prime spaces create --fleet " +
+            opts.fleet +
+            " --code <code>",
+        );
+      }
       if (created.status >= 400) {
         // The fleet already exists: this space joins it instead.
         await joinFleet(ctx, creds, opts);
       }
     } else {
       await joinFleet(ctx, creds, opts);
+    }
+  }
+
+  // The operator admits the member. The space waits for that: a space that
+  // is not in the fleet yet cannot take its place in it.
+  if (!isMember) {
+    const deadline = Date.now() + (opts.approvalWaitMs ?? 180_000);
+    for (;;) {
+      const me = await fleetCall(creds, "GET", "/fleets/" + encodeURIComponent(opts.fleet) + "/me", undefined);
+      if (me.status === 200 && me.json?.status === "member") break;
+      if (Date.now() > deadline) break;
+      await Bun.sleep(3000);
     }
   }
 

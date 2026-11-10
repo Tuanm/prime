@@ -342,6 +342,106 @@ export const UI_CSS = `      * {
         border: 1px dashed #999;
         text-align: center;
       }
+      /* ---- fleets ---- */
+      .fleet {
+        border: 1px solid #e5e5e5;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 12px;
+        background: #fff;
+      }
+      .fleet-head {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .fleet-name {
+        font-weight: 700;
+        font-size: 14px;
+      }
+      .fleet-meta {
+        color: #666;
+        font-size: 11px;
+      }
+      .fleet-actions {
+        margin-left: auto;
+        display: flex;
+        gap: 6px;
+      }
+      .fleet-btn {
+        border: 1px solid #d4d4d4;
+        background: #fff;
+        border-radius: 6px;
+        padding: 3px 8px;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+        color: #111;
+      }
+      .fleet-btn:hover {
+        background: #f5f5f5;
+      }
+      .fleet-btn.danger {
+        color: #b91c1c;
+        border-color: #f0c4c4;
+      }
+      /* The tree of the fleet's spaces: the primary at the top, the
+         mirrors under it. */
+      .fleet-tree {
+        list-style: none;
+        margin-top: 10px;
+      }
+      .fleet-node {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid #e5e5e5;
+        border-radius: 6px;
+        padding: 6px 9px;
+        margin-top: 6px;
+      }
+      /* The primary holds the fleet: it is the one that writes. */
+      .fleet-node.primary {
+        border: 2px solid #16a34a;
+        padding: 5px 8px;
+        background: #f0fdf4;
+      }
+      .fleet-node.child {
+        margin-left: 18px;
+      }
+      .fleet-node .who {
+        font-weight: 600;
+      }
+      .fleet-node .tag {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: #666;
+      }
+      .fleet-node .tag.primary {
+        color: #16a34a;
+      }
+      .fleet-node .id {
+        color: #999;
+        font-size: 10px;
+        margin-left: auto;
+      }
+      .fleet-pending {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px dashed #e5e5e5;
+      }
+      .fleet-pending .head {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+      }
+      .fleet-note {
+        font-size: 11px;
+        color: #666;
+        margin-top: 8px;
+      }
       @media (max-width: 600px) {
         body {
           width: auto;

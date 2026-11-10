@@ -105,7 +105,6 @@ export interface PendingRequest {
 export interface Invite {
   codeHash: string;
   expiresAt: number;
-  autoApprove: boolean;
   createdBy: string;
   createdAt: number;
 }

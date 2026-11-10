@@ -111,9 +111,10 @@ async function call(
 describe("a member that comes back with a new key", () => {
   test("the fleet learns the new key when it joins again", async () => {
     const { doInstance, state } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "owner-1" });
-    const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: { autoApprove: true } });
+    await makeFleet(doInstance, "owner-1");
+    const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: {} });
     await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
     const joined = await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: "B".repeat(43) + "=" } });
     expect(joined.status).toBe(200);
     // The key it came back with is the key the fleet seals for.
@@ -123,14 +124,27 @@ describe("a member that comes back with a new key", () => {
 
   test("the fleet learns the new key when it takes its place", async () => {
     const { doInstance, state } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "owner-1" });
+    await makeFleet(doInstance, "owner-1");
     const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: { autoApprove: true } });
     await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
     await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: "C".repeat(43) + "=" } });
     const members = state.data.get("members") as Record<string, { pubkey?: string }>;
     expect(members["member-1"]?.pubkey).toBe("C".repeat(43) + "=");
   });
 });
+
+/**
+ * A fleet as the operator sets it up: the operator creates it, the device
+ * asks to join, and the operator admits it. The first member admitted owns
+ * the fleet.
+ */
+async function makeFleet(doInstance: FleetDO, owner = "dev-owner"): Promise<void> {
+  await call(doInstance, "/create", { caller: "admin", device: "operator" });
+  const invite = await call(doInstance, "/invite", { caller: "admin", device: "operator", body: {} });
+  await call(doInstance, "/join", { caller: "device", device: owner, body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
+  await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: owner } });
+}
 
 // ---- pure helpers --------------------------------------------------------
 
@@ -203,19 +217,31 @@ describe("limits", () => {
 describe("fleet creation", () => {
   test("an operator or a proven device can create, and only once", async () => {
     const { doInstance } = makeDo();
-    const created = await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    const created = await call(doInstance, "/create", { caller: "admin", device: "operator" });
     expect(created.status).toBe(200);
-    expect(created.json.member.role).toBe("owner");
-    const again = await call(doInstance, "/create", { caller: "admin", device: "dev-other" });
+    // The fleet is empty: the operator admits the members.
+    const members = await call(doInstance, "/members", { caller: "admin", device: "operator" });
+    expect((members.json.members ?? []).length).toBe(0);
+    const again = await call(doInstance, "/create", { caller: "admin", device: "operator" });
     expect(again.status).toBe(409);
   });
 
-  test("a device can create a fleet of its own", async () => {
+  test("a device cannot create a fleet of its own", async () => {
     const { doInstance } = makeDo();
     const created = await call(doInstance, "/create", { caller: "device", device: "dev-first" });
-    expect(created.status).toBe(200);
-    expect(created.json.member.deviceId).toBe("dev-first");
-    expect(created.json.member.role).toBe("owner");
+    expect(created.status).toBe(403);
+  });
+
+  test("the first member the operator admits owns the fleet", async () => {
+    const { doInstance } = makeDo();
+    await call(doInstance, "/create", { caller: "admin", device: "operator" });
+    const invite = await call(doInstance, "/invite", { caller: "admin", device: "operator", body: {} });
+    await call(doInstance, "/join", { caller: "device", device: "dev-first", body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
+    const pending = await call(doInstance, "/pending", { caller: "admin", device: "operator" });
+    expect((pending.json.requests ?? pending.json.pending ?? []).length).toBe(1);
+    const approved = await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-first" } });
+    expect(approved.status).toBe(200);
+    expect(approved.json.member.role).toBe("owner");
   });
 
   test("the device allowance is counted where every device shares it", () => {
@@ -248,7 +274,7 @@ describe("fleet creation", () => {
 describe("invites", () => {
   test("an operator mints a code, and only its hash is stored", async () => {
     const { doInstance, state } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
     expect(inv.status).toBe(200);
     expect(inviteShape(inv.json.code)).toBe(true);
@@ -259,7 +285,7 @@ describe("invites", () => {
 
   test("the owner of a fleet can mint an invite, and a stranger cannot", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     // The device that created the fleet runs it.
     const own = await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
     expect(own.status).toBe(200);
@@ -279,7 +305,7 @@ describe("invites", () => {
 describe("joining", () => {
   test("a valid code admits the device to the pending list", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
     const joined = await call(doInstance, "/join", { caller: "device", device: "dev-new", body: { code: inv.json.code, label: "laptop" } });
     expect(joined.status).toBe(200);
@@ -290,7 +316,7 @@ describe("joining", () => {
 
   test("an unknown code is refused, and a code is single use", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const bad = await call(doInstance, "/join", { caller: "device", device: "dev-x", body: { code: newInviteCode() } });
     expect(bad.status).toBe(403);
 
@@ -303,7 +329,7 @@ describe("joining", () => {
 
   test("an expired invite is refused and removed", async () => {
     const { doInstance, state } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { ttlMs: 1 } });
     await new Promise((r) => setTimeout(r, 10));
     const joined = await call(doInstance, "/join", { caller: "device", device: "dev-late", body: { code: inv.json.code } });
@@ -311,20 +337,24 @@ describe("joining", () => {
     expect(Object.keys((state.data.get("invites") as Record<string, unknown>) ?? {})).toHaveLength(0);
   });
 
-  test("auto-approve admits immediately", async () => {
+  test("a join waits for the operator", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
-    const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
+    await makeFleet(doInstance, "dev-owner");
+    const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
     const joined = await call(doInstance, "/join", { caller: "device", device: "dev-fast", body: { code: inv.json.code } });
-    expect(joined.json.status).toBe("member");
-    expect(joined.json.member.role).toBe("member");
+    expect(joined.json.status).toBe("pending");
+    // It is not a member until the operator admits it.
+    const me = await call(doInstance, "/me", { caller: "device", device: "dev-fast", method: "GET" });
+    expect(me.json.status).toBe("pending");
   });
 
   test("re-joining when already a member is idempotent", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
-    const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
+    await makeFleet(doInstance, "dev-owner");
+    const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
     await call(doInstance, "/join", { caller: "device", device: "dev-fast", body: { code: inv.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-fast" } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-fast" } });
     const again = await call(doInstance, "/join", { caller: "device", device: "dev-fast", body: { code: newInviteCode() } });
     expect(again.status).toBe(200);
     expect(again.json.status).toBe("member");
@@ -332,7 +362,7 @@ describe("joining", () => {
 
   test("an operator cannot join as a device", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const joined = await call(doInstance, "/join", { caller: "admin", device: "dev-owner", body: { code: newInviteCode() } });
     expect(joined.status).toBe(403);
   });
@@ -341,7 +371,7 @@ describe("joining", () => {
 describe("approval and removal", () => {
   test("approve promotes a pending request to member", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
     await call(doInstance, "/join", { caller: "device", device: "dev-new", body: { code: inv.json.code } });
     const pending = await call(doInstance, "/pending", { caller: "admin", device: "dev-owner", method: "GET" });
@@ -354,16 +384,17 @@ describe("approval and removal", () => {
 
   test("approving something that is not pending is refused", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const approved = await call(doInstance, "/approve", { caller: "admin", device: "dev-owner", body: { deviceId: "ghost" } });
     expect(approved.status).toBe(404);
   });
 
   test("the owner may leave, and the fleet goes to the member that stayed longest", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
     await call(doInstance, "/join", { caller: "device", device: "dev-m", body: { code: inv.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-m" } });
     const left = await call(doInstance, "/remove", { caller: "admin", device: "dev-owner", body: { deviceId: "dev-owner" } });
     expect(left.status).toBe(200);
     // The member that stayed is the owner now, so it can run the fleet.
@@ -377,9 +408,10 @@ describe("approval and removal", () => {
 
   test("the owner can remove a member", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
     await call(doInstance, "/join", { caller: "device", device: "dev-m", body: { code: inv.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-m" } });
     expect((await call(doInstance, "/remove", { caller: "admin", device: "dev-owner", body: { deviceId: "dev-m" } })).status).toBe(200);
     const me = await call(doInstance, "/me", { caller: "device", device: "dev-m", method: "GET" });
     expect(me.json.status).toBe("none");
@@ -387,7 +419,7 @@ describe("approval and removal", () => {
 
   test("a fleet with no members left is gone", async () => {
     const { doInstance, state } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const left = await call(doInstance, "/remove", { caller: "admin", device: "dev-owner", body: { deviceId: "dev-owner" } });
     expect(left.status).toBe(200);
     expect(state.data.get("members")).toBeUndefined();
@@ -398,7 +430,7 @@ describe("approval and removal", () => {
 
   test("revoke invalidates every outstanding invite", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
     const revoked = await call(doInstance, "/revoke", { caller: "admin", device: "dev-owner", body: {} });
     expect(revoked.json.revoked).toBe(1);
@@ -409,7 +441,7 @@ describe("approval and removal", () => {
 describe("deleting a fleet", () => {
   test("the owner may delete it, and the name is free again", async () => {
     const { doInstance, state } = makeDo();
-    await call(doInstance, "/create", { caller: "device", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
     expect(inv.status).toBe(200);
 
@@ -422,7 +454,7 @@ describe("deleting a fleet", () => {
     expect(state.data.get("invites")).toBeUndefined();
 
     // The name can be used again.
-    const again = await call(doInstance, "/create", { caller: "device", device: "dev-second" });
+    const again = await call(doInstance, "/create", { caller: "admin", device: "operator" });
     expect(again.status).toBe(200);
   });
 });
@@ -430,7 +462,7 @@ describe("deleting a fleet", () => {
 describe("a fleet nobody is running", () => {
   test("a proven device may clean it up once it has gone quiet", async () => {
     const { doInstance, state } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     // While the fleet is alive, nobody may delete it but its owner.
     const tooEarly = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
     expect(tooEarly.status).toBe(403);
@@ -444,7 +476,7 @@ describe("a fleet nobody is running", () => {
 
   test("the owner may always delete its own fleet", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const deleted = await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
     expect(deleted.status).toBe(200);
   });
@@ -453,16 +485,17 @@ describe("a fleet nobody is running", () => {
 describe("caps", () => {
   test("the member cap refuses further admissions", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
-    // Fill to MAX_MEMBERS - 1 extra via auto-approved invites.
+    await makeFleet(doInstance, "dev-owner");
+    // Fill to MAX_MEMBERS - 1 extra, each one admitted by the operator.
     for (let i = 0; i < MAX_MEMBERS - 1; i++) {
-      const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
+      const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
       const joined = await call(doInstance, "/join", { caller: "device", device: "dev-" + i, body: { code: inv.json.code } });
-      expect(joined.json.status).toBe("member");
+      expect(joined.json.status).toBe("pending");
+      await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-" + i } });
     }
     const roster = await call(doInstance, "/members", { caller: "admin", device: "dev-owner", method: "GET" });
     expect(roster.json.members).toHaveLength(MAX_MEMBERS);
-    const over = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
+    const over = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: {} });
     const refused = await call(doInstance, "/join", { caller: "device", device: "dev-overflow", body: { code: over.json.code } });
     expect(refused.status).toBe(409);
   });
@@ -471,7 +504,7 @@ describe("caps", () => {
 describe("bootstrap", () => {
   test("the first member with no state becomes primary", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const boot = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
     expect(boot.json.role).toBe("primary");
     expect(boot.json.epoch).toBe(1);
@@ -479,9 +512,10 @@ describe("bootstrap", () => {
 
   test("a second member cannot also become primary while the lease is held", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
     await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: inv.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
     const first = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
     const second = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two", body: {} });
     expect(first.json.role).toBe("primary");
@@ -491,7 +525,7 @@ describe("bootstrap", () => {
 
   test("a non-member cannot bootstrap", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const boot = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-intruder", body: {} });
     expect(boot.status).toBe(403);
   });
@@ -500,7 +534,7 @@ describe("bootstrap", () => {
 describe("catch up before promoting", () => {
   test("a member that takes over must apply the state it replaces", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "device", device: "dev-one" });
+    await makeFleet(doInstance, "dev-one");
     const first = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-one" });
     expect(first.json.role).toBe("primary");
     await call(doInstance, "/head/advance", {
@@ -510,8 +544,9 @@ describe("catch up before promoting", () => {
     });
 
     // A second member joins, so there is somebody to take over.
-    const invite = await call(doInstance, "/invite", { caller: "admin", device: "dev-one", body: { autoApprove: true } });
+    const invite = await call(doInstance, "/invite", { caller: "admin", device: "dev-one", body: {} });
     await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: invite.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
 
     // The primary lets go. The member that is left has not applied the state,
     // so it is not given the lease: it would block the one that can publish.
@@ -544,7 +579,7 @@ describe("catch up before promoting", () => {
 
   test("a member that has not applied the head cannot publish over it", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "device", device: "dev-one" });
+    await makeFleet(doInstance, "dev-one");
     await call(doInstance, "/bootstrap", { caller: "device", device: "dev-one" });
     await call(doInstance, "/head/advance", {
       caller: "device",
@@ -563,7 +598,7 @@ describe("catch up before promoting", () => {
 describe("head advance", () => {
   test("the lease holder advances the head, and a stale sequence is refused", async () => {
     const { doInstance, bucket } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
     const first = await call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "m1", manifestHash: "h1" } });
     expect(first.status).toBe(200);
@@ -575,9 +610,10 @@ describe("head advance", () => {
 
   test("a member without the lease cannot advance the head", async () => {
     const { doInstance } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
     await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: inv.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
     await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
     const res = await call(doInstance, "/head/advance", { caller: "device", device: "dev-two", body: { expectedSeq: 0, manifestKey: "evil", manifestHash: "evil" } });
     expect(res.status).toBe(409);
@@ -585,12 +621,12 @@ describe("head advance", () => {
 
   test("the head survives losing the object's storage, because it lives in R2", async () => {
     const { doInstance, state, bucket } = makeDo();
-    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    await makeFleet(doInstance, "dev-owner");
     await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
     await call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "m1", manifestHash: "h1" } });
     // simulate the object losing everything it had locally
     state.data.clear();
-    const created = await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    const created = await call(doInstance, "/create", { caller: "admin", device: "operator" });
     expect(created.status).toBe(200); // membership is gone, as expected
     const head = JSON.parse(bucket.objects.get("fleets/acme/head")!.body);
     expect(head.seq).toBe(1);

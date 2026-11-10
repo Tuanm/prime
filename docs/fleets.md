@@ -7,6 +7,19 @@ are **replicas** (read-only, mirroring the primary).
 This document covers membership: who may join, how they prove it, and what
 state a new member starts from.
 
+## The admin interface
+
+The operator runs the fleets from `/admin`, at the top of the page:
+
+- **+** makes a fleet. Only the operator can, and the name is free again
+  when the fleet is deleted.
+- **Invite** mints a single-use code for a space that wants to join.
+- Each fleet is a card. Under it is the tree of its spaces: the one that
+  holds the lease - the primary - is at the top with a green border, and
+  the mirrors are under it.
+- A space that asked to join waits under the card, with **Admit** and
+  **Decline**.
+
 ## Roles
 
 | Role | Who | Can do |
@@ -46,9 +59,10 @@ the gateway token a requirement for a fleet to work at all.
 
 ## Who runs a fleet
 
-The device that creates a fleet owns it. The owner mints the invites, admits
-the members, removes them and deletes the fleet, using its own credential.
-The gateway token still works, and is the way in when the owner is gone.
+The operator creates a fleet, in the admin interface, and the first member
+it admits owns it. The owner mints the invites, removes members and
+deletes the fleet, using its own credential. The gateway token still
+works, and is the way in when the owner is gone.
 
 A fleet space is kept in step by an agent on the host: a small background
 process that watches the space's workspace, publishes what changed when
@@ -74,19 +88,23 @@ are all gone would sit there for ever with nobody able to touch it.
 
 ## Joining
 
+A fleet is made by the operator, in the admin interface, and nowhere else:
+a device cannot bring one into being. The spaces join it, and the
+operator admits them.
+
 ```
 operator                      gateway                       new device
    |                             |                              |
-   |-- POST /fleets ------------->|  creates the fleet           |
-   |-- POST /fleets/:f/invite --->|  mints a single-use code     |
+   |-- POST /admin/api/fleets/:f >|  creates the fleet           |
+   |-- POST .../:f/invite ------>|  mints a single-use code     |
    |                             |                              |
    |          (code handed over out of band) ------------------>|
    |                             |                              |
    |                             |<-- POST /fleets/:f/join -----|
    |                             |    (device token + code)     |
    |                             |                              |
-   |<-- GET /fleets/:f/pending --|  request waits for approval  |
-   |-- POST /fleets/:f/approve -->|                              |
+   |<-- GET /admin/api/fleets ----|  the request waits           |
+   |-- POST .../:f/approve ----->|                              |
    |                             |--- admitted ---------------->|
 ```
 
@@ -101,8 +119,14 @@ The invite is what makes an admission deliberate. It is:
   is why the default is a second step: the operator sees which device is
   asking and approves it.
 
-`--auto-approve` collapses the two steps for a fleet that is being set up in
-one sitting. It is a deliberate opt-in, not the default.
+There is no way to admit a device without the operator seeing it: the
+approval is the point. A space that asks to join waits for it, and the
+agent keeps trying until it is let in.
+
+The operator's view is the admin interface, where each fleet is a card
+with the spaces that are in it: the one that holds the lease is the
+primary, and the spaces that asked to join are waiting to be admitted.
+
 
 Knowing the fleet name is never enough. A leaked code admits at most one
 device, for at most an hour, and only to the pending list unless the operator

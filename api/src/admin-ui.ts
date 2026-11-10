@@ -27,6 +27,12 @@ ${UI_CSS}    </style>
     <div class="sub">device registry &middot; admin<span id="count"></span></div>
 
     <div class="row-head">
+      <h2>Fleets</h2>
+      <button class="plus" id="fleetAddBtn" type="button" title="New fleet">+</button>
+    </div>
+    <ul id="fleetList"></ul>
+
+    <div class="row-head section">
       <h2>Devices</h2>
       <button class="plus" id="addBtn" type="button" title="Add device">+</button>
     </div>
@@ -514,6 +520,7 @@ ${UI_CSS}    </style>
 
         function load() {
           loadAnon();
+          loadFleets();
           return api("/admin/api/devices")
             .then(function (j) {
               devices = (j && j.devices) || [];
@@ -521,6 +528,227 @@ ${UI_CSS}    </style>
               render();
             })
             .catch(function (e) { setStatus("load failed: " + e.message, true); });
+        }
+
+        // ---- fleets ----
+        // A fleet is a group of spaces that keep each other in step. The
+        // operator sets them up here: the fleet is created, the spaces ask to
+        // join with an invite code, and the operator admits them. The member
+        // that holds the lease is the primary: it is the one that writes.
+        var fleetListEl = document.getElementById("fleetList");
+        var fleetAddBtn = document.getElementById("fleetAddBtn");
+        var fleets = [];
+
+        function fleetBtn(text, onClick, danger) {
+          var b = document.createElement("button");
+          b.type = "button";
+          b.className = "fleet-btn" + (danger ? " danger" : "");
+          b.textContent = text;
+          b.addEventListener("click", onClick);
+          return b;
+        }
+
+        function fleetName(m) {
+          return m.label || m.deviceId || "?";
+        }
+
+        function fleetRender() {
+          fleetListEl.innerHTML = "";
+          if (!fleets.length) {
+            var empty = document.createElement("li");
+            empty.className = "empty";
+            empty.textContent = "No fleets yet. Click + to create one.";
+            fleetListEl.appendChild(empty);
+            return;
+          }
+          fleets.forEach(fleetCard);
+        }
+
+        function fleetCard(f) {
+          var li = document.createElement("li");
+          li.className = "fleet";
+
+          var head = document.createElement("div");
+          head.className = "fleet-head";
+          var name = document.createElement("span");
+          name.className = "fleet-name";
+          name.textContent = f.fleet;
+          head.appendChild(name);
+
+          var members = f.members || [];
+          var pending = f.pending || [];
+          var bits = [];
+          bits.push(members.length + (members.length === 1 ? " member" : " members"));
+          if (pending.length) bits.push(pending.length + " waiting");
+          var primary = null;
+          members.forEach(function (m) {
+            if (m.deviceId === f.primary) primary = m;
+          });
+          if (primary) bits.push("primary " + fleetName(primary));
+          else if (f.primary) bits.push("primary " + f.primary);
+          var meta = document.createElement("span");
+          meta.className = "fleet-meta";
+          meta.textContent = bits.join(" · ");
+          head.appendChild(meta);
+
+          var actions = document.createElement("span");
+          actions.className = "fleet-actions";
+          actions.appendChild(fleetBtn("Invite", function () {
+            fleetInvite(f.fleet);
+          }));
+          actions.appendChild(fleetBtn("Delete", function () {
+            fleetDelete(f.fleet);
+          }, true));
+          head.appendChild(actions);
+          li.appendChild(head);
+
+          // The tree of spaces: the primary at the top, the mirrors under it.
+          var tree = document.createElement("ul");
+          tree.className = "fleet-tree";
+          var ordered = members.slice().sort(function (a, b) {
+            var ap = a.deviceId === f.primary ? 0 : 1;
+            var bp = b.deviceId === f.primary ? 0 : 1;
+            if (ap !== bp) return ap - bp;
+            return (a.addedAt || 0) - (b.addedAt || 0);
+          });
+          ordered.forEach(function (m) {
+            tree.appendChild(fleetNode(m, m.deviceId === f.primary));
+          });
+          if (!ordered.length) {
+            var none = document.createElement("li");
+            none.className = "fleet-node child";
+            none.textContent = "No spaces yet. Mint an invite code and give it to a space.";
+            tree.appendChild(none);
+          }
+          li.appendChild(tree);
+
+          // The spaces that asked to join and are waiting.
+          if (pending.length) {
+            var box = document.createElement("div");
+            box.className = "fleet-pending";
+            var ph = document.createElement("div");
+            ph.className = "head";
+            ph.textContent = "Waiting for approval";
+            box.appendChild(ph);
+            var plist = document.createElement("ul");
+            plist.className = "fleet-tree";
+            pending.forEach(function (p) {
+              plist.appendChild(fleetPendingNode(f.fleet, p));
+            });
+            box.appendChild(plist);
+            li.appendChild(box);
+          }
+
+          fleetListEl.appendChild(li);
+        }
+
+        function fleetNode(m, isPrimary) {
+          var li = document.createElement("li");
+          li.className = "fleet-node" + (isPrimary ? " primary" : " child");
+          var dot = document.createElement("span");
+          dot.className = "dot " + (m.online ? "on" : "off");
+          li.appendChild(dot);
+          var who = document.createElement("span");
+          who.className = "who";
+          who.textContent = fleetName(m);
+          li.appendChild(who);
+          var tag = document.createElement("span");
+          tag.className = "tag" + (isPrimary ? " primary" : "");
+          tag.textContent = isPrimary ? "primary" : m.role === "owner" ? "owner" : "member";
+          li.appendChild(tag);
+          if (!m.online) {
+            var off = document.createElement("span");
+            off.className = "tag";
+            off.textContent = "offline";
+            li.appendChild(off);
+          }
+          var id = document.createElement("span");
+          id.className = "id";
+          id.textContent = m.deviceId;
+          li.appendChild(id);
+          return li;
+        }
+
+        function fleetPendingNode(fleet, p) {
+          var li = document.createElement("li");
+          li.className = "fleet-node child";
+          var dot = document.createElement("span");
+          dot.className = "dot " + (p.online ? "on" : "off");
+          li.appendChild(dot);
+          var who = document.createElement("span");
+          who.className = "who";
+          who.textContent = p.label || p.deviceId;
+          li.appendChild(who);
+          var id = document.createElement("span");
+          id.className = "id";
+          id.textContent = p.deviceId;
+          li.appendChild(id);
+          var actions = document.createElement("span");
+          actions.className = "fleet-actions";
+          actions.appendChild(fleetBtn("Admit", function () {
+            fleetAction(fleet, "approve", { deviceId: p.deviceId }, "admitted " + (p.label || p.deviceId));
+          }));
+          actions.appendChild(fleetBtn("Decline", function () {
+            fleetAction(fleet, "remove", { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId), true);
+          }, true));
+          li.appendChild(actions);
+          return li;
+        }
+
+        function fleetCreate() {
+          var name = window.prompt("The name of the new fleet (a-z, 0-9 and dashes):");
+          if (!name) return;
+          name = name.trim();
+          if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) {
+            setStatus("that is not a fleet name", true);
+            return;
+          }
+          api("/admin/api/fleets/" + encodeURIComponent(name), { method: "POST", body: "{}" })
+            .then(function () {
+              setStatus("created fleet " + name);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not create the fleet: " + e.message, true); });
+        }
+
+        function fleetInvite(fleet) {
+          api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/invite", { method: "POST", body: "{}" })
+            .then(function (j) {
+              window.prompt("Invite code for " + fleet + " (single use, it expires):", j.code || "");
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not mint an invite: " + e.message, true); });
+        }
+
+        function fleetDelete(fleet) {
+          if (!window.confirm("Delete the fleet " + fleet + "? The spaces in it are not touched.")) return;
+          api("/admin/api/fleets/" + encodeURIComponent(fleet), { method: "DELETE" })
+            .then(function () {
+              setStatus("deleted fleet " + fleet);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not delete the fleet: " + e.message, true); });
+        }
+
+        function fleetAction(fleet, step, body, what, danger) {
+          api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/" + step, {
+            method: "POST",
+            body: JSON.stringify(body),
+          })
+            .then(function () {
+              setStatus(what);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not " + step + ": " + e.message, true); });
+        }
+
+        function loadFleets() {
+          return api("/admin/api/fleets")
+            .then(function (j) {
+              fleets = (j && j.fleets) || [];
+              fleetRender();
+            })
+            .catch(function (e) { setStatus("could not load the fleets: " + e.message, true); });
         }
 
         // ---- anonymous devices ----
@@ -703,9 +931,12 @@ ${UI_CSS}    </style>
           renderRow({ deviceId: "", token: "", online: false }, true, p);
         });
 
+        fleetAddBtn.addEventListener("click", fleetCreate);
+
         load();
         setInterval(refreshDots, 5000);
         setInterval(loadAnon, 5000);
+        setInterval(loadFleets, 10000);
       })();
     </script>
   </body>

@@ -120,7 +120,6 @@ const FLEET_FLAGS: FlagSpec[] = [
 
 const FLEET_INVITE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
-  flag("auto-approve", "boolean", "Admit the device that presents the code without waiting for approval"),
   flag("ttl", "number", "How long the invite stays valid, in seconds", { placeholder: "<s>" }),
 ];
 

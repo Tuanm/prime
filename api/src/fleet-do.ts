@@ -91,6 +91,7 @@ export class FleetDO implements DurableObject {
   // Forget everything about this fleet.
   private async clear(fleetId: string): Promise<void> {
     await this.state.storage.delete("members");
+    await this.state.storage.delete("created");
     await this.state.storage.delete("invites");
     await this.state.storage.delete("pending");
     await this.state.storage.delete("lease");
@@ -99,6 +100,24 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("ownerSeenAt");
     try {
       await this.bucket().delete(this.headKey(fleetId));
+    } catch {}
+    // The fleet is gone, so the registry should stop listing it.
+    await this.registerWithRegistry(fleetId, false);
+  }
+
+
+  /**
+   * Tell the registry whether this fleet exists.
+   *
+   * The list of fleets lives in the registry object, because the fleet
+   * objects cannot be enumerated.
+   */
+  private async registerWithRegistry(fleetId: string, exists: boolean): Promise<void> {
+    try {
+      const reg = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global"));
+      await reg.fetch("https://registry/" + (exists ? "fleet-add" : "fleet-remove") + "?id=" + encodeURIComponent(fleetId), {
+        method: "POST",
+      });
     } catch {}
   }
 
@@ -211,7 +230,7 @@ export class FleetDO implements DurableObject {
     const deviceId = request.headers.get("x-prime-device") ?? "";
     const caller: Caller = { kind, deviceId };
 
-    if (path === "/create" && request.method === "POST") return this.create(caller, body);
+    if (path === "/create" && request.method === "POST") return this.create(caller, body, request);
     if (path === "/invite" && request.method === "POST") return this.invite(caller, body);
     if (path === "/invite-check" && request.method === "POST") return this.inviteCheck(body);
     if (path === "/join" && request.method === "POST") {
@@ -274,35 +293,39 @@ export class FleetDO implements DurableObject {
     return null;
   }
 
-  private async create(caller: Caller, body: Record<string, unknown>): Promise<Response> {
-    // Both the operator and a proven device may create a fleet: the first
-    // member of a fleet is usually a space, and it has to be able to bring
-    // the fleet into being. Admission of everyone else still takes an invite
-    // and an approval.
-    if (!caller.deviceId) return Response.json({ error: "device required" }, { status: 400 });
+  private async create(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+    // Only the operator may create a fleet. A fleet is a thing an operator
+    // sets up: the spaces join it afterwards, and the operator admits them.
+    if (caller.kind !== "admin") {
+      return Response.json(
+        { error: "only the operator may create a fleet" },
+        { status: 403 },
+      );
+    }
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {
-      const existing = await this.members();
-      if (Object.keys(existing).length > 0) {
+      if (await this.exists()) {
         out = Response.json({ error: "fleet already exists" }, { status: 409 });
         return;
       }
-      // How many fleets a device may create is counted in the registry
-      // object, which every device shares: a counter kept here would be
-      // fresh for every new fleet and so would never count anything.
-      const pubkey = cleanPubkey(body.pubkey);
-      const owner: Member = {
-        deviceId: caller.deviceId,
-        role: "owner",
-        addedAt: Date.now(),
-        addedBy: caller.deviceId,
-        ...(pubkey ? { pubkey } : {}),
-      };
-      await this.state.storage.put("members", { [caller.deviceId]: owner });
-      out = Response.json({ ok: true, member: owner });
+      // The fleet starts empty. The first member the operator admits owns
+      // it: a fleet with nobody in it cannot be run by anybody, so the
+      // first one in takes it.
+      await this.state.storage.put("created", Date.now());
+      out = Response.json({ ok: true, fleet: fleetId });
+      // The registry keeps the list of fleets, so the operator can see them.
+      await this.registerWithRegistry(fleetId, true);
     });
     return out;
+  }
+
+  /** Whether this fleet has been created, whether anybody is in it yet or not. */
+  private async exists(): Promise<boolean> {
+    if ((await this.state.storage.get<number>("created")) !== undefined) return true;
+    const members = await this.members();
+    return Object.keys(members).length > 0;
   }
 
   private async invite(caller: Caller, body: Record<string, unknown>): Promise<Response> {
@@ -310,14 +333,13 @@ export class FleetDO implements DurableObject {
     if (denied) return denied;
 
     const ttlMs = clampTtl(typeof body.ttlMs === "number" ? body.ttlMs : undefined);
-    const autoApprove = body.autoApprove === true;
+
     const code = newInviteCode();
     const codeHash = await hashCode(code);
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {
-      const members = await this.members();
-      if (Object.keys(members).length === 0) {
+      if (!(await this.exists())) {
         out = Response.json({ error: "fleet does not exist" }, { status: 404 });
         return;
       }
@@ -325,10 +347,10 @@ export class FleetDO implements DurableObject {
       const invites = (await this.state.storage.get<Record<string, Invite>>("invites")) ?? {};
       // Drop expired invites while we are here, so storage does not accumulate.
       for (const [hash, inv] of Object.entries(invites)) if (inv.expiresAt <= now) delete invites[hash];
-      const invite: Invite = { codeHash, expiresAt: now + ttlMs, autoApprove, createdBy: caller.deviceId, createdAt: now };
+      const invite: Invite = { codeHash, expiresAt: now + ttlMs, createdBy: caller.deviceId, createdAt: now };
       invites[codeHash] = invite;
       await this.state.storage.put("invites", invites);
-      out = Response.json({ ok: true, code, expiresAt: invite.expiresAt, autoApprove });
+      out = Response.json({ ok: true, code, expiresAt: invite.expiresAt });
     });
     return out;
   }
@@ -346,7 +368,7 @@ export class FleetDO implements DurableObject {
     const invite = invites[codeHash];
     if (!invite) return Response.json({ ok: false, error: "unknown or already-used invite" }, { status: 403 });
     if (invite.expiresAt <= Date.now()) return Response.json({ ok: false, error: "invite expired" }, { status: 403 });
-    return Response.json({ ok: true, autoApprove: invite.autoApprove, expiresAt: invite.expiresAt });
+    return Response.json({ ok: true, expiresAt: invite.expiresAt });
   }
 
   private async join(caller: Caller, body: Record<string, unknown>): Promise<Response> {
@@ -399,19 +421,6 @@ export class FleetDO implements DurableObject {
         return;
       }
 
-      if (invite.autoApprove) {
-        const member: Member = {
-          deviceId: caller.deviceId,
-          role: "member",
-          addedAt: now,
-          addedBy: invite.createdBy,
-          ...(pubkey ? { pubkey } : {}),
-        };
-        members[caller.deviceId] = member;
-        await this.state.storage.put("members", members);
-        out = Response.json({ ok: true, status: "member", member });
-        return;
-      }
 
       const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
       if (!pending[caller.deviceId] && Object.keys(pending).length >= MAX_PENDING) {
@@ -449,12 +458,16 @@ export class FleetDO implements DurableObject {
         return;
       }
       delete pending[deviceId];
+      // The first member the operator admits owns the fleet: a fleet with
+      // nobody in it cannot be run by anybody.
+      const first = Object.keys(members).length === 0;
       const member: Member = {
         deviceId,
-        role: "member",
+        role: first ? "owner" : "member",
         addedAt: Date.now(),
         addedBy: caller.deviceId,
         ...(request.pubkey ? { pubkey: request.pubkey } : {}),
+        ...(request.label ? { label: request.label } : {}),
       };
       members[deviceId] = member;
       await this.state.storage.put("members", members);

@@ -11,7 +11,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
-import { FleetCreationAllowance } from "./fleets";
+import { FleetCreationAllowance, validFleetId } from "./fleets";
 import {
   ANON_ID_RE,
   ANON_TOKEN_ALPHABET,
@@ -112,6 +112,7 @@ export class RegistryDO extends DurableObject<Env> {
   private anonFailures = new Map<string, number[]>(); // deviceId -> recent wrong-token times (memory)
   private anonLockedUntil = new Map<string, number>(); // deviceId -> lock expiry (memory)
   private fleetCreates = new FleetCreationAllowance();
+  private fleets = new Set<string>(); // the fleets that exist (persisted)
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -121,6 +122,10 @@ export class RegistryDO extends DurableObject<Env> {
     // this covers cold starts after eviction). Seed the device map from the
     // DEVICE_TOKENS secret the first time the object is created.
     this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        const savedFleets = (await this.ctx.storage.get<string[]>("fleets")) || [];
+        for (const id of savedFleets) if (validFleetId(id)) this.fleets.add(id);
+      } catch {}
       try {
         const saved = (await this.ctx.storage.get<string[]>("online")) || [];
         const now = Date.now();
@@ -213,6 +218,21 @@ export class RegistryDO extends DurableObject<Env> {
       this.online.delete(id);
       await this.persist();
       return Response.json({ ok: true, deviceId: id });
+    }
+
+    // The fleets that exist. The list lives here so the operator can see
+    // them: each fleet is its own object, and there is no way to enumerate
+    // objects.
+    if (request.method === "GET" && path === "/fleets") {
+      return Response.json({ fleets: [...this.fleets].sort() });
+    }
+    if (request.method === "POST" && (path === "/fleet-add" || path === "/fleet-remove")) {
+      const id = url.searchParams.get("id") || "";
+      if (!validFleetId(id)) return Response.json({ error: "invalid fleet id" }, { status: 400 });
+      if (path === "/fleet-add") this.fleets.add(id);
+      else this.fleets.delete(id);
+      await this.persistFleets();
+      return Response.json({ ok: true, fleets: this.fleets.size });
     }
 
     // A device may create only a few fleets an hour. The counter lives here
@@ -672,6 +692,12 @@ export class RegistryDO extends DurableObject<Env> {
   private async persist(): Promise<void> {
     try {
       await this.ctx.storage.put("online", [...this.online.keys()]);
+    } catch {}
+  }
+
+  private async persistFleets(): Promise<void> {
+    try {
+      await this.ctx.storage.put("fleets", [...this.fleets]);
     } catch {}
   }
 

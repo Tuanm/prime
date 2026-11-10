@@ -623,7 +623,7 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
 export function usageLine(topic: string, sub?: string): string {
   if (topic === "fleets") {
     if (sub === "create") return "Usage: prime fleets create <fleet-id>";
-    if (sub === "invite") return "Usage: prime fleets invite <fleet-id> [--auto-approve] [--ttl <s>]";
+    if (sub === "invite") return "Usage: prime fleets invite <fleet-id> [--ttl <s>]";
     if (sub === "join") return "Usage: prime fleets join <fleet-id> --code <code> [--label <label>]";
     if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id>";
     if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --member <id>";

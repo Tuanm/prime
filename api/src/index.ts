@@ -30,6 +30,7 @@ import { HOME_HTML } from "./home-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleFleetRoutes, markSeen } from "./fleets-routes";
+import { validFleetId } from "./fleets";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { ipBlockKey } from "./config";
@@ -319,6 +320,85 @@ async function relayToFleet(
     }
   }
   return relayed;
+}
+
+/**
+ * The operator's view of the fleets.
+ *
+ * Each fleet is its own object, so the list of them lives in the registry.
+ * For each one the object is asked who is in it and who holds the lease; the
+ * registry says which of them are connected.
+ */
+async function adminFleets(env: Env): Promise<Response> {
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const listed = await reg.fetch("https://registry/fleets").catch(() => null);
+  const ids = listed ? (((await listed.json()) as { fleets?: string[] }).fleets ?? []) : [];
+  // Which devices are connected: the registry knows, and the admin list
+  // already shows it.
+  const full = await reg.fetch("https://registry/full").catch(() => null);
+  const devices = full ? (((await full.json()) as { devices?: Array<{ deviceId?: string; online?: boolean }> }).devices ?? []) : [];
+  const online = new Set(devices.filter((d) => d.online).map((d) => String(d.deviceId ?? "")));
+  const known = new Set(devices.map((d) => String(d.deviceId ?? "")));
+  const fleets: Array<Record<string, unknown>> = [];
+  for (const id of ids) {
+    if (!env.FLEET) break;
+    const stub = env.FLEET.get(env.FLEET.idFromName(id));
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.set("x-prime-caller", "admin");
+    headers.set("x-prime-fleet", id);
+    const info = await stub.fetch("https://fleet/reap", { method: "POST", headers }).catch(() => null);
+    if (!info || !info.ok) continue;
+    const body = (await info.json()) as { members?: string[]; lastActivity?: number };
+    const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
+    const rosterBody = roster && roster.ok ? ((await roster.json()) as { members?: Array<Record<string, unknown>> }) : {};
+    const primary = await stub.fetch("https://fleet/primary", { method: "GET", headers }).catch(() => null);
+    const primaryBody = primary && primary.ok ? ((await primary.json()) as { primary?: string | null }) : {};
+    // The spaces that asked to join and are waiting for the operator.
+    const waiting = await stub.fetch("https://fleet/pending", { method: "GET", headers }).catch(() => null);
+    const waitingBody = waiting && waiting.ok ? ((await waiting.json()) as { pending?: Array<Record<string, unknown>> }) : {};
+    const pending = (waitingBody.pending ?? []).map((p) => ({
+      deviceId: String(p.deviceId ?? ""),
+      label: typeof p.label === "string" ? p.label : undefined,
+      requestedAt: typeof p.requestedAt === "number" ? p.requestedAt : 0,
+      online: online.has(String(p.deviceId ?? "")),
+    }));
+    const members = (rosterBody.members ?? []).map((m) => ({
+      deviceId: String(m.deviceId ?? ""),
+      role: String(m.role ?? "member"),
+      label: typeof m.label === "string" ? m.label : undefined,
+      addedAt: typeof m.addedAt === "number" ? m.addedAt : 0,
+      online: online.has(String(m.deviceId ?? "")),
+      known: known.has(String(m.deviceId ?? "")),
+    }));
+    fleets.push({
+      fleet: id,
+      members,
+      memberCount: members.length,
+      primary: primaryBody.primary ?? null,
+      pending,
+      lastActivity: body.lastActivity ?? 0,
+    });
+  }
+  return Response.json({ fleets });
+}
+
+/**
+ * An action on a fleet, made by the operator.
+ *
+ * The operator acts for the fleet: the gateway passes itself as the caller,
+ * so an operator can admit a member or clear a fleet away.
+ */
+async function adminFleetAction(env: Env, fleetId: string, step: string, body: Record<string, unknown>): Promise<Response> {
+  if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+  const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
+  const headers = new Headers({ "content-type": "application/json" });
+  headers.set("x-prime-caller", "admin");
+  headers.set("x-prime-fleet", fleetId);
+  const path = step === "delete" ? "delete" : step;
+  const res = await stub.fetch("https://fleet/" + path, { method: "POST", headers, body: JSON.stringify(body) });
+  const answer = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) return Response.json({ error: String(answer.error ?? "the fleet refused") }, { status: res.status });
+  return Response.json(answer);
 }
 
 async function authorizeDevice(deviceId: string, request: Request, url: URL, cfg: GatewayConfig, env: Env): Promise<DeviceAuth> {
@@ -668,6 +748,51 @@ export default {
             headers,
             body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
           }));
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      }
+
+      // ---- fleets ----
+      // The operator's view of the fleets: who is in them, which member
+      // holds the lease, and which of them are connected right now.
+      if (request.method === "GET" && url.pathname === "/admin/api/fleets") {
+        return await adminFleets(env);
+      }
+      if (url.pathname.startsWith("/admin/api/fleets/")) {
+        const rest = url.pathname.slice("/admin/api/fleets/".length);
+        const slash = rest.indexOf("/");
+        const fleetId = slash === -1 ? rest : rest.slice(0, slash);
+        const step = slash === -1 ? "" : rest.slice(slash + 1);
+        if (!validFleetId(fleetId)) return Response.json({ error: "invalid fleet id" }, { status: 400 });
+        if (request.method === "POST" && step === "") {
+          // A fleet is created here and nowhere else: the operator sets it
+          // up, and the spaces join it afterwards.
+          if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+          const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
+          const headers = new Headers({ "content-type": "application/json" });
+          headers.set("x-prime-caller", "admin");
+          headers.set("x-prime-fleet", fleetId);
+          const made = await stub.fetch("https://fleet/create", { method: "POST", headers, body: "{}" });
+          const answer = (await made.json().catch(() => ({}))) as Record<string, unknown>;
+          if (!made.ok) return Response.json({ error: String(answer.error ?? "could not create the fleet") }, { status: made.status });
+          return Response.json(answer);
+        }
+        if (request.method === "DELETE" && step === "") {
+          return await adminFleetAction(env, fleetId, "delete", {});
+        }
+        if (request.method === "POST" && step === "invite") {
+          return await adminFleetAction(env, fleetId, "invite", {});
+        }
+        if (request.method === "POST" && step === "approve") {
+          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown };
+          return await adminFleetAction(env, fleetId, "approve", { deviceId: String(body.deviceId ?? "") });
+        }
+        if (request.method === "POST" && step === "remove") {
+          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown };
+          return await adminFleetAction(env, fleetId, "remove", { deviceId: String(body.deviceId ?? "") });
+        }
+        if (request.method === "POST" && step === "reap") {
+          return await adminFleetAction(env, fleetId, "reap", {});
         }
         return Response.json({ error: "not found" }, { status: 404 });
       }

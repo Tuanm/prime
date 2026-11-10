@@ -159,6 +159,12 @@ export async function fleetsCreate(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
   const t = target(ctx, spaceArg(ctx));
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId), {});
+  if (res.status === 403) {
+    throw new CliError(
+      "only the operator may create a fleet",
+      "A fleet is set up in the admin interface, where the operator admits the spaces that join it.",
+    );
+  }
   failOn(res.status, res.json, "could not create the fleet");
   if (ctx.json) {
     printJson({ fleet: fleetId, member: res.json.member });
@@ -190,9 +196,8 @@ export async function fleetsReap(ctx: Ctx): Promise<void> {
 export async function fleetsInvite(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
   const t = target(ctx, spaceArg(ctx));
-  const autoApprove = bool(ctx.parsed, "auto-approve");
   const ttlMs = ctx.parsed.flags.has("ttl") ? Number(ctx.parsed.flags.get("ttl")) : undefined;
-  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/invite", { autoApprove, ttlMs });
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/invite", { ttlMs });
   failOn(res.status, res.json, "could not mint an invite");
   const invite = res.json as FleetInvite;
   if (ctx.json) {
@@ -201,8 +206,7 @@ export async function fleetsInvite(ctx: Ctx): Promise<void> {
   }
   ctx.out(yellow("invite code (single use, expires in " + Math.round((invite.expiresAt - Date.now()) / 1000) + "s)"));
   ctx.out("  " + bold(invite.code));
-  if (autoApprove) ctx.out(dim("auto-approve: the device that presents this code joins straight away"));
-  else ctx.out(dim("the device that presents this code still waits for approval"));
+  ctx.out(dim("the device that presents this code still waits for the operator to admit it"));
 }
 
 export async function fleetsJoin(ctx: Ctx): Promise<void> {
