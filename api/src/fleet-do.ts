@@ -156,10 +156,18 @@ export class FleetDO implements DurableObject {
   // A client that is not a member learns nothing: it is told that there is
   // no primary, not who it is.
   private async primary(caller: Caller): Promise<Response> {
+    const held = await this.lease();
+    // The operator may ask: the admin interface shows who holds the lease.
+    if (caller.kind === "admin") {
+      return Response.json({
+        member: true,
+        primary: held ? held.holder : null,
+        epoch: held ? held.epoch : 0,
+      });
+    }
     if (caller.kind !== "device") return this.deny();
     const members = await this.members();
     if (!members[caller.deviceId]) return Response.json({ member: false, primary: null });
-    const held = await this.lease();
     return Response.json({
       member: true,
       primary: held ? held.holder : null,

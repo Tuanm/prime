@@ -322,6 +322,14 @@ async function relayToFleet(
   return relayed;
 }
 
+/** The same headers, but the gateway speaking for itself. */
+function adminHeaders(headers: Headers): Headers {
+  const out = new Headers(headers);
+  out.set("x-prime-caller", "admin");
+  out.delete("x-prime-device");
+  return out;
+}
+
 /**
  * The operator's view of the fleets.
  *
@@ -351,7 +359,7 @@ async function adminFleets(env: Env): Promise<Response> {
     const body = (await info.json()) as { members?: string[]; lastActivity?: number };
     const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
     const rosterBody = roster && roster.ok ? ((await roster.json()) as { members?: Array<Record<string, unknown>> }) : {};
-    const primary = await stub.fetch("https://fleet/primary", { method: "GET", headers }).catch(() => null);
+    const primary = await stub.fetch("https://fleet/primary", { method: "GET", headers: adminHeaders(headers) }).catch(() => null);
     const primaryBody = primary && primary.ok ? ((await primary.json()) as { primary?: string | null }) : {};
     // The spaces that asked to join and are waiting for the operator.
     const waiting = await stub.fetch("https://fleet/pending", { method: "GET", headers }).catch(() => null);

@@ -19,7 +19,7 @@ import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pull, publish, type MemberPaths } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
 import { snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
 import { ensureFleetAgent, fleetAgentStatus, stopFleetAgent } from "./fleet-daemon.ts";
@@ -161,6 +161,17 @@ function target(ctx: Ctx, spaceName?: string): FleetTarget {
   return t;
 }
 
+/** The space a device is the identity of, if it is one. */
+function spaceOfDevice(config: Config, deviceId: string): string | undefined {
+  for (const [id, entry] of Object.entries(config.devices)) {
+    if (id === deviceId && entry.space) return entry.space;
+  }
+  for (const [name, space] of Object.entries(config.spaces)) {
+    if (space.gateway_device === deviceId) return name;
+  }
+  return undefined;
+}
+
 function spaceArg(ctx: Ctx): string | undefined {
   return str(ctx.parsed, "space");
 }
@@ -223,9 +234,28 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
   const code = str(ctx.parsed, "code");
   if (!code) throw new UsageError("missing --code", "Run 'prime fleets invite <fleet>' on the operator's machine and pass the code it prints.");
-  const label = str(ctx.parsed, "label");
   const t = target(ctx, spaceArg(ctx));
-  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/join", { code, label });
+
+  // The member's key. The fleet seals every snapshot for the keys its
+  // members hold, so a member that joins without one could never open
+  // anything it is sent. The key of a space is the key its agent uses, so
+  // the same file is kept.
+  if (!t.device) {
+    throw new UsageError(
+      "no device to join with",
+      "Name the device that is joining: --space <name>, or --device <id> --token <token>.",
+    );
+  }
+  const spaceName = spaceArg(ctx) ?? spaceOfDevice(ctx.config, t.device);
+  const keyFile = fleetKeyFile(ctx.configPath, fleetId, spaceName ?? t.device ?? "device");
+  const keys = loadOrCreateKeyPair(keyFile);
+  const label = str(ctx.parsed, "label") ?? spaceName ?? "";
+
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/join", {
+    code,
+    ...(label ? { label } : {}),
+    pubkey: keys.publicKey,
+  });
   failOn(res.status, res.json, "could not join the fleet");
   if (ctx.json) {
     printJson({ fleet: fleetId, status: res.json.status });
@@ -235,6 +265,7 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
     ctx.out(green("joined fleet ") + " " + bold(fleetId));
   } else {
     ctx.out(yellow("request recorded; waiting for the operator to approve it"));
+    ctx.out(dim("  the operator admits it in the admin interface"));
   }
 }
 
