@@ -611,7 +611,11 @@ ${UI_CSS}    </style>
             return;
           }
           fleets.forEach(fleetCard);
-          pendingFleets.forEach(fleetNewCard);
+          // The cards that are being filled in are appended here: forEach
+          // throws away what the function returns.
+          pendingFleets.forEach(function (pending) {
+            fleetListEl.appendChild(fleetNewCard(pending));
+          });
         }
 
         // The card that is filled in to make a new fleet: the same row the
