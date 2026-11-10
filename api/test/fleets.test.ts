@@ -6,6 +6,8 @@ import {
   INVITE_DEFAULT_TTL_MS,
   INVITE_MAX_TTL_MS,
   inviteShape,
+  FleetCreationAllowance,
+  MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
   newInviteCode,
   validFleetId,
@@ -163,14 +165,47 @@ describe("limits", () => {
 // ---- the Durable Object state machine ------------------------------------
 
 describe("fleet creation", () => {
-  test("only an operator can create, and only once", async () => {
+  test("an operator or a proven device can create, and only once", async () => {
     const { doInstance } = makeDo();
-    expect((await call(doInstance, "/create", { caller: "device", device: "dev-owner" })).status).toBe(403);
     const created = await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
     expect(created.status).toBe(200);
     expect(created.json.member.role).toBe("owner");
     const again = await call(doInstance, "/create", { caller: "admin", device: "dev-other" });
     expect(again.status).toBe(409);
+  });
+
+  test("a device can create a fleet of its own", async () => {
+    const { doInstance } = makeDo();
+    const created = await call(doInstance, "/create", { caller: "device", device: "dev-first" });
+    expect(created.status).toBe(200);
+    expect(created.json.member.deviceId).toBe("dev-first");
+    expect(created.json.member.role).toBe("owner");
+  });
+
+  test("the device allowance is counted where every device shares it", () => {
+    // The count lives in one place that every device shares, because a count
+    // kept per fleet would be fresh for every new fleet and so would never
+    // count anything.
+    const allowance = new FleetCreationAllowance();
+    expect(allowance.count("dev-1")).toBe(0);
+    expect(allowance.allows("dev-1")).toBe(true);
+    for (let i = 0; i < MAX_FLEETS_PER_DEVICE; i++) {
+      allowance.record("dev-1");
+    }
+    expect(allowance.count("dev-1")).toBe(MAX_FLEETS_PER_DEVICE);
+    expect(allowance.allows("dev-1")).toBe(false);
+    // Another device has its own allowance.
+    expect(allowance.count("dev-2")).toBe(0);
+    expect(allowance.allows("dev-2")).toBe(true);
+  });
+
+  test("the allowance forgets what falls outside its window", () => {
+    const allowance = new FleetCreationAllowance(2, 1000);
+    allowance.record("dev-1", 1000);
+    allowance.record("dev-1", 1500);
+    expect(allowance.allows("dev-1", 1500)).toBe(false);
+    // Half an hour later the first two are outside the window.
+    expect(allowance.allows("dev-1", 2600)).toBe(true);
   });
 });
 

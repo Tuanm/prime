@@ -18,6 +18,7 @@ import {
   type Member,
   type PendingRequest,
   cleanLabel,
+  cleanPubkey,
   clampTtl,
   hashCode,
   inviteShape,
@@ -73,6 +74,37 @@ export class FleetDO implements DurableObject {
     }
   }
 
+  // The head, for a member that wants to know what state the fleet is at.
+  private async head(caller: Caller, request: Request): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
+    const members = await this.members();
+    if (!members[caller.deviceId]) return this.deny();
+    const head = await this.readHead(fleetId);
+    return Response.json({ head });
+  }
+
+  // The members' public keys, for the member that publishes snapshots.
+  //
+  // Only the primary sees this in full. The roster itself keeps the device
+  // ids truncated for ordinary members; a public key is useless without the
+  // private half, but a full roster is information a member has no need for.
+  private async keys(caller: Caller): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    if (!members[caller.deviceId]) return this.deny();
+    const held = await this.lease();
+    if (!held || held.holder !== caller.deviceId) {
+      return Response.json({ error: "only the primary may read the members' keys" }, { status: 409 });
+    }
+    return Response.json({
+      members: Object.values(members).map((m) => ({
+        deviceId: m.deviceId,
+        ...(m.pubkey ? { pubkey: m.pubkey } : {}),
+      })),
+    });
+  }
+
   private async members(): Promise<Members> {
     return (await this.state.storage.get<Members>("members")) ?? {};
   }
@@ -87,7 +119,7 @@ export class FleetDO implements DurableObject {
     const deviceId = request.headers.get("x-prime-device") ?? "";
     const caller: Caller = { kind, deviceId };
 
-    if (path === "/create" && request.method === "POST") return this.create(caller);
+    if (path === "/create" && request.method === "POST") return this.create(caller, body);
     if (path === "/invite" && request.method === "POST") return this.invite(caller, body);
     if (path === "/join" && request.method === "POST") return this.join(caller, body);
     if (path === "/approve" && request.method === "POST") return this.approve(caller, body);
@@ -96,10 +128,13 @@ export class FleetDO implements DurableObject {
     if (path === "/members" && request.method === "GET") return this.listMembers(caller);
     if (path === "/pending" && request.method === "GET") return this.listPending(caller);
     if (path === "/me" && request.method === "GET") return this.me(caller);
+    if (path === "/role") return this.role(caller);
     if (path === "/bootstrap" && request.method === "POST") return this.bootstrap(caller, request);
     if (path === "/lease/renew" && request.method === "POST") return this.renew(caller, body);
     if (path === "/lease/release" && request.method === "POST") return this.release(caller);
     if (path === "/head/advance" && request.method === "POST") return this.advance(caller, body, request);
+    if (path === "/head" && request.method === "GET") return this.head(caller, request);
+    if (path === "/keys" && request.method === "GET") return this.keys(caller);
 
     return Response.json({ error: "not found" }, { status: 404 });
   }
@@ -113,9 +148,11 @@ export class FleetDO implements DurableObject {
     return null;
   }
 
-  private async create(caller: Caller): Promise<Response> {
-    const denied = await this.requireAdmin(caller);
-    if (denied) return denied;
+  private async create(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+    // Both the operator and a proven device may create a fleet: the first
+    // member of a fleet is usually a space, and it has to be able to bring
+    // the fleet into being. Admission of everyone else still takes an invite
+    // and an approval.
     if (!caller.deviceId) return Response.json({ error: "device required" }, { status: 400 });
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
@@ -125,7 +162,17 @@ export class FleetDO implements DurableObject {
         out = Response.json({ error: "fleet already exists" }, { status: 409 });
         return;
       }
-      const owner: Member = { deviceId: caller.deviceId, role: "owner", addedAt: Date.now(), addedBy: caller.deviceId };
+      // How many fleets a device may create is counted in the registry
+      // object, which every device shares: a counter kept here would be
+      // fresh for every new fleet and so would never count anything.
+      const pubkey = cleanPubkey(body.pubkey);
+      const owner: Member = {
+        deviceId: caller.deviceId,
+        role: "owner",
+        addedAt: Date.now(),
+        addedBy: caller.deviceId,
+        ...(pubkey ? { pubkey } : {}),
+      };
       await this.state.storage.put("members", { [caller.deviceId]: owner });
       out = Response.json({ ok: true, member: owner });
     });
@@ -165,6 +212,7 @@ export class FleetDO implements DurableObject {
     const code = typeof body.code === "string" ? body.code : "";
     if (!inviteShape(code)) return Response.json({ error: "invalid invite code" }, { status: 400 });
     const label = cleanLabel(body.label);
+    const pubkey = cleanPubkey(body.pubkey);
     const codeHash = await hashCode(code);
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
@@ -203,7 +251,13 @@ export class FleetDO implements DurableObject {
       }
 
       if (invite.autoApprove) {
-        const member: Member = { deviceId: caller.deviceId, role: "member", addedAt: now, addedBy: invite.createdBy };
+        const member: Member = {
+          deviceId: caller.deviceId,
+          role: "member",
+          addedAt: now,
+          addedBy: invite.createdBy,
+          ...(pubkey ? { pubkey } : {}),
+        };
         members[caller.deviceId] = member;
         await this.state.storage.put("members", members);
         out = Response.json({ ok: true, status: "member", member });
@@ -215,7 +269,12 @@ export class FleetDO implements DurableObject {
         out = Response.json({ error: "too many pending requests" }, { status: 429 });
         return;
       }
-      pending[caller.deviceId] = { deviceId: caller.deviceId, ...(label ? { label } : {}), requestedAt: now };
+      pending[caller.deviceId] = {
+        deviceId: caller.deviceId,
+        ...(label ? { label } : {}),
+        ...(pubkey ? { pubkey } : {}),
+        requestedAt: now,
+      };
       await this.state.storage.put("pending", pending);
       out = Response.json({ ok: true, status: "pending", requestedAt: now });
     });
@@ -241,7 +300,13 @@ export class FleetDO implements DurableObject {
         return;
       }
       delete pending[deviceId];
-      const member: Member = { deviceId, role: "member", addedAt: Date.now(), addedBy: caller.deviceId };
+      const member: Member = {
+        deviceId,
+        role: "member",
+        addedAt: Date.now(),
+        addedBy: caller.deviceId,
+        ...(request.pubkey ? { pubkey: request.pubkey } : {}),
+      };
       members[deviceId] = member;
       await this.state.storage.put("members", members);
       await this.state.storage.put("pending", pending);
@@ -295,8 +360,19 @@ export class FleetDO implements DurableObject {
   private async listMembers(caller: Caller): Promise<Response> {
     const members = await this.members();
     if (caller.kind === "admin") return Response.json({ ok: true, members: Object.values(members) });
+    // A member sees the roster with the other devices' ids cut short: knowing
+    // a member's full id is not something a member needs, and the primary
+    // gets the keys it needs from the dedicated route instead.
+    if (caller.kind === "device" && members[caller.deviceId]) {
+      const self = members[caller.deviceId]!;
+      const redacted = Object.values(members).map((m) =>
+        m.deviceId === self.deviceId ? m : { ...m, deviceId: m.deviceId.slice(0, 8) + "…" },
+      );
+      return Response.json({ ok: true, members: redacted });
+    }
     // A device may see the roster only if it is in it.
     if (!members[caller.deviceId]) return this.deny();
+
     const redacted = Object.values(members).map((m) => ({
       deviceId: m.deviceId === caller.deviceId ? m.deviceId : m.deviceId.slice(0, 6) + "\u2026",
       role: m.role,
@@ -409,6 +485,22 @@ export class FleetDO implements DurableObject {
     if (!written) return Response.json({ error: "head changed" }, { status: 409 });
     await this.state.storage.put("epoch", next.epoch);
     return Response.json({ ok: true, head: next });
+  }
+
+  // What this device may do right now. The Worker asks before serving a
+  // payload, so the answer has to be cheap and cannot involve the network.
+  private async role(caller: Caller): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    const member = members[caller.deviceId];
+    if (!member) return Response.json({ member: false, primary: false, epoch: 0 });
+    const held = await this.lease();
+    return Response.json({
+      member: true,
+      primary: held !== null && held.holder === caller.deviceId,
+      epoch: held ? held.epoch : 0,
+      role: member.role,
+    });
   }
 
   private async me(caller: Caller): Promise<Response> {

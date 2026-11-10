@@ -23,17 +23,69 @@ export const INVITE_DEFAULT_TTL_MS = 10 * 60 * 1000;
 export const INVITE_MAX_TTL_MS = 60 * 60 * 1000;
 export const MAX_MEMBERS = 32;
 export const MAX_PENDING = 32;
+/** How many fleets one device may create in an hour. */
+export const MAX_FLEETS_PER_DEVICE = 5;
+
+/**
+ * How many fleets each device has created recently.
+ *
+ * The count is kept in one place that every device shares, because a count
+ * kept per fleet would be fresh for every new fleet and so would never
+ * count anything.
+ */
+export class FleetCreationAllowance {
+  private readonly byDevice = new Map<string, number[]>();
+
+  constructor(
+    private readonly limit: number = MAX_FLEETS_PER_DEVICE,
+    private readonly windowMs: number = 60 * 60_000,
+  ) {}
+
+  /** How many fleets this device created inside the window. */
+  count(deviceId: string, now: number = Date.now()): number {
+    const recent = this.prune(deviceId, now);
+    this.byDevice.set(deviceId, recent);
+    return recent.length;
+  }
+
+  /** Record a fleet creation and return the new count. */
+  record(deviceId: string, now: number = Date.now()): number {
+    const recent = this.prune(deviceId, now);
+    recent.push(now);
+    this.byDevice.set(deviceId, recent);
+    return recent.length;
+  }
+
+  /** Whether the device may create another fleet. */
+  allows(deviceId: string, now: number = Date.now()): boolean {
+    return this.count(deviceId, now) < this.limit;
+  }
+
+  private prune(deviceId: string, now: number): number[] {
+    return (this.byDevice.get(deviceId) ?? []).filter((at) => now - at < this.windowMs);
+  }
+}
 
 export interface Member {
   deviceId: string;
   role: "owner" | "member";
   addedAt: number;
   addedBy: string;
+  /**
+   * The member's public key for content encryption, base64.
+   *
+   * A member publishes snapshots sealed for the members' keys, so the gateway
+   * stores ciphertext it cannot open. The key is public, so it is not a
+   * secret: it is the half the gateway is not given.
+   */
+  pubkey?: string;
 }
 
 export interface PendingRequest {
   deviceId: string;
   label?: string;
+  /** The member's public key for content encryption, when it offered one. */
+  pubkey?: string;
   requestedAt: number;
 }
 
@@ -80,6 +132,19 @@ export function clampTtl(ttlMs: number | undefined): number {
 
 // A label is shown to the operator so they can tell requests apart. It is
 // cosmetic: never trust it as identity.
+/**
+ * A member's public key: base64 of a 32 byte X25519 public key.
+ *
+ * The shape is checked here so a malformed key cannot reach the Durable
+ * Object, and so a member cannot smuggle an arbitrary string into the roster.
+ */
+export function cleanPubkey(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
 export function cleanLabel(label: unknown): string | undefined {
   if (typeof label !== "string") return undefined;
   const trimmed = label.trim().replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 48);

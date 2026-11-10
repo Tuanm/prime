@@ -11,6 +11,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
+import { FleetCreationAllowance } from "./fleets";
 import {
   ANON_ID_RE,
   ANON_TOKEN_ALPHABET,
@@ -110,6 +111,7 @@ export class RegistryDO extends DurableObject<Env> {
   private anonCreates = new Map<string, number[]>(); // client IP -> recent creation times (memory)
   private anonFailures = new Map<string, number[]>(); // deviceId -> recent wrong-token times (memory)
   private anonLockedUntil = new Map<string, number>(); // deviceId -> lock expiry (memory)
+  private fleetCreates = new FleetCreationAllowance();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -211,6 +213,22 @@ export class RegistryDO extends DurableObject<Env> {
       this.online.delete(id);
       await this.persist();
       return Response.json({ ok: true, deviceId: id });
+    }
+
+    // A device may create only a few fleets an hour. The counter lives here
+    // because this object is the one shared by every device: a counter kept
+    // in the fleet's own object would be fresh for every new fleet, and so
+    // would never count anything.
+    if (request.method === "POST" && path === "/fleet-created") {
+      const id = url.searchParams.get("id") || "";
+      if (!validDeviceId(id)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      return Response.json({ ok: true, count: this.fleetCreates.record(id) });
+    }
+
+    if (request.method === "GET" && path === "/fleet-count") {
+      const id = url.searchParams.get("id") || "";
+      if (!validDeviceId(id)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      return Response.json({ count: this.fleetCreates.count(id) });
     }
 
     if (request.method === "GET" && path === "/devices") {
