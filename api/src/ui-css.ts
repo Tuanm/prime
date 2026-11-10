@@ -343,35 +343,42 @@ export const UI_CSS = `      * {
         text-align: center;
       }
       /* ---- fleets ----
-         The fleet is a card; the spaces in it are rows, the same rows the
-         device list uses, so the two read the same way. */
-      .fleet {
-        border: 1px solid #e5e5e5;
-        border-radius: 8px;
-        padding: 12px;
-        margin-bottom: 12px;
-        background: #fff;
-      }
-      .fleet.new {
-        border-style: dashed;
-      }
-      .fleet-head {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .fleet-name {
-        font-weight: 700;
-        font-size: 14px;
+         The fleets are roots and the spaces in them are the leaves below.
+         Every one of them is a row of the device list, so they all look
+         the same. */
+      .fleet-branch {
+        margin-bottom: 10px;
       }
       .fleet-meta {
         color: #666;
         font-size: 11px;
+        white-space: nowrap;
       }
       .fleet-actions {
         margin-left: auto;
         display: flex;
         gap: 6px;
+      }
+      /* The plain actions: they say what they do, so they are not hidden
+         behind a menu. They are the secondary buttons of the interface. */
+      .fleet-btn {
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.2;
+        padding: 7px 12px;
+        background: #fff;
+        color: #111;
+        border: 1px solid #111;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .fleet-btn:hover {
+        background: #f2f2f2;
+      }
+      .fleet-btn.danger {
+        color: #b91c1c;
+        border-color: #b91c1c;
       }
       .fleet-btn {
         border: 1px solid #111;
@@ -388,10 +395,41 @@ export const UI_CSS = `      * {
       .fleet-btn.danger {
         color: #b91c1c;
       }
-      /* The tree of the fleet's spaces. */
+      /* The fleets are roots; the spaces in them are the leaves below.
+         The branch is drawn with a line, the way a tree is drawn. */
       .fleet-tree {
         list-style: none;
-        margin-top: 10px;
+        margin: 0;
+        padding: 0;
+      }
+      .fleet-branch {
+        margin-bottom: 14px;
+      }
+      .fleet-tree .fleet-tree {
+        position: relative;
+        margin-top: 8px;
+        padding-left: 26px;
+      }
+      /* The line the leaves hang from. */
+      .fleet-tree .fleet-tree::before {
+        content: "";
+        position: absolute;
+        left: 11px;
+        top: -4px;
+        bottom: 14px;
+        border-left: 1px solid #dcdcdc;
+      }
+      /* The tick into each leaf. */
+      .fleet-tree .fleet-tree > li {
+        position: relative;
+      }
+      .fleet-tree .fleet-tree > li::before {
+        content: "";
+        position: absolute;
+        left: -15px;
+        top: 17px;
+        width: 14px;
+        border-top: 1px solid #dcdcdc;
       }
       .fleet-tree .row {
         margin-bottom: 6px;
@@ -402,25 +440,16 @@ export const UI_CSS = `      * {
         padding: 7px 9px;
         background: #f0fdf4;
       }
-      .fleet-pending {
-        margin-top: 12px;
-        padding-top: 10px;
-        border-top: 1px dashed #e5e5e5;
-      }
-      .fleet-pending .head {
-        font-size: 11px;
-        color: #666;
-        margin-bottom: 6px;
-      }
-      /* The card that is filled in to make a fleet. */
-      .fleet-form {
-        margin-top: 10px;
-      }
-      .fleet-form .box {
+      /* A space that is waiting to be admitted is drawn as an outline:
+         it is not in the fleet yet. */
+      .fleet-row.waiting .box {
         border-style: dashed;
+        color: #666;
       }
-      .fleet-form .id-input {
-        width: 100%;
+      /* The card that is filled in to make a fleet is a row like the others,
+         with a dashed box so it reads as not there yet. */
+      .fleet-row.new .box {
+        border-style: dashed;
       }
       .dlg-code {
         margin: 0 12px 14px;

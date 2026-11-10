@@ -542,6 +542,16 @@ ${UI_CSS}    </style>
         // never lost.
         var pendingFleets = [];
 
+        // A plain action button: the thing it does is on it.
+        function fleetBtn(text, onClick, danger) {
+          var b = document.createElement("button");
+          b.type = "button";
+          b.className = "fleet-btn" + (danger ? " danger" : "");
+          b.textContent = text;
+          b.addEventListener("click", onClick);
+          return b;
+        }
+
         // The menu of a row, the way the device rows do it: a button that
         // opens a list of actions.
         function fleetMenu(items) {
@@ -604,24 +614,13 @@ ${UI_CSS}    </style>
           pendingFleets.forEach(fleetNewCard);
         }
 
-        // The card that is filled in to make a new fleet.
+        // The card that is filled in to make a new fleet: the same row the
+        // device list opens, with the name to type into.
         function fleetNewCard(pending) {
-          var li = document.createElement("li");
-          li.className = "fleet new";
-
-          var head = document.createElement("div");
-          head.className = "fleet-head";
-          var title = document.createElement("span");
-          title.className = "fleet-name";
-          title.textContent = "New fleet";
-          head.appendChild(title);
-          var hint = document.createElement("span");
-          hint.className = "fleet-meta";
-          hint.textContent = "the name the spaces use to join it";
-          head.appendChild(hint);
-
-          head.appendChild(
-            fleetMenu([
+          var row = fleetRootRow(
+            pending.name || "",
+            "the name the spaces use to join it",
+            [
               {
                 text: "Create",
                 onClick: function () {
@@ -634,26 +633,17 @@ ${UI_CSS}    </style>
                   fleetDrop(pending);
                 },
               },
-            ]),
+            ],
+            true
           );
-          li.appendChild(head);
-
-          var form = document.createElement("div");
-          form.className = "fleet-form";
-          var box = document.createElement("div");
-          box.className = "box";
-          var input = document.createElement("input");
-          input.className = "id-input";
-          input.placeholder = "fleet name: a-z, 0-9 and dashes";
-          input.value = pending.name || "";
-          input.addEventListener("input", function () { pending.name = input.value; });
-          input.addEventListener("keydown", function (e) {
+          row.input.addEventListener("input", function () { pending.name = row.input.value; });
+          row.input.addEventListener("keydown", function (e) {
             if (e.key === "Enter") fleetCreate(pending);
           });
-          box.appendChild(input);
-          form.appendChild(box);
-          li.appendChild(form);
-          return li;
+          var branch = document.createElement("li");
+          branch.className = "fleet-tree fleet-branch";
+          branch.appendChild(row.li);
+          return branch;
         }
 
         function fleetDrop(pending) {
@@ -663,16 +653,6 @@ ${UI_CSS}    </style>
         }
 
         function fleetCard(f) {
-          var li = document.createElement("li");
-          li.className = "fleet";
-
-          var head = document.createElement("div");
-          head.className = "fleet-head";
-          var name = document.createElement("span");
-          name.className = "fleet-name";
-          name.textContent = f.fleet;
-          head.appendChild(name);
-
           var members = f.members || [];
           var pending = f.pending || [];
           var bits = [];
@@ -683,14 +663,13 @@ ${UI_CSS}    </style>
             if (m.deviceId === f.primary) primary = m;
           });
           if (primary) bits.push("primary " + fleetName(primary));
-          else if (f.primary) bits.push("primary " + f.primary);
-          var meta = document.createElement("span");
-          meta.className = "fleet-meta";
-          meta.textContent = bits.join(" · ");
-          head.appendChild(meta);
 
-          head.appendChild(
-            fleetMenu([
+          // The fleet is the root of the tree: a row of the device list, with
+          // the spaces in it as the leaves below.
+          var row = fleetRootRow(
+            f.fleet,
+            bits.join(" · "),
+            [
               {
                 text: "Invite",
                 onClick: function () {
@@ -704,54 +683,82 @@ ${UI_CSS}    </style>
                   fleetDelete(f.fleet);
                 },
               },
-            ]),
+            ],
+            false
           );
-          li.appendChild(head);
+          var li = row.li;
 
-          // The tree of spaces: the primary at the top, the mirrors under it.
-          var tree = document.createElement("ul");
-          tree.className = "fleet-tree";
+          // The spaces hang from the fleet as the leaves of a tree: the
+          // primary first, then the mirrors in the order they came.
           var ordered = members.slice().sort(function (a, b) {
             var ap = a.deviceId === f.primary ? 0 : 1;
             var bp = b.deviceId === f.primary ? 0 : 1;
             if (ap !== bp) return ap - bp;
             return (a.addedAt || 0) - (b.addedAt || 0);
           });
+          var leaves = document.createElement("ul");
+          leaves.className = "fleet-tree";
           ordered.forEach(function (m) {
-            tree.appendChild(fleetNode(f.fleet, m, m.deviceId === f.primary));
+            var leaf = document.createElement("li");
+            leaf.appendChild(fleetNode(f.fleet, m, m.deviceId === f.primary));
+            leaves.appendChild(leaf);
           });
-          if (!ordered.length) {
+          pending.forEach(function (p) {
+            var leaf = document.createElement("li");
+            leaf.appendChild(fleetPendingNode(f.fleet, p));
+            leaves.appendChild(leaf);
+          });
+          if (!ordered.length && !pending.length) {
             var none = document.createElement("li");
-            none.className = "row fleet-row";
+            var noneRow = document.createElement("div");
+            noneRow.className = "row fleet-row";
             var noneBox = document.createElement("div");
             noneBox.className = "box";
             var noneText = document.createElement("span");
             noneText.className = "fleet-meta";
             noneText.textContent = "No spaces yet. Mint an invite code and give it to a space.";
             noneBox.appendChild(noneText);
-            none.appendChild(noneBox);
-            tree.appendChild(none);
-          }
-          li.appendChild(tree);
-
-          // The spaces that asked to join and are waiting.
-          if (pending.length) {
-            var box = document.createElement("div");
-            box.className = "fleet-pending";
-            var ph = document.createElement("div");
-            ph.className = "head";
-            ph.textContent = "Waiting for approval";
-            box.appendChild(ph);
-            var plist = document.createElement("ul");
-            plist.className = "fleet-tree";
-            pending.forEach(function (p) {
-              plist.appendChild(fleetPendingNode(f.fleet, p));
-            });
-            box.appendChild(plist);
-            li.appendChild(box);
+            noneRow.appendChild(noneBox);
+            none.appendChild(noneRow);
+            leaves.appendChild(none);
           }
 
-          fleetListEl.appendChild(li);
+          // The fleet card is the root; the leaves are below it, outside it.
+          // The branch is a tree, so the lines are drawn between the root
+          // and the leaves.
+          var branch = document.createElement("li");
+          branch.className = "fleet-tree fleet-branch";
+          branch.appendChild(li);
+          branch.appendChild(leaves);
+          fleetListEl.appendChild(branch);
+        }
+
+        // A root row: the fleet, or the card that is filled in to make one.
+        // It is a row of the device list, the same as the spaces below it.
+        function fleetRootRow(name, meta, items, isNew) {
+          var li = document.createElement("li");
+          li.className = "row fleet-row" + (isNew ? " new" : "");
+          var dot = document.createElement("span");
+          dot.className = "dot off";
+          var box = document.createElement("div");
+          box.className = "box";
+
+          var nameInput = document.createElement("input");
+          nameInput.className = "id-input";
+          nameInput.placeholder = "fleet name";
+          nameInput.value = name || "";
+          nameInput.title = isNew ? "" : "the fleet";
+
+          var metaEl = document.createElement("span");
+          metaEl.className = "fleet-meta";
+          metaEl.textContent = meta || "";
+
+          box.appendChild(nameInput);
+          box.appendChild(metaEl);
+          box.appendChild(fleetMenu(items));
+          li.appendChild(dot);
+          li.appendChild(box);
+          return { li: li, input: nameInput };
         }
 
         // A space in the fleet, drawn as a row of the device list: the status
@@ -810,7 +817,7 @@ ${UI_CSS}    </style>
         // the menu.
         function fleetPendingNode(fleet, p) {
           var li = document.createElement("li");
-          li.className = "row fleet-row";
+          li.className = "row fleet-row waiting";
           var dot = document.createElement("span");
           dot.className = "dot " + (p.online ? "on" : "off");
           var box = document.createElement("div");
@@ -828,25 +835,19 @@ ${UI_CSS}    </style>
           idInput.value = p.deviceId;
           idInput.title = "the device id that asked to join";
 
-          var menu = fleetMenu([
-            {
-              text: "Admit",
-              onClick: function () {
-                fleetAction(fleet, "approve", { deviceId: p.deviceId }, "admitted " + (p.label || p.deviceId));
-              },
-            },
-            {
-              text: "Decline",
-              danger: true,
-              onClick: function () {
-                fleetAction(fleet, "remove", { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
-              },
-            },
-          ]);
+          // The answers the operator has to give are shown, not tucked away.
+          var answers = document.createElement("span");
+          answers.className = "fleet-actions";
+          answers.appendChild(fleetBtn("Admit", function () {
+            fleetAction(fleet, "approve", { deviceId: p.deviceId }, "admitted " + (p.label || p.deviceId));
+          }));
+          answers.appendChild(fleetBtn("Decline", function () {
+            fleetAction(fleet, "remove", { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
+          }, true));
 
           box.appendChild(nameInput);
           box.appendChild(idInput);
-          box.appendChild(menu);
+          box.appendChild(answers);
           li.appendChild(dot);
           li.appendChild(box);
           return li;
@@ -876,7 +877,7 @@ ${UI_CSS}    </style>
           var pending = { name: "" };
           pendingFleets.push(pending);
           fleetRender();
-          var inputs = fleetListEl.querySelectorAll(".fleet.new .id-input");
+          var inputs = fleetListEl.querySelectorAll(".fleet-row .id-input");
           var last = inputs[inputs.length - 1];
           if (last) last.focus();
         }
