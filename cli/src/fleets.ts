@@ -138,7 +138,7 @@ function failOn(status: number, json: any, what: string): void {
 }
 
 function target(ctx: Ctx, spaceName?: string): FleetTarget {
-  return resolveFleetTarget(
+  const t = resolveFleetTarget(
     ctx.config,
     {
       gateway: str(ctx.parsed, "gateway"),
@@ -149,6 +149,16 @@ function target(ctx: Ctx, spaceName?: string): FleetTarget {
     },
     spaceName,
   );
+  // A fleet command speaks for a device. Without its credential the gateway
+  // cannot tell who is asking, and the answer would be a bare
+  // "unauthorized" that says nothing about what to do.
+  if (!t.gatewayToken && !t.deviceToken) {
+    throw new CliError(
+      "no credential to speak with",
+      "Name the device this command is about: --space <name>, or --device <id> --token <token>. The operator's own credential is --gateway-token.",
+    );
+  }
+  return t;
 }
 
 function spaceArg(ctx: Ctx): string | undefined {
