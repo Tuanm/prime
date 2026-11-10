@@ -38,6 +38,7 @@ const ALLOWED_ACTIONS = new Set([
   "snapshot",
   "invite-check",
   "primary",
+  "reap",
   "delete",
   "packs",
   "manifests",
@@ -229,6 +230,25 @@ async function sha256Hex(data: ArrayBuffer): Promise<string> {
 /** When each device was last seen, so the registry is told at most once a minute. */
 const lastSeen = new Map<string, number>();
 
+/**
+ * The devices the gateway still knows.
+ *
+ * A device that is not here any more cannot be called, so it cannot be
+ * taking part in a fleet.
+ */
+async function knownDevices(env: Env): Promise<Set<string>> {
+  const known = new Set<string>();
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    const res = await reg.fetch("https://registry/map");
+    if (!res.ok) return known;
+    const body = (await res.json()) as { map?: Record<string, string>; anonymous?: string[] };
+    for (const id of Object.keys(body.map ?? {})) known.add(id);
+    for (const id of body.anonymous ?? []) known.add(id);
+  } catch {}
+  return known;
+}
+
 /** Tell the registry that a device is still in use. */
 export async function markSeen(env: Env, deviceId: string): Promise<void> {
   const now = Date.now();
@@ -333,6 +353,42 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     if ((body.count ?? 0) >= MAX_FLEETS_PER_DEVICE) {
       return Response.json({ error: "too many fleets created by this device" }, { status: 429 });
     }
+  }
+
+  // Reaping a fleet nobody can reach.
+  //
+  // A fleet whose members are all gone - the gateway does not know any of
+  // them any more - is a fleet nobody can run and nobody can leave. Any
+  // proven device may clear it away.
+  if (action === "reap" && request.method === "POST") {
+    const namespace = deps.env.FLEET;
+    if (!namespace) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+    const caller = await provenDevice({ ...deps, fleetId, action });
+    if (!caller) return deps.unauthorized();
+    const stub = namespace.get(namespace.idFromName(fleetId));
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.set("x-prime-caller", "admin");
+    headers.set("x-prime-fleet", fleetId);
+    const reaped = await stub.fetch("https://fleet/reap", { method: "POST", headers });
+    if (!reaped.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
+    const body = (await reaped.json()) as { members?: string[]; lastActivity?: number };
+    const members = body.members ?? [];
+    if (members.length === 0) return Response.json({ ok: true, gone: true, members: 0 });
+    const known = await knownDevices(deps.env);
+    const living = members.filter((id) => known.has(id));
+    if (living.length > 0) {
+      return Response.json(
+        { error: "the fleet still has members the gateway knows", members: living.length },
+        { status: 409 },
+      );
+    }
+    const gone = await stub.fetch("https://fleet/delete", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ reason: "every member is gone" }),
+    });
+    if (!gone.ok) return Response.json({ error: "could not clear the fleet" }, { status: 500 });
+    return Response.json({ ok: true, gone: true, members: members.length });
   }
 
   // Who holds the lease. A member may ask; anyone else learns nothing.

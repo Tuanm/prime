@@ -195,7 +195,7 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
   return snap;
 }
 
-async function effectiveSnapshot(env: Env): Promise<RegistrySnapshot> {
+export async function effectiveSnapshot(env: Env): Promise<RegistrySnapshot> {
   if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.snap;
   const snap = await freshSnapshot(env);
   mapCache = { at: Date.now(), snap };

@@ -37,6 +37,7 @@ import {
   fleetsMembers,
   fleetsPending,
   fleetsRemove,
+  fleetsReap,
   fleetsRevoke,
   fleetsDelete,
   fleetsStatus,
@@ -398,6 +399,8 @@ async function main(argv: string[]): Promise<void> {
           return fleetsDelete(ctx);
         case "agent":
           return fleetsAgent(ctx);
+        case "reap":
+          return fleetsReap(ctx);
         default:
           throw new UsageError(`unknown fleets command "${sub}"`, "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]");
       }

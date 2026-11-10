@@ -119,6 +119,19 @@ export class FleetDO implements DurableObject {
   }
 
   //
+  // The members' identities, for the gateway to check whether any of them
+  // still exist.
+  //
+  // Only the gateway asks: a member does not get to see the whole roster
+  // through this.
+  private async reap(caller: Caller): Promise<Response> {
+    if (caller.kind !== "admin") return this.deny();
+    const members = await this.members();
+    const lastActivity = (await this.state.storage.get<number>("lastActivity")) ?? 0;
+    return Response.json({ members: Object.keys(members), lastActivity });
+  }
+
+  //
   // Who holds the lease, for a client that wants to talk to the fleet.
   //
   // A client that is not a member learns nothing: it is told that there is
@@ -213,6 +226,7 @@ export class FleetDO implements DurableObject {
     if (path === "/me" && request.method === "GET") return this.me(caller);
     if (path === "/role") return this.role(caller);
     if (path === "/primary" && request.method === "GET") return this.primary(caller);
+    if (path === "/reap" && request.method === "POST") return this.reap(caller);
     if (path === "/bootstrap" && request.method === "POST") {
       await this.touch();
       return this.bootstrap(caller, request, body);
@@ -451,9 +465,13 @@ export class FleetDO implements DurableObject {
   }
 
   private async remove(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
-    const denied = await this.requireOperatorOrOwner(caller);
-    if (denied) return denied;
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+    // A member may leave of its own accord. Only the owner may remove
+    // somebody else.
+    if (!(caller.kind === "device" && caller.deviceId === deviceId)) {
+      const denied = await this.requireOperatorOrOwner(caller);
+      if (denied) return denied;
+    }
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {

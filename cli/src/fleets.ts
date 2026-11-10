@@ -168,6 +168,25 @@ export async function fleetsCreate(ctx: Ctx): Promise<void> {
   ctx.out(dim("this device is the owner; it can mint invites and approve members"));
 }
 
+/**
+ * Clear away a fleet that nobody can reach.
+ *
+ * A fleet whose members are all gone - the gateway does not know any of
+ * them any more - cannot be run and cannot be left. Any proven device may
+ * clear it away.
+ */
+export async function fleetsReap(ctx: Ctx): Promise<void> {
+  const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
+  const t = target(ctx, spaceArg(ctx));
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/reap", {});
+  failOn(res.status, res.json, "could not clear the fleet away");
+  if (ctx.json) {
+    printJson({ fleet: fleetId, gone: true, members: res.json.members ?? 0 });
+    return;
+  }
+  ctx.out(green("cleared away ") + " " + bold(fleetId) + dim(" (" + (res.json.members ?? 0) + " members, all gone)"));
+}
+
 export async function fleetsInvite(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
   const t = target(ctx, spaceArg(ctx));
