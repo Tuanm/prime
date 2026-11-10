@@ -405,32 +405,11 @@ export const UI_CSS = `      * {
       .fleet-branch {
         margin-bottom: 14px;
       }
+      /* The spaces of a fleet are set in, under it. The indent says which
+         belong to which fleet; nothing else is drawn. */
       .fleet-tree .fleet-tree {
-        position: relative;
         margin-top: 8px;
-        padding-left: 46px;
-      }
-      /* The line the leaves hang from. It starts under the box of the
-         fleet, so the branch belongs to it and not to what is above. */
-      .fleet-tree .fleet-tree::before {
-        content: "";
-        position: absolute;
-        left: 20px;
-        top: -9px;
-        bottom: 14px;
-        border-left: 1px solid #dcdcdc;
-      }
-      /* The tick into each leaf. */
-      .fleet-tree .fleet-tree > li {
-        position: relative;
-      }
-      .fleet-tree .fleet-tree > li::before {
-        content: "";
-        position: absolute;
-        left: -26px;
-        top: 17px;
-        width: 26px;
-        border-top: 1px solid #dcdcdc;
+        padding-left: 24px;
       }
       .fleet-tree .row {
         margin-bottom: 6px;

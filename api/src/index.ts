@@ -345,8 +345,11 @@ async function adminFleets(env: Env): Promise<Response> {
   // already shows it.
   const full = await reg.fetch("https://registry/full").catch(() => null);
   const devices = full ? (((await full.json()) as { devices?: Array<{ deviceId?: string; online?: boolean }> }).devices ?? []) : [];
-  const online = new Set(devices.filter((d) => d.online).map((d) => String(d.deviceId ?? "")));
   const known = new Set(devices.map((d) => String(d.deviceId ?? "")));
+  // The members of a fleet are often anonymous devices, and the device list
+  // leaves those out. The registry says which of them are connected.
+  const live = await reg.fetch("https://registry/online").catch(() => null);
+  const online = new Set(live ? (((await live.json()) as { online?: string[] }).online ?? []) : []);
   const fleets: Array<Record<string, unknown>> = [];
   for (const id of ids) {
     if (!env.FLEET) break;

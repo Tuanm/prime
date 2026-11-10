@@ -519,6 +519,16 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({ ok: true, deviceId: id, disabled: dis });
     }
 
+    // The devices that are connected right now.
+    //
+    // The device list leaves the anonymous devices out, because their ids
+    // are not shown; the fleet view needs to know whether the members of a
+    // fleet are connected, so it asks for them here.
+    if (request.method === "GET" && path === "/online") {
+      this.sweep();
+      return Response.json({ online: [...this.online.keys()] });
+    }
+
     if (request.method === "GET" && path === "/full") {
       this.sweep();
       await this.gcAnon();
