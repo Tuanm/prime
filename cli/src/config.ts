@@ -101,6 +101,12 @@ export interface SpaceEntry {
   /** Where the MCP server answers right now; recomputed on every start. */
   local_url?: string;
   created_at?: string;
+  /** The fleet this space belongs to, if any. */
+  fleet?: string;
+  /** The fleet's role for this space: primary or replica. */
+  fleet_role?: string;
+  /** The host directory holding the space's work tree. */
+  work_dir?: string;
 }
 
 export interface Config {

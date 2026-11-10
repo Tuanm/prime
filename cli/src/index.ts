@@ -26,6 +26,19 @@ import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
 import { isSpaceCommand, spacesCreate, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
+import {
+  fleetsApprove,
+  fleetsCreate,
+  fleetsInvite,
+  fleetsJoin,
+  fleetsLeave,
+  fleetsMembers,
+  fleetsPending,
+  fleetsRemove,
+  fleetsRevoke,
+  fleetsStatus,
+  fleetsSync,
+} from "./fleets.ts";
 import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
@@ -83,11 +96,44 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("vault-kind", "string", "Limit --vault to values, secrets or codes (repeatable)", { placeholder: "<kind>", repeatable: true }),
   flag("trusted", "boolean", "Allow secrets/codes into this space (only for trusted clients)"),
   flag("expose", "boolean", "Publish the space through the gateway as an anonymous device"),
+  flag("fleet", "string", "Put the space in this fleet; it joins and takes its place", { placeholder: "<fleet-id>" }),
+  flag("code", "string", "Invite code, when joining a fleet that already exists", { placeholder: "<code>" }),
   flag("gateway", "string", "Gateway for --expose (default: saved default or the managed gateway)", { placeholder: "<url>" }),
   flag("gateway-token", "string", "Gateway credential for --expose, only if the gateway needs one", { placeholder: "<token>" }),
   flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
   flag("runtime", "string", "Runtime: apple|podman|docker", { placeholder: "<runtime>" }),
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
+];
+
+const FLEET_FLAGS: FlagSpec[] = [
+  flag("gateway", "string", "Gateway origin", { placeholder: "<url>" }),
+  flag("gateway-token", "string", "Gateway credential (operator authority)", { placeholder: "<token>" }),
+  flag("device", "string", "Device id this call speaks as", { placeholder: "<id>" }),
+  flag("token", "string", "Device token (X-Device-Token)", { placeholder: "<token>" }),
+  flag("space", "string", "Take the device credentials from this space", { placeholder: "<name>" }),
+  flag("timeout", "number", "Per-request timeout in milliseconds", { placeholder: "<ms>" }),
+];
+
+const FLEET_INVITE_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("auto-approve", "boolean", "Admit the device that presents the code without waiting for approval"),
+  flag("ttl", "number", "How long the invite stays valid, in seconds", { placeholder: "<s>" }),
+];
+
+const FLEET_JOIN_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("code", "string", "Invite code from the operator", { placeholder: "<code>" }),
+  flag("label", "string", "A name for this machine, shown to the operator", { placeholder: "<label>" }),
+];
+
+const FLEET_APPROVE_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("device", "string", "Device id to approve or remove", { placeholder: "<id>" }),
+];
+
+const FLEET_SYNC_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("space", "string", "The space that belongs to the fleet", { placeholder: "<name>" }),
 ];
 
 const VAULTS_FLAGS: FlagSpec[] = [
@@ -282,7 +328,7 @@ async function main(argv: string[]): Promise<void> {
     }
   }
 
-  if (topic === "devices" || topic === "tools" || topic === "files" || topic === "spaces" || topic === "vaults") {
+  if (topic === "devices" || topic === "tools" || topic === "files" || topic === "spaces" || topic === "vaults" || topic === "fleets") {
     if (wantHelp) {
       showHelp(helpFor(topic, sub), topic, sub);
       return;
@@ -310,6 +356,33 @@ async function main(argv: string[]): Promise<void> {
           return devicesList(ctx);
         default:
           throw new UsageError(`unknown devices command "${sub}"`, `Valid: connect, disconnect, status, list. ${usageLine("devices")}`);
+      }
+    case "fleets":
+      switch (sub) {
+        case "create":
+          return fleetsCreate(ctx);
+        case "invite":
+          return fleetsInvite(ctx);
+        case "join":
+          return fleetsJoin(ctx);
+        case "approve":
+          return fleetsApprove(ctx);
+        case "pending":
+          return fleetsPending(ctx);
+        case "members":
+          return fleetsMembers(ctx);
+        case "remove":
+          return fleetsRemove(ctx);
+        case "leave":
+          return fleetsLeave(ctx);
+        case "revoke":
+          return fleetsRevoke(ctx);
+        case "status":
+          return fleetsStatus(ctx);
+        case "sync":
+          return fleetsSync(ctx);
+        default:
+          throw new UsageError(`unknown fleets command "${sub}"`, "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]");
       }
     case "vaults":
       return vaultsCommand(ctx);
@@ -406,6 +479,13 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "upload") return FILES_UPLOAD_FLAGS;
     if (sub === "download") return FILES_DOWNLOAD_FLAGS;
     return [];
+  }
+  if (topic === "fleets") {
+    if (sub === "invite") return FLEET_INVITE_FLAGS;
+    if (sub === "join") return FLEET_JOIN_FLAGS;
+    if (sub === "approve" || sub === "remove") return FLEET_APPROVE_FLAGS;
+    if (sub === "sync") return FLEET_SYNC_FLAGS;
+    return FLEET_FLAGS;
   }
   if (topic === "vaults") return VAULTS_FLAGS;
   if (topic === "update") return UPDATE_FLAGS;

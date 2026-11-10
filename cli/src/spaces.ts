@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { bold, cyan, dim, green, printJson, red, table, yellow } from "./output.ts";
 import { formatBytes } from "./files.ts";
 import { connectUrlFor, probeCredential, registerAnonymous, type AnonymousDevice } from "./connect.ts";
+import { fleetWorkDir, setupFleetSpace } from "./fleet-space.ts";
 import { ENV, resolveGateway } from "./target.ts";
 import { allVaultCompanies, brokerScopeFor } from "./vaults.ts";
 import { type BrokerScope, ensureBroker, registerBrokerScope, unregisterBrokerScope } from "./vault-broker.ts";
@@ -823,12 +824,16 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   if (persistent && bool(ctx.parsed, "ephemeral")) throw new UsageError("--persistent and --ephemeral contradict each other");
   const offline = bool(ctx.parsed, "offline");
   const expose = bool(ctx.parsed, "expose");
+  const fleet = str(ctx.parsed, "fleet");
+  if (fleet && offline) {
+    throw new UsageError("--fleet needs network access", "An offline space cannot reach the gateway; drop --offline to put it in a fleet.");
+  }
   if (expose && offline) {
     throw new UsageError("--expose needs network access", "An offline space cannot reach the gateway; drop --offline to expose it.");
   }
   const runtime = await detectRuntime(str(ctx.parsed, "runtime"), bool(ctx.parsed, "allow-rootful"));
-  const gateway = expose ? resolveGateway(ctx.config, str(ctx.parsed, "gateway")) : undefined;
-  const gatewayToken = expose ? resolveGatewayToken(ctx) : undefined;
+  const gateway = expose || fleet ? resolveGateway(ctx.config, str(ctx.parsed, "gateway")) : undefined;
+  const gatewayToken = expose || fleet ? resolveGatewayToken(ctx) : undefined;
   let vaultCompanies = strList(ctx.parsed, "vault");
   if (bool(ctx.parsed, "vault-all")) vaultCompanies = allVaultCompanies(ctx.configPath);
   vaultCompanies = [...new Set(vaultCompanies)].sort();
@@ -843,7 +848,10 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const token = newToken();
   const port = runtime.kind === "apple" ? CONTAINER_PORT : await freePort();
   const container = "prime-space-" + id.slice("space-".length);
-  const volume = persistent ? container + "-work" : undefined;
+  // A space in a fleet keeps its work tree in a host directory, because the
+  // synchronisation runs on the host and has to be able to read it.
+  const fleetWork = fleet ? fleetWorkDir(ctx, name) : undefined;
+  const volume = fleetWork ?? (persistent ? container + "-work" : undefined);
   const network = container + "-net";
   const space: SpaceEntry = {
     id,
@@ -858,6 +866,8 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     cpus,
     memory,
     ...(offline ? { offline: true } : {}),
+    ...(fleet ? { fleet } : {}),
+    ...(fleetWork ? { work_dir: fleetWork } : {}),
     ...(vaultCompanies.length > 0 ? { vaults: vaultCompanies } : {}),
     ...(vaultCompanies.length > 0 && vaultKinds ? { vault_kinds: vaultKinds } : {}),
     ...(vaultCompanies.length > 0 && trusted ? { trusted: true } : {}),
@@ -865,7 +875,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   };
 
   await ensureImage(runtime, image, (text) => ctx.note(text));
-  if (volume) volumeCreate(runtime, volume);
+  if (volume && !fleetWork) volumeCreate(runtime, volume);
   networkCreate(runtime, network, offline);
   const secretDir = secretDirFor(ctx, container);
   ensureSecret(secretDir, token);
@@ -877,7 +887,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     } catch (err) {
       removeSecret(secretDir);
       networkDelete(runtime, network);
-      if (volume) volumeDelete(runtime, volume);
+      if (volume && !fleetWork) volumeDelete(runtime, volume);
       throw err;
     }
   }
@@ -888,11 +898,39 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     } catch (err) {
       removeSecret(secretDir);
       networkDelete(runtime, network);
-      if (volume) volumeDelete(runtime, volume);
+      if (volume && !fleetWork) volumeDelete(runtime, volume);
       throw err;
     }
     rememberExposed(ctx, name, space, exposed, gateway!, gatewayToken);
     ensureSecret(secretDir, token, exposed.token);
+  }
+  // A fleet space takes its place in the fleet and, if it is a replica, gets
+  // the current state before the container starts. A space that began empty
+  // and caught up later would have a window where the two disagree.
+  if (fleet) {
+    let device: AnonymousDevice | undefined;
+    try {
+      device = await registerAnonymous(gateway!, gatewayToken);
+      const setup = await setupFleetSpace(ctx, {
+        fleet,
+        spaceName: name,
+        gateway: gateway!,
+        deviceId: device.deviceId,
+        deviceToken: device.token,
+        ...(str(ctx.parsed, "code") ? { code: str(ctx.parsed, "code") } : {}),
+        create: !str(ctx.parsed, "code"),
+      });
+      space.gateway_device = device.deviceId;
+      space.remote_token = device.token;
+      space.gateway = gateway!;
+      space.fleet_role = setup.role;
+      ensureSecret(secretDir, token, device.token);
+    } catch (err) {
+      removeSecret(secretDir);
+      networkDelete(runtime, network);
+      if (volume && !fleetWork) volumeDelete(runtime, volume);
+      throw err;
+    }
   }
   const started = Date.now();
   const run = runContainer(runtime, space, image, secretDir, bool(ctx.parsed, "allow-no-limits"), (text) => ctx.note(text));
@@ -901,7 +939,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
       await activateBroker(ctx, pendingBroker);
     } catch (err) {
       runtimeExec(runtime, ["rm", "-f", container], 120_000);
-      if (volume) volumeDelete(runtime, volume);
+      if (volume && !fleetWork) volumeDelete(runtime, volume);
       networkDelete(runtime, network);
       removeSecret(secretDir);
       if (pendingBroker) await unregisterBrokerScope(ctx.configPath, pendingBroker.token);
@@ -909,14 +947,14 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     }
   }
   if (run.code !== 0) {
-    if (volume) volumeDelete(runtime, volume);
+    if (volume && !fleetWork) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
     removeSecret(secretDir);
     fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
   }
   if (run.cgroup === "disabled" && !bool(ctx.parsed, "allow-no-limits")) {
     runtimeExec(runtime, ["rm", "-f", container], 120_000);
-    if (volume) volumeDelete(runtime, volume);
+    if (volume && !fleetWork) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
     removeSecret(secretDir);
     fail("this runtime cannot enforce the cpu/memory limits", "Enable systemd cgroups (run 'prime spaces doctor') and retry, or pass --allow-no-limits to accept a space without resource limits.");
@@ -928,7 +966,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     await waitReady(url, token, ctx.quiet);
   } catch (err) {
     runtimeExec(runtime, ["rm", "-f", container], 120_000);
-    if (volume) volumeDelete(runtime, volume);
+    if (volume && !fleetWork) volumeDelete(runtime, volume);
     networkDelete(runtime, network);
     removeSecret(secretDir);
     if (pendingBroker) await unregisterBrokerScope(ctx.configPath, pendingBroker.token);

@@ -139,6 +139,18 @@ An operator sees full device ids. A member sees the roster only if it is in
 it, and other members are truncated to a prefix - enough to recognise a peer,
 not enough to impersonate one.
 
+## Nested repositories
+
+A repository inside the work tree belongs to the member, not to the fleet.
+The fleet **excludes** it: it does not mirror the files, and it does not
+record a reference to it either. A reference would be a promise the replica
+could not keep, because the replica has no copy of that history.
+
+The nested repository keeps its own history, its own remote and its own
+uncommitted work. The fleet never writes inside it, and a snapshot taken
+around it stays correct.
+
+---
 ## Failure behaviour
 
 | Situation | Behaviour |

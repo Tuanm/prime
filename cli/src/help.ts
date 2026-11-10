@@ -28,8 +28,10 @@ COMMANDS
   files list                              List uploaded files and their metadata
   files upload <path> [options]           Upload a file through the files API
   files download <id|name> [options]      Download an uploaded file
+  fleets create|invite|join|approve|members  Groups of devices that hold the same work
   vaults <cmd>                            Encrypted values, secrets and TOTP codes
   spaces create [--name <n>] [--persistent] A rootless Linux codespace running the device buddy
+  spaces create --fleet <id> [--code <c>]   Put the space in a fleet; it joins and catches up
   spaces list|start|stop|delete|logs|enter|top  Manage the codespaces (local devices)
   vaults <cmd>                            Encrypted values, secrets and TOTP
   service install [options]               Run the device buddy as a user service (starts at
@@ -399,6 +401,30 @@ EXIT CODES
   0 success   1 error   2 usage   3 authentication   4 device offline   5 timeout
 `;
 
+const FLEETS = `prime fleets - groups of devices that hold the same work
+
+USAGE
+  prime fleets create <fleet-id>                 Create a fleet; this device owns it
+  prime fleets invite <fleet-id> [options]      Mint a single-use invite code
+  prime fleets join <fleet-id> --code <code>     Join with an invite code
+  prime fleets pending <fleet-id>                List the requests waiting for approval
+  prime fleets approve <fleet-id> --device <id> Admit a waiting device
+  prime fleets members <fleet-id>                Show the roster
+  prime fleets remove <fleet-id> --device <id>   Remove a member
+  prime fleets leave <fleet-id>                  Leave the fleet
+  prime fleets revoke <fleet-id>                 Invalidate every outstanding invite
+  prime fleets status <fleet-id>                 Show this device's standing in the fleet
+
+A fleet holds one primary and any number of replicas. The primary has the
+lease and may write; the replicas mirror it. Membership takes two steps: the
+operator mints an invite, the device presents it and waits for approval.
+Knowing the fleet name is never enough to join.
+
+The operator commands need the gateway token; the member commands need the
+device's own token. Pass --device and --token, or --space to take them from
+a space that was created for a fleet.
+`;
+
 const VAULTS = `prime vaults - encrypted local values, secrets and TOTP codes
 
 USAGE
@@ -537,6 +563,8 @@ OPTIONS (create)
   --memory <size>     default 4g, e.g. 512m, 2g
   --offline           internal network only (no internet), host still connects
   --expose            publish through the gateway as an anonymous device
+  --fleet <id>        put the space in this fleet; it joins and takes its place
+  --code <code>       invite code, when joining a fleet that already exists
   --vault <company>   let the run tool use a company's values/secrets/codes (repeatable)
   --vault-all         assign every vault company
   --vault-kind <k>    limit to values, secrets or codes (repeatable)
@@ -559,6 +587,10 @@ EXAMPLES
   prime spaces enter dev -- cat /etc/os-release     # or run one command
   prime spaces top dev                              # live cpu/mem/processes (q quits)
   prime spaces create --name pub --expose           # reachable through the gateway
+  prime spaces create --name dev --fleet acme      # the space joins the fleet
+  prime fleets invite acme                          # the operator mints a code
+  prime spaces create --name w2 --fleet acme --code <code>
+  prime fleets sync --space w2                      # the replica catches up
 `;
 export function rootHelp(): string {
   return ROOT;
@@ -571,19 +603,28 @@ export function helpFor(topic: string | undefined, sub: string | undefined): str
   if (topic === "call") return TOOLS;
   if (topic === "files" || topic === "upload" || topic === "download") return FILES;
   if (topic === "spaces") return SPACES;
+  if (topic === "fleets") return FLEETS;
   if (topic === "vaults") return VAULTS;
   if (topic === "update" || topic === "upgrade") return UPDATE;
   if (topic === "connect") return CONNECT;
   if (topic === "serve") return SERVE;
   if (topic === "code-mcp") return CODE_MCP;
   if (topic === "service") return SERVICE;
-  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|files|spaces|vaults|call|update|code-mcp]")}`;
+  if (topic === "help") return `${ROOT}\n${dim("Usage: prime help [connect|serve|service|devices|tools|files|spaces|fleets|vaults|call|update|code-mcp]")}`;
   void sub;
   return undefined;
 }
 
 /** One-line usage hint shown when a command is invoked incorrectly. */
 export function usageLine(topic: string, sub?: string): string {
+  if (topic === "fleets") {
+    if (sub === "create") return "Usage: prime fleets create <fleet-id>";
+    if (sub === "invite") return "Usage: prime fleets invite <fleet-id> [--auto-approve] [--ttl <s>]";
+    if (sub === "join") return "Usage: prime fleets join <fleet-id> --code <code> [--label <label>]";
+    if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --device <id>";
+    if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --device <id>";
+    return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]";
+  }
   if (topic === "devices") {
     if (sub === "connect") return "Usage: prime devices connect <device-id> [--token <t>] [--gateway <url>]";
     if (sub === "disconnect") return "Usage: prime devices disconnect <device-id>";
