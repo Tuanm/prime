@@ -50,6 +50,20 @@ The device that creates a fleet owns it. The owner mints the invites, admits
 the members, removes them and deletes the fleet, using its own credential.
 The gateway token still works, and is the way in when the owner is gone.
 
+A fleet space is kept in step by an agent on the host: a small background
+process that watches the space's workspace, publishes what changed when
+the space is the primary, and pulls what the primary published when it
+is not. It starts with the space and stops with it, and it needs no
+attention:
+
+```
+prime fleets agent start     # start it now
+prime fleets agent status    # what it is doing
+```
+
+A change reaches the other members in well under a second, because the
+agent notices a change at once instead of waiting for the next round.
+
 An owner that leaves hands the fleet to the member that has been in it the
 longest, so a fleet is never left with nobody able to run it. A space that is
 deleted leaves its fleet.
@@ -187,6 +201,25 @@ uncommitted work. The fleet never writes inside it, and a snapshot taken
 around it stays correct.
 
 ---
+## Talking to a fleet
+
+A client may address the fleet itself instead of one of its members:
+
+```
+prime tools call fleet:<fleet-id>.bash '{"command":"ls"}'
+```
+
+The call goes to the member that holds the lease - the primary - because
+that is the one whose state the fleet agrees on, and the one that may
+write. The gateway relays on the caller's behalf, so the caller proves
+only that it is a member of the fleet.
+
+The primary is a moving target: when it dies, its lease runs out and
+another member takes it over. A call made in the meantime fails and says
+so; a call made after that goes to the new primary, with the same state
+the old one had.
+
+---
 ## Failure behaviour
 
 | Situation | Behaviour |
@@ -199,6 +232,9 @@ around it stays correct.
 | the space of a member is deleted | the space leaves the fleet, and the fleet is gone if it was the last one |
 | a fleet nobody has touched for a day | any proven device may clean it up; a fleet that is not being run is not worth keeping |
 | primary dies | the lease expires; a member that finds no lease takes it, applies the state it is replacing, and only then may publish |
+| the space of the primary is stopped | it gives up the lease at once, so another member takes over without waiting for the lease to run out |
+| a member comes back with a new key | the fleet learns the new key when it takes its place, and seals the next snapshot for it |
+| a replica's workspace is changed by hand | the change is left alone and reported, rather than thrown away by the next pull |
 | object storage lost | head and epoch re-read from R2; membership is rebuilt by re-inviting |
 
 ## Limits
