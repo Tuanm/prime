@@ -134,6 +134,28 @@ async function ensureStore(gitDir: string, work: string, env: Record<string, str
   await gitText(gitDir, ["config", "core.worktree", work], env);
 }
 
+/** Whether the work tree holds any file at all. */
+export function hasFiles(work: string): boolean {
+  let entries: string[];
+  try {
+    entries = readdirSync(work);
+  } catch {
+    return false;
+  }
+  for (const name of entries) {
+    if (name === ".git") continue;
+    const full = join(work, name);
+    try {
+      if (statSync(full).isDirectory()) {
+        if (hasFiles(full)) return true;
+        continue;
+      }
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
 // Take a snapshot of the work tree.
 //
 // The index is a temporary file, so the user's index, refs, HEAD and working
@@ -157,7 +179,10 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   await gitText(gitDir, ["add", "-A", "--"].concat(pathspec), env);
 
   const tree = await gitText(gitDir, ["write-tree"], env);
-  if (tree === EMPTY_TREE) {
+  if (tree === EMPTY_TREE && hasFiles(work)) {
+    // The work tree has files and the tree does not: the add did not take.
+    // An empty tree on its own is fine - a workspace can be empty, and a
+    // fresh fleet has nothing to publish.
     throw new Error("the snapshot produced an empty tree; nothing was added");
   }
 

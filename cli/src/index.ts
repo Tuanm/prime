@@ -36,6 +36,7 @@ import {
   fleetsPending,
   fleetsRemove,
   fleetsRevoke,
+  fleetsDelete,
   fleetsStatus,
   fleetsSync,
 } from "./fleets.ts";
@@ -128,7 +129,7 @@ const FLEET_JOIN_FLAGS: FlagSpec[] = [
 
 const FLEET_APPROVE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
-  flag("device", "string", "Device id to approve or remove", { placeholder: "<id>" }),
+  flag("member", "string", "The member to approve or remove", { placeholder: "<id>" }),
 ];
 
 const FLEET_SYNC_FLAGS: FlagSpec[] = [
@@ -381,6 +382,8 @@ async function main(argv: string[]): Promise<void> {
           return fleetsStatus(ctx);
         case "sync":
           return fleetsSync(ctx);
+        case "delete":
+          return fleetsDelete(ctx);
         default:
           throw new UsageError(`unknown fleets command "${sub}"`, "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]");
       }

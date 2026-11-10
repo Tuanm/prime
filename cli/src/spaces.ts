@@ -755,6 +755,39 @@ function rememberExposed(
   if (gatewayToken) space.gateway_token = gatewayToken;
 }
 
+/**
+ * Remember the gateway identity a fleet space uses.
+ *
+ * The fleet is administered by the device that owns it, so the credential
+ * has to be kept: without it the fleet could not be invited into, removed
+ * from, or deleted.
+ */
+function rememberFleetDevice(
+  ctx: Ctx,
+  name: string,
+  space: SpaceEntry,
+  device: AnonymousDevice,
+  gateway: string,
+  gatewayToken: string | undefined,
+): void {
+  for (const [id, entry] of Object.entries(ctx.config.devices)) {
+    if (entry.space === name && !entry.local_url) delete ctx.config.devices[id];
+  }
+  ctx.config.devices[device.deviceId] = {
+    gateway,
+    ...(gatewayToken ? { gateway_token: gatewayToken } : {}),
+    token: device.token,
+    anonymous: true,
+    connected_at: new Date().toISOString(),
+    note: "gateway identity of the fleet space '" + name + "'",
+    space: name,
+  };
+  space.gateway = gateway;
+  space.gateway_device = device.deviceId;
+  space.remote_token = device.token;
+  if (gatewayToken) space.gateway_token = gatewayToken;
+}
+
 /** Is the anonymous device still accepted? Re-register when the gateway has
  *  forgotten it (unused anonymous devices expire). */
 async function refreshExposure(ctx: Ctx, name: string, space: SpaceEntry, gatewayToken: string | undefined): Promise<void> {
@@ -920,10 +953,8 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
         ...(str(ctx.parsed, "code") ? { code: str(ctx.parsed, "code") } : {}),
         create: !str(ctx.parsed, "code"),
       });
-      space.gateway_device = device.deviceId;
-      space.remote_token = device.token;
-      space.gateway = gateway!;
       space.fleet_role = setup.role;
+      rememberFleetDevice(ctx, name, space, device, gateway!, gatewayToken);
       ensureSecret(secretDir, token, device.token);
     } catch (err) {
       removeSecret(secretDir);
@@ -1188,6 +1219,12 @@ export async function spacesStop(ctx: Ctx): Promise<void> {
 export async function spacesDelete(ctx: Ctx): Promise<void> {
   const name = requirePositional(ctx, "<name>", "prime spaces delete <name>");
   const space = requireSpace(ctx.config, name);
+  // A space that belongs to a fleet leaves it. Otherwise the fleet keeps a
+  // member that is never there again, and one that owns it keeps a fleet
+  // nobody can run.
+  if (space.fleet && space.gateway_device && space.remote_token) {
+    await leaveFleet(ctx, space);
+  }
   const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
   runtimeExec(runtime, ["stop", space.container], 120_000);
   runtimeExec(runtime, ["rm", "-f", space.container], 120_000);
@@ -1206,6 +1243,34 @@ export async function spacesDelete(ctx: Ctx): Promise<void> {
     return;
   }
   ctx.out(green("\u2713") + " deleted space " + bold(name));
+}
+
+/**
+ * Leave the fleet this space belongs to.
+ *
+ * The space speaks with its own gateway identity, so it removes itself from
+ * the fleet. The fleet hands itself to the member that has been in it the
+ * longest, and goes away when the last one leaves.
+ */
+async function leaveFleet(ctx: Ctx, space: SpaceEntry): Promise<void> {
+  const fleet = space.fleet!;
+  const gateway = space.gateway;
+  if (!gateway) return;
+  try {
+    const res = await fetch(gateway + "/fleets/" + encodeURIComponent(fleet) + "/remove", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-prime-device": space.gateway_device!,
+        "x-device-token": space.remote_token!,
+      },
+      body: JSON.stringify({ deviceId: space.gateway_device }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) ctx.note(yellow("  the space could not leave the fleet " + fleet + " (" + res.status + ")"));
+  } catch (err) {
+    ctx.note(yellow("  the space could not leave the fleet " + fleet + ": " + (err instanceof Error ? err.message : String(err))));
+  }
 }
 
 export async function spacesList(ctx: Ctx): Promise<void> {

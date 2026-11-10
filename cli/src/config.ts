@@ -213,6 +213,9 @@ export function parseConfig(text: string, source: string): Config {
       ...(asString(entry.gateway_device) ? { gateway_device: asString(entry.gateway_device) } : {}),
       ...(asString(entry.remote_token) ? { remote_token: asString(entry.remote_token) } : {}),
       ...(asString(entry.gateway_token) ? { gateway_token: asString(entry.gateway_token) } : {}),
+      ...(asString(entry.fleet) ? { fleet: asString(entry.fleet) } : {}),
+      ...(asString(entry.fleet_role) ? { fleet_role: asString(entry.fleet_role) } : {}),
+      ...(asString(entry.work_dir) ? { work_dir: asString(entry.work_dir) } : {}),
       ...(asString(entry.local_url) ? { local_url: asString(entry.local_url) } : {}),
       ...(asString(entry.created_at) ? { created_at: asString(entry.created_at) } : {}),
     };
@@ -334,6 +337,9 @@ export function serializeConfig(config: Config): string {
         ["gateway_token", space.gateway_token],
         ["local_url", space.local_url],
         ["created_at", space.created_at],
+        ["fleet", space.fleet],
+        ["fleet_role", space.fleet_role],
+        ["work_dir", space.work_dir],
       ] as const) {
         if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
       }

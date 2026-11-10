@@ -205,8 +205,8 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
 
 export async function fleetsApprove(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
-  const deviceId = str(ctx.parsed, "device");
-  if (!deviceId) throw new UsageError("missing --device", "The device id of the request to approve, as shown by 'prime fleets pending <fleet>'.");
+  const deviceId = str(ctx.parsed, "member");
+  if (!deviceId) throw new UsageError("missing --member", "The device id of the request to approve, as shown by 'prime fleets pending <fleet>'.");
   const t = target(ctx, spaceArg(ctx));
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/approve", { deviceId });
   failOn(res.status, res.json, "could not approve the request");
@@ -253,8 +253,8 @@ export async function fleetsMembers(ctx: Ctx): Promise<void> {
 
 export async function fleetsRemove(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
-  const deviceId = str(ctx.parsed, "device");
-  if (!deviceId) throw new UsageError("missing --device", "The device id to remove.");
+  const deviceId = str(ctx.parsed, "member");
+  if (!deviceId) throw new UsageError("missing --member", "The device id to remove.");
   const t = target(ctx, spaceArg(ctx));
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/remove", { deviceId });
   failOn(res.status, res.json, "could not remove the member");
@@ -276,6 +276,18 @@ export async function fleetsLeave(ctx: Ctx): Promise<void> {
     return;
   }
   ctx.out(green("left fleet ") + " " + fleetId);
+}
+
+export async function fleetsDelete(ctx: Ctx): Promise<void> {
+  const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
+  const t = target(ctx, spaceArg(ctx));
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/delete", {});
+  failOn(res.status, res.json, "could not delete the fleet");
+  if (ctx.json) {
+    printJson({ fleet: fleetId, deleted: true });
+    return;
+  }
+  ctx.out(green("deleted fleet ") + " " + bold(fleetId));
 }
 
 export async function fleetsRevoke(ctx: Ctx): Promise<void> {
@@ -336,7 +348,11 @@ export async function fleetsSync(ctx: Ctx): Promise<void> {
   if (!role.member) throw new CliError("this device is not a member of the fleet " + fleetId);
 
   const state = readFleetState(ctx, fleetId, spaceName);
-  if (role.primary) {
+
+  // Take a place in the fleet first. The lease is short-lived, so a member
+  // that has not spoken for a while has to take it again before it may write.
+  const placed = await bootstrap(creds, fleetId);
+  if (placed.primary) {
     const result = await publish(creds, fleetId, paths, state.base ?? null, state.seq ?? 0);
     writeFleetState(ctx, fleetId, spaceName, { ...state, base: result.commit, seq: result.seq });
     if (ctx.json) {
@@ -359,6 +375,24 @@ export async function fleetsSync(ctx: Ctx): Promise<void> {
   }
   ctx.out(green("applied") + " " + bold(fleetId) + " seq " + pulled.seq);
 }
+/**
+ * Take a place in the fleet.
+ *
+ * The lease is short-lived: a member that has not spoken for a while has to
+ * take it again before it may write. The fleet decides whether it can.
+ */
+export async function bootstrap(creds: FleetCredentials, fleet: string): Promise<{ primary: boolean; catchUpTo?: number }> {
+  const res = await fetch(creds.gateway + "/fleets/" + encodeURIComponent(fleet) + "/bootstrap", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-prime-device": creds.deviceId, "x-device-token": creds.deviceToken },
+    body: "{}",
+    signal: AbortSignal.timeout(creds.timeoutMs ?? 120_000),
+  });
+  if (!res.ok) throw new CliError("could not take a place in the fleet: " + res.status);
+  const body = (await res.json()) as { role?: string; catchUpTo?: number };
+  return { primary: body.role === "primary", ...(body.catchUpTo !== undefined ? { catchUpTo: body.catchUpTo } : {}) };
+}
+
 /** Where a member keeps its own state for a fleet, under prime's directory. */
 export function fleetStateDir(ctx: Ctx, fleetId: string, spaceName: string): string {
   const dir = join(dirname(ctx.configPath), "fleets", fleetId, spaceName);

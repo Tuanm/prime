@@ -44,6 +44,20 @@ remove members and revoke codes with its own device credential. A member it
 invited would otherwise have no way to admit anyone else, which would make
 the gateway token a requirement for a fleet to work at all.
 
+## Who runs a fleet
+
+The device that creates a fleet owns it. The owner mints the invites, admits
+the members, removes them and deletes the fleet, using its own credential.
+The gateway token still works, and is the way in when the owner is gone.
+
+An owner that leaves hands the fleet to the member that has been in it the
+longest, so a fleet is never left with nobody able to run it. A space that is
+deleted leaves its fleet.
+
+A fleet that has not been touched for a day is not being run by anybody, and
+any proven device may clean such a fleet up. Otherwise a fleet whose members
+are all gone would sit there for ever with nobody able to touch it.
+
 ## Joining
 
 ```
@@ -180,8 +194,10 @@ around it stays correct.
 | invite expired | refused, removed from storage |
 | invite already used | refused; one code admits once |
 | fleet full | refused (cap 32 members) |
-| owner removed | refused; a fleet with no owner cannot be administered |
-| owner device gone | the operator takes over the fleet with the gateway token and mints the next invite |
+| owner leaves | the fleet goes to the member that has been in it the longest |
+| last member leaves | the fleet is gone with it |
+| the space of a member is deleted | the space leaves the fleet, and the fleet is gone if it was the last one |
+| a fleet nobody has touched for a day | any proven device may clean it up; a fleet that is not being run is not worth keeping |
 | primary dies | the lease expires; a member that finds no lease takes it, applies the state it is replacing, and only then may publish |
 | object storage lost | head and epoch re-read from R2; membership is rebuilt by re-inviting |
 

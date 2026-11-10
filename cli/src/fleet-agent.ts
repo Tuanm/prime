@@ -163,7 +163,9 @@ export async function pull(
   // The gateway cannot open this: the snapshot key was sealed for us.
   const plain = openForMember(sealed, manifest.wrapped, manifest.senderPublicKey, creds.deviceId, keys.privateKey);
   if (!plain) {
-    throw new Error("this snapshot was not sealed for this member");
+    throw new Error(
+      "this snapshot was not sealed for this member: it was published before this device joined, so the primary has to publish again now that it has",
+    );
   }
   if (payloadHash(plain) !== manifest.packHash && payloadHash(plain) === "") {
     throw new Error("the pack does not match its manifest");

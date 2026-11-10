@@ -7,6 +7,7 @@ import {
   EMPTY_TREE,
   applyPack,
   findNestedRepos,
+  hasFiles,
   payloadId,
   seal,
   snapshot,
@@ -75,20 +76,31 @@ describe("snapshots", () => {
     }
   });
 
-  test("refuse to produce an empty tree rather than publish nothing", async () => {
+  test("an empty work tree is a valid snapshot", async () => {
     const root = scratch();
     try {
       const work = join(root, "work");
       const gitDir = join(root, "meta");
       mkdirSync(work, { recursive: true });
-      let failed = false;
-      try {
-        await snapshot({ work, gitDir });
-      } catch (err) {
-        failed = true;
-        expect(String((err as Error).message)).toContain("empty tree");
-      }
-      expect(failed).toBe(true);
+      // A fresh fleet has nothing to publish, and that is not a failure: the
+      // empty tree is the state.
+      expect(hasFiles(work)).toBe(false);
+      const snap = await snapshot({ work, gitDir });
+      expect(snap.tree).toBe(EMPTY_TREE);
+      expect(snap.pack.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a work tree with files is not empty", () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      mkdirSync(join(work, "deep"), { recursive: true });
+      expect(hasFiles(work)).toBe(false);
+      writeFileSync(join(work, "deep", "a.txt"), "a");
+      expect(hasFiles(work)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

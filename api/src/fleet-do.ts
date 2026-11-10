@@ -23,6 +23,7 @@ import {
   hashCode,
   inviteShape,
   MAX_MEMBERS,
+  OWNER_SILENCE_MS,
   MAX_PENDING,
   newInviteCode,
 } from "./fleets";
@@ -72,6 +73,48 @@ export class FleetDO implements DurableObject {
     } catch {
       return { ...EMPTY_HEAD };
     }
+  }
+
+  // Delete the fleet.
+  //
+  // The membership, the invites and the head all go, so the name is free
+  // again and nothing of the workspace is left behind.
+  // Remember that this fleet was touched.
+  //
+  // A fleet nobody touches is not being run. That is what tells a device
+  // that meets an abandoned fleet that it may clean it up.
+  private async touch(): Promise<void> {
+    await this.state.storage.put("lastActivity", Date.now());
+  }
+
+  // Forget everything about this fleet.
+  private async clear(fleetId: string): Promise<void> {
+    await this.state.storage.delete("members");
+    await this.state.storage.delete("invites");
+    await this.state.storage.delete("pending");
+    await this.state.storage.delete("lease");
+    await this.state.storage.delete("epoch");
+    await this.state.storage.delete("applied");
+    await this.state.storage.delete("ownerSeenAt");
+    try {
+      await this.bucket().delete(this.headKey(fleetId));
+    } catch {}
+  }
+
+  private async delete(caller: Caller, request: Request): Promise<Response> {
+    const denied = await this.requireOperatorOrOwner(caller);
+    if (denied) {
+      // A fleet that has not been touched for a day is not being run by
+      // anybody, and a fleet whose members are all gone cannot be run at
+      // all. A proven device may clean such a fleet up, otherwise it sits
+      // there for ever with nobody able to touch it.
+      if (caller.kind !== "device") return denied;
+      const last = (await this.state.storage.get<number>("lastActivity")) ?? 0;
+      if (last === 0 || Date.now() - last < OWNER_SILENCE_MS) return denied;
+    }
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
+    await this.clear(fleetId);
+    return Response.json({ ok: true, deleted: fleetId });
   }
 
   // The head, for a member that wants to know what state the fleet is at.
@@ -135,20 +178,33 @@ export class FleetDO implements DurableObject {
 
     if (path === "/create" && request.method === "POST") return this.create(caller, body);
     if (path === "/invite" && request.method === "POST") return this.invite(caller, body);
-    if (path === "/join" && request.method === "POST") return this.join(caller, body);
+    if (path === "/join" && request.method === "POST") {
+      await this.touch();
+      return this.join(caller, body);
+    }
     if (path === "/approve" && request.method === "POST") return this.approve(caller, body);
-    if (path === "/remove" && request.method === "POST") return this.remove(caller, body);
+    if (path === "/remove" && request.method === "POST") return this.remove(caller, body, request);
     if (path === "/revoke" && request.method === "POST") return this.revoke(caller, body);
     if (path === "/members" && request.method === "GET") return this.listMembers(caller);
     if (path === "/pending" && request.method === "GET") return this.listPending(caller);
     if (path === "/me" && request.method === "GET") return this.me(caller);
     if (path === "/role") return this.role(caller);
-    if (path === "/bootstrap" && request.method === "POST") return this.bootstrap(caller, request);
+    if (path === "/bootstrap" && request.method === "POST") {
+      await this.touch();
+      return this.bootstrap(caller, request);
+    }
     if (path === "/lease/renew" && request.method === "POST") return this.renew(caller, body);
     if (path === "/lease/release" && request.method === "POST") return this.release(caller);
-    if (path === "/head/advance" && request.method === "POST") return this.advance(caller, body, request);
+    if (path === "/head/advance" && request.method === "POST") {
+      await this.touch();
+      return this.advance(caller, body, request);
+    }
     if (path === "/head" && request.method === "GET") return this.head(caller, request);
-    if (path === "/applied" && request.method === "POST") return this.applied(caller, body);
+    if (path === "/applied" && request.method === "POST") {
+      await this.touch();
+      return this.applied(caller, body);
+    }
+    if (path === "/delete" && request.method === "POST") return this.delete(caller, request);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
 
     return Response.json({ error: "not found" }, { status: 404 });
@@ -175,6 +231,8 @@ export class FleetDO implements DurableObject {
     const members = await this.members();
     const member = members[caller.deviceId];
     if (!member || member.role !== "owner") return this.deny();
+    // The owner speaks for its fleet by acting on it.
+    await this.touch();
     return null;
   }
 
@@ -345,7 +403,7 @@ export class FleetDO implements DurableObject {
     return out;
   }
 
-  private async remove(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+  private async remove(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
     const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
@@ -365,13 +423,24 @@ export class FleetDO implements DurableObject {
         out = Response.json({ error: "no such member" }, { status: 404 });
         return;
       }
-      // The owner cannot remove itself; that would leave the fleet unowned and
-      // nobody able to mint invites or approve members.
+      delete members[deviceId];
+      // Removing the owner hands the fleet to the member that has been in it
+      // the longest. A fleet whose owner is gone and that nobody can take
+      // over is a fleet nobody can run.
       if (member.role === "owner") {
-        out = Response.json({ error: "cannot remove the fleet owner" }, { status: 409 });
+        const rest = Object.values(members).sort((a, b) => a.addedAt - b.addedAt);
+        if (rest.length > 0) {
+          const next = rest[0]!;
+          members[next.deviceId] = { ...next, role: "owner" };
+        }
+      }
+      // A fleet with no members is not a fleet: it goes away with the last
+      // one, rather than sitting there with nobody able to run it.
+      if (Object.keys(members).length === 0) {
+        await this.clear(request.headers.get("x-prime-fleet") ?? "");
+        out = Response.json({ ok: true, removed: "member", fleet: "gone" });
         return;
       }
-      delete members[deviceId];
       await this.state.storage.put("members", members);
       out = Response.json({ ok: true, removed: "member" });
     });
@@ -429,7 +498,9 @@ export class FleetDO implements DurableObject {
   private async bootstrap(caller: Caller, request: Request): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
-    const ttlMs = 15_000;
+    // The lease is short-lived on purpose: a member that stops speaking
+    // releases the fleet to the others without anyone having to notice.
+    const ttlMs = 60_000;
     const head = await this.readHead(fleetId);
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();

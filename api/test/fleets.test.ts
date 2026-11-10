@@ -9,6 +9,7 @@ import {
   FleetCreationAllowance,
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
+  OWNER_SILENCE_MS,
   newInviteCode,
   validFleetId,
 } from "../src/fleets";
@@ -334,15 +335,41 @@ describe("approval and removal", () => {
     expect(approved.status).toBe(404);
   });
 
-  test("the owner cannot remove itself, but can remove a member", async () => {
+  test("the owner may leave, and the fleet goes to the member that stayed longest", async () => {
     const { doInstance } = makeDo();
     await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
     const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
     await call(doInstance, "/join", { caller: "device", device: "dev-m", body: { code: inv.json.code } });
-    expect((await call(doInstance, "/remove", { caller: "admin", device: "dev-owner", body: { deviceId: "dev-owner" } })).status).toBe(409);
+    const left = await call(doInstance, "/remove", { caller: "admin", device: "dev-owner", body: { deviceId: "dev-owner" } });
+    expect(left.status).toBe(200);
+    // The member that stayed is the owner now, so it can run the fleet.
+    const roster = await call(doInstance, "/members", { caller: "admin", device: "dev-op", method: "GET" });
+    expect(roster.json.members).toHaveLength(1);
+    expect(roster.json.members[0].deviceId).toBe("dev-m");
+    expect(roster.json.members[0].role).toBe("owner");
+    const inv2 = await call(doInstance, "/invite", { caller: "device", device: "dev-m", body: {} });
+    expect(inv2.status).toBe(200);
+  });
+
+  test("the owner can remove a member", async () => {
+    const { doInstance } = makeDo();
+    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
+    await call(doInstance, "/join", { caller: "device", device: "dev-m", body: { code: inv.json.code } });
     expect((await call(doInstance, "/remove", { caller: "admin", device: "dev-owner", body: { deviceId: "dev-m" } })).status).toBe(200);
     const me = await call(doInstance, "/me", { caller: "device", device: "dev-m", method: "GET" });
     expect(me.json.status).toBe("none");
+  });
+
+  test("a fleet with no members left is gone", async () => {
+    const { doInstance, state } = makeDo();
+    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    const left = await call(doInstance, "/remove", { caller: "admin", device: "dev-owner", body: { deviceId: "dev-owner" } });
+    expect(left.status).toBe(200);
+    expect(state.data.get("members")).toBeUndefined();
+    // The name is free again.
+    const again = await call(doInstance, "/create", { caller: "admin", device: "dev-second" });
+    expect(again.status).toBe(200);
   });
 
   test("revoke invalidates every outstanding invite", async () => {
@@ -352,6 +379,50 @@ describe("approval and removal", () => {
     const revoked = await call(doInstance, "/revoke", { caller: "admin", device: "dev-owner", body: {} });
     expect(revoked.json.revoked).toBe(1);
     expect((await call(doInstance, "/join", { caller: "device", device: "dev-z", body: { code: inv.json.code } })).status).toBe(403);
+  });
+});
+
+describe("deleting a fleet", () => {
+  test("the owner may delete it, and the name is free again", async () => {
+    const { doInstance, state } = makeDo();
+    await call(doInstance, "/create", { caller: "device", device: "dev-owner" });
+    const inv = await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
+    expect(inv.status).toBe(200);
+
+    const stranger = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
+    expect(stranger.status).toBe(403);
+
+    const deleted = await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
+    expect(deleted.status).toBe(200);
+    expect(state.data.get("members")).toBeUndefined();
+    expect(state.data.get("invites")).toBeUndefined();
+
+    // The name can be used again.
+    const again = await call(doInstance, "/create", { caller: "device", device: "dev-second" });
+    expect(again.status).toBe(200);
+  });
+});
+
+describe("a fleet nobody is running", () => {
+  test("a proven device may clean it up once it has gone quiet", async () => {
+    const { doInstance, state } = makeDo();
+    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    // While the fleet is alive, nobody may delete it but its owner.
+    const tooEarly = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
+    expect(tooEarly.status).toBe(403);
+
+    // Once it has been quiet for a day, it is not being run by anybody.
+    state.data.set("lastActivity", Date.now() - OWNER_SILENCE_MS - 1000);
+    const cleaned = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
+    expect(cleaned.status).toBe(200);
+    expect(state.data.get("members")).toBeUndefined();
+  });
+
+  test("the owner may always delete its own fleet", async () => {
+    const { doInstance } = makeDo();
+    await call(doInstance, "/create", { caller: "admin", device: "dev-owner" });
+    const deleted = await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
+    expect(deleted.status).toBe(200);
   });
 });
 

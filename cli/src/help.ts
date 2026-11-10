@@ -408,11 +408,12 @@ USAGE
   prime fleets invite <fleet-id> [options]      Mint a single-use invite code
   prime fleets join <fleet-id> --code <code>     Join with an invite code
   prime fleets pending <fleet-id>                List the requests waiting for approval
-  prime fleets approve <fleet-id> --device <id> Admit a waiting device
+  prime fleets approve <fleet-id> --member <id> Admit a waiting device
   prime fleets members <fleet-id>                Show the roster
-  prime fleets remove <fleet-id> --device <id>   Remove a member
+  prime fleets remove <fleet-id> --member <id>  Remove a member
   prime fleets leave <fleet-id>                  Leave the fleet
   prime fleets revoke <fleet-id>                 Invalidate every outstanding invite
+  prime fleets delete <fleet-id>                  Remove the fleet and everything in it
   prime fleets status <fleet-id>                 Show this device's standing in the fleet
 
 A fleet holds one primary and any number of replicas. The primary has the
@@ -621,8 +622,8 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "create") return "Usage: prime fleets create <fleet-id>";
     if (sub === "invite") return "Usage: prime fleets invite <fleet-id> [--auto-approve] [--ttl <s>]";
     if (sub === "join") return "Usage: prime fleets join <fleet-id> --code <code> [--label <label>]";
-    if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --device <id>";
-    if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --device <id>";
+    if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id>";
+    if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --member <id>";
     return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]";
   }
   if (topic === "devices") {

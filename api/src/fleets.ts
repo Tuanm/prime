@@ -23,6 +23,11 @@ export const INVITE_DEFAULT_TTL_MS = 10 * 60 * 1000;
 export const INVITE_MAX_TTL_MS = 60 * 60 * 1000;
 export const MAX_MEMBERS = 32;
 export const MAX_PENDING = 32;
+/**
+ * How long a fleet's owner may be silent before a member may clean it up.
+ */
+export const OWNER_SILENCE_MS = 24 * 60 * 60_000;
+
 /** How many fleets one device may create in an hour. */
 export const MAX_FLEETS_PER_DEVICE = 5;
 

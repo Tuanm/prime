@@ -35,6 +35,7 @@ const ALLOWED_ACTIONS = new Set([
   "head",
   "role",
   "applied",
+  "delete",
   "packs",
   "manifests",
   "keys",
