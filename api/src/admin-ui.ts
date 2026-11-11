@@ -113,15 +113,14 @@ ${UI_CSS}    </style>
           var cloud = document.createElement("span");
           // Filled: a token is set, so a client can reach the fleet. Hollow:
           // there is no way in.
-          var open = !!f.buddy;
-          cloud.className = "cloud-ic " + (f.disabled ? "off" : open ? "on" : "off hollow");
+          cloud.className = fleetCloudClass(f);
           cloud.title = f.disabled
             ? "a fleet of spaces, paused"
-            : open
-              ? f.primary
+            : !f.buddy
+              ? "no token is set, so no client can reach this fleet"
+              : f.primary
                 ? "a fleet of spaces, reached through " + f.primary
-                : "a fleet of spaces with no primary right now"
-              : "no token is set, so no client can reach this fleet";
+                : "no space holds the lease right now, so no client can reach this fleet";
           cloud.innerHTML = FLEET_CLOUD;
 
           var box = document.createElement("div");
@@ -155,6 +154,45 @@ ${UI_CSS}    </style>
             text: "Refresh token",
             onClick: function () { fleetBuddyRefresh(f.fleet); },
           };
+          // The actions a buddy has. The fleet is reached through one of its
+          // spaces, so they act on the one that holds the lease.
+          var primary = null;
+          (f.members || []).forEach(function (m) {
+            if (m.deviceId === f.primary) primary = m;
+          });
+          var primaryPath = primary ? "/admin/api/devices/" + encodeURIComponent(primary.deviceId) : "";
+          var items = [
+            {
+              text: "View",
+              disabled: !primary,
+              onClick: function () {
+                showViewDialog(f.fleet, primaryPath + "/origin");
+              },
+            },
+            {
+              text: "Tools",
+              disabled: !primary || !primary.online || !!primary.disabled,
+              onClick: function () {
+                showTools(f.fleet, fetch(primaryPath + "/tools", { method: "POST" }));
+              },
+            },
+            {
+              text: "Clients",
+              disabled: !primary || !primary.online || !!primary.disabled,
+              onClick: function () {
+                showClientsDialog(primary.deviceId);
+              },
+            },
+            saveSpec,
+            {
+              text: f.disabled ? "Activate" : "Deactivate",
+              danger: !f.disabled,
+              onClick: function () {
+                fleetSaveMeta(f, null, !f.disabled);
+              },
+            },
+            refreshSpec,
+          ];
           tokInput.addEventListener("input", function () {
             var v = tokInput.value.trim();
             // Save only what would change it: the mask is not the token.
@@ -162,10 +200,23 @@ ${UI_CSS}    </style>
           });
           box.appendChild(idInput);
           box.appendChild(tokInput);
-          box.appendChild(fleetMenu([saveSpec, refreshSpec]));
+          box.appendChild(fleetMenu(items));
           li.appendChild(cloud);
           li.appendChild(box);
           listEl.appendChild(li);
+        }
+
+        /**
+         * Whether a client can reach the fleet right now: it has a token of its
+         * own, it is not paused, and one of its spaces holds the lease.
+         */
+        function fleetOpen(f) {
+          return !f.disabled && !!f.buddy && !!f.primary;
+        }
+
+        /** The cloud says whether there is a way in. */
+        function fleetCloudClass(f) {
+          return "cloud-ic " + (fleetOpen(f) ? "on" : "off hollow");
         }
 
         /** A fresh token for a client to keep. */
@@ -910,7 +961,7 @@ ${UI_CSS}    </style>
           var li = document.createElement("li");
           li.className = "row fleet-row" + (isNew ? " new" : "") + (fleet.disabled ? " disabled" : "");
           var cloud = document.createElement("span");
-          cloud.className = "cloud-ic " + (fleet.disabled ? "off" : "on");
+          cloud.className = isNew ? "cloud-ic off hollow" : fleetCloudClass(fleet);
           cloud.title = isNew ? "a new fleet" : "a fleet of spaces";
           cloud.innerHTML = FLEET_CLOUD;
           var box = document.createElement("div");
@@ -934,7 +985,7 @@ ${UI_CSS}    </style>
         // the menu.
         function fleetNode(fleet, m, isPrimary) {
           var li = document.createElement("li");
-          li.className = "row fleet-row" + (isPrimary ? " primary" : "");
+          li.className = "row fleet-row" + (isPrimary ? " primary" : "") + (m.disabled ? " disabled" : "");
           var dot = document.createElement("span");
           dot.className = "dot " + (m.online ? "on" : "off");
           var box = document.createElement("div");

@@ -363,6 +363,52 @@ function tokenMatches(request: Request, url: URL, expected: string): boolean {
   return !!given && timingSafeEq(given, expected);
 }
 
+/**
+ * The fleets a device is a member of.
+ *
+ * Membership lives in each fleet's own object, and the objects cannot be
+ * enumerated, so the registry's list of fleets is walked.
+ */
+async function fleetsWithMember(env: Env, deviceId: string): Promise<string[]> {
+  if (!env.FLEET) return [];
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    const listed = await reg.fetch("https://registry/fleets");
+    if (!listed.ok) return [];
+    const ids = ((await listed.json()) as { fleets?: string[] }).fleets ?? [];
+    const found: string[] = [];
+    for (const id of ids) {
+      const headers = new Headers({ "x-prime-caller": "admin", "x-prime-fleet": id });
+      const stub = env.FLEET.get(env.FLEET.idFromName(id));
+      const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
+      if (!roster || !roster.ok) continue;
+      const body = (await roster.json().catch(() => ({}))) as { members?: Array<{ deviceId?: string }> };
+      if ((body.members ?? []).some((m) => m.deviceId === deviceId)) found.push(id);
+    }
+    return found;
+  } catch {
+    return [];
+  }
+}
+
+/** Take a switched-off device out of the running in every fleet it is in. */
+async function vacateInFleets(env: Env, deviceId: string): Promise<string[]> {
+  if (!env.FLEET) return [];
+  const vacated: string[] = [];
+  for (const id of await fleetsWithMember(env, deviceId)) {
+    const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": id });
+    const stub = env.FLEET.get(env.FLEET.idFromName(id));
+    const res = await stub
+      .fetch("https://fleet/vacate", { method: "POST", headers, body: JSON.stringify({ deviceId }) })
+      .catch(() => null);
+    if (res && res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { vacated?: boolean };
+      if (body.vacated) vacated.push(id);
+    }
+  }
+  return vacated;
+}
+
 /** The same headers, but the gateway speaking for itself. */
 function adminHeaders(headers: Headers): Headers {
   const out = new Headers(headers);
@@ -981,8 +1027,11 @@ export default {
         );
         const dropped = disabled ? await kickDeviceTunnel(env, deviceId) : false;
         if (!res.ok) return res;
+        // A space that has been switched off must not keep driving its fleet:
+        // the lease goes back, and the next member that asks takes its place.
+        const vacated = disabled ? await vacateInFleets(env, deviceId) : [];
         const current = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-        return Response.json({ ...current, ok: true, disabled, tunnelDropped: dropped });
+        return Response.json({ ...current, ok: true, disabled, tunnelDropped: dropped, fleetsVacated: vacated });
       }
       if (request.method === "DELETE" && url.pathname.startsWith("/admin/api/devices/")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length);

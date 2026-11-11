@@ -332,6 +332,7 @@ export class FleetDO implements DurableObject {
     }
     if (path === "/delete" && request.method === "POST") return this.delete(caller, request);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
+    if (path === "/vacate" && request.method === "POST") return this.vacate(caller, body);
 
     return Response.json({ error: "not found" }, { status: 404 });
   }
@@ -758,6 +759,22 @@ export class FleetDO implements DurableObject {
       out = Response.json({ ok: true, epoch: held.epoch });
     });
     return out;
+  }
+
+  /**
+   * Take a member out of the running: a space the operator has switched off
+   * must not keep the fleet's lease, or the fleet would go on being driven by
+   * a space that cannot be reached. The next member to ask takes its place.
+   */
+  private async vacate(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+    if (caller.kind !== "admin") return this.deny();
+    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+    const held = await this.lease();
+    if (!held || held.holder !== deviceId) {
+      return Response.json({ ok: true, vacated: false, primary: held ? held.holder : null });
+    }
+    await this.state.storage.delete("lease");
+    return Response.json({ ok: true, vacated: true, primary: null });
   }
 
   private async release(caller: Caller): Promise<Response> {

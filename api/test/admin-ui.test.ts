@@ -210,6 +210,7 @@ describe("the fleets in the admin interface", () => {
         fleet: "acme",
         label: "the office",
         disabled: false,
+        buddy: "0123456789abcdef0123456789abcdef01234567",
         members: [{ deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true }],
         primary: "d1",
         pending: [],
@@ -219,7 +220,10 @@ describe("the fleets in the admin interface", () => {
     const branch = page.list()[0]!;
     const root = branch.children[0]!;
     // A fleet is a group of spaces, so it carries the cloud, not a status dot.
+    // A token and a space holding the lease mean there is a way in.
     expect(root.children[0]!.className).toContain("cloud-ic");
+    expect(root.children[0]!.className).toContain("on");
+    expect(root.children[0]!.className).not.toContain("hollow");
     expect(menuOf(root)).toEqual(["Save", "Deactivate", "Invite", "Delete"]);
   });
 
@@ -338,8 +342,11 @@ describe("the fleets in the admin interface", () => {
     expect(box.children[0]!.value).toBe("acme");
     expect(box.children[1]!.value).not.toContain("0123456789abcdef");
     expect(box.children[1]!.value).toContain("***");
-    expect(menuOf(row)).toEqual(["Save", "Refresh token"]);
+    // The actions a buddy has, acting on the space that holds the lease.
+    expect(menuOf(row)).toEqual(["View", "Tools", "Clients", "Save", "Deactivate", "Refresh token"]);
     expect(action(row, "Save")!.disabled).toBe(true);
+    // With no space holding the lease there is nothing to look at.
+    expect(action(row, "View")!.disabled).toBe(true);
   });
 
   test("a fleet with no token is drawn hollow: there is no way in", async () => {
@@ -365,4 +372,21 @@ describe("the fleets in the admin interface", () => {
     expect(page).not.toContain('placeholder = "device id"');
   });
 
+
+  test("a fleet with a token and no primary is hollow: nobody to reach", async () => {
+    const page = loadPage([
+      {
+        fleet: "lonely",
+        label: "",
+        disabled: false,
+        buddy: "0123456789abcdef0123456789abcdef01234567",
+        members: [],
+        primary: null,
+        pending: [],
+      },
+    ]);
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    expect(row.children[0]!.className).toContain("hollow");
+  });
 });
