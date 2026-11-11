@@ -719,3 +719,53 @@ describe("the name a space gives for itself", () => {
     expect(members["owner-1"]?.label).toBe("renamed");
   });
 });
+
+describe("two spaces of a fleet cannot share a name", () => {
+  test("the second one to ask is refused, and told what to do", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    // The first space is already in, under a name.
+    const members = (await call(doInstance, "/members", { caller: "admin", device: "operator" })).json.members as Array<{ deviceId: string; label?: string }>;
+    expect(members.length).toBe(1);
+    expect(members[0]!.label).toBeUndefined();
+
+    const first = await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { label: "alpha" } });
+    expect(first.status).toBe(200);
+
+    // Another space with the same name cannot join.
+    const invite = await call(doInstance, "/invite", { caller: "admin", device: "operator", body: {} });
+    const joined = await call(doInstance, "/join", { caller: "device", device: "member-2", body: { code: invite.json.code, label: "Alpha" } });
+    expect(joined.status).toBe(409);
+    expect(String(joined.json.error)).toContain("already in this fleet");
+    expect(String(joined.json.hint)).toContain("--name");
+
+    // A name nobody uses goes through.
+    const invite2 = await call(doInstance, "/invite", { caller: "admin", device: "operator", body: {} });
+    const ok = await call(doInstance, "/join", { caller: "device", device: "member-2", body: { code: invite2.json.code, label: "beta" } });
+    expect(ok.status).toBe(200);
+  });
+
+  test("a waiting request holds its name too", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    const invite = await call(doInstance, "/invite", { caller: "admin", device: "operator", body: {} });
+    await call(doInstance, "/join", { caller: "device", device: "waiting-1", body: { code: invite.json.code, label: "gamma" } });
+    const invite2 = await call(doInstance, "/invite", { caller: "admin", device: "operator", body: {} });
+    const clash = await call(doInstance, "/join", { caller: "device", device: "waiting-2", body: { code: invite2.json.code, label: "gamma" } });
+    expect(clash.status).toBe(409);
+    expect(String(clash.json.error)).toContain("already waiting");
+  });
+
+  test("a name another space uses is not taken on when a space takes its place", async () => {
+    const { doInstance, state } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { label: "alpha" } });
+    const invite = await call(doInstance, "/invite", { caller: "admin", device: "operator", body: {} });
+    await call(doInstance, "/join", { caller: "device", device: "member-2", body: { code: invite.json.code, label: "beta" } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-2" } });
+    // It tries to take the other one's name: it keeps its own instead.
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-2", body: { label: "alpha" } });
+    const members = state.data.get("members") as Record<string, { label?: string }>;
+    expect(members["member-2"]?.label).toBe("beta");
+  });
+});

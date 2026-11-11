@@ -408,6 +408,7 @@ space that has just taken over the lease can be entered at once.
 | no member holds the lease | the fleet has no primary, so there is nowhere to send a call: it answers that it has none, and the card says so |
 | a fleet has no token | no client can reach it; a member still can, and the spaces keep syncing |
 | a device already has the name a fleet wants | the fleet is refused: a fleet is reached under its own name, so the two names must not collide (and `anon-` is reserved for the anonymous devices) |
+| two spaces of one fleet would share a name | the second one is refused when it asks to join, and told to pass `--name`; a space that takes over an identity keeps the name it already had. Names are compared without case: `alpha` and `Alpha` are one name |
 | a member comes back with a new key | the fleet learns the new key when it takes its place, and seals the next snapshot for it |
 | a space is renamed, or an identity is taken over by another space | the name the operator reads is corrected on the next round of the agent, because the space says what it is called every time it takes its place |
 | a replica's workspace is changed by hand | the change is left alone and reported, rather than thrown away by the next pull |

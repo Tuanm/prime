@@ -31,6 +31,27 @@ import {
 } from "./fleets";
 import type { Env } from "./config";
 
+
+/** The name another member or waiting request already uses, if there is one. */
+function findClash(
+  members: Members,
+  pending: Record<string, PendingRequest>,
+  self: string,
+  label: string | undefined,
+): string | undefined {
+  if (!label) return undefined;
+  const want = label.toLowerCase();
+  for (const m of Object.values(members)) {
+    if (m.deviceId === self) continue;
+    if ((m.label ?? "").toLowerCase() === want) return m.label;
+  }
+  for (const p of Object.values(pending)) {
+    if (p.deviceId === self) continue;
+    if ((p.label ?? "").toLowerCase() === want) return p.label;
+  }
+  return undefined;
+}
+
 /** What the operator has decided about a fleet itself. */
 interface FleetMeta {
   /** A name for the operator to read; the id stays the id. */
@@ -512,8 +533,33 @@ export class FleetDO implements DurableObject {
         return;
       }
 
+      // Two spaces with the same name cannot be told apart in the operator's
+      // list, and the name is all the list shows. A space on another machine
+      // is the only way to meet one: this machine's spaces are its own keys.
+      const clashes = findClash(members, {}, caller.deviceId, label);
+      if (clashes) {
+        out = Response.json(
+          {
+            error: "a space called \"" + clashes + "\" is already in this fleet",
+            hint: "give this space another name with --name, so the fleet can tell the two apart",
+          },
+          { status: 409 },
+        );
+        return;
+      }
 
       const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
+      const waiting = findClash(members, pending, caller.deviceId, label);
+      if (waiting) {
+        out = Response.json(
+          {
+            error: "a space called \"" + waiting + "\" is already waiting to join this fleet",
+            hint: "give this space another name with --name, so the fleet can tell the two apart",
+          },
+          { status: 409 },
+        );
+        return;
+      }
       if (!pending[caller.deviceId] && Object.keys(pending).length >= MAX_PENDING) {
         out = Response.json({ error: "too many pending requests" }, { status: 429 });
         return;
@@ -697,8 +743,12 @@ export class FleetDO implements DurableObject {
       membersChanged = true;
     }
     if (label !== undefined && members[caller.deviceId]!.label !== label) {
-      members[caller.deviceId]!.label = label;
-      membersChanged = true;
+      // A name another member already uses is not taken on: the list would
+      // then show two spaces that cannot be told apart.
+      if (!findClash(members, {}, caller.deviceId, label)) {
+        members[caller.deviceId]!.label = label;
+        membersChanged = true;
+      }
     }
     if (membersChanged) await this.state.storage.put("members", members);
 

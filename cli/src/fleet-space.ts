@@ -224,7 +224,10 @@ async function joinFleet(ctx: Ctx, creds: FleetCredentials, opts: FleetSpaceOpti
     pubkey: keys.publicKey,
   });
   if (joined.status >= 400) {
-    throw new CliError("could not join the fleet: " + (joined.json?.error ?? joined.status));
+    throw new CliError(
+      "could not join the fleet: " + (joined.json?.error ?? joined.status),
+      typeof joined.json?.hint === "string" ? joined.json.hint : undefined,
+    );
   }
 }
 
