@@ -65,9 +65,6 @@ export const LANDING_HTML = String.raw`<!doctype html>
     <h1>Connect</h1>
     <div class="sub">a buddy in your team</div>
     <p class="desc">Any machine becomes a buddy in your team: its files and its shell, reachable from anywhere, and nothing of it opened to the network.</p>
-    <p class="desc">A buddy works on its own. Buddies also work together: a few of them can be one team, a <b>fleet</b>. A fleet is one piece of work kept in step across machines, so a job started on one of them carries on where it lands, and the work does not stop because one machine went quiet.</p>
-    <p class="desc">A fleet is made of <b>spaces</b> - a space is a workspace made in a moment, or kept for as long as you want it. Each one carries the same work, and any of them can take over when another stops answering.</p>
-    <p class="desc"><a href="/join">How a fleet fits together</a>, with a picture.</p>
 
     <div class="cg" id="cg">
       <button type="button" class="main" id="connect">Connect</button>
@@ -78,9 +75,13 @@ export const LANDING_HTML = String.raw`<!doctype html>
     </div>
     <div class="target" id="target"></div>
 
+    <p class="desc" style="margin-top:22px">A buddy works on its own. Buddies also work together: a few of them can be one team, a <b>fleet</b>. A fleet is one piece of work kept in step across machines, so a job started on one of them carries on where it lands, and the work does not stop because one machine went quiet.</p>
+    <p class="desc">A fleet is made of <b>spaces</b> - a space is a workspace made in a moment, or kept for as long as you want it. Each one carries the same work, and any of them can take over when another stops answering.</p>
+    <p class="desc"><a href="/join">How a fleet fits together</a>, with a picture.</p>
+
     <div class="guide" id="guide"></div>
 
-    <p class="desc"><a href="https://github.com/Tuanm/prime/blob/main/cli/README.md">The <b>prime</b> handbook</a> covers what else a buddy can do.</p>
+
 
     <script>
       (function () {

@@ -82,7 +82,7 @@ __CSS__
 
     <p class="desc" style="margin-top:20px">The fleet is one address: a job sent to it reaches whichever space is in charge, and the answer comes back the same way. Nobody has to know which machine ran it.</p>
 
-    <p class="meta"><a href="/connect">Set up a buddy</a> &middot; <a href="https://github.com/Tuanm/prime/blob/main/docs/fleets.md">The full picture</a></p>
+    <p class="meta"><a href="/connect">Set up a buddy</a></p>
     <div class="foot">
       <a href="https://github.com/Tuanm/prime" aria-label="Source on GitHub">__ICON__</a>
     </div>
