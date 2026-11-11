@@ -57,7 +57,7 @@ __CSS__
       </a>
     </div>
 
-    <p class="meta"><a href="https://github.com/Tuanm/prime/releases">All releases</a></p>
+    <p class="meta"><a href="https://github.com/Tuanm/prime/releases">Releases</a> &middot; <a href="/security">Security</a></p>
     <div class="foot">
       <a href="https://github.com/Tuanm/prime" aria-label="Source on GitHub">__ICON__</a>
     </div>
