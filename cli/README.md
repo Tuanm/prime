@@ -1,856 +1,303 @@
-# prime - the CLI
+# prime
 
-A small, fast command line client for the [Prime gateway](../README.md). It talks
-to devices through the gateway's relay and lets you list, inspect and call
-their tools from a terminal or a script.
+prime is the command line for a buddy: a machine of yours that offers its files and its shell as tools, reachable from anywhere through a gateway. From the same small binary you also run a space, share a file, keep a vault, and hold a fleet together.
 
-- **Fast**: ~11 ms cold start, ~15 MB resident, one HTTP round trip per command.
-- **Light**: no runtime dependencies, no SDK, no YAML library.
-- **Cross-platform**: one self-contained binary per OS/arch.
-- **Scriptable**: typed exit codes, JSON output, stdin batching.
+## How the pieces fit
 
-```text
-prime connect                                   # THIS machine as an anonymous device
-prime serve                                    # every device's tools behind one endpoint
-prime devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
-prime devices connect my-laptop                 # later: defaults already stored
-prime devices list
-prime tools list my-laptop
-prime tools view my-laptop.snapshot
-prime tools call my-laptop.click '{"selector":"#submit"}'
+A buddy connects out to the gateway and stays connected. Nothing on it opens a port, so there is nothing to forward and no firewall rule to add. The connection lasts while the buddy runs.
+
+The gateway is the one address in front of it. You present a token. The gateway carries the request, and the answer comes back the same way. What it keeps for a buddy is sealed for that buddy's own key, so the gateway carries the work without opening it.
+
+```mermaid
+flowchart LR
+  you[You] --> gw[Gateway]
+  gw --> buddy[Buddy]
+  gw --> fleet[Fleet]
+  buddy --> machine[One machine]
+  fleet --> primary[Space in charge]
+  fleet --> copies[Spaces in step]
 ```
+
+A space is a workspace in a rootless container that runs a buddy of its own, with no gateway. A fleet is a few spaces that hold the same work: one is in charge and the others keep a copy, so a job carries on when a machine goes quiet. A client reaches a fleet as one device.
 
 ## Install
 
-```bash
-cd cli
-bun run build          # every platform → dist/
-bun run build:host     # just this machine (fast)
-```
-
-`bun run build` writes `dist/prime` (the host build, under the bare name it is
-installed as) plus one binary per platform:
-
-| Artifact | Size | Needs Bun at runtime |
-| --- | --- | --- |
-| `dist/prime` (host) | 59.4 MB | no - runtime is embedded |
-| `dist/prime-darwin-arm64` | 59.4 MB | no |
-| `dist/prime-darwin-x64` | 66.2 MB | no |
-| `dist/prime-linux-x64` / `-linux-arm64` | 77.6 / 77.5 MB | no |
-| `dist/prime-windows-x64.exe` / `-windows-arm64.exe` | ~95 / ~84 MB | no |
-| `dist/prime.js` | ~240 KB (includes the device buddy) | yes |
-
-The compiled binaries are large because `bun build --compile` embeds the
-whole Bun runtime; that is the price of shipping one file that runs anywhere
-with no install step. If Bun (>= 1.2, for the built-in YAML parser) is already
-present, the ~240 KB bundle (most of it the embedded device buddy) is the leaner choice:
+Build from source with Bun:
 
 ```bash
-install -m 755 dist/prime.js ~/.local/bin/prime
+bun run build        # one file for every platform
+bun run build:host   # only this machine, much faster
 ```
 
-## Commands
+Each build writes one self-contained file per platform: macOS and Linux on arm64 and x64, Windows on x64 and arm64. The runtime travels inside, so a file runs on a machine with no Bun installed. That is why it is large: about 90 MB on a Mac and 100 to 120 MB on Linux and Windows.
 
-```text
-prime connect [--gateway <url>] [--new] [--no-start] [-- <device flags>]
-prime serve [<device-id>...] [--port <n> [--host <addr>]]
-prime devices connect <device-id> [options]
-prime devices disconnect <device-id>
-prime devices status <device-id>
-prime devices list [--no-probe]
-prime files list [--json] [--show-keys]
-prime files upload <path> [--name <n>] [--key <k>] [--expiry-days <n>]
-prime files download <id|name> [-o <path>] [--key <k>] [--resume]
-prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
-prime spaces list|start|stop|delete|logs <name>
-prime spaces top <name> [--once] [--json]
-prime spaces create --expose [--gateway <url>]
-prime spaces create --setup <file>
-prime spaces create --fleet <fleet-id> [--code <code>]
-prime fleets list|create|invite|join|pending|approve|members|remove|leave|status|sync|agent
-prime spaces create --vault <company> [--vault <company>...] [--vault-kind <values|secrets|codes>]
-prime vaults init|company|set|list|get|code|rm|assign|status
-prime spaces doctor [--json]
-prime tools list <device-id>
-prime tools view <device-id>.<tool-id>
-prime tools call <device-id>.<tool-id> [<json>] [options]
-prime tools call <device-id>.<tool-id> <json> <device-id>.<tool-id> <json> ...
-... | prime tools call
-prime update [--check]
-prime service install [options]            # the device buddy as a user service
-prime service uninstall
-prime service status
-prime help [connect|serve|service|devices|tools|code-mcp]
-prime code-mcp [options]                   # the bundled device buddy, with the config's options
-```
+Where Bun 1.2 or newer is already present, the JavaScript bundle is the leaner choice. It is a few hundred kilobytes and carries the same buddy.
 
-When no gateway is given or configured anywhere, every command uses the
-managed gateway `https://prime.tuanm.workers.dev` (precedence: `--gateway` >
-`PRIME_GATEWAY_URL` > device entry > `defaults.gateway` > that default).
+A command is one request to the gateway, and the binary starts in about ten milliseconds, so it is cheap to call from a script.
 
-Aliases, as specified:
-
-- `prime` on its own is `prime --help`.
-- `prime call ...` is `prime tools call ...`.
-- `prime upgrade` is `prime update`.
-- `prime upload ...` is `prime files upload ...`, and `prime download ...` is
-  `prime files download ...`.
-
-Every subcommand supports `--help`, and global flags are available everywhere:
-`--json`, `--no-color`, `--config <path>`, `--verbose`, `--quiet`.
-
-### connect - this machine as an anonymous device
+Put the file on your path under the name `prime`, then check it:
 
 ```bash
-prime connect                                # default gateway: prime.tuanm.workers.dev
-prime connect --gateway https://gw.example.dev
-prime connect --new                          # force a fresh device
-prime connect --no-start --json              # just print/save the credentials
-prime connect -- --enable-memory             # extra flags for the device buddy
+prime --version
 ```
 
-`prime connect` asks the gateway for an anonymous device
-(`POST /api/devices/anonymous`), saves `{gateway, id, token}` in the config file
-(marked `anonymous: true`), prints the device id, the 6-character device code and
-the connect URL, and then runs the **bundled device buddy** in the foreground as that
-device (`prime code-mcp --gateway <origin> --id <id> --port <free port> --bind
-127.0.0.1`). Ctrl-C stops it; the command exits with its status. The
-device code is handed over in the `PRIME_CHILD_DEVICE_TOKEN` environment
-variable rather than on the command line, so `ps` never shows it; the child turns
-it into its `--gateway-token` in-process and removes it from its
-environment, so its own subprocesses never inherit it.
+## On each platform
 
-```text
-✓ registered anonymous device anon-05ece6d0e71cfce9
-  device id    anon-05ece6d0e71cfce9
-  device code  O184FH
-  gateway      https://prime.tuanm.workers.dev
-  connect url  https://prime.tuanm.workers.dev/device/anon-05ece6d0e71cfce9?token=O184FH
-```
+A buddy works the same everywhere. Three things differ: how it starts at login, how a space runs, and where the logs go.
 
-- **Reuse.** The saved device for that gateway is reused on every later run - the
-  gateway caps the total number of devices (100), so repeated runs must not burn
-  new ones. `--new` registers a fresh one.
-- **Expiry.** The gateway deletes an anonymous device that never connected after
-  about an hour, and one offline for 7 days. A saved device the gateway rejects
-  (401) is replaced automatically, with a note. A device the operator disabled
-  (403) is reported (exit 3) rather than silently replaced.
-- **Errors.** 429 (too many devices created from your network) shows when to
-  retry; 503 means the gateway's device limit is reached; 403 means anonymous
-  devices are disabled there (exit 3); a gateway that requires a gateway token
-  answers 401 (pass `--gateway-token`, exit 3).
-- The device is an ordinary config entry, so `prime tools list <id>`,
-  `prime call <id>.bash ...` and `prime serve` use it directly.
-- The connect URL and code grant shell access to this machine: keep them secret.
-  Anonymous devices get a lower request budget and cannot use file storage.
-
-### serve - every device as one tool server
-
-```bash
-prime serve                                    # stdio endpoint for any client
-prime serve laptop staging                     # only these devices
-prime serve --port 7800                        # HTTP on http://127.0.0.1:7800/mcp
-```
-
-`prime serve` aggregates the tools of every configured device (the same devices
-and credentials `prime tools list` / `prime call` use, or just the ids given) into
-**one** tool server.
-
-- **stdio** (default): newline-delimited JSON-RPC 2.0 - `initialize`,
-  `tools/list`, `tools/call`, `ping`; notifications get no response. stdout
-  carries nothing but JSON-RPC; notes go to stderr.
-- **HTTP** (`--port`): `POST /mcp` with JSON responses (batches accepted, a
-  notification-only body gets 202); `GET` returns 405. It listens on
-  `127.0.0.1` unless `--host` says otherwise; a non-loopback `--host` also needs
-  `--allow-remote` and prints a warning, because the server has **no
-  authentication**. Browser origins other than localhost get 403.
-- **Names** are `<device>__<tool>`: characters outside `[a-zA-Z0-9_-]` become
-  `_` (`alpha.v2` + `file.read` → `alpha_v2__file_read`). Names that collide
-  after sanitizing, or exceed 64 characters, get a 6-hex hash of their own
-  (device, tool) pair, so they are stable regardless of which devices are online.
-  Descriptions are prefixed `[<device-id>]`; schemas and annotations are kept.
-- **Calls** are routed to the device and its result returned verbatim
-  (`isError` included). A device-side JSON-RPC error is passed through; a
-  transport failure (offline, timeout) becomes an `isError` result.
-- **Availability.** Offline devices are skipped with a stderr note. The list is
-  re-read on `tools/list` (cached 15 s) and, in stdio mode, every 60 s with a
-  `notifications/tools/list_changed`, so devices that come online later appear.
-  With no reachable device the server still starts with an empty list.
-
-### code-mcp - the device buddy
-
-The CLI embeds the device buddy (documented in
-[SERVER.md](SERVER.md)), which exposes a machine's files and shell. `prime connect` runs it for you;
-`prime code-mcp [options]` runs it directly (`prime code-mcp --help` lists its
-options), e.g. as a registered device:
-
-```bash
-prime code-mcp --gateway gw.example.dev --id my-laptop --gateway-token <token>
-```
-
-Its options can live in the config, in a `code-mcp:` section (its option
-names without the dashes); options on the command line override them:
-
-```yaml
-devices:
-  ...
-
-code-mcp:
-  port: "7777"
-  bind: "127.0.0.1"
-  id: "demo"
-  token: "demo"
-  gateway: "prime.tuanm.workers.dev"
-  enable-memory: true
-```
-
-With that, a bare `prime code-mcp` starts the device. A device `id` needs a
-gateway: when `id` is set and `gateway` is not, the CLI's gateway is used
-(`defaults.gateway`, else `https://prime.tuanm.workers.dev`). Values from the config are
-handed to the device buddy inside the process, so a token there never shows up in `ps`.
-An unknown key or a wrongly typed value is an error naming the config file.
-`prime code-mcp` refuses to start while the **service** is running - one device buddy per machine and config.
-
-### service - the device buddy as a user service
-
-```bash
-prime service install                          # the config's service options as is
-prime service install --port 7788 --enable-memory   # ...with overrides
-prime service status [--json]
-prime service uninstall
-```
-
-`install` registers the device buddy with the OS so it starts at login and comes back
-after a crash, then waits until it has **stayed** up before reporting success
-(otherwise it prints the service's own log). With a device `id`, it also
-waits for the device to be **online on the gateway**, and fails if the gateway
-rejects the id/token. Running it again reinstalls and restarts it with the
-current options.
-
-| OS | Definition | Logs | Restart after a crash |
+| Platform | At login | A space runs on | Logs |
 | --- | --- | --- | --- |
-| Linux | systemd user unit `~/.config/systemd/user/code-mcp.service` | `journalctl --user -u code-mcp` | `Restart=on-failure` |
-| macOS | launchd agent `~/Library/LaunchAgents/dev.prime.code-mcp.plist` | `~/Library/Logs/prime/code-mcp.log` | `KeepAlive` (not after a clean stop) |
-| Windows | Scheduled Task `\prime\code-mcp`, at logon, no admin rights, no window | `code-mcp.log` next to the config | a one-minute watchdog trigger |
+| macOS | a launch agent | Apple's container micro-VM | a log file for the service |
+| Linux | a systemd user service | rootless podman | `journalctl --user -u code-mcp` |
+| Windows | a scheduled task at logon, no admin rights, no window | WSL2 | a log file beside the config |
 
-The service runs `prime code-mcp --service --config <config>` and reads its
-options at every start: the config's `code-mcp:` section, overridden by the
-options given to `install` (stored in `service.yaml` next to the config, mode
-0600). No credential is written into the service definition or onto a command
-line. To apply a config change, run `prime service install` again; `uninstall`
-stops it and removes the definition and `service.yaml`. `--config <path>`
-selects another config for all three commands.
+On Linux a user service stops at logout unless lingering is on. `prime service install` says so when it is off.
 
-**Proxies and TLS-inspecting networks.** A service starts with almost no
-environment, so `install` carries over the network settings of the shell it is
-run from - `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` (either case),
-`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` - into `service.yaml`
-(0600; a proxy URL can hold a password), and lists their names. The service
-also trusts the operating system's certificate store (`NODE_USE_SYSTEM_CA=1`),
-where an organisation installs its TLS-inspection root, so a managed device
-usually needs nothing set at all. Its tunnel uses `HTTPS_PROXY`
-(respecting `NO_PROXY`). If the tunnel still reports `TLS handshake failed`,
-export `NODE_EXTRA_CA_CERTS=/path/to/your-org-root.pem` and re-run `install`.
+A service starts with almost no environment, so `install` carries the proxy settings of the shell it ran in and trusts the operating system's certificate store. On a network that inspects TLS the buddy still reaches out. If it reports a handshake failure, set `NODE_EXTRA_CA_CERTS` to your organisation's root and install again.
 
-On Linux, a user service stops at logout unless lingering is enabled
-(`loginctl enable-linger $USER`); `install` says so when it is off.
+Under WSL2 a space needs a user systemd session for its limits, or the fallback runtime. `prime spaces doctor` says which piece is missing.
 
-### devices connect
+## Connect a machine
 
-Saves the device in the config file and then probes it. Anything you omit falls
-back to the environment, the device's existing entry, then the defaults section -
-so a full connect once makes every later device a one-liner.
+`prime connect` registers this machine as an anonymous buddy, saves it, prints its id, its six-character code and a connect URL, then runs the buddy in front of you. Ctrl-C stops it, and the command exits with the buddy's status.
 
 ```bash
-prime devices connect staging --token dev-token --gateway https://gw.example.dev --gateway-token gw-token
-prime devices connect laptop                       # inherits gateway + gateway token
-prime devices connect laptop --no-verify           # save without probing
-prime devices connect laptop --set-default         # also update the defaults section
+prime connect                                    # this machine, managed gateway
+prime connect --gateway https://gw.example.dev   # another gateway
+prime connect --new                              # ask for a fresh buddy
+prime connect --no-start                         # register and print, run nothing
+prime connect -- --enable-memory                 # pass a flag to the buddy itself
 ```
 
-Re-running `connect` **merges**: omitting `--token` keeps the token already
-stored rather than clearing it.
+Keep the code and the URL as carefully as a password: they grant shell access to this machine. An anonymous buddy also has a lower request budget and no file storage.
 
-### devices list / status
+The buddy is remembered per gateway, so the next `prime connect` is the same one. A buddy the gateway no longer knows is replaced with a new one, and the note says so. A buddy the operator switched off is reported, and nothing is replaced. An unused anonymous buddy is deleted after about an hour, and one offline for seven days after that.
 
-`status` sends a `ping` and reports reachability plus round-trip time.
-`list` probes every configured device concurrently and prints a table;
-`--no-probe` skips the probes for an instant offline listing.
-
-```text
-DEVICE    STATUS   LATENCY   GATEWAY
-alpha     online   12 ms     https://gw.example.dev
-staging   offline  -         https://staging.example.dev
-```
-
-### files - list, upload and download
-
-The gateway keeps temporary files in R2, scoped to a registered device. The
-commands below speak to its REST API (`/api/files`) with that device's id and
-token, and stream both directions so a large file is never held in memory.
+A registered buddy is saved once and reused the same way:
 
 ```bash
-prime files upload ./report.pdf                  # expires in 7 days (the maximum)
+prime devices connect my-laptop --token dev-secret --gateway https://gw.example.dev
+prime devices connect laptop --set-default      # also store these as the defaults
+prime devices list                              # what is connected, and how fast
+prime devices status my-laptop                  # one ping, with a round trip
+prime devices disconnect my-laptop              # forget it here, not on the machine
+```
+
+Anything you leave out falls back to the environment, then the buddy's entry, then the defaults, so a full connect once makes every later one a single line. Running connect again merges: a token already stored is kept, not cleared.
+
+To keep a buddy at login:
+
+```bash
+prime service install                              # the options from your config
+prime service install --port 7788 --enable-memory  # with overrides
+prime service status
+prime service uninstall
+```
+
+`install` waits until the service has stayed up before it reports success. With a device id it also waits for the buddy to be online. No credential is written into a service definition or a command line; the service reads your config at every start. Run `install` again to apply a change.
+
+## Call a tool
+
+`prime tools list` shows what a buddy offers. `prime tools view` prints one tool's arguments and a ready call. `prime call` is the same command with fewer words.
+
+```bash
+prime tools list my-laptop
+prime tools view my-laptop.snapshot
+prime tools call my-laptop.click '{"selector":"#submit"}'   # inline JSON
+prime tools call my-laptop.click --arg selector=#submit     # no quoting at all
+prime tools call laptop.snapshot '{}' phone.screenshot '{}' # several, in order
+prime tools call --file calls.json                          # or @calls.json, or -
+```
+
+A tool reference is the buddy and the tool joined by a dot. When a label is genuinely ambiguous, `--device` and `--tool` pick the halves.
+
+`--arg` exists because cmd.exe has no `cat` and no single quotes. A value that looks like a number, a boolean, null or an array becomes one; anything else stays text.
+
+Calls run one after another by default, so clicks and typing keep their order. `--parallel` runs them together, at most eight in flight unless `--concurrency` says otherwise.
+
+A failing call never stops its siblings. Every result is printed and the command exits 1. A call that stands alone keeps its own code instead, so a script can tell a rejected token from an offline buddy.
+
+## One address for every buddy
+
+`prime serve` puts every buddy's tools behind one server, so a client that knows one address can reach them all:
+
+```bash
+prime serve                    # reads and writes on stdin and stdout
+prime serve --port 7800        # http://127.0.0.1:7800/mcp
+claude mcp add gateway -- prime serve
+```
+
+Tool names are the buddy and the tool joined by two underscores, like `laptop__snapshot`, and they stay the same whatever else is online. A buddy that is offline is skipped with a note and picked up when it comes back.
+
+It listens on `127.0.0.1` unless `--host` says otherwise, and a wider address also needs `--allow-remote`. There is no authentication on that endpoint: anyone who can reach it can run every buddy's tools, shell included.
+
+## Share a file
+
+The gateway keeps files for a buddy and hands them back later. Both directions stream, so a large file is never held in memory.
+
+```bash
+prime files upload ./report.pdf                  # expires in seven days
 prime files upload ./secret.pdf --key hunter2 --expiry-days 1
-prime files list                                 # name, id, size, type, dates, lock
-prime files download report.pdf -o ./report.pdf  # by name, when it is unique
-prime files download 1a2b3c... -o ./report.pdf   # by id, always
-prime files download 1a2b... -o ./part.pdf --resume   # continue a partial file
+prime files list                                 # name, size, dates, whether it is locked
+prime files download report.pdf -o ./copy.pdf    # by name, when there is one
+prime files download 1a2b3c -o ./part.pdf --resume
 ```
 
-By default the device and gateway are the ones configured for the background
-service, so after `prime service install ... --id <id> --gateway-token <token>`
-the file commands work with no extra flags. Each field can be overridden:
+`prime upload` and `prime download` are the same commands with less typing.
 
-```text
---device <id>     device whose files to use
---token <token>   that device's token
---gateway <url>   gateway origin
---timeout <ms>    per-request timeout (default 300000)
-```
+Limits are per buddy: 200 MiB each, five files and 500 MiB held, seven days at most. An expired file drops out of the listing. A protected file needs its key to come back; `--show-keys` prints the keys to the owner.
 
-Upload options: `--name` (stored name), `--key` (protect the file at creation;
-downloads then need `--key`), `--content-type`, `--expires-in <seconds>` or
-`--expiry-days <days>`. Download options: `-o/--output` (`-` for stdout),
-`--resume` for an interrupted transfer, `--force` to overwrite. `list
---show-keys` prints protection keys for the owner; without it they show as
-"locked: yes". Files are per device: 200 MiB each, 5 files and 500 MiB per
-device, 7 days maximum; expired files fall out of the listing automatically.
+The buddy is the one your service runs as, so these commands need no flags once the service is installed. `--device`, `--token` and `--gateway` override it.
 
-### spaces - disposable or persistent codespaces
+## Run a space
 
-A space is a rootless Linux container running the device buddy with **no gateway**.
-When it starts, prime registers it as a local device, so the ordinary commands
-work against it: `prime devices list`, `prime tools list <space-id>`,
-`prime tools call <space-id>.<tool>`.
+A space is a rootless Linux container that runs a buddy with no gateway. It registers itself as a local device, so the ordinary commands work on it.
 
 ```bash
-prime spaces create --name dev                    # ephemeral, 2 cpu, 4g, /root/work
-prime spaces create --name work --persistent      # keeps /root/work across restarts
-prime spaces list                                 # name, mode, state, device, url
-prime devices list                                # the space shows up as "local"
-prime tools call dev.bash '{"cwd":"/root/work","command":"uname -a"}'
-prime spaces stop dev                             # ephemeral: wipes the container
-prime spaces start work                           # persistent: resumes the container
-prime spaces enter dev                            # interactive shell in the space
-prime spaces enter dev -- cat /etc/os-release     # or one command
+prime spaces create --name dev                  # throwaway, 2 cpus, 4g
+prime spaces create --name work --persistent    # keeps its work across a restart
+prime spaces list
+prime tools call dev.bash '{"command":"uname -a"}'
+prime spaces enter dev                          # a shell inside
+prime spaces enter dev -- uname -a              # or one command
+prime spaces top dev                            # live cpu, memory, processes
 prime spaces logs work
-prime spaces top dev                              # live cpu/mem/processes (q quits)
-prime spaces create --name pub --expose           # anonymous device via the gateway
-prime spaces create --name work --setup ./boot.sh  # run a script inside once it is up
-prime spaces create --name alpha --fleet acme --code <code>   # join a fleet
-prime spaces doctor                               # rootless? systemd? crun? limits?
-prime spaces delete work                          # container + volume + device entry
+prime spaces stop dev
+prime spaces delete work
 ```
 
-**The toolbox.** A new space has git, ssh, unzip, curl, wget, jq, ripgrep,
-python3 and bun. The image carries them; a space made on an older image is
-brought to the same place when it is created, so either way a space made today
-has what a working space needs. `--setup <file>` runs a script inside the space
-once it is up, so a particular job's needs can be given to it in the same step.
+A throwaway space is wiped on stop. A persistent one keeps its workspace and comes back where it was. Every new space has git, ssh, unzip, curl, wget, jq, ripgrep, python3 and bun, and `--setup` runs a script inside once it is up.
 
-**In a fleet.** `--fleet <id> --code <code>` puts the space in a fleet: it
-joins with the operator's invite, waits to be admitted, then takes its place -
-the first admitted space is the primary that writes, the rest mirror it.
-`--expose` is dropped for a fleet space, because the fleet is how it is
-reached. `prime spaces enter` works only on the primary of a fleet: an edit
-made in a replica is thrown away when it mirrors. See
-[fleets.md](../docs/fleets.md).
+CPUs and memory are bounded, and the limits are required. Where the machine cannot enforce them, create refuses instead of running unbounded. Each space has its own network and cannot reach its sibling.
 
-**Runtimes.** macOS uses the Apple container CLI: one lightweight micro-VM per
-space, so root inside is not root on the host, and no Docker Desktop is needed.
-Linux uses rootless podman (a user namespace maps container root to your user);
-docker is a fallback and requires `--allow-rootful` unless it runs rootless. The
-host reaches the space over the runtime's private network - an Apple vmnet
-address, or a loopback publish - so nothing is exposed to the LAN.
+`--expose` puts a space behind the gateway, so a client anywhere can call its tools. The connect URL is a root password for that space: keep it to yourself. `--offline` gives the space no internet, and cannot be exposed.
 
-**State.** `--ephemeral` (default) deletes the container on stop: the next start is
-clean. `--persistent` mounts a named volume at `/root/work` and keeps the
-container on stop, so start resumes it.
+## Keep secrets
 
-**Networks.** Every space gets its own network (Apple vmnet or podman bridge),
-deleted with the space: two spaces cannot reach each other. The host connects over
-the space's private address; nothing is published to the LAN. `--offline` switches
-to an internal network (no internet) on both runtimes while the host keeps access.
-
-**Security.** Rootless runtime, no host mounts, no docker socket, per-space
-network; the space token lives in a 0600 file mounted read-only at
-`/run/prime/token`, so it never appears in the container config, env or inspect
-output.
-`--cpus` and `--memory` bound the container, and **limits are required**: when the
-runtime cannot enforce cgroups (podman without systemd, WSL2 crun fallback),
-create refuses instead of silently running unlimited, unless you pass
-`--allow-no-limits`. Online spaces have NAT (internet and host services on
-0.0.0.0, not the host filesystem); `--offline` gives a no-internet internal
-network on Apple and podman alike. The tool server only answers with the random
-per-space token. The image is `ghcr.io/tuanm/prime-space:<version>`, built
-multi-arch by the release workflow.
-
-**Diagnose.** `prime spaces doctor` prints the platform (including WSL2 detection),
-uid, podman version/rootless flag, cgroup manager and OCI runtime, the user
-systemd bus, crun availability, and whether each space enforces limits.
-
-**WSL2.** Rootless podman there needs a user systemd for cgroups; without one it
-fails while applying cgroup configuration or moving the rootless netns. Two fixes:
-
-1. Enable systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`), run `wsl --shutdown`,
-   then `loginctl enable-linger $USER`. This keeps cpus/memory limits.
-2. Or install **crun** (`sudo apt install crun`): only crun accepts NoCgroups, so
-   prime forces podman's `engine.runtime` to crun for its own containers (via
-   `CONTAINERS_CONF_OVERRIDE`) and retries with `--cgroups=disabled` (no limits:
-   create refuses unless `--allow-no-limits`). runc rejects that with "not
-   compatible with NoCgroups"; podman no longer has a per-container `--runtime`
-   flag.
-
-prime tries the default, then cgroupfs, then the crun fallback; the hint prints
-if every attempt fails. Spaces created before limit/token tracking can be listed
-(and show `unknown`), but `start` refuses them until they are recreated or
-`--allow-no-limits` is passed.
-
-**Flags.** `--image <tag>`, `--runtime apple|podman|docker`, `--offline`, `--allow-rootful`, `--allow-no-limits`.
-
-**Vaults and run.** The local vault is an encrypted SQLite database at
-`~/.prime/vaults.db` (AES-256-GCM). By default the key is a 0600 file under
-`~/.prime/keys/`; `prime vaults init --keychain` opts into the OS keychain
-(macOS Keychain / Secret Service, may show an authorization dialog). Existing
-keychain items are found automatically. Companies group values,
-secrets and TOTP codes. Values are injected into the space; secrets and TOTP codes are not. They stay in
-a host-side broker started on demand, and the space only holds placeholders and
-a per-space capability token (removed after startup). A space created with
-`--vault acme` (repeatable) or `--vault-all` gets the `run` tool: JavaScript with `tools.<name>({...})`,
-`values.<name>`, `secrets.<name>` and `codes.<name>` (`{code, expires_at}`).
-Inside the sandbox secrets are placeholders; the server forwards `tools.http` to
-the broker, which substitutes the real value only for hosts listed in that
-secret/code's `--allow-host` metadata and redacts the response. A request that
-uses a secret/code must be `https://`; every secret/code used on the request
-must individually allow that host. Local shell/file tools reject placeholders. The broker is a host process (not in the space), only
-holds scopes for running spaces, and exits after the last scope goes idle. The
-token/vault files are removed from the space as soon as it answers. On Apple containers the broker listens on the space's vmnet gateway; on Linux
-containers it listens on a Unix socket bind-mounted at /run/prime/broker.sock,
-so no network port is opened. Every request still needs the per-space capability
-token, secrets can only go to their allowed hosts, and abandoned scopes expire
-after a bounded time so a crashed host CLI cannot leave secrets in memory
-indefinitely.
+A vault groups entries into companies: plain values, secrets, and one-time codes. It is encrypted on this machine. The key is a private file by default; `--keychain` keeps it in the operating system's keychain instead.
 
 ```bash
-prime vaults init
+prime vaults init                                  # the vault and its key
 prime vaults company add acme
 prime vaults set acme value region --value eu-west-1
 printf '%s' "$API_TOKEN" | prime vaults set acme secret api --stdin --allow-host api.example.com
-prime vaults set acme code deploy --uri 'otpauth://totp/Acme:deploy?secret=...&issuer=Acme' --allow-host api.example.com
-prime vaults code acme deploy --json
-prime spaces create --name dev --vault acme
-prime tools call dev.run '{"code":"return await tools.http({url: \"https://api.example.com/me\", headers: {Authorization: \"Bearer \" + secrets.api}})"}'
-prime vaults status                                       # broker/pid/scopes
-prime vaults assign dev acme beta      # afterwards, restart the space
+prime vaults set acme code deploy --uri 'otpauth://totp/...' --allow-host api.example.com
+prime vaults code acme deploy --json               # the code right now
+prime vaults get acme value region
+prime vaults assign dev acme                       # afterwards, restart the space
+prime vaults status                                # is the broker running, and for what
 ```
 
-**Expose.** `--expose` publishes the space through the gateway as an anonymous
-device: the device buddy inside the space opens an outbound tunnel, so any
-client with the printed connect URL can call its tools (the local direct device
-stays too). The connect URL is a credential: anyone who has it can run commands
-as root in the space. Anonymous devices have a lower request budget and expire
-when unused; `--offline` cannot be exposed. The gateway is chosen with
-`--gateway` (default: saved default, then the managed gateway); pass
-`--gateway-token` only when the gateway requires one. Deleting the space removes
-the local entries; the anonymous device expires on the gateway once unused, and
-the local direct device stays available either way.
+A value is copied into a space that is assigned the company. A secret and a code are not. The space holds a placeholder, and a small broker on the host puts the real value into the request, only for the hosts that entry allows and only over https, then redacts the answer. The broker holds nothing for a space that is not running.
 
-**Monitor.** `prime spaces top <name>` is an htop-style view of one space: cpu,
-memory, net/block io, pids and the process list from inside the container, sorted
-by cpu and refreshed every 2 seconds (`q`/Ctrl-C quits). `--once` prints one
-snapshot, `--json` returns it as data, `--interval` and `--limit` tune it.
-Command lines that carry the space token are redacted.
+A space with a vault also gets a `run` tool: JavaScript that can reach `tools.<name>`, `values.<name>`, `secrets.<name>` and `codes.<name>`. Shell and file tools in the space reject a placeholder.
 
-## Calling tools
+`prime vaults get` masks a secret unless `--reveal` is passed. A secret cannot be given with `--value`, because it would show up in the process list; pipe it with `--stdin`.
 
-Five input forms, so every platform has one that needs no shell tricks. There
-is no `cat` in `cmd.exe` and no single-quote syntax either, which is why
-`--file` and `--arg` exist.
+## Run a fleet
 
-**1. Inline** - one reference and its arguments:
+A fleet is a named group of spaces that hold the same work. Exactly one space is in charge and writes; the others keep a copy and wait. The first space admitted takes charge, and when it goes quiet its lease runs out and another steps up with the work already in hand.
 
 ```bash
-prime tools call my-laptop.click '{"selector":"#submit"}'
-prime tools call my-laptop.snapshot '{}'
-prime tools call my-laptop.snapshot          # no arguments => {}
+prime fleets create acme                      # you own it
+prime fleets invite acme                      # a single-use code
+prime fleets join acme --code <code>          # from the joining machine
+prime fleets pending acme                     # who is waiting
+prime fleets approve acme --member <id>       # the operator's door
+prime fleets members acme
+prime fleets status acme
 ```
 
-**2. Key/value** - no JSON quoting at all, which is the form that behaves
-identically in cmd.exe, PowerShell and bash:
+A space can join as it is made:
 
 ```bash
-prime tools call my-laptop.click --arg selector=#submit
-prime tools call my-device.bash --arg cwd=C:/work --arg command="echo hi"
+prime spaces create --name alpha --fleet acme
+prime spaces create --name beta --fleet acme --code <code>
+prime fleets sync --space beta                # one round: publish or catch up
+prime fleets sync --space beta --watch        # keep the spaces in step
+prime fleets leave acme
 ```
 
-Values parse as JSON scalars when they look like one, so `n=5` is a number,
-`b=true` a boolean, `nil=null` null and `arr=[1,2]` an array; anything
-else stays a string. Repeat `--arg` once per argument.
-
-**3. Paired** - several tools in one command, executed in order:
-
-```bash
-prime tools call laptop.snapshot '{}' phone.screenshot '{"full":true}'
+```mermaid
+sequenceDiagram
+  participant Operator
+  participant Gateway
+  participant Space
+  Operator->>Gateway: invite
+  Operator->>Space: the code
+  Space->>Gateway: join
+  Gateway->>Operator: waiting
+  Operator->>Gateway: admit
+  Gateway->>Space: in step
 ```
 
-Calls run **sequentially by default** so side-effecting tools (clicks, typing)
-keep their order. `--parallel` runs them concurrently when they are
-independent, with at most `--concurrency` (default 8) in flight - firing every
-call at once would trip the gateway's per-IP rate limit and its per-device
-pending cap, turning a large batch into a pile of failures.
+Knowing the fleet's name is never enough to join. An invite is the invitation; the operator is the door. A fleet also answers as a device with its own token, so a client sends a job to the fleet and does not need to know which space ran it.
 
-**4. File** - the portable replacement for `cat x.json | prime tools call`:
+A space in a fleet is not exposed, because the fleet is how it is reached. Only the space in charge takes edits; an edit made in a copy is thrown away when it mirrors.
 
-```bash
-prime tools call --file calls.json       # or -f
-prime tools call @calls.json             # same thing, positional
-prime tools call -f a.json -f b.json     # repeatable; the files' calls merge in order
-prime tools call --file -                # "-" means stdin
-```
+## Things people do with it
 
-**5. stdin** - explicitly, or automatically when stdin is not a terminal:
+- **Reach the machine at home from a cafe.** Run `prime connect` once on the desktop, then save it elsewhere with `prime devices connect desktop --token <token>`. A call like `prime tools call desktop.bash '{"command":"git status"}'` runs on the machine at home, and nothing was opened on the network to reach it.
+- **Hand a build to another machine.** `prime files upload ./build.zip --key hunter2` leaves it with the gateway, and `prime files download build.zip --key hunter2` picks it up somewhere else before the seven days are up.
+- **Try a script you do not trust.** `prime spaces create --name risky` gives a throwaway container with its own network. Run the script with a call like `prime tools call risky.bash '{"command":"./run.sh"}'`, then `prime spaces delete risky`, and nothing of it is left on your machine.
+- **Keep an API token out of a space.** Put the token in a vault company with `--allow-host`, assign the company to the space, and the space reaches the API through its `run` tool. The token itself never enters the container.
 
-```bash
-type calls.json | prime tools call         # cmd.exe
-Get-Content calls.json | prime tools call  # PowerShell
-cat calls.json | prime tools call          # bash
-prime tools call --stdin < calls.json
-```
+## In a script
 
-```json
-{ "name": "my-laptop.click", "arguments": { "selector": "#submit" } }
-```
+Every command prints plainly, and `--json` gives one shape for a result and one for a failure. `--quiet` prints errors only, `--verbose` adds timing, and `--no-color` keeps a log clean.
 
-```json
-[
-  { "id": 1, "name": "my-laptop.snapshot", "arguments": {} },
-  { "id": 2, "name": "my-laptop.click", "arguments": { "selector": "#submit" } }
-]
-```
-
-Output follows the input: a single call prints the tool's text content on stdout;
-a batch labels each result with its `id` in the specified order. `--json`
-prints the raw result for a single call and an array of
-`{ id, name, ok, result | error }` for a batch.
-
-A tool that reports failure (`isError`) is printed and exits 1. In a batch, one
-failing call does not abort the others - every outcome is reported and the exit
-code is 1.
-
-A specification file (or stdin) holds one call object, or an array of them.
-Calls without an `id` are numbered automatically, continuing across multiple
-files. A UTF-8 BOM and CRLF line endings are both tolerated, because Windows
-editors emit them.
-
-### Results and failures
-
-Output follows the input: a single call prints the tool's text content on stdout;
-a batch labels each result with its `id` in the specified order. `--json`
-prints the raw result for a single call and an array of
-`{ id, name, ok, result | error }` for a batch.
-
-**Failures are per call and never cascade.** If three calls are requested and the
-middle one fails, the other two still run, still return their results, and are
-still printed:
-
-```text
---- [1] my-laptop.snapshot
-...the snapshot...
-
---- [2] my-laptop.click (isError)
-Element not found: #submit
-
---- [3] my-laptop.evaluate
-42
-```
-
-The command then exits **1**, because the overall result was a failure. This holds
-in sequential and `--parallel` mode alike - a failing or timing-out call never
-cancels its siblings, and each call keeps its own timeout. A failing call that is
-the *only* call keeps its specific exit code instead (3 auth, 4 offline,
-5 timeout), so single-call scripts can still branch on the failure class.
-
-### Device and tool references
-
-`<device-id>.<tool-id>` is split on the **longest configured device id**, so a
-device named `alpha.v2` and a tool named `file.read` both resolve correctly:
-
-```text
-alpha.v2.echo     -> device "alpha.v2", tool "echo"
-alpha.file.read   -> device "alpha",   tool "file.read"
-```
-
-When a label is genuinely ambiguous, `--device` and `--tool` override either
-half.
-
-## Configuration
-
-Defaults live in `~/.prime/config.yaml` (override with `--config` or `PRIME_CONFIG`). The file holds secrets: it is created `0600` inside a
-`0700` directory, and every write is atomic.
-
-```yaml
-defaults:
-  gateway: "https://gw.example.dev"
-  gateway_token: "gw-..."
-  token: "dev-..."
-  timeout_ms: 300000
-devices:
-  my-laptop:
-    token: "dev-laptop-secret"
-    connected_at: "2026-02-14T09:00:00.000Z"
-```
-
-Per field, precedence is:
-
-```text
---flag  >  environment variable  >  device entry  >  defaults section
-```
-
-The gateway additionally falls back to `https://prime.tuanm.workers.dev`
-when none of these sets one.
-
-Devices created by `prime connect` are stored like any other, with their own
-gateway and `anonymous: true`:
-
-```yaml
-devices:
-  anon-05ece6d0e71cfce9:
-    gateway: "https://prime.tuanm.workers.dev"
-    token: "O184FH"
-    anonymous: true
-```
-
-| Environment variable | Meaning |
+| Code | Means |
 | --- | --- |
-| `PRIME_CONFIG` | Config file path |
-| `PRIME_GATEWAY_URL` | Gateway origin |
-| `PRIME_GATEWAY_TOKEN` | Gateway credential (`Authorization: Bearer`) |
-| `PRIME_DEVICE_TOKEN` | Device credential (`X-Device-Token`) |
-| `PRIME_TIMEOUT_MS` | Per-request timeout |
+| 0 | it worked |
+| 1 | a tool call failed |
+| 2 | a usage error: a bad flag, bad JSON, an unknown command |
+| 3 | authentication rejected |
+| 4 | the buddy is offline |
+| 5 | the call timed out |
 
-Two credentials are involved: the **gateway token** authenticates you to the
-Worker, and the **device token** is forwarded through the tunnel to the device.
-A deployment may use either, both, or neither.
+Code 3 and code 4 sit close together on purpose. A gateway that uses per-buddy tokens answers 3 for an id it does not know, so nobody can list valid ids. Only a known buddy that is disconnected gets 4.
 
-## Exit codes
+Each field comes from the flag first, then the environment, then the buddy's entry, then the defaults section. The gateway itself falls back to `https://prime.tuanm.workers.dev`. `PRIME_GATEWAY_URL`, `PRIME_GATEWAY_TOKEN`, `PRIME_DEVICE_TOKEN` and `PRIME_TIMEOUT_MS` set the common fields, and `PRIME_CONFIG` points at another config file.
 
-| Code | Meaning |
+Two tokens are in play. The gateway token admits you to the gateway; the buddy token travels through to the buddy. A gateway may ask for either, both or neither.
+
+A request is retried only when it provably never reached the tool: a rate limit, a full queue, a failed tunnel send. A timeout or a dropped connection is reported instead. The tool may still be running, and running it twice is worse.
+
+## Limits
+
+| What | Limit |
 | --- | --- |
-| 0 | Success |
-| 1 | A tool call failed (including `isError` results) |
-| 2 | Usage error: bad flags, bad JSON, unknown command |
-| 3 | Authentication rejected (401) |
-| 4 | Device offline (503) |
-| 5 | Timeout |
+| A shared file | 200 MiB, seven days, five files and 500 MiB per buddy |
+| An anonymous buddy | a lower request budget, no file storage, deleted when unused |
+| A gateway | 100 buddies by default |
+| A space | cpu and memory limits it cannot lift, and no folder of yours inside |
+| An exposed space | anyone holding the connect URL can run commands as root inside |
+| A served endpoint | no authentication, and loopback only unless you widen it |
 
-Note on 3 versus 4: a gateway configured with **per-device tokens** answers 401
-for a device id it does not know, deliberately, so nobody can enumerate valid
-ids. That means an *unregistered* id exits 3, and only a *registered but
-currently disconnected* device exits 4.
+## What it does not do
 
-With `--json`, failures are printed as `{ "error": { "message", "hint", "exit_code" } }`
-on stdout, so a script can read both the reason and the code.
-
-## Performance
-
-### Cold start
-
-Measured on an M1 Mac with the three candidates **interleaved**, 60 runs each,
-every run's exit code checked (a plain `/usr/bin/true` costs ~3 ms on the same
-harness, so the CLI's own startup is a few ms less than the figures below):
-
-| Build | min | median | p90 | Size |
-| --- | --- | --- | --- | --- |
-| compiled + `--bytecode` | **11.2 ms** | 13.2 ms | 16.1 ms | 60.9 MB |
-| compiled, no bytecode | 16.7 ms | 19.9 ms | 22.2 ms | 59.4 MB |
-| `bun dist/prime.js` | 18.4 ms | 20.6 ms | 22.2 ms | 36.4 KB |
-
-**`--bytecode` is worth 33% of cold start** for ~1.5 MB of binary, which is why
-the build uses it. It requires the entry module to avoid top-level `await` -
-`src/index.ts` uses a floating async IIFE for exactly that reason.
-
-The compiled binary is now faster than the bundle; the bundle's advantage is
-purely distribution size (36 KB vs 60-82 MB) when Bun is already installed.
-Peak resident memory is ~15 MB either way.
-
-### Multi-call throughput
-
-Eight calls to a tool that takes 200 ms each, through a local gateway:
-
-| Calls | Sequential | `--parallel` | Speedup | Sequential per call |
-| --- | --- | --- | --- | --- |
-| 1 | 234 ms | 233 ms | 1.00x | 218 ms |
-| 2 | 452 ms | 248 ms | 1.82x | 218 ms |
-| 4 | 890 ms | 261 ms | 3.40x | 218 ms |
-| 8 | 1747 ms | 280 ms | 6.23x | 216 ms |
-
-Sequential per-call overhead beyond the tool's own 200 ms is ~18 ms, which
-includes process start, TLS reuse and the gateway round trip. `--parallel`
-costs the same for 8 calls as for 1 because they are dispatched concurrently.
-
-Failure isolation was measured in both modes with the pattern
-`[ok, FAIL, ok]`: exit code 1, both successful results present, failure
-reported - and the same for a mid-batch timeout.
-
-Against the deployed gateway (prime.tuanm.workers.dev, device on a home
-connection) a single `tools call` costs ~0.4-1.2 s end to end depending on
-network conditions - Cloudflare edge plus the device round trip, not CLI
-startup. HTTP round trips per command: **1**.
-
-`--parallel` scales on the real gateway too, with a device that sleeps 2 s per
-call:
-
-| Calls | Sequential | `--parallel` | Speedup |
-| --- | --- | --- | --- |
-| 1 | 2599 ms | 2528 ms | 1.03x |
-| 2 | 4955 ms | 2650 ms | 1.87x |
-| 4 | 10416 ms | 2554 ms | **4.08x** |
-
-Four parallel calls finish in the same wall time as one.
-
-Design choices behind those numbers:
-
-- **No dependencies.** JSON-RPC over `fetch` is ~150 lines; the config file is
-  parsed with Bun's built-in `Bun.YAML.parse`, and the CLI writes YAML with a
-  small emitter. Nothing to resolve, nothing to load.
-- **One round trip per command.** Tool servers *should* require `initialize`
-  before other requests, but current devices do not. `--handshake auto`
-  (the default) therefore calls directly and only handshakes if the server
-  actually complains - see `--handshake always|never` to force it.
-- **Connection reuse within a batch.** A batch spanning several devices creates
-  one client per device, not per call.
-- **Concurrent probes for `devices list`**, with a short probe timeout so a stuck
-  device cannot stall a listing.
-- **Bytecode-compiled binaries** (`--bytecode`), which remove most of the module
-  graph's parse/compile cost at startup.
-- **Per-call isolation in batches**, so a call that rejects for any reason -
-  including a bug in the error path itself - cannot discard its siblings'
-  results.
-- **Bounded concurrency** (`--concurrency`, default 8) instead of firing every
-  call at once, which would trip the gateway's per-IP rate limit and its
-  per-device pending cap.
-- **Retries only where they are provably safe** - see below.
-
-## Reliability
-
-A retry is only safe when the request provably never reached the tool, so the
-CLI retries a deliberately narrow set of failures, up to 3 attempts with
-exponential backoff and jitter:
-
-| Failure | Retried | Why |
-| --- | --- | --- |
-| 429 rate limited | yes | rejected at the gateway, never forwarded |
-| 502 device send failed | yes | the tunnel send itself failed |
-| 503 device busy | yes | the pending queue was full, never forwarded |
-| 503 device offline | no | nothing to wait for |
-| 504 / timeout | **no** | the tool may still be running |
-| dropped connection | **no** | the request may have been delivered |
-
-The last two matter: retrying them could run a side-effecting tool twice, so the
-CLI would rather report a failure you can retry yourself. A retry never extends
-`--timeout` - the timeout is the budget for the whole call, retries included.
+- It does not help with a machine that is already compromised. A buddy is its machine, and whoever holds its token holds that machine.
+- A shared file is not private by itself. A file with no key is readable by anyone who has the link while it lasts.
+- It does not retry a call that may already have run. A timeout is reported, and trying again is your decision.
+- A fleet copy is read-only. An edit made in a copy is thrown away when it mirrors.
+- A connect URL is a password. Anyone holding it can run commands in that space.
+- A served endpoint is not safe to expose. It has no authentication, so keep it on loopback.
 
 ## Updating
 
-The CLI ships as a self-contained binary with no package manager behind it, so
-it updates itself:
+prime carries no package manager, so it updates itself:
 
 ```bash
-prime update              # install the newest release (alias: prime upgrade)
-prime update --check      # only report whether one exists
-prime update --json       # machine-readable result
+prime update                 # the newest release (alias: prime upgrade)
+prime update --check         # is there one?
+prime update --force         # reinstall the current one
+prime update --to ./prime    # install somewhere you own
 ```
 
-```text
-  current   26.10.3
-  latest    26.10.4
-  installed 26.10.4 -> /Users/you/.local/bin/prime
-```
+An update fetches the release for this platform, checks it against the release's checksum, and swaps the file in one step, so an interrupted update cannot leave half an executable. A release without a checksum is refused. The checksum proves the download arrived intact, not that the release is trustworthy.
 
-It lists the repo's releases, keeps the `prime-v*` tags, picks the highest by
-SemVer, downloads the asset for this platform, checks it against the release's
-`SHA256SUMS`, and replaces the file atomically - so an interrupted update cannot
-leave a half-written executable. A release without `SHA256SUMS` is refused
-rather than installed unverified; note that this proves the download is intact
-and is what the release published, **not** that the release itself is
-trustworthy.
+A directory you cannot write says so, and suggests the privileges that own it or `--to`. On Windows the running file is renamed aside and removed on the next run. A version carries the year and the month, so `prime --version` says how old the download is.
 
-| Situation | Behaviour |
-| --- | --- |
-| Already newest | Reports "already up to date", changes nothing |
-| `--check` | Never writes, and works from a source checkout |
-| Not writable (e.g. `/usr/local/bin`) | Explains and suggests `sudo prime update` or `--to <path>` |
-| Windows, binary in use | Renames the running `.exe` to `<path>.old` (Windows allows a rename, not an overwrite), installs the new one in its place, and removes `.old` on the next run |
-| Source checkout (`.ts`) | Refuses, so your working tree is never overwritten |
-| `--to install/prime.js` | Installs the JS bundle instead of a native binary |
+## Where to read more
 
-Other flags: `--force` reinstalls the current version, and
-`--release-version <v>` installs one specific version.
-
-One caveat: a release built before this command existed cannot update itself.
-Install that one release by hand (below), and `prime update` takes over from there.
-
-## Releasing
-
-`.github/workflows/release-cli.yml` builds every platform on a single Linux
-runner (Bun cross-compiles) and publishes a GitHub Release:
-
-```bash
-git tag prime-v26.10.3
-git push origin prime-v26.10.3
-```
-
-The tag supplies the version baked into the binaries, so `prime --version` in a
-release reports the release it came from.
-
-### Versioning
-
-Versions are dates: **26.10.3** is 2026-10-03. For a 60 MB binary with no
-auto-update, `prime --version` telling you *how stale* the download is matters more
-than a compatibility signal.
-
-The one subtlety is that the version also lands in `package.json` and a Release
-tag, and both are parsed as SemVer - which **forbids leading zeros**. So the day
-is not padded: `26.10.3`, never `26.10.03`. (`npm pack` accepts the padded form,
-so this fails late and confusingly.) A second release on the same day uses build
-metadata: `prime-v26.10.3+1`.
-
-`cli/src/version.ts` is the single source of truth, enforced by both the build
-(`bun run build --version <v>` rejects a bad value with a hint) and the release
-workflow. Use plain SemVer instead if the CLI ever gains consumers who pin it. A manual `workflow_dispatch` run builds
-the same artifacts and uploads them as workflow artifacts without publishing a
-release. Each release carries the five platform binaries, the JS bundle, and a
-`SHA256SUMS` file.
-
-## Development
-
-```bash
-bun run test          # unit + feature tests (offline; fake gateway in-process)
-bun test:e2e          # end-to-end: boots a local wrangler gateway + mock devices
-bun run typecheck     # tsc with tsconfig.typecheck.json
-bun test:service      # prime service against this OS's real service manager
-```
-
-### The bundled device buddy
-
-The device buddy lives in this package as one module (`src/code-mcp.ts`), which the binary embeds -
-so a binary embeds exactly the device buddy of the commit it was built
-from.
-
-- It is a script with top-level side effects, so it is never imported
-  statically: only `prime code-mcp` loads it, via `await import("#code-mcp")` (a
-  `package.json` subpath import, a static string so `bun build` embeds it). It is
-  excluded from `tsc` (mapped to `src/code-mcp.stub.d.ts`) because it is written
-  to its own conventions, not this package's strict settings. It uses top-level
-  `await`, which is why binaries are compiled with `--bytecode --format=esm`.
-- The build smoke-tests the server's `--help` on the bundle and the host binary from
-  a directory outside the repository, so a build that lost it fails.
-
-The end-to-end suite compiles the host binary and drives it against a real local
-gateway, covering both credentials, the tunnel relay, every input form, exit
-codes, handshake modes, dotted device ids, sequential ordering, `--parallel`
-overlap, timeouts, and the offline path - and the anonymous flow: `prime connect`
-registering and reusing a device, running the embedded device buddy (from a
-directory without `src/`), real device tools through the connect URL, and
-`prime serve` over stdio and HTTP.
+Every command has its own page: `prime help connect`, `prime help spaces`, `prime help fleets`, `prime help vaults`, and so on. `prime help` with no topic lists the rest.

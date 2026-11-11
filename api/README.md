@@ -1,457 +1,260 @@
-# Prime — Cloudflare Worker
+# Prime gateway
 
-**Production gateway for exposing devices to MCP clients, built on Cloudflare Workers + Durable Objects. Per-device authentication, long-call support, zero servers.**
+The gateway is the door between a tool call and the machine that runs it. A buddy connects out once, the gateway holds that one tunnel, and every call for that buddy goes down it and comes back with an answer.
 
-## Overview
+## How a call travels
 
-| Topic | Answer |
-| --- | --- |
-| **What** | WebSocket tunnel gateway: a device connects once; MCP clients relay JSON-RPC calls to it over HTTP |
-| **Where** | Cloudflare Worker + Durable Objects (needs a **Paid** plan) |
-| **Why DOs** | A Worker's memory is per-isolate; only a Durable Object per `deviceId` guarantees every `/mcp` request finds the device's WebSocket |
-| **Protocol** | Wire-compatible with the device protocol: register / keepalive / JSON-RPC envelope |
-| **Client transports** | **Streamable HTTP** (`POST /device/{id}`) and **HTTP with SSE** (`GET /device/sse/{id}` + `POST /device/messages/{id}`) — auth-identical, both relay over the device tunnel |
-| **Cost model** | Idle tunnels hibernate (WebSocket Hibernation API); no servers to run |
-
-## Architecture
-
-```mermaid
-flowchart LR
-    C[MCP client] -->|"POST /device/{deviceId}"| W
-    D[Device<br/>device buddy] -->|"wss /device/ws/{deviceId}?token=…"| W
-    subgraph CF [Cloudflare Worker]
-        W[entry — src/index.ts<br/>routing, auth, rate limit]
-        DO[DeviceDO — src/device-do.ts<br/>per deviceId<br/>WebSocket + pending registry]
-        R[RegistryDO — src/registry-do.ts<br/>online deviceIds]
-    end
-    W -->|stub.fetch| DO
-    W -->|idFromName| R
-    DO <-->|"register / keepalive / JSON-RPC"| D
-    R -.->|"GET /devices — admin token"| C
-```
-
-| Component | Responsibility |
-| --- | --- |
-| `src/index.ts` | Route `/devices`, `/device/{id}`, `/device/ws`; gateway + device auth **before** any DO; per-isolate rate limiting; origin whitelist |
-| `src/device-do.ts` | One object per device: owns the WebSocket, pending-request registry, request timeout, keepalive watchdog (alarm-driven), per-device pending budget |
-| `src/registry-do.ts` | Single shared object: online deviceIds for `GET /devices`, persisted, TTL-swept |
-| `src/config.ts`, `src/rate-limit.ts`, `src/protocol.ts` | Env config + helpers, limiter, tunnel envelope types |
-
-### Request flow
+Nothing on your machine listens to the network. The buddy opens one connection out and keeps it. A client sends a tool call to the gateway over plain HTTP. The gateway proves the caller, finds the buddy's open tunnel, and passes the call down it. The buddy runs the tool and sends the result back. The client gets one HTTP answer and never learns where the machine sits.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant D as Device
-    participant W as Worker entry
-    participant DO as DeviceDO
-    participant C as MCP client
-
-    D->>W: wss /device/ws/{deviceId}?token=T
-    W->>W: deviceKnown(T) — 401 if unknown/bad
-    W->>DO: forward upgrade + x-auth-token
-    DO->>D: 101 — token re-checked (defense in depth)
-    D->>DO: { type: "register", deviceId }
-    DO-->>D: { type: "registered" }
-
-    C->>W: POST /device/{deviceId} + token
-    W->>W: gateway token, rate limit, body cap, budget
-    W->>DO: stub.fetch (idempotent routing)
-    DO-->>D: { id, request, token? }
-    D-->>DO: { id, response }
-    DO-->>C: 200 — JSON-RPC response
+  participant C as Client
+  participant G as Gateway
+  participant B as Buddy
+  C->>G: POST /device/{id} with a tool call
+  G->>G: prove the token
+  G->>B: forward over the open tunnel
+  B->>B: run the tool
+  B-->>G: the result
+  G-->>C: the answer
 ```
 
-## Deploy
+A call may take its time. The tunnel waits, and the HTTP answer waits with it, up to five minutes by default. Only computation is billed, not waiting, so a build or a recording that takes minutes is an ordinary call.
 
-Use Node.js 22 or newer and the repository's locked Wrangler 4 dependencies.
-The production configuration includes a container image; Docker with the buildx
-plugin must be available. The local test configuration omits containers.
+## Who answers in a fleet
 
-```bash
-cd gateway
-npm install
-npx wrangler secret put DEVICE_TOKENS   # REQUIRED for secure deployments
-npx wrangler secret put ADMIN_TOKEN     # optional — gates GET /devices
-npx wrangler deploy
+A fleet is a named group of spaces that hold the same work. One of them holds the lease and does the writing. The rest keep an identical copy and wait their turn.
+
+A fleet is also a buddy. It has its own name and its own token, so a client calls the fleet and never one machine. The gateway asks the fleet which member holds the lease, then relays the call there. When that member goes quiet the lease runs out and another steps up, with the work already in step. A call made in the gap fails and says which member it could not reach.
+
+```mermaid
+flowchart TD
+  call[Client calls the fleet by name] --> lease{Who holds the lease}
+  lease -->|one member| primary[That member answers]
+  lease -->|ran out| nextUp[The next member steps up]
+  nextUp --> primary
+  lease -->|nobody| none[The fleet says it has no primary]
 ```
 
-### Secrets
+The lease is renewed every five seconds and lasts fifteen, so a lost round or two is still a live primary. A space that is stopped, or switched off by the operator, gives the lease back at once. The member that takes it applies what it is missing before it writes, so a fleet never forks.
 
-| Secret | Required | Effect |
+## Endpoints
+
+Every endpoint is a URL the gateway answers. The paths below are the ones to use. Older aliases still answer, and the same way.
+
+### Buddies
+
+| Endpoint | Needs | What it does |
 | --- | --- | --- |
-| `DEVICE_TOKENS` | recommended | JSON map `{"deviceId":"token",…}`; authenticates devices at `/device/ws` and relay requests at `/mcp` |
-| `DEVICE_TOKEN` | optional | Shared fallback token for all devices when no per-device map is set |
-| `GATEWAY_TOKEN` | optional | Client → gateway bearer auth for `/device/*` |
-| `ADMIN_TOKEN` | optional | `GET /devices` auth (defaults to `GATEWAY_TOKEN`); endpoint hidden (404) when neither is set |
-| `VIRTUAL_DEVICE_TOKENS` | for cloud device | JSON map `{"cloud":"token",…}`; credentials for the in-process virtual device |
+| `POST /api/devices/anonymous` | gateway token if set | Create a throwaway buddy. The answer carries its id, its code and a connect URL. |
+| `WS /device/ws/{deviceId}` | the buddy's token, or a one-use ticket | Open the tunnel the gateway keeps. |
+| `POST /device/{deviceId}` | gateway token and the buddy's token | Carry one JSON-RPC call and return the answer. |
+| `GET /device/sse/{deviceId}` | gateway token and the buddy's token | Open an event stream. The first event names the URL for posting calls. |
+| `POST /device/messages/{deviceId}?session=` | gateway token and the buddy's token | Send one call over that stream. The answer arrives on the stream. |
+| `GET /device/{deviceId}/download/{ticket}` | gateway token and the buddy's token | Download a file the buddy hands out by ticket. |
+| `POST /device/{fleetId}` | the fleet's token | Send a call to whichever member holds the lease. |
 
-## Cloud device (virtual device + coding sandbox)
+The older paths `/mcp/{deviceId}`, `/sse/{deviceId}`, `/messages/{deviceId}` and `/ws/{deviceId}` are the same endpoints. A second connect from the same buddy replaces a tunnel that has gone quiet. It is refused while the old tunnel is still live.
 
-The gateway also exposes an **in-process device** (`deviceId: cloud`, from `VIRTUAL_DEVICE_IDS`) that needs no tunnel. Its tools run in the Worker against Cloudflare services, and — for shell/file/jobs — inside a **Cloudflare Container** (dev image: node, bun, python, git, bash, ripgrep; see `Dockerfile` + `src/coding-sandbox.ts`).
+### Pages
 
-Tools (the device tool naming convention): `bash`, `read`, `write`, `ls`, `job`, `fetch`, `search`, `kv`, `sql`, `guide`. The sandbox is the only place with real processes: plain Workers cannot spawn them.
+| Endpoint | Needs | What it does |
+| --- | --- | --- |
+| `GET /` | public | The front page. |
+| `GET /connect` | public | Set up a buddy on this machine. |
+| `GET /connect/{deviceId}` | the buddy's token | The sandbox page for that buddy. |
+| `GET /sandbox` | the buddy's own credentials | Run a buddy in this browser tab. |
+| `GET /join` | public | What a fleet is, told plainly. |
+| `GET /security` | public | What the design does for you, and what it cannot. |
+| `GET /files` | the buddy's own credentials | The file management page. |
+| `GET /files/{id}` | public, or the file's key | The download page for one file. |
+| `GET /mcp` | public | A redirect to the connect page. |
 
-| Component | Responsibility |
+### Files
+
+Files authenticate with the buddy's own id and token, over HTTP Basic. There is no separate secret to keep. Uploads are raw bytes and stream straight through, so a large file is never held in memory. A protected file travels with a key in the `X-File-Key` request header, never in a URL, so a key cannot reach an access log, a browser history or a referrer. A link never carries the key either; send it separately, through a channel you already trust.
+
+| Endpoint | Needs | What it does |
+| --- | --- | --- |
+| `POST /api/files?name=&expiry_days=` | the buddy's own credentials | Upload raw bytes and get the id and links back. |
+| `GET /api/files` | the buddy's own credentials | What this buddy stores, and how much of its budget is spent. |
+| `GET /api/files/{id}` | the buddy's own credentials, or the file's key | Download the file. Ranges are supported. |
+| `PATCH /api/files/{id}` | the buddy's own credentials | Set or clear the file's key. |
+| `DELETE /api/files/{id}` | the buddy's own credentials | Delete the file now. |
+
+### Fleets
+
+| Endpoint | Needs | What it does |
+| --- | --- | --- |
+| `GET /fleets` | gateway token | List the fleets. |
+| `POST /fleets/{fleet}` | gateway token, or a buddy's token | Create a fleet. |
+| `POST /fleets/{fleet}/join` | a buddy's token and the invite code | Ask to join. It waits until the operator admits it. |
+| `POST /fleets/{fleet}/bootstrap` | a member's token | Take the lease or become a replica, in one step. |
+| `GET /fleets/{fleet}` | a member's token | The roster. Ids are cut short for everyone but the operator. |
+| `GET /fleets/{fleet}/head` | a member's token | Where the work has got to. |
+| `POST /fleets/{fleet}/snapshot` | the primary's token | Publish a sealed pack and its manifest in one call. |
+| `GET /fleets/{fleet}/packs/{hash}` | a member's token | Fetch a pack that is missing. |
+
+### Operator
+
+These need Cloudflare Access, unless the row says otherwise. The gateway verifies the Access assertion itself, so a broken Access application closes the page instead of opening it.
+
+| Endpoint | Needs | What it does |
+| --- | --- | --- |
+| `GET /devices` | admin token | Which buddies are online. Hidden when no admin token is set. |
+| `GET /admin` | Access | The operator page. |
+| `GET /admin/api/devices` | Access | The whole registry, with tokens, state and where each buddy connects from. |
+| `POST /admin/api/devices` | Access | Register a buddy or change its token. A new token drops the old tunnel. |
+| `DELETE /admin/api/devices/{id}` | Access | Remove a buddy. |
+| `POST /admin/api/devices/{id}/state` | Access | Switch a buddy off or on. Off drops its tunnel and its leases. |
+| `GET /admin/api/devices/{id}/clients` | Access | Who called that buddy lately. |
+| `POST /admin/api/devices/{id}/tools` | Access | The tools it exposes, fetched for the page so the token stays in the gateway. |
+| `GET /admin/api/anonymous` | Access | Anonymous buddies by reference. Their ids and codes are never shown. |
+| `POST /admin/api/anonymous/{ref}/state` | Access | Switch one off or on. |
+| `GET /admin/api/anonymous/{ref}/clients` | Access | Who called it lately. |
+| `POST /admin/api/anonymous/{ref}/tools` | Access | The tools it exposes. |
+| `DELETE /admin/api/anonymous/{ref}` | Access | Delete it. |
+| `GET /admin/api/fleets` | Access | Every fleet, its members, and who holds the lease. |
+| `POST /admin/api/fleets/{fleet}` | Access | Create a fleet. |
+| `POST /admin/api/fleets/{fleet}/invite` | Access | Mint a one-use invite code. |
+| `POST /admin/api/fleets/{fleet}/approve` | Access | Admit a waiting buddy. |
+| `POST /admin/api/fleets/{fleet}/remove` | Access | Take a member out. |
+| `POST /admin/api/fleets/{fleet}/buddy` | Access | Set the fleet's own token. |
+| `POST /admin/api/fleets/{fleet}/meta` | Access | Rename a fleet, or pause it. |
+| `DELETE /admin/api/fleets/{fleet}` | Access | Delete a fleet. Its spaces are left alone. |
+| `GET /admin/api/usage` | Access | What the month has cost so far. |
+| `GET, POST, DELETE /admin/api/blocked` | Access | Block or unblock an address. |
+
+## Security
+
+**Every call is proved.** A buddy is an id and a token. The gateway checks both before it moves anything, on the tunnel and again on every call. A wrong pair gets a plain refusal, and an unknown id gets the same refusal, so nobody can tell a real buddy from a made-up one. A buddy that is switched off loses its tunnel at once, and a rotated token stops working at the next call. An address the operator blocks reaches nothing but the operator page.
+
+**One tunnel, one buddy.** Each buddy has a place of its own. A tunnel can answer only the calls made to its own id, so a call can never land on the wrong machine.
+
+**The gateway carries what it cannot read.** File contents are bytes it never inspects. A fleet's snapshots are sealed for the members' keys, so the gateway stores ciphertext it cannot open. It keeps no request log.
+
+**The operator page has two gates.** Cloudflare Access proves who the person is. The gateway then verifies that assertion itself, so removing or breaking the Access application closes the page instead of exposing it. Listing the online buddies uses a token instead, and when no admin token is set that endpoint does not exist at all.
+
+**Anonymous buddies are kept small.** A stranger can ask for a buddy and get a short code. That buddy is rate-limited harder, cannot store files, and locks for ten minutes after twenty wrong codes. A fleet invite is single use, short lived and stored as a hash, and nothing joins a fleet unnoticed: the operator admits each buddy by hand.
+
+**A fleet call carries the primary's credential.** The gateway relays with the token of the member that holds the lease. Which member that is comes from a proven credential, never from a string the caller sends.
+
+## Limits
+
+| What | Limit |
 | --- | --- |
-| `src/cloud-device.ts` | In-process MCP server for virtual devices; routes tools to KV/D1 or the sandbox |
-| `src/coding-sandbox.ts` | `CodingSandbox` — Container DO with RPC methods (`shellRun`, `fs*`, `job*`) |
-| `Dockerfile` | Dev image built on deploy (needs a local Docker daemon, e.g. `colima start`) |
+| One call | 300 s, then the gateway stops waiting |
+| Body of one call | 1 MiB |
+| Calls in flight per buddy | 100 |
+| Silence on a tunnel | 90 s, then it is dropped |
+| Event streams per buddy | 32 |
+| Buddies on the gateway | 100, anonymous included |
+| Calls from one address | 100 per minute |
+| Calls to an anonymous buddy | 30 per minute per address |
+| New anonymous buddies | 5 per address per hour |
+| One file | 200 MiB |
+| One file's life | 7 days |
+| Files per buddy | 5, and 500 MiB together |
+| A ticket download | 100 MiB, 10 minutes, 4 at a time |
+| Members in a fleet | 32 |
+| An invite | 10 minutes, one use |
 
-Deploy requires the `[[containers]]` binding + a `CODING_SANDBOX` DO binding + migration `v2`. First deploy builds/pushes the image and provisions the container (can take a few minutes).
+The rate limit counts in memory, so two copies of the gateway can each let a burst through. A Cloudflare rule on the address is the hard ceiling. A month's fleet budget is another ceiling: when it is spent, fleet calls answer 402 until it is raised or the month turns over.
 
-Token transport on any endpoint: `Authorization: Bearer <token>`, `?auth=<token>`, `?token=<token>`, or `X-Device-Token` (device credentials).
+## Three ways to run it
 
-### Tunables (`[vars]` in `wrangler.toml`)
+### A teammate needs the tools, not the laptop
 
-| Variable | Default | Meaning |
+Register the buddy in the operator page and give it a token. Hand over the token, not a login. When the work is done, change the token in the same place; the old one stops at the next call and the tunnel that used it is dropped.
+
+```bash
+prime devices connect my-laptop --token t        # keep the id and token on their machine
+prime tools call my-laptop.bash '{"command":"git status"}'
+```
+
+### A build that runs for minutes
+
+Start a buddy on the build machine, then let CI make one call. The answer waits while the build runs. Nothing is polled and nothing is queued. A call may run for five minutes by default; raise `TIMEOUT_MS` when the build needs longer.
+
+```bash
+curl -sS -X POST "https://YOUR-GATEWAY/device/build-box" \
+  -H "Authorization: Bearer $GATEWAY_TOKEN" \
+  -H "X-Device-Token: $DEVICE_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash","arguments":{"command":"make -j8"}}}'
+```
+
+### A file that lives for a week
+
+Files are for the handoff that is not worth a bucket of its own: a report, a log, a screenshot. Upload it, share the link, let it expire.
+
+```bash
+prime files upload report.pdf                    # a link that lasts a week
+prime files list                                 # what is left, and when it goes
+```
+
+## Configuration
+
+Set the secrets once and change the rest only when a machine or a call needs more room. Every default below is chosen to be safe.
+
+```bash
+npx wrangler secret put GATEWAY_TOKEN      # who may call the gateway
+npx wrangler secret put DEVICE_TOKENS      # JSON map of buddy id to token
+npx wrangler secret put ADMIN_TOKEN        # who may list the online buddies
+npx wrangler deploy                        # publish the gateway
+```
+
+### Identity and access
+
+| Variable | Default | What it does |
 | --- | --- | --- |
-| `TIMEOUT_MS` | `300000` | Per-request relay timeout — 5 min for long tool calls |
-| `MAX_PENDING_PER_DEVICE` | `100` | Concurrent in-flight requests per device (503 when full) |
-| `MAX_BODY_BYTES` | `1048576` | Request body cap (413) |
-| `KEEPALIVE_TIMEOUT_MS` | `90000` | Drop tunnel after this long with no frame (alarm-driven) |
-| `TUNNEL_REPLACE_GRACE_MS` | `5000` | An authenticated reconnect may take over a tunnel idle this long (fast reconnect after a silent drop) |
-| `PING_INTERVAL_MS` / `PING_MAX_MISSES` | `30000` / `2` | Server-side ping cadence / misses before reap |
-| `IDLE_TIMEOUT_MS` | `120000` | Hibernation idle threshold |
-| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `60000` / `100` | Per-isolate in-memory limiter |
-| `ALLOWED_ORIGINS` | unset | Comma-separated WS origin whitelist (403 otherwise) |
-| `SSE_IDLE_TIMEOUT_MS` | `120000` | Close an SSE session after this long with no activity (stream-spam guard) |
-| `MAX_SSE_SESSIONS` | `32` | Cap concurrent SSE streams per device (memory guard → `503` when full) |
-| `MAX_DEVICES` | `100` | Registered + anonymous devices (virtual excluded); beyond it registration is refused |
-| `ANON_DEVICES` | on | `off` disables anonymous registration (`403`) |
-| `ANON_RATE_LIMIT_MAX` | `30` | Relay requests per client IP per window for an **anonymous** device (registered: `RATE_LIMIT_MAX`) |
-| `ANON_CREATE_MAX` / `ANON_CREATE_WINDOW_MS` | `5` / `3600000` | Anonymous registrations per client IP |
-| `ANON_UNUSED_TTL_MS` / `ANON_IDLE_TTL_MS` | `3600000` / `604800000` | Delete an anonymous device never connected within 1 h / offline for 7 days |
-| `ANON_AUTH_MAX_FAILURES` / `ANON_AUTH_LOCK_MS` | `20` / `600000` | Wrong codes before an anonymous device is locked, and for how long |
+| `GATEWAY_TOKEN` | unset | The token a client presents. When unset, the gateway is open. |
+| `DEVICE_TOKENS` | unset | JSON map of buddy id to token. Preferred over one shared token. |
+| `DEVICE_TOKEN` | unset | One token for every buddy, used when there is no map. |
+| `ADMIN_TOKEN` | `GATEWAY_TOKEN` | Who may list the online buddies. With neither token set, that endpoint does not exist. |
+| `ACCESS_TEAM_DOMAIN` | unset | The Access team whose assertion the gateway verifies. |
+| `ACCESS_AUD` | unset | The Access application's tag. |
+| `ADMIN_ACCESS` | `enforce` | `enforce`, `warn` or `off` for the Access check. |
+| `VIRTUAL_DEVICE_IDS` | unset | Comma-separated ids the gateway answers itself, with no tunnel. |
+| `VIRTUAL_DEVICE_TOKENS` | unset | JSON map of token for those ids. |
 
-> **Long tool calls** — Durable Objects and incoming HTTP requests have
-> **unlimited wall time** while the caller stays connected; only CPU time is
-> billed. With `TIMEOUT_MS` at 300 s and the device's 25 s keepalive, long
-> operations (recording, `wait_for`, downloads) relay correctly.
+### The tunnel
 
-## Security model
-
-| Goal | Control |
-| --- | --- |
-| No one can hijack a deviceId | Per-device token required at `/device/ws` connect, re-checked inside the DO; duplicate registration → 409 |
-| No one can intercept relay traffic | Same token required on `/mcp` before the DO is touched |
-| No existence oracle | Unknown deviceId → identical 401; no DO created for unauthenticated probes |
-| No roster leak | `/devices` hidden (404) without admin token; admin-gated (401) otherwise |
-| Admin UI | `/admin` + registry API behind Cloudflare Access (identity policy configured in the dashboard) |
-| No register takeover | Register message with a different deviceId is rejected; a duplicate **live** tunnel is `409`, but a stale tunnel (no frame for `TUNNEL_REPLACE_GRACE_MS`) is replaced by the same authenticated device so reconnect is instant |
-| No slow-device DoS | Per-device pending budget; body cap (413) |
-| No stale tunnels | Keepalive alarm drops dead tunnels |
-| No brute force | Per-isolate rate limit on relay **and** WS upgrade + optional Cloudflare edge rule on `CF-Connecting-IP` (client-spoof-proof) |
-| No cross-device leakage | One DO = one device; a WS can only resolve its own pendings |
-| Anonymous devices stay contained | Generated `anon-` ids (reserved: the admin cannot create or overwrite one), lower relay rate limit, no file storage, and a global lock after `ANON_AUTH_MAX_FAILURES` wrong codes — a 6-character code is a small space, so guessing must be throttled across all isolates, which the RegistryDO does |
-| Admin never holds an anonymous credential | Anonymous devices are addressed by an opaque `ref`; Tools / Clients / state / delete are resolved server-side |
-
-## API
-
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `GET` | `/admin` | Cloudflare Access | Device registry UI (operator) |
-| `GET` / `POST` / `DELETE` | `/admin/api/devices(/{id})` | Cloudflare Access | List / register / remove devices |
-| `GET` | `/devices` | admin token | List online devices (machine endpoint; anonymous ids excluded) |
-| `POST` | `/api/devices/anonymous` | gateway token if configured | Create an anonymous device → `201 {deviceId, token, connect_url, ws_url, rate_limit}`; `429` per-IP limit, `503` device limit |
-| `GET` | `/admin/api/anonymous` | Cloudflare Access | Anonymous devices by `ref` (no ids or codes), plus `count` / `max_devices` |
-| `POST` / `GET` / `DELETE` | `/admin/api/anonymous/{ref}(/tools\|/clients\|/state)` | Cloudflare Access | Tools / Clients / Activate-Deactivate / Delete an anonymous device |
-| `POST` | `/device/{deviceId}` | gateway + device | Relay JSON-RPC body to the device; `X-Device-Token`/ `?token=` forwarded as relay token |
-| `GET` | `/device/sse/{deviceId}` | gateway + device | Open a `text/event-stream`; first `endpoint` event tells the client the `/messages` POST URL (`/sse?deviceId=` legacy alias) |
-| `POST` | `/device/messages/{deviceId}?session=` | gateway + device | SSE client→server leg; returns `202`, and the JSON-RPC response is pushed over the stream. Unknown session → `400` |
-| `POST` | `/api/files?name=&expiry_days=` | device basic | Upload a temporary file (raw body, streamed into R2). Protect it at creation with an `X-File-Key` header (`?key=` also accepted; the header wins) |
-| `GET` | `/api/files` | device basic | List this device's files + usage |
-| `GET` | `/api/files/{id}` | device basic, or the `X-File-Key` header for a protected file | Download (supports `Range`) |
-| `PATCH` | `/api/files/{id}` | device basic | Set or clear a file's protection key (`{"key":"..."}`; empty clears it) |
-| `DELETE` | `/api/files/{id}` | device basic | Delete a file immediately |
-| `GET` | `/files` | device basic | File management page |
-| `GET` | `/files/{id}` | public; a protected file prompts for its key | File download page |
-| `GET` | `/` | public | Front page (Prime), linking the three pages below |
-| `GET` | `/mcp` | public | The product page - the page `/` used to be |
-| `GET` | `/sandbox` | device basic | Browser sandbox: this tab as a device |
-| `GET` | `/connect/{deviceId}` | device token | The same page for one device; old `/device/{deviceId}` browser links redirect here |
-| `WS` | `/device/ws/{deviceId}` | device | Device WebSocket (preferred) |
-| `WS` | `/ws?deviceId=<id>` | device | Legacy device WebSocket |
-
-> **Admin UI** — `/admin` and `/admin/api/*` are protected by **Cloudflare
-> Access**; the identity policy is configured in the Cloudflare dashboard.
-> `GET /devices` uses the admin token instead, so scripts can query it
-> without an Access session.
-
-## Anonymous devices
-
-A client with no registered device can ask for one:
-
-```bash
-curl -X POST https://prime.tuanm.workers.dev/api/devices/anonymous
-# {"deviceId":"anon-3f9c0d1e2a4b5c6d","token":"7KQ2XM",
-#  "connect_url":"https://prime.tuanm.workers.dev/device/anon-3f9c0d1e2a4b5c6d?token=7KQ2XM", ...}
-```
-
-The gateway picks an unused id and a 6-character code (digits and upper-case
-letters). The device then connects like any other (`/device/ws/{id}` with
-`X-Device-Token`), and MCP clients use `connect_url`. `prime connect` (the CLI)
-does all of this and runs the bundled device buddy as the device.
-
-- **Lower limits:** `ANON_RATE_LIMIT_MAX` (30/min per client IP) instead of
-  `RATE_LIMIT_MAX` (100); 5 registrations per IP per hour; no file storage.
-- **Device cap:** `MAX_DEVICES` (100) counts registered and anonymous devices
-  together. A full gateway answers `503` to anonymous registration and `409`
-  to a new admin registration (updates and renames still work).
-- **Cleanup:** an anonymous device that never connects is deleted after an hour,
-  one that stays offline for 7 days after that — abandoned devices do not hold
-  slots forever.
-- **Brute force:** after 20 wrong codes in 10 minutes the device is locked for
-  everyone (the right code included) for 10 minutes; registered devices are not
-  affected.
-- **Admin:** the *Anonymous Devices* section of `/admin` shows them with the
-  same menu (Tools, Clients, Activate/Deactivate, Delete) but never their id or
-  code — they are addressed by an opaque `ref` and resolved server-side.
-- Creating anonymous devices never switches an open gateway (no registered
-  devices) into per-device mode.
-
-## Temporary files
-
-Upload a file, share the link, let it expire. Contents live in an **R2** bucket
-(`BUCKET`, bucket `code-mcp-files`); metadata and quotas live in a
-per-device `FilesDO`; a global index in `RegistryDO` maps a file id back
-to its owner, so a download URL needs only the id.
-
-Auth is **HTTP Basic with the device's own credential** - the same
-`deviceId`/`token` pair registered at `/admin`. There is no second
-secret. The browser replays those credentials automatically on same-origin
-fetches, which is why the pages need no token handling of their own.
-
-```bash
-BASE=https://prime.tuanm.workers.dev
-
-# upload (streamed; 201 returns the id and URLs)
-curl -u demo:demo --data-binary @report.pdf \
-  "$BASE/api/files?name=report.pdf&expiry_days=7"
-
-# a protected file: set the key as a header so it never appears in a URL or an
-# access log; downloads then need it as a REQUEST HEADER too
-curl -u demo:demo -H 'X-File-Key: hunter2' --data-binary @secret.pdf \
-  "$BASE/api/files?name=secret.pdf&expiry_days=1"
-
-curl -H 'X-File-Key: hunter2' -o out.pdf "$BASE/api/files/<id>"
-
-curl -u demo:demo "$BASE/api/files"                    # list + usage
-curl -u demo:demo -o out.pdf "$BASE/api/files/<id>"    # download
-curl -u demo:demo -X DELETE "$BASE/api/files/<id>"     # delete
-
-open "$BASE/files"                                     # management page
-```
-
-`POST` accepts the raw bytes, not multipart, so the body streams straight
-into R2 without being buffered - the isolate only has 128 MB of memory, so
-buffering a 200 MiB upload is not possible. A body with a known
-`Content-Length` is piped directly; a chunked body (no length) goes through
-an R2 multipart upload, one 5 MiB part at a time. Both paths enforce the cap.
-
-Downloads support `Range` (206 with `Content-Range`), so a large file can
-resume.
-
-### Why the key is a request header
-
-A protection key in a query string is a secret written to every access log, to
-the browser history, and to whatever the page sends as a `Referer`. So the API
-takes it **only** as the `X-File-Key` request header and ignores `?key=`
-entirely - a request that puts the key in the URL is rejected exactly as if no
-key had been sent.
-
-**A link never carries the key either.** `page_url` - what "Copy link" copies -
-is a plain `/files/{id}`, and a `?key=` on a page is ignored exactly like a wrong
-one. A link is for sharing; the key is for sending separately, through whatever
-private channel the owner prefers.
-
-Opening a protected file's page therefore always asks for the key. The visitor
-types it into the prompt, and the page sends it as `X-File-Key` and saves the
-result from a blob - so the key never reaches the address bar, the history, or a
-`Referer`. The owner, whose own credentials authorise them, gets the download
-control instead and never needs the key.
-
-No page embeds the key in its HTML either: the views handed to `/files` and
-`/files/{id}` have it stripped, so even the owner's page source does not contain
-the secret. Every page and download response carries `Referrer-Policy:
-no-referrer` and `X-Content-Type-Options: nosniff`: an uploaded file is
-attacker-supplied bytes and must never be sniffed into something renderable, and
-a page URL must never travel onward as a referrer.
-
-| Limit | Default | Var |
+| Variable | Default | What it does |
 | --- | --- | --- |
-| Per file | 200 MiB | `FILES_MAX_UPLOAD_BYTES` |
-| Lifetime | 7 days | `FILES_MAX_EXPIRY_MS` |
-| Files per device | 5 | `FILES_MAX_PER_DEVICE` |
-| Bytes per device | 500 MiB | `FILES_MAX_TOTAL_BYTES` |
+| `TIMEOUT_MS` | `300000` | How long one call may run. |
+| `MAX_BODY_BYTES` | `1048576` | The body cap for one call. A larger body is refused before it is read. |
+| `MAX_PENDING_PER_DEVICE` | `100` | Calls in flight to one buddy. Over it, the gateway answers busy. |
+| `KEEPALIVE_TIMEOUT_MS` | `90000` | Drop a tunnel after this much silence. |
+| `PING_INTERVAL_MS`, `PING_MAX_MISSES` | `30000`, `2` | How often the gateway pings a buddy, and how many misses it allows. |
+| `TUNNEL_REPLACE_GRACE_MS` | `5000` | An authenticated reconnect may take over a tunnel quiet for this long. |
+| `IDLE_TIMEOUT_MS` | `120000` | How long a quiet tunnel may sit idle. |
+| `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` | `60000`, `100` | The in-memory limiter: calls per address per window. |
+| `ALLOWED_ORIGINS` | unset | A comma-separated whitelist of browser origins for the tunnel. |
+| `SSE_IDLE_TIMEOUT_MS` | `120000` | Close an event stream after this much quiet. |
+| `MAX_SSE_SESSIONS` | `32` | Concurrent event streams per buddy. Over it, the gateway answers busy. |
+| `ONLINE_TTL_MS`, `REGISTRY_REFRESH_MS` | `150000`, `30000` | How long a buddy counts as online, and how often it refreshes that. |
 
-The byte cap counts **expired-but-undeleted** files too, as specified. Expiry is
-enforced twice: lazily on every list and read, and by a `FilesDO` alarm that
-wakes at the earliest deadline. An expired file is deleted from R2 and from the
-metadata, so it is neither listed nor stored. A reservation that never finishes
-uploading (the grey dot in the UI) is reaped after an hour, so a failed upload
-cannot hold a slot forever.
+### Anonymous buddies
 
-The five-file cap counts live files only, so expiry frees a slot as soon as the
-file is reaped.
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `MAX_DEVICES` | `100` | Buddies the gateway holds, anonymous included. Ids the gateway answers itself do not count. |
+| `ANON_DEVICES` | on | `off` turns anonymous registration off. |
+| `ANON_RATE_LIMIT_MAX` | `30` | Calls per address per window for one anonymous buddy. |
+| `ANON_CREATE_MAX`, `ANON_CREATE_WINDOW_MS` | `5`, one hour | New anonymous buddies per address. |
+| `ANON_UNUSED_TTL_MS` | one hour | Delete an anonymous buddy that never connects within this time. |
+| `ANON_IDLE_TTL_MS` | 7 days | Delete an anonymous buddy that has been offline this long. |
+| `ANON_AUTH_MAX_FAILURES`, `ANON_AUTH_LOCK_MS` | `20`, 10 minutes | Wrong codes before an anonymous buddy is locked, and for how long. |
 
-### The pages
+### Files and fleets
 
-The management page lists every live file **earliest-expiry first**, so whatever
-is about to disappear leads the list. Each row shows the name, its size, when it
-expires, and whether it is protected:
-
-```
-● quarterly-report.pdf   2.3 MiB   in 6 days   -
-○ customer-list.csv     18.0 KiB   in 36 h     ••••••
-● screenshot.png        500.0 KiB  not uploaded -
-```
-
-The dot is green while there is more than three days left, a red outline inside
-three days, and grey for a reservation that has not finished uploading.
-
-The protection key is **masked**, but its cell is an input you can click to edit -
-the same interaction as the admin page's token field. Focusing selects the mask,
-so typing replaces it, and nothing is written until you choose **Save**, which stays
-disabled until the value actually differs (recomputed each time the menu opens, as
-on the admin page). A value protects the file; an empty box removes the protection.
-The menu keeps **Download** and **Save** as separate words for separate actions,
-because Save already means "commit my edits" elsewhere in the product. The key is
-never rendered back in the clear:
-"Copy link" puts it into a shareable page URL instead, and "Download" streams it
-through the device's own credentials, which the gateway accepts in place of a
-key for the owner.
-
-The page deliberately has just the list and a `+` button. There is no expiry
-control, because expiry is an ordering rather than a filter, and no key input - a
-key field would look like a filter too. Both remain per-call REST API options
-(`key=`, and `expiry_days=` / `expires_in=` / `expiry_ms=` for anything shorter
-than the seven-day maximum that page uploads use).
-
-`+` adds a dashed card to the end of the list, the same size and left edge as a
-file card. Click it to open the file picker, or drop files onto it; either way
-each file becomes its own not-yet-uploaded card, which is then uploaded from that
-card's menu. Pressing `+` again puts the card away.
-
-### Monthly R2 budget
-
-File storage is capped by a **monthly spend ceiling**, so an unattended gateway
-cannot run up a bill. The ceiling is `R2_BUDGET_USD_MONTH` (default `$5`).
-
-```toml
-[vars]
-R2_BUDGET_USD_MONTH = "5"
-```
-
-The gateway prices usage with Cloudflare's published Standard-class rates -
-`$0.015` per GB-month, `$4.50` per million Class A operations, `$0.36` per
-million Class B - and deducts the monthly free allowances (10 GB, 1M Class A,
-10M Class B). Those constants live in `src/config.ts`; update them if the
-pricing changes.
-
-An upload is refused with `507` when it would push the projected month past
-the ceiling. Storage is really billed per GB-month while a file here lives at
-most seven days, so the projection charges a full month for every byte admitted:
-pessimistic on purpose, because that is what makes the ceiling a guarantee rather
-than an estimate. The equivalent storage ceiling is about `343 GB` at the
-default budget, and it is reported as `max_bytes`.
-
-Bytes are reserved before the body is read - so an oversized upload fails before
-any of it is transferred - and settled against the real size afterwards. Deletes
-and expiries hand their bytes back, and the byte count deliberately carries
-across a month boundary rather than resetting to zero while the data is still
-stored and still billed. Operation counters do reset each month.
-
-`GET /api/files` returns the running total, and the management page shows it:
-
-```json
-"budget": {
-  "month": "2026-10", "bytes": 1048576, "max_bytes": 343333333333,
-  "budget_usd": 5, "cost_usd": 0.0000, "remaining_usd": 5,
-  "class_a_ops": 3, "class_b_ops": 1,
-  "breakdown": { "storage_usd": 0, "class_a_usd": 0, "class_b_usd": 0 }
-}
-```
-
-If the registry is briefly unreachable the check fails **open**: a blip must not
-stop every upload. The per-device caps still bound what a single device can
-store, and the accounting corrects itself on the next admission.
-
-### Enabling file storage
-
-R2 is not enabled by default on a Cloudflare account, and it is two separate
-one-time steps - the first of which no API or CLI can perform:
-
-1. **Dashboard -> R2 -> enable it** (accept the terms). Until that is done every
-   R2 API call fails with `code 10042: Please enable R2 through the Cloudflare
-   Dashboard`.
-2. **Refresh the CLI credentials** so the token carries the R2 scope:
-
-   ```bash
-   npx wrangler login
-   npx wrangler whoami   # "r2 (write)" must appear under Token Permissions
-   ```
-
-Then create the bucket and deploy:
-
-```bash
-npx wrangler r2 bucket create code-mcp-files
-npx wrangler deploy
-```
-
-Without the `BUCKET` binding, `/api/files` answers
-`503 file storage is not configured` (and `/files` renders a matching page)
-while every other route keeps working - so the worker can be deployed before R2
-exists without breaking anything else.
-
-## Local development
-
-Smoke coverage: gateway/device auth, duplicate-registration rejection, register-message takeover blocking, end-to-end JSON-RPC relay, cross-device response blocking, request timeout, body cap, pending budget, origin whitelist, keepalive ack, invalid deviceId, `/devices` listing + hidden-without-admin, per-device unknown-id 401, relay-token forwarding, long-call relay.
-
-> **Miniflare note** — local DO state persists under `.wrangler/state`. After a
-> hard kill, stale sockets linger until the keepalive alarm fires; for a clean
-> run: `rm -rf api/.wrangler/state` before starting.
-
-### Ticket-based file downloads
-
-Devices that implement the download protocol can return a download URL under
-`/device/{deviceId}/download/{ticket}`. Tickets are exactly 64 lowercase hex digits;
-they identify a device-issued download, never a filesystem path or proxy URL.
-Only GET is supported. The endpoint uses the same gateway authentication,
-per-device credentials, disabled-device checks and rate limit as MCP. Virtual
-cloud devices have no tunnel and cannot use this endpoint.
-
-```sh
-curl --fail --output artifact.zip \
-  --header "Authorization: Bearer $GATEWAY_TOKEN" \
-  --header "X-Device-Token: $DEVICE_TOKEN" \
-  "https://YOUR_GATEWAY/device/YOUR_DEVICE/download/$TICKET"
-```
-
-`X-Device-Token` is required for downloads, including when the same credential
-was supplied in a query parameter. Keep credentials out of copied download URLs.
-The device is responsible for ticket authorization, expiry and revocation.
-
-Wire protocol (JSON WebSocket frames):
-
-1. Gateway sends `{type:"download-start",id,ticket,token}` with a fresh UUID.
-2. Device responds `{type:"download-head",id,status:200,headers}`. A decimal
-   `content-length` is required and must be between 0 and 104857600 inclusive.
-   Only `content-length`, `content-type` and `content-disposition` are forwarded.
-   Gateway forces attachment disposition, no-store caching and nosniff.
-   A 400–599 head instead ends the request with an empty error response.
-3. HTTP stream demand sends `{type:"download-pull",id}`. Device responds once
-   with `{type:"download-chunk",id,data,done}`; `data` is canonical base64 for at
-   most 65536 bytes, and `done` is boolean. Empty files return empty data and
-   `done:true`. Final received bytes must exactly match content-length.
-4. Cancellation, invalid frames, timeout or device failure sends
-   `{type:"download-cancel",id}` when the tunnel is still available. A device
-   can fail a transfer with `{type:"download-error",id}`.
-
-There is one outstanding pull per stream, no application chunk queue, at most
-four concurrent downloads per device, a `TIMEOUT_MS` deadline for each head/pull
-(default 30 seconds), and a ten-minute overall deadline. Disconnects and tunnel
-replacement fail all pending requests and streams. Unknown completed transfer
-IDs are ignored. Errors after HTTP headers terminate the stream; clients must
-check transfer success and declared length. Existing JSON-RPC and SSE clients
-need no protocol changes.
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `FILES_MAX_UPLOAD_BYTES` | 200 MiB | The size cap for one file. |
+| `FILES_MAX_EXPIRY_MS` | 7 days | The longest life a file may be given. |
+| `FILES_MAX_PER_DEVICE` | `5` | Live files one buddy may hold. |
+| `FILES_MAX_TOTAL_BYTES` | 500 MiB | Bytes one buddy may store, expired files included until they are reaped. |
+| `R2_BUDGET_USD_MONTH` | `5` | The monthly ceiling on file storage spend. An upload that would pass it answers 507. |
+| `R2_FREE_STORAGE_GB` | `10` | The free storage the budget assumes before it charges for any bytes. |
+| `FLEET_MONTHLY_BUDGET_USD` | `20` | The monthly ceiling on running fleets. Past it, fleet calls answer 402. |

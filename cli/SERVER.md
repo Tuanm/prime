@@ -1,101 +1,130 @@
-# Device buddy
+# Buddy
 
-A minimal MCP (Model Context Protocol) server over HTTP with Streamable HTTP transport and JSON-RPC 2.0 - the companion a device runs to expose itself.
+A buddy is a machine made reachable as a set of tools. It runs one small server
+that turns the machine's files and shell into tools, and it keeps a tunnel open
+to the gateway, so a client can call those tools from anywhere.
 
-One implementation in TypeScript/Bun (`src/code-mcp.ts`).
+## How a call arrives
 
-## Features
+The buddy opens the tunnel. Your client sends a call to the gateway, and the
+gateway passes it down the tunnel the buddy already holds. Nothing reaches the
+machine any other way.
 
-- **Tools (always available):** read, write, edit, multi_edit, bash, grep, find, ls, job, mcp
-- **Tools (conditional):**
-  - `preview` — enabled when `cloudflared` is on PATH
-  - `remember`, `forget`, `recall` — enabled with `--enable-memory`
-  - `get_upload_link` — enabled with `--public` or `--domain` (requires `--token`)
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant G as Gateway
+  participant B as Buddy
+  B->>G: open the tunnel with id and token
+  G-->>B: tunnel ready
+  C->>G: call a tool
+  G->>B: pass the call down the tunnel
+  B->>B: run it on the machine
+  B-->>G: result
+  G-->>C: result
+```
 
-## Usage
+The buddy offers `read`, `write`, `edit`, `multi_edit`, the shell tool for
+that machine, `grep`, `find`, `ls`, `job` and `mcp`. A call runs on the
+machine and the reply comes back the same way.
+
+## Run a buddy
+
+`prime connect` is the short path. It registers this machine as an anonymous
+device on the gateway, prints a device ID, a 6-character device code and a
+connect URL, then runs the buddy in the foreground. Stop it with Ctrl-C.
+
 ```bash
-# Bun
-bun src/code-mcp.ts [flags...]
+# Connect this machine to the default gateway.
+prime connect
+
+# Run the same buddy against a gateway you host.
+prime code-mcp --gateway gateway.example.dev --id my-laptop --gateway-token "$TOKEN"
+
+# List the tools a buddy offers.
+prime tools list my-laptop
+
+# Call one tool on it.
+prime tools call my-laptop.bash '{"command":"uname -a"}'
 ```
 
-See the **Flags** table below.
+`prime connect` reuses the device it made last time, so one machine keeps one
+entry. Add `--new` to register a fresh device. Flags for the buddy itself go
+after `--`, as in `prime connect -- --enable-memory`.
 
-### Gateway Mode
+To run a buddy without a terminal, install it as a user service with
+`prime service install`. It starts at login and restarts if it fails. It reads
+its settings from the config, so no credential sits on a command line. On Linux
+it stops at logout unless lingering is enabled.
 
-Connect to a [Prime](../api) (in this repository) to expose this server to the internet without `cloudflared`:
-```bash
-bun src/code-mcp.ts     --gateway wss://gateway.example.workers.dev --port 7777
-```
+Keep the connect URL and the device code private. They grant shell access to
+the machine. An anonymous device has a lower request budget and no file
+storage.
 
-A bare `--gateway` (no URL) connects to the managed gateway at
-`wss://prime.tuanm.workers.dev`.
+## Flags that matter
 
-The gateway authenticates every device at connect time against its device
-registry (unknown ids or missing/mismatched tokens are rejected with 401, so
-nobody can hijack a registered device). Pass `--id` with the registered device
-ID and `--token` with that device's token; the token is presented to the
-gateway as `X-Device-Token` on the WebSocket upgrade:
-```bash
-```
+| Flag | What it does | Default |
+| --- | --- | --- |
+| `--gateway [url]` | Tunnel through a gateway. A bare flag uses `wss://prime.tuanm.workers.dev`. | no tunnel |
+| `--id <uuid>` | The device ID the buddy connects as. | a random UUID |
+| `--gateway-token <s>` | Device credential sent to the gateway. Overrides `--token` for the tunnel. | `--token` |
+| `--token <s>` | Require a token on every request. Also the device credential unless set separately. | no auth |
+| `--port <n>` | Local port for the endpoint. | `7777`, or `$PORT` |
+| `--bind <addr>` | Address the local endpoint listens on. | `127.0.0.1` |
+| `--enable-memory` | Add the `remember`, `forget` and `recall` tools. | off |
+| `--disallowed-tools <list>` | Hide tools by name, comma-separated. | none |
+| `--public` | Expose the endpoint through a Cloudflare quick tunnel. Needs `cloudflared`. | off |
+| `--domain <host>` | Serve under a hostname you already route to the port. Cannot be combined with `--public`. | none |
+| `--mcp <path>` | Add the tools of other servers, read from a config file. | none |
 
-Need a credential that differs from the local server token? Use
-`--gateway-token` — it overrides `--token` for the gateway connection only.
+`--token` guards the local endpoint. `--gateway-token` proves the device to
+the gateway. Set both when they differ.
 
-The client implements the same gateway WebSocket protocol with proactive
-liveness detection:
+## When the network drops
 
-- **App-layer keepalive**: client sends `{"type":"keepalive"}` every ~25 s; the
-  gateway replies `{"type":"keepalive-ack"}`. Data-frame heartbeat survives
-  HTTP/2 proxies (Cloudflare Zero Trust, etc.) that can swallow WebSocket
-  control ping/pong.
-- **Inbound watchdog (~75 s)**: if no frame arrives within the window the
-  socket is force-closed and the client reconnects with exponential backoff.
-- **Reconnect**: on any disconnect (error, close, watchdog, keepalive send
-  failure) the client retries with jittered backoff and preserves the same
-  `--id` so the gateway entry returns to the same device slot.
+The buddy keeps the tunnel alive with its own small messages, not by
+relying on the network to carry a ping. That is what gets through a proxy which
+quietly drops an idle connection.
 
-## Flags
+- Every 25 seconds it sends a small keepalive to the gateway.
+- If nothing arrives for 75 seconds, it closes the tunnel and reconnects.
+- Reconnect waits longer each time, up to 60 seconds, with a little randomness
+  so many buddies do not all return at once. It keeps the same device ID, so
+  the gateway puts it back in the same slot.
+- A drop does not stop the machine. Jobs already running keep running, and the
+  local endpoint stays up.
+- A call made while the tunnel is down fails at the gateway. Call again once it
+  is back.
 
-| Flag                        | Description                                                            | Default           |
-| --------------------------- | ---------------------------------------------------------------------- | ----------------- |
-| `--port <n>`                | Listen port                                                            | `7777` or `$PORT` |
-| `--bind <addr>`             | Bind address                                                           | `127.0.0.1`       |
-| `--token <s>`               | Require `?token=<s>` or `Authorization: Bearer <s>` on every request; in gateway mode also presented to the gateway as the device credential | no auth |
-| `--gateway [url]`          | Connect to a gateway server and tunnel requests via WebSocket; bare flag uses the default managed gateway | `wss://prime.tuanm.workers.dev` |
-| `--gateway-token <s>`      | Device credential sent to the gateway on connect (overrides `--token`); must match the token registered for `--id` in the gateway | `--token` |
-| `--enable-memory`           | Enable remember/forget/recall tools                                    | disabled          |
-| `--disallowed-tools <list>` | Comma-separated list of tools to disable                               | none              |
-| `--public`                  | Expose via Cloudflare quick tunnel (requires `cloudflared`)            | disabled          |
-| `--domain <host>`           | Use existing public hostname (mutually exclusive with `--public`)      | none              |
-| `--mcp <path>`              | Aggregate tools from external MCP servers (Claude Desktop JSON config) | none              |
-| `--id <uuid>`               | Use specific device ID for gateway connection                          | random UUID       |
+If the first attempt cannot connect, the buddy prints the likely cause. A
+network that inspects TLS needs `NODE_EXTRA_CA_CERTS` set to your root
+certificate. A network that needs a proxy needs `HTTPS_PROXY` set before the
+buddy starts.
 
-### MCP Config Format
-```json
-{
-  "mcpServers": {
-    "namespace": {
-      "command": "...",
-      "args": [...],
-      "env": {...}
-    }
-  }
-}
-```
+## What it leaves closed
 
-Tools are exposed with `<namespace>__` prefix. HTTP transport servers use `{"type": "http", "url": "...", "headers": {...}}`.
+- **No open port.** It does not listen on the network. It binds to loopback by
+  default, and the tunnel the buddy opened is the only way in.
+- **No unproved call.** Requests to the local endpoint need a token once one is
+  set. Calls from a browser always need one.
+- **No unproved tunnel.** The gateway checks the device ID and its token before
+  it accepts the tunnel. A mismatched pair is refused.
+- **No secrets passed down.** Shell tools and added servers do not inherit your
+  environment. They get a small set of variables, not keys such as `AWS_*` or
+  `OPENAI_API_KEY`.
+- **No unbounded input.** Request bodies, tunnel frames and uploads are capped
+  in size, so one large call cannot exhaust memory.
+- **Not a VPN.** It answers tool calls. It does not forward your traffic or
+  open a route to the rest of your network.
 
-## Build
+## Use cases
 
-### Bun
-```bash
-bun build ./code-mcp.ts --outfile=./code-mcp --target=bun --compile --minify
-chmod +x code-mcp
-```
-
-## Security notes
-
-- The server binds to `127.0.0.1` by default. To expose on a LAN, pass `--bind 0.0.0.0` and a `--token`.
-- The `--token` is enforced with a constant-time compare; accepts both `?token=…` query string and `Authorization: Bearer …` header.
-- Child processes (shell tools and external MCP servers) receive a minimal env (`PATH`, `HOME`, `SHELL`, `LANG`, `LC_CTYPE`, `TZ`, `TMP*` + Windows essentials). Secrets in the parent env (`AWS_*`, `OPENAI_API_KEY`, etc.) are not forwarded.
-- Request body, WebSocket frames, and uploads are size-capped to protect against memory-DoS.
+- **A long job on the machine you are not at.** Start it with the shell tool,
+  then read the output and the exit code from any client. The job keeps running
+  when your laptop closes.
+- **A file on a home machine, changed from a phone.** A buddy on the machine, a
+  client in your pocket. Read the file, edit it, save it. No port opened, no
+  VPN.
+- **One build machine for a team.** Register it once, then every client that
+  holds its token calls the same shell and the same files. None of them touch
+  the machine directly.
