@@ -42,12 +42,12 @@ ${UI_CSS}    </style>
       <h2>Anonymous</h2>
     </div>
     <ul id="anonList"></ul>
-    <div class="status" id="status"></div>
+    <div class="toasts" id="toasts"></div>
 
     <script>
       (function () {
         var listEl = document.getElementById("list");
-        var statusEl = document.getElementById("status");
+        // (the old status line is a toast now: see toast() below)
         var addBtn = document.getElementById("addBtn");
         var anonListEl = document.getElementById("anonList");
         var countEl = document.getElementById("count");
@@ -59,9 +59,35 @@ ${UI_CSS}    </style>
           return t.slice(0, 3) + "***" + t.slice(-3);
         }
 
+        var toastsEl = document.getElementById("toasts");
+
+        /**
+         * Say what happened, in a toast that leaves on its own.
+         *
+         * The sandbox page's toast, in the admin page's colours: a short note in
+         * the corner, with a coloured edge for what it is. Several can be up at
+         * once - a poll that fails while another message is showing does not
+         * hide it - and each leaves after a few seconds.
+         */
+        function toast(text, variant) {
+          var msg = String(text == null ? "" : text).slice(0, 300);
+          if (!msg) return;
+          var t = document.createElement("div");
+          t.className = "toast " + (variant === "error" ? "error" : "success");
+          t.textContent = msg;
+          toastsEl.appendChild(t);
+          // A few at a time is enough: the oldest goes when the list grows.
+          while (toastsEl.children.length > 4) toastsEl.removeChild(toastsEl.children[0]);
+          setTimeout(function () {
+            t.classList.add("leaving");
+            setTimeout(function () {
+              if (t.parentNode) t.parentNode.removeChild(t);
+            }, 300);
+          }, variant === "error" ? 6000 : 3500);
+        }
+
         function setStatus(msg, isErr) {
-          statusEl.textContent = msg || "";
-          statusEl.style.color = isErr ? "#b91c1c" : "#666";
+          toast(msg, isErr ? "error" : "success");
         }
 
         function api(path, opts) {

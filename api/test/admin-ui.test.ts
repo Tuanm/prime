@@ -74,7 +74,7 @@ interface Page {
   settle(): Promise<void>;
 }
 
-function loadPage(fleets: unknown[] = []): Page {
+function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean } = {}): Page {
   const source = readFileSync(new URL("../src/admin-ui.ts", import.meta.url), "utf8");
   const html = source.slice(source.indexOf("<script>") + 8, source.indexOf("</script>"));
   const byId: Record<string, El> = {};
@@ -87,13 +87,17 @@ function loadPage(fleets: unknown[] = []): Page {
     removeEventListener() {},
     body: makeEl("body"),
   };
-  const fetchStub = async (path: string) => ({
-    ok: true,
-    status: 200,
-    json: async () => (String(path).indexOf("/admin/api/fleets") === 0 ? { fleets } : {}),
-    text: async () => "{}",
-    headers: { get: () => null },
-  });
+  const fetchStub = async (path: string) => {
+    const fleetsCall = String(path).indexOf("/admin/api/fleets") === 0;
+    const failing = fleetsCall && opts.failFleets;
+    return {
+      ok: !failing,
+      status: failing ? 500 : 200,
+      json: async () => (fleetsCall ? { fleets } : {}),
+      text: async () => "{}",
+      headers: { get: () => null },
+    };
+  };
   const run = new Function(
     "document",
     "window",
@@ -111,7 +115,7 @@ function loadPage(fleets: unknown[] = []): Page {
     fetchStub,
     () => 0,
     () => {},
-    (fn: Function) => fn(),
+    (fn: Function, ms?: number) => setTimeout(fn, Math.max(0, Number(ms) || 0)),
     () => {},
     AbortSignal,
   );
@@ -388,5 +392,14 @@ describe("the fleets in the admin interface", () => {
     await page.settle();
     const row = page.byId["list"]!.children[0]!;
     expect(row.children[0]!.className).toContain("hollow");
+  });
+
+  test("what goes wrong is said in a toast, not in a line at the bottom", async () => {
+    const page = loadPage([], { failFleets: true });
+    await page.settle();
+    const toasts = page.byId["toasts"]!.children;
+    expect(toasts.length).toBeGreaterThan(0);
+    expect(toasts[toasts.length - 1]!.className).toContain("toast");
+    expect(toasts[toasts.length - 1]!.className).toContain("error");
   });
 });

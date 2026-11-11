@@ -342,11 +342,44 @@ export const UI_CSS = `      * {
       .dlg-msg.err {
         color: #b91c1c;
       }
-      .status {
-        margin-top: 14px;
-        font-size: 11px;
-        color: #666;
-        min-height: 16px;
+      /* Confirmations are toasts, the way the sandbox page shows them: a
+         short dark note in the corner that leaves on its own. */
+      .toasts {
+        position: fixed;
+        top: 14px;
+        right: 14px;
+        z-index: 90;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: flex-end;
+        pointer-events: none;
+      }
+      .toast {
+        background: #111;
+        color: #fff;
+        font-size: 12px;
+        padding: 7px 12px;
+        border-left: 4px solid #111;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+        max-width: min(420px, calc(100vw - 28px));
+        animation: toast-in 0.18s ease-out;
+        transition: opacity 0.3s;
+      }
+      .toast.success {
+        border-left-color: #16a34a;
+      }
+      .toast.error {
+        border-left-color: #b91c1c;
+      }
+      .toast.leaving {
+        opacity: 0;
+      }
+      @keyframes toast-in {
+        from {
+          transform: translateY(-6px);
+          opacity: 0;
+        }
       }
       .empty {
         font-size: 12px;
