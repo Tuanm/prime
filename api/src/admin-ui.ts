@@ -128,10 +128,13 @@ ${UI_CSS}    </style>
           idInput.title = "the fleet, reached as a device of this name";
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
-          tokInput.placeholder = "token";
           var real = f.buddy || "";
           var masked = maskToken(real);
           tokInput.value = masked;
+          // Without a token there is no way in at all: say so where the
+          // operator looks, not only in a document.
+          tokInput.placeholder = "no access: no token";
+          if (!real) tokInput.title = "no token is set, so no client can reach this fleet";
           tokInput.addEventListener("focus", function () {
             if (tokInput.value === masked) tokInput.select();
           });

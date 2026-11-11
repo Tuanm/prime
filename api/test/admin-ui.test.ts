@@ -347,4 +347,16 @@ describe("the fleets in the admin interface", () => {
     expect(page).not.toContain("Anonymous Devices");
     expect(page).not.toContain('placeholder = "device id"');
   });
+
+  test("a fleet with no token says that nobody can reach it", async () => {
+    const page = loadPage([
+      { fleet: "open-fleet", label: "", disabled: false, buddy: "", members: [], primary: null, pending: [] },
+    ]);
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    const box = row.children.find((c) => c.className === "box")!;
+    const token = box.children[1]!;
+    expect(token.value).toBe("");
+    expect(token.placeholder).toContain("no access");
+  });
 });
