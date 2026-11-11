@@ -1446,6 +1446,7 @@ export async function spacesList(ctx: Ctx): Promise<void> {
         state: row.state,
         url: row.url,
         device: row.space.id,
+        ...(row.space.fleet ? { fleet: row.space.fleet } : {}),
         persistent: row.space.mode === "persistent",
       })),
       ...(runtimeError ? { runtime_error: runtimeError } : {}),
@@ -1459,9 +1460,12 @@ export async function spacesList(ctx: Ctx): Promise<void> {
     row.space.id,
     row.url ?? dim("-"),
     row.space.gateway_device ?? dim("-"),
+    // A space in a fleet is one of its members: which fleet, and whether
+    // it is the one that writes.
+    row.space.fleet ? row.space.fleet + (row.space.fleet_role === "primary" ? dim(" (primary)") : "") : dim("-"),
     row.space.image,
   ]);
-  ctx.out(table(["NAME", "MODE", "STATUS", "DEVICE", "URL", "EXPOSED", "IMAGE"], tableRows));
+  ctx.out(table(["NAME", "MODE", "STATUS", "DEVICE", "URL", "EXPOSED", "FLEET", "IMAGE"], tableRows));
   const running = rows.filter((r) => r.state === "running").length;
   ctx.note(dim(running + "/" + rows.length + " running" + (runtimeError ? " (runtime: " + runtimeError + ")" : "")));
 }

@@ -20,7 +20,7 @@
 import { createHash, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -132,7 +132,9 @@ export function findNestedRepos(work: string, maxDepth = 6): string[] {
       }
       if (!isDir) continue;
       if (existsSync(join(full, ".git"))) {
-        found.push(relative(work, full));
+        // The paths are handed to git, which speaks forward slashes on
+        // every platform: a Windows separator would name nothing.
+        found.push(relative(work, full).split(sep).join("/"));
         continue; // a nested repository is a boundary; do not descend
       }
       walk(full, depth + 1);

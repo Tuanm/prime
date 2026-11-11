@@ -61,7 +61,9 @@ export function resolveFleetTarget(
 ): FleetTarget {
   const space = spaceName ? config.spaces[spaceName] : undefined;
   const device = flags.device ?? space?.gateway_device ?? space?.id ?? Object.keys(config.devices)[0];
-  const deviceToken = flags.token ?? space?.remote_token ?? space?.token;
+  // The credential of the device that was picked, so a command that named no
+  // space still has something to speak with.
+  const deviceToken = flags.token ?? space?.remote_token ?? space?.token ?? (device ? config.devices[device]?.token : undefined);
   const gateway = normalizeGateway(flags.gateway ?? space?.gateway ?? config.defaults.gateway ?? env[ENV.gateway] ?? DEFAULT_GATEWAY);
   const gatewayToken = flags.gatewayToken ?? env[ENV.gatewayToken] ?? config.defaults.gateway_token ?? space?.gateway_token;
   const timeoutMs = flags.timeout ?? config.defaults.timeout_ms ?? 300_000;
@@ -174,6 +176,78 @@ function spaceOfDevice(config: Config, deviceId: string): string | undefined {
 
 function spaceArg(ctx: Ctx): string | undefined {
   return str(ctx.parsed, "space");
+}
+
+/**
+ * The fleets this machine knows, and what the gateway says about them.
+ *
+ * Every other fleet command speaks about one fleet; this one answers the
+ * question they all leave open: which fleets are there? It reads them from
+ * the configuration - the spaces that are in one - and asks the gateway for
+ * the standing of each.
+ */
+export async function fleetsList(ctx: Ctx): Promise<void> {
+  // Which spaces of this machine are in which fleet.
+  const local = new Map<string, string[]>();
+  for (const [name, space] of Object.entries(ctx.config.spaces)) {
+    if (!space.fleet) continue;
+    const spaces = local.get(space.fleet) ?? [];
+    spaces.push(name);
+    local.set(space.fleet, spaces);
+  }
+  const t = target(ctx, spaceArg(ctx));
+
+  // The operator sees every fleet on the gateway, not only the ones this
+  // machine has a space in.
+  const remote = new Set<string>();
+  if (t.gatewayToken) {
+    const listed = await call(t, "GET", "/fleets", undefined);
+    if (listed.status === 200) {
+      for (const id of (listed.json?.fleets ?? []) as string[]) remote.add(id);
+    }
+  }
+
+  const ids = [...new Set([...local.keys(), ...remote])].sort();
+  if (ids.length === 0) {
+    ctx.out(dim("no fleets here"));
+    ctx.out(dim("a space joins one with 'prime spaces create --fleet <fleet> --code <code>'"));
+    return;
+  }
+
+  const rows: string[][] = [];
+  for (const fleet of ids) {
+    const spaces = local.get(fleet) ?? [];
+    const member = spaces.find((name) => ctx.config.spaces[name]?.gateway_device && ctx.config.spaces[name]?.remote_token);
+    // Without a space of this machine in the fleet there is nothing to ask
+    // with, so the answer stays unknown.
+    let standing = "-";
+    let members = "-";
+    if (member) {
+      const space = ctx.config.spaces[member]!;
+      // This machine's own space speaks for the fleet: it is a member.
+      const as: FleetTarget = {
+        gateway: t.gateway,
+        ...(t.gatewayToken ? { gatewayToken: t.gatewayToken } : {}),
+        device: space.gateway_device!,
+        deviceToken: space.remote_token!,
+        timeoutMs: t.timeoutMs,
+      };
+      const me = await call(as, "GET", "/fleets/" + encodeURIComponent(fleet) + "/me", undefined);
+      standing = me.json?.status ?? String(me.status);
+      // This space's own role in the fleet, not the fleet's owner.
+      if (me.json?.member?.role === "owner") standing += " (owner)";
+      const roster = await call(as, "GET", "/fleets/" + encodeURIComponent(fleet) + "/members", undefined);
+      if (roster.status === 200) members = String((roster.json?.members ?? []).length);
+    }
+    rows.push([fleet, spaces.length > 0 ? spaces.join(", ") : "-", standing, members]);
+  }
+
+  if (ctx.json) {
+    printJson({ fleets: ids.map((id) => ({ fleet: id, spaces: local.get(id) ?? [], remote: remote.has(id) })) });
+    return;
+  }
+  ctx.out(table(["FLEET", "SPACES HERE", "THIS DEVICE", "MEMBERS"], rows));
+  if (local.size === 0) ctx.out(dim("this machine has no space in a fleet"));
 }
 
 export async function fleetsCreate(ctx: Ctx): Promise<void> {

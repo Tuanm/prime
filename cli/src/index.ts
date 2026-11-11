@@ -33,6 +33,7 @@ import {
   fleetsCreate,
   fleetsInvite,
   fleetsJoin,
+  fleetsList,
   fleetsLeave,
   fleetsMembers,
   fleetsPending,
@@ -372,6 +373,8 @@ async function main(argv: string[]): Promise<void> {
       }
     case "fleets":
       switch (sub) {
+        case "list":
+          return fleetsList(ctx);
         case "create":
           return fleetsCreate(ctx);
         case "invite":

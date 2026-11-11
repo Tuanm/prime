@@ -604,7 +604,17 @@ export default {
     // Membership and bootstrap. The Worker proves the credential here; the
     // Durable Object only ever sees an identity this Worker established.
     if (url.pathname.startsWith("/fleets/") || url.pathname.startsWith("/api/fleets/") || url.pathname === "/fleets") {
-      if (url.pathname === "/fleets") return Response.json({ error: "fleet id required" }, { status: 400 });
+      if (url.pathname === "/fleets") {
+        // The fleets that exist, for the operator: the list lives in the
+        // registry, because the fleet objects cannot be enumerated.
+        if (request.method !== "GET") return Response.json({ error: "fleet id required" }, { status: 400 });
+        const t = extractToken(request, url, "auth");
+        if (!cfg.gatewayToken || !t || !timingSafeEq(t, cfg.gatewayToken)) {
+          return Response.json({ error: "only the operator may list the fleets" }, { status: 403 });
+        }
+        const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+        return reg.fetch("https://registry/fleets");
+      }
       const fleetResponse = await handleFleetRoutes({
         request,
         env,

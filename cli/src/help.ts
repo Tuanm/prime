@@ -404,6 +404,7 @@ EXIT CODES
 const FLEETS = `prime fleets - groups of devices that hold the same work
 
 USAGE
+  prime fleets list                              The fleets this machine knows
   prime fleets create <fleet-id>                 Create a fleet; this device owns it
   prime fleets invite <fleet-id> [options]      Mint a single-use invite code
   prime fleets join <fleet-id> --code <code>     Join with an invite code

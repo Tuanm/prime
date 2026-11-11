@@ -25,6 +25,17 @@ describe("choosing which gateway a fleet command talks to", () => {
     expect(t.deviceToken).toBe("flag-token");
   });
 
+  test("a device picked from the config brings its token with it", () => {
+    const c = config({
+      devices: { "anon-one": { gateway: "https://one.example", token: "one-token" } },
+    });
+    // No space named, so the first configured device speaks for the fleet -
+    // and its credential has to come with it.
+    const t = resolveFleetTarget(c, {});
+    expect(t.device).toBe("anon-one");
+    expect(t.deviceToken).toBe("one-token");
+  });
+
   test("a space supplies the credentials of its gateway identity", () => {
     const c = config({
       spaces: {
