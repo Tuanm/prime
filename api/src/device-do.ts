@@ -338,7 +338,8 @@ export class DeviceDO extends DurableObject<Env> {
     // The registry TTL-sweeps its online entries; re-register periodically so
     // a long-lived tunnel stays "online" in the admin UI (throttled - the
     // keepalive every 25s keeps this cheap).
-    this.maybeRefreshRegistry();
+    const refresh = this.maybeRefreshRegistry();
+    if (refresh) this.ctx.waitUntil(refresh);
     try {
       // Rewriting the attachment must not drop the tunnel's origin.
       ws.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin: this.tunnelOrigin });
@@ -430,14 +431,24 @@ export class DeviceDO extends DurableObject<Env> {
     console.log(JSON.stringify({ trace: "tunnel", what, deviceId: id, origin: meta?.origin ?? null }));
   }
 
-  private maybeRefreshRegistry(): void {
+  /**
+   * Tell the registry this device is connected, at most every REGISTRY_REFRESH_MS.
+   *
+   * The promise is returned on purpose: the callers hand it to waitUntil. A
+   * Durable Object may be evicted the moment the event that woke it is done, and
+   * a fetch that is only kicked off - never awaited - can be cut off with it,
+   * which leaves a connected device looking offline in the list until it next
+   * speaks.
+   */
+  private maybeRefreshRegistry(): Promise<void> | null {
     const now = Date.now();
     const intervalMs = parseInt(this.env.REGISTRY_REFRESH_MS || "30000", 10) || 30000;
-    if (now - this.lastRegistryAt < intervalMs) return;
+    if (now - this.lastRegistryAt < intervalMs) return null;
     this.lastRegistryAt = now;
-    this.env.REGISTRY
+    return this.env.REGISTRY
       .get(this.env.REGISTRY.idFromName("global"))
       .fetch("https://registry/register?id=" + encodeURIComponent(this.deviceId), { method: "POST" })
+      .then(() => {})
       .catch(() => {});
   }
 
@@ -564,7 +575,7 @@ export class DeviceDO extends DurableObject<Env> {
     // quiet - a space doing its work and nothing else - sends nothing for the
     // message path to refresh from. The alarm says it here, so a connected
     // device never goes "offline" in the list while it is connected.
-    this.maybeRefreshRegistry();
+    await this.maybeRefreshRegistry();
     this.scheduleKeepaliveCheck();
   }
 

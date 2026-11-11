@@ -522,22 +522,39 @@ async function vacateSilentPrimary(env: Env, fleetId: string, holder: string | n
  * inline styles, and the web font. The script, on the page that has one, is
  * named by the hash of its own text, not by `unsafe-inline`.
  */
-const PAGE_CSP_BASE =
-  // The one request these pages make is /connect asking GitHub for the newest
-  // release, so that is the one place they may connect to.
-  "default-src 'none'; img-src data:; connect-src https://api.github.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+/**
+ * The policy the public pages are served under.
+ *
+ * These pages are documents with one stylesheet and, on one of them, one script.
+ * Neither is allowed by name: each is allowed by the hash of its own text, so a
+ * style or a script that was not written here cannot run at all.
+ */
+const PAGE_CSP_HEAD =
+  "default-src 'none'; img-src data:; connect-src https://api.github.com; font-src https://fonts.gstatic.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-/** The base policy, with one script allowed by its hash. */
-let pageCspWithScript: { html: string; csp: string } | null = null;
-async function pageCsp(html: string): Promise<string> {
-  const match = /<script>([\s\S]*?)<\/script>/.exec(html);
-  if (!match) return PAGE_CSP_BASE;
-  if (pageCspWithScript && pageCspWithScript.html === html) return pageCspWithScript.csp;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(match[1]!));
+/** sha256 of a piece of text, base64, in the shape a CSP wants it. */
+async function cspHash(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   let binary = "";
   for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
-  const csp = PAGE_CSP_BASE + "; script-src 'sha256-" + btoa(binary) + "'";
-  pageCspWithScript = { html, csp };
+  return "'sha256-" + btoa(binary) + "'";
+}
+
+/** The policy for one page, with its own style and script named by hash. */
+let pageCspCache: { html: string; csp: string } | null = null;
+async function pageCsp(html: string): Promise<string> {
+  if (pageCspCache && pageCspCache.html === html) return pageCspCache.csp;
+  const parts: string[] = [];
+  const style = /<style>([\s\S]*?)<\/style>/.exec(html);
+  parts.push(
+    style
+      ? "style-src " + (await cspHash(style[1]!)) + " https://fonts.googleapis.com"
+      : "style-src https://fonts.googleapis.com",
+  );
+  const script = /<script>([\s\S]*?)<\/script>/.exec(html);
+  if (script) parts.push("script-src " + (await cspHash(script[1]!)));
+  const csp = PAGE_CSP_HEAD + "; " + parts.join("; ");
+  pageCspCache = { html, csp };
   return csp;
 }
 

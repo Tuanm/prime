@@ -38,6 +38,7 @@ __CSS__
       .sealed-key .k { color: #16a34a; font-weight: 600; }
       h2 { font-size: 13px; font-weight: 700; margin: 26px 0 6px; }
       .limit { border-left: 4px solid #b91c1c; padding: 2px 0 2px 12px; margin: 22px 0 0; }
+      .desc.flush { margin: 0; }
       .meta { margin-top: 26px; font-size: 10px; color: #999; }
       .meta a { color: #999; }
       .foot { margin-top: 14px; }
@@ -77,7 +78,7 @@ __CSS__
     <p class="desc">Each space in a fleet is sealed for its own key, so one compromised machine does not hand over the others. Whoever is in charge is decided by a short lease, and a space that has stopped stops being in charge.</p>
 
     <div class="limit">
-      <p class="desc" style="margin:0"><b>What this does not do.</b> Nothing here helps with a machine that is already compromised. A buddy is its machine. Keep the token - and the machine - as carefully as you keep the work on it.</p>
+      <p class="desc flush"><b>What this does not do.</b> Nothing here helps with a machine that is already compromised. A buddy is its machine. Keep the token - and the machine - as carefully as you keep the work on it.</p>
     </div>
 
     <p class="meta"><a href="/connect">Set up a buddy</a> &middot; <a href="/join">Join a fleet</a></p>

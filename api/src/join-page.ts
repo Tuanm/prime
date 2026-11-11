@@ -185,6 +185,7 @@ __CSS__
       }
 
       .legend { font-size: 11px; color: #999; margin-top: 12px; }
+      .desc.gap { margin-top: 20px; }
       .steps { margin: 20px 0 0; border-top: 1px solid #eee; }
       .steps li { list-style: none; padding: 10px 0; border-bottom: 1px solid #eee; }
       .steps b { font-weight: 700; }
@@ -273,7 +274,7 @@ __CSS__
       <li><b>It takes its place.</b> <span>First one in is in charge; every one after keeps a copy and waits.</span></li>
     </ul>
 
-    <p class="desc" style="margin-top:20px">The fleet is one address: a job sent to it reaches whichever space is in charge, and the answer comes back the same way. Nobody has to know which machine ran it.</p>
+    <p class="desc gap">The fleet is one address: a job sent to it reaches whichever space is in charge, and the answer comes back the same way. Nobody has to know which machine ran it.</p>
 
     <p class="meta"><a href="/connect">Set up a buddy</a></p>
     <div class="foot">

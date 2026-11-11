@@ -26,6 +26,8 @@ export const LANDING_HTML = String.raw`<!doctype html>
       h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.4px; margin-bottom: 4px; }
       .sub { font-size: 10px; color: #999; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 20px; }
       .desc { margin-bottom: 26px; }
+      /* A paragraph after something that is not a paragraph. */
+      .desc.gap { margin-top: 22px; }
       .cg { position: relative; display: inline-flex; }
       .cg button { font: inherit; cursor: pointer; background: #111; color: #fff; border: 1px solid #111; }
       .cg button:hover { background: #000; }
@@ -78,7 +80,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
     </div>
     <div class="target" id="target"></div>
 
-    <p class="desc" style="margin-top:22px">A buddy works on its own. Buddies also work together: a few of them can be one team, a <b>fleet</b>. A fleet is one piece of work kept in step across machines, so a job started on one of them carries on where it lands, and the work does not stop because one machine went quiet.</p>
+    <p class="desc gap">A buddy works on its own. Buddies also work together: a few of them can be one team, a <b>fleet</b>. A fleet is one piece of work kept in step across machines, so a job started on one of them carries on where it lands, and the work does not stop because one machine went quiet.</p>
     <p class="desc">A fleet is made of <b>spaces</b> - a space is a workspace made in a moment, or kept for as long as you want it. Each one carries the same work, and any of them can take over when another stops answering.</p>
     <p class="meta"><a href="/join">Join a fleet</a></p>
 
