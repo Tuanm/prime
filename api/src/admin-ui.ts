@@ -646,7 +646,6 @@ ${UI_CSS}    </style>
         function fleetNewCard(pending) {
           var row = fleetRootRow(
             { name: pending.name || "" },
-            "",
             [
               {
                 text: "Create",
@@ -682,20 +681,11 @@ ${UI_CSS}    </style>
         function fleetCard(f) {
           var members = f.members || [];
           var pending = f.pending || [];
-          var bits = [];
-          if (pending.length) bits.push(pending.length + " waiting");
-          var primary = null;
-          members.forEach(function (m) {
-            if (m.deviceId === f.primary) primary = m;
-          });
-          if (primary) bits.push("primary " + fleetName(primary));
-          if (f.disabled) bits.push("paused");
 
           // The fleet is the root of the tree: a row of the device list, with
           // the spaces in it as the leaves below.
           var row = fleetRootRow(
             f,
-            bits.join(" · "),
             [
               {
                 text: "Save",
@@ -762,7 +752,7 @@ ${UI_CSS}    </style>
         // A root row: the fleet, or the card that is filled in to make one.
         // It is a row of the device list, the same as the spaces below it,
         // with a cloud instead of the status dot: a fleet is a group.
-        function fleetRootRow(fleet, metaText, items, isNew) {
+        function fleetRootRow(fleet, items, isNew) {
           var li = document.createElement("li");
           li.className = "row fleet-row" + (isNew ? " new" : "") + (fleet.disabled ? " disabled" : "");
           var cloud = document.createElement("span");
@@ -778,12 +768,7 @@ ${UI_CSS}    </style>
           nameInput.value = isNew ? fleet.name || "" : fleet.label || fleet.fleet || "";
           nameInput.title = isNew ? "" : "the fleet " + fleet.fleet;
 
-          var metaEl = document.createElement("span");
-          metaEl.className = "fleet-meta";
-          metaEl.textContent = metaText || "";
-
           box.appendChild(nameInput);
-          box.appendChild(metaEl);
           box.appendChild(fleetMenu(items));
           li.appendChild(cloud);
           li.appendChild(box);

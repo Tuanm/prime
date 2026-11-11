@@ -349,11 +349,7 @@ export const UI_CSS = `      * {
       .fleet-branch {
         margin-bottom: 10px;
       }
-      .fleet-meta {
-        color: #666;
-        font-size: 11px;
-        white-space: nowrap;
-      }
+
       .fleet-actions {
         margin-left: auto;
         display: flex;

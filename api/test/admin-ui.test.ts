@@ -244,4 +244,22 @@ describe("the fleets in the admin interface", () => {
     expect(rows[0]!.className).toContain("new");
     expect(menuOf(rows[0]!)).toEqual(["Save", "Cancel"]);
   });
+
+  test("the fleet card carries the name and the actions, and nothing else", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        disabled: false,
+        members: [{ deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true }],
+        primary: "d1",
+        pending: [],
+      },
+    ]);
+    await page.settle();
+    const root = page.list()[0]!.children[0]!;
+    const box = root.children.find((c) => c.className === "box")!;
+    // The name, and the menu: no member count, no primary line, no meta.
+    expect(box.children.length).toBe(2);
+    expect(box.children[0]!.tagName).toBe("input");
+  });
 });
