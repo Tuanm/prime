@@ -129,6 +129,23 @@ function loadPage(fleets: unknown[] = []): Page {
   };
 }
 
+
+/** The labels of the actions in a row's menu. */
+function menuOf(row: El): string[] {
+  // row > box > menu-wrap > [button, menu] and the menu holds the actions.
+  for (const child of row.children) {
+    if (child.className === "box") {
+      for (const inner of child.children) {
+        if (inner.className === "menu-wrap") {
+          const menu = inner.children.find((c) => c.className === "menu");
+          return (menu?.children || []).map((b) => b.textContent);
+        }
+      }
+    }
+  }
+  return [];
+}
+
 describe("the fleets in the admin interface", () => {
   test("the + button opens the card that is filled in", () => {
     const page = loadPage();
@@ -170,5 +187,61 @@ describe("the fleets in the admin interface", () => {
     // The fleet is the root; the spaces are the leaves below it.
     expect(branch.children.length).toBeGreaterThan(1);
     expect(branch.children[0]!.className).toContain("fleet-row");
+  });
+  test("a fleet is a cloud, and it offers Save and Deactivate", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        label: "the office",
+        disabled: false,
+        members: [{ deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true }],
+        primary: "d1",
+        pending: [],
+      },
+    ]);
+    await page.settle();
+    const branch = page.list()[0]!;
+    const root = branch.children[0]!;
+    // A fleet is a group of spaces, so it carries the cloud, not a status dot.
+    expect(root.children[0]!.className).toContain("cloud-ic");
+    expect(menuOf(root)).toEqual(["Save", "Deactivate", "Invite", "Delete"]);
+  });
+
+  test("a paused fleet is drawn as switched off, and offers Activate", async () => {
+    const page = loadPage([
+      { fleet: "acme", disabled: true, members: [], primary: null, pending: [] },
+    ]);
+    await page.settle();
+    const root = page.list()[0]!.children[0]!;
+    expect(root.className).toContain("disabled");
+    expect(root.children[0]!.className).toContain("off");
+    expect(menuOf(root)).toContain("Activate");
+  });
+
+  test("a space is a member of a fleet, not a device with an id on show", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        members: [{ deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true }],
+        primary: "d1",
+        pending: [],
+      },
+    ]);
+    await page.settle();
+    const leaves = page.list()[0]!.children[1]!;
+    const space = leaves.children[0]!.children[0]!;
+    const box = space.children.find((c) => c.className === "box")!;
+    // The name, and the actions: the device id is not shown.
+    expect(box.children.length).toBe(2);
+    expect(menuOf(space)).toEqual(["View", "Tools", "Clients", "Deactivate", "Remove"]);
+  });
+
+  test("the card for a new device is an outline that can be cancelled", () => {
+    const page = loadPage();
+    page.click("addBtn");
+    const rows = page.byId["list"]!.children;
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.className).toContain("new");
+    expect(menuOf(rows[0]!)).toEqual(["Save", "Cancel"]);
   });
 });

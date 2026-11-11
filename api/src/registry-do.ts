@@ -526,7 +526,7 @@ export class RegistryDO extends DurableObject<Env> {
     // fleet are connected, so it asks for them here.
     if (request.method === "GET" && path === "/online") {
       this.sweep();
-      return Response.json({ online: [...this.online.keys()] });
+      return Response.json({ online: [...this.online.keys()], disabled: [...this.disabled] });
     }
 
     if (request.method === "GET" && path === "/full") {

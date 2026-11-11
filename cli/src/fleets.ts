@@ -592,7 +592,10 @@ export async function bootstrap(creds: FleetCredentials, fleet: string): Promise
     body: "{}",
     signal: AbortSignal.timeout(creds.timeoutMs ?? 120_000),
   });
-  if (!res.ok) throw new CliError("could not take a place in the fleet: " + res.status);
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new CliError("could not take a place in the fleet: " + (detail.error ?? res.status));
+  }
   const body = (await res.json()) as { role?: string; catchUpTo?: number };
   return { primary: body.role === "primary", ...(body.catchUpTo !== undefined ? { catchUpTo: body.catchUpTo } : {}) };
 }

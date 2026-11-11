@@ -420,17 +420,19 @@ export const UI_CSS = `      * {
         padding: 7px 9px;
         background: #f0fdf4;
       }
-      /* A space that is waiting to be admitted is drawn as an outline:
-         it is not in the fleet yet. */
+      /* A row that is being filled in, or waiting to be admitted, is drawn
+         as an outline: it is not there yet. */
+      .row.new .box,
       .fleet-row.waiting .box {
         border-style: dashed;
         color: #666;
       }
-      /* The card that is filled in to make a fleet is a row like the others,
-         with a dashed box so it reads as not there yet. */
-      .fleet-row.new .box {
-        border-style: dashed;
+      /* A fleet, or a space in it, that the operator has switched off. */
+      .fleet-row.disabled .box {
+        color: #999;
+        background: #fafafa;
       }
+
       .dlg-code {
         margin: 0 12px 14px;
         padding: 10px;

@@ -30,6 +30,17 @@ import {
 } from "./fleets";
 import type { Env } from "./config";
 
+/** What the operator has decided about a fleet itself. */
+interface FleetMeta {
+  /** A name for the operator to read; the id stays the id. */
+  label?: string;
+  /** A paused fleet takes no part in anything. */
+  disabled?: boolean;
+}
+
+/** The routes a paused fleet refuses. */
+const PAUSED_ROUTES = new Set(["/join", "/bootstrap", "/head/advance"]);
+
 interface Caller {
   kind: "admin" | "device";
   deviceId: string;
@@ -147,7 +158,8 @@ export class FleetDO implements DurableObject {
     if (caller.kind !== "admin") return this.deny();
     const members = await this.members();
     const lastActivity = (await this.state.storage.get<number>("lastActivity")) ?? 0;
-    return Response.json({ members: Object.keys(members), lastActivity });
+    const meta = await this.meta();
+    return Response.json({ members: Object.keys(members), lastActivity, meta });
   }
 
   //
@@ -228,6 +240,31 @@ export class FleetDO implements DurableObject {
     return (await this.state.storage.get<Members>("members")) ?? {};
   }
 
+  /** What the operator has set about the fleet itself. */
+  private async meta(): Promise<FleetMeta> {
+    return (await this.state.storage.get<FleetMeta>("meta")) ?? {};
+  }
+
+  /** A fleet the operator has paused takes no part in anything. */
+  private async paused(): Promise<boolean> {
+    return (await this.meta()).disabled === true;
+  }
+
+  /** Set what the operator has decided about the fleet. */
+  private async setMeta(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+    if (caller.kind !== "admin") return this.deny();
+    if (!(await this.exists())) return Response.json({ error: "no such fleet" }, { status: 404 });
+    const meta = await this.meta();
+    if (typeof body.label === "string") {
+      const label = cleanLabel(body.label);
+      if (label === undefined) delete meta.label;
+      else meta.label = label;
+    }
+    if (typeof body.disabled === "boolean") meta.disabled = body.disabled;
+    await this.state.storage.put("meta", meta);
+    return Response.json({ ok: true, meta });
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -237,6 +274,13 @@ export class FleetDO implements DurableObject {
     const kind = request.headers.get("x-prime-caller") === "admin" ? "admin" : "device";
     const deviceId = request.headers.get("x-prime-device") ?? "";
     const caller: Caller = { kind, deviceId };
+
+    // A paused fleet takes no part in the work: nothing joins it, nobody
+    // takes a place in it, and nothing is published to it. The operator
+    // still runs it, so the routes that manage it are left alone.
+    if (PAUSED_ROUTES.has(path) && (await this.paused())) {
+      return Response.json({ error: "the fleet is paused" }, { status: 409 });
+    }
 
     if (path === "/create" && request.method === "POST") return this.create(caller, body, request);
     if (path === "/invite" && request.method === "POST") return this.invite(caller, body);
@@ -254,6 +298,7 @@ export class FleetDO implements DurableObject {
     if (path === "/role") return this.role(caller);
     if (path === "/primary" && request.method === "GET") return this.primary(caller);
     if (path === "/reap" && request.method === "POST") return this.reap(caller);
+    if (path === "/meta" && request.method === "POST") return this.setMeta(caller, body);
     if (path === "/bootstrap" && request.method === "POST") {
       await this.touch();
       return this.bootstrap(caller, request, body);

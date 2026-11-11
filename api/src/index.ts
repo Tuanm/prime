@@ -349,7 +349,9 @@ async function adminFleets(env: Env): Promise<Response> {
   // The members of a fleet are often anonymous devices, and the device list
   // leaves those out. The registry says which of them are connected.
   const live = await reg.fetch("https://registry/online").catch(() => null);
-  const online = new Set(live ? (((await live.json()) as { online?: string[] }).online ?? []) : []);
+  const liveBody = live ? ((await live.json()) as { online?: string[]; disabled?: string[] }) : {};
+  const online = new Set(liveBody.online ?? []);
+  const off = new Set(liveBody.disabled ?? []);
   const fleets: Array<Record<string, unknown>> = [];
   for (const id of ids) {
     if (!env.FLEET) break;
@@ -359,7 +361,7 @@ async function adminFleets(env: Env): Promise<Response> {
     headers.set("x-prime-fleet", id);
     const info = await stub.fetch("https://fleet/reap", { method: "POST", headers }).catch(() => null);
     if (!info || !info.ok) continue;
-    const body = (await info.json()) as { members?: string[]; lastActivity?: number };
+    const body = (await info.json()) as { members?: string[]; lastActivity?: number; meta?: { label?: string; disabled?: boolean } };
     const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
     const rosterBody = roster && roster.ok ? ((await roster.json()) as { members?: Array<Record<string, unknown>> }) : {};
     const primary = await stub.fetch("https://fleet/primary", { method: "GET", headers: adminHeaders(headers) }).catch(() => null);
@@ -379,10 +381,13 @@ async function adminFleets(env: Env): Promise<Response> {
       label: typeof m.label === "string" ? m.label : undefined,
       addedAt: typeof m.addedAt === "number" ? m.addedAt : 0,
       online: online.has(String(m.deviceId ?? "")),
+      disabled: off.has(String(m.deviceId ?? "")),
       known: known.has(String(m.deviceId ?? "")),
     }));
     fleets.push({
       fleet: id,
+      label: body.meta?.label ?? "",
+      disabled: body.meta?.disabled === true,
       members,
       memberCount: members.length,
       primary: primaryBody.primary ?? null,
@@ -805,6 +810,13 @@ export default {
         if (request.method === "POST" && step === "reap") {
           return await adminFleetAction(env, fleetId, "reap", {});
         }
+        if (request.method === "POST" && step === "meta") {
+          const body = (await request.json().catch(() => ({}))) as { label?: unknown; disabled?: unknown };
+          const patch: Record<string, unknown> = {};
+          if (typeof body.label === "string") patch.label = body.label;
+          if (typeof body.disabled === "boolean") patch.disabled = body.disabled;
+          return await adminFleetAction(env, fleetId, "meta", patch);
+        }
         return Response.json({ error: "not found" }, { status: 404 });
       }
 
@@ -847,6 +859,25 @@ export default {
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
         const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
         return stub.fetch("https://device/clients");
+      }
+      if (request.method === "POST" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/tools")) {
+        // The same answer the tools dialog gets from /mcp, relayed here so
+        // the token never reaches the browser. A fleet member is an
+        // anonymous device, and the admin is not given its token.
+        const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/tools".length);
+        if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+        if ((await effectiveDisabledSet(env)).has(deviceId)) {
+          return Response.json({ error: "device disabled" }, { status: 403 });
+        }
+        const map = await reg.fetch("https://registry/map");
+        const token = map.ok ? ((await map.json()) as { map?: Record<string, string> }).map?.[deviceId] : undefined;
+        if (!token) return Response.json({ error: "no such device" }, { status: 404 });
+        const headers = new Headers({ "content-type": "application/json", "x-device-id": deviceId, "x-device-token": token });
+        return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch(new Request("https://device/mcp", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+        }));
       }
       if (request.method === "POST" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/state")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/state".length);

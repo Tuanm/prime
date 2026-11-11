@@ -102,7 +102,7 @@ ${UI_CSS}    </style>
 
         function renderRow(dev, isNew, pendingObj) {
           var li = document.createElement("li");
-          li.className = "row" + (dev.disabled ? " disabled" : "");
+          li.className = "row" + (isNew ? " new" : "") + (dev.disabled ? " disabled" : "");
           li.dataset.deviceId = dev.deviceId || "";
 
           var virtual = !!dev.virtual;
@@ -183,12 +183,22 @@ ${UI_CSS}    </style>
           stateItem.type = "button";
           stateItem.textContent = dev.disabled ? "Activate" : "Deactivate";
           if (!dev.disabled) stateItem.className = "danger";
-          menu.appendChild(viewItem);
-          menu.appendChild(toolsItem);
-          menu.appendChild(clientsItem);
-          menu.appendChild(saveItem);
-          menu.appendChild(stateItem);
-          if (!virtual) menu.appendChild(delItem);
+          // A row that is being filled in has nothing to look at yet: it
+          // offers Save, and Cancel to throw it away.
+          var cancelItem = document.createElement("button");
+          cancelItem.type = "button";
+          cancelItem.textContent = "Cancel";
+          if (isNew) {
+            menu.appendChild(saveItem);
+            menu.appendChild(cancelItem);
+          } else {
+            menu.appendChild(viewItem);
+            menu.appendChild(toolsItem);
+            menu.appendChild(clientsItem);
+            menu.appendChild(saveItem);
+            menu.appendChild(stateItem);
+            if (!virtual) menu.appendChild(delItem);
+          }
           menuWrap.appendChild(btn);
           menuWrap.appendChild(menu);
 
@@ -211,6 +221,15 @@ ${UI_CSS}    </style>
           var origToken = realToken;
           var maskedTok = masked;
 
+          cancelItem.addEventListener("click", function () {
+            closeMenus();
+            if (pendingObj) {
+              dropPending();
+              render();
+              setStatus("");
+            }
+          });
+
           function isDirty() {
             var idChanged = idInput.value.trim() !== origId;
             var tok = tokInput.value.trim();
@@ -222,7 +241,7 @@ ${UI_CSS}    </style>
             var online = li.dataset.online === "1";
             toolsItem.disabled = !online; // Tools needs a live tunnel
             clientsItem.disabled = virtual || !online; // Clients needs a live tunnel
-            saveItem.disabled = !isDirty(); // Save only after the user edits
+            saveItem.disabled = !isNew && !isDirty(); // Save only after the user edits
           }
 
           viewItem.addEventListener("click", function () {
@@ -597,6 +616,10 @@ ${UI_CSS}    </style>
         }
 
 
+        // The mark of a fleet: the cloud, the same one a cloud device has.
+        var FLEET_CLOUD =
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg>';
+
         function fleetName(m) {
           return m.label || m.deviceId || "?";
         }
@@ -622,7 +645,7 @@ ${UI_CSS}    </style>
         // device list opens, with the name to type into.
         function fleetNewCard(pending) {
           var row = fleetRootRow(
-            pending.name || "",
+            { name: pending.name || "" },
             "",
             [
               {
@@ -660,20 +683,33 @@ ${UI_CSS}    </style>
           var members = f.members || [];
           var pending = f.pending || [];
           var bits = [];
-          bits.push(members.length + (members.length === 1 ? " member" : " members"));
           if (pending.length) bits.push(pending.length + " waiting");
           var primary = null;
           members.forEach(function (m) {
             if (m.deviceId === f.primary) primary = m;
           });
           if (primary) bits.push("primary " + fleetName(primary));
+          if (f.disabled) bits.push("paused");
 
           // The fleet is the root of the tree: a row of the device list, with
           // the spaces in it as the leaves below.
           var row = fleetRootRow(
-            f.fleet,
+            f,
             bits.join(" · "),
             [
+              {
+                text: "Save",
+                onClick: function () {
+                  fleetSaveMeta(f, row.input.value);
+                },
+              },
+              {
+                text: f.disabled ? "Activate" : "Deactivate",
+                danger: !f.disabled,
+                onClick: function () {
+                  fleetSaveMeta(f, null, !f.disabled);
+                },
+              },
               {
                 text: "Invite",
                 onClick: function () {
@@ -724,29 +760,32 @@ ${UI_CSS}    </style>
         }
 
         // A root row: the fleet, or the card that is filled in to make one.
-        // It is a row of the device list, the same as the spaces below it.
-        function fleetRootRow(name, meta, items, isNew) {
+        // It is a row of the device list, the same as the spaces below it,
+        // with a cloud instead of the status dot: a fleet is a group.
+        function fleetRootRow(fleet, metaText, items, isNew) {
           var li = document.createElement("li");
-          li.className = "row fleet-row" + (isNew ? " new" : "");
-          var dot = document.createElement("span");
-          dot.className = "dot off";
+          li.className = "row fleet-row" + (isNew ? " new" : "") + (fleet.disabled ? " disabled" : "");
+          var cloud = document.createElement("span");
+          cloud.className = "cloud-ic " + (fleet.disabled ? "off" : "on");
+          cloud.title = isNew ? "a new fleet" : "a fleet of spaces";
+          cloud.innerHTML = FLEET_CLOUD;
           var box = document.createElement("div");
           box.className = "box";
 
           var nameInput = document.createElement("input");
           nameInput.className = "id-input";
-          nameInput.placeholder = "fleet name";
-          nameInput.value = name || "";
-          nameInput.title = isNew ? "" : "the fleet";
+          nameInput.placeholder = isNew ? "fleet name" : "a name for the fleet";
+          nameInput.value = isNew ? fleet.name || "" : fleet.label || fleet.fleet || "";
+          nameInput.title = isNew ? "" : "the fleet " + fleet.fleet;
 
           var metaEl = document.createElement("span");
           metaEl.className = "fleet-meta";
-          metaEl.textContent = meta || "";
+          metaEl.textContent = metaText || "";
 
           box.appendChild(nameInput);
           box.appendChild(metaEl);
           box.appendChild(fleetMenu(items));
-          li.appendChild(dot);
+          li.appendChild(cloud);
           li.appendChild(box);
           return { li: li, input: nameInput };
         }
@@ -772,18 +811,33 @@ ${UI_CSS}    </style>
               ? "the owner of the fleet"
               : "a member of the fleet";
 
-          var idInput = document.createElement("input");
-          idInput.className = "tok-input";
-          idInput.readOnly = true;
-          idInput.value = m.deviceId;
-          idInput.title = "the device id of this space";
-
+          // The space is a device, so it has the actions a device has.
           var menu = fleetMenu([
             {
-              text: "Tools",
-              disabled: !m.online,
+              text: "View",
               onClick: function () {
-                showToolsDialog(m.deviceId, "");
+                showViewDialog(fleetName(m), "/admin/api/devices/" + encodeURIComponent(m.deviceId) + "/origin");
+              },
+            },
+            {
+              text: "Tools",
+              disabled: !m.online || m.disabled,
+              onClick: function () {
+                showTools(fleetName(m), fetch("/admin/api/devices/" + encodeURIComponent(m.deviceId) + "/tools", { method: "POST" }));
+              },
+            },
+            {
+              text: "Clients",
+              disabled: !m.online || m.disabled,
+              onClick: function () {
+                showClientsDialog(m.deviceId);
+              },
+            },
+            {
+              text: m.disabled ? "Activate" : "Deactivate",
+              danger: !m.disabled,
+              onClick: function () {
+                fleetDeviceState(m);
               },
             },
             {
@@ -796,7 +850,6 @@ ${UI_CSS}    </style>
           ]);
 
           box.appendChild(nameInput);
-          box.appendChild(idInput);
           box.appendChild(menu);
           li.appendChild(dot);
           li.appendChild(box);
@@ -816,14 +869,8 @@ ${UI_CSS}    </style>
           var nameInput = document.createElement("input");
           nameInput.className = "id-input";
           nameInput.readOnly = true;
-          nameInput.value = p.label || p.deviceId;
+          nameInput.value = p.label || "a device";
           nameInput.title = "waiting to be admitted";
-
-          var idInput = document.createElement("input");
-          idInput.className = "tok-input";
-          idInput.readOnly = true;
-          idInput.value = p.deviceId;
-          idInput.title = "the device id that asked to join";
 
           // The answers the operator has to give are shown, not tucked away.
           var answers = document.createElement("span");
@@ -836,11 +883,25 @@ ${UI_CSS}    </style>
           }, true));
 
           box.appendChild(nameInput);
-          box.appendChild(idInput);
           box.appendChild(answers);
           li.appendChild(dot);
           li.appendChild(box);
           return li;
+        }
+
+        // A space is a device: the operator can switch it off and on.
+        function fleetDeviceState(m) {
+          var disabled = !m.disabled;
+          setStatus((disabled ? "deactivating " : "activating ") + fleetName(m) + " ...");
+          api("/admin/api/devices/" + encodeURIComponent(m.deviceId) + "/state", {
+            method: "POST",
+            body: JSON.stringify({ disabled: disabled }),
+          })
+            .then(function () {
+              setStatus((disabled ? "deactivated " : "activated ") + fleetName(m));
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not change the state: " + e.message, true); });
         }
 
         function fleetCreate(pending) {
@@ -870,6 +931,23 @@ ${UI_CSS}    </style>
           var inputs = fleetListEl.querySelectorAll(".fleet-row .id-input");
           var last = inputs[inputs.length - 1];
           if (last) last.focus();
+        }
+
+        // What the operator decided about the fleet itself: its name, or
+        // whether it takes part in anything.
+        function fleetSaveMeta(f, label, disabled) {
+          var patch = {};
+          if (label !== null && label !== undefined) patch.label = String(label).trim();
+          if (disabled !== undefined) patch.disabled = disabled;
+          api("/admin/api/fleets/" + encodeURIComponent(f.fleet) + "/meta", {
+            method: "POST",
+            body: JSON.stringify(patch),
+          })
+            .then(function () {
+              setStatus(disabled !== undefined ? (disabled ? "paused " : "resumed ") + f.fleet : "saved " + f.fleet);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not change the fleet: " + e.message, true); });
         }
 
         function fleetInvite(fleet) {
