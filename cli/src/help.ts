@@ -31,6 +31,7 @@ COMMANDS
   fleets create|invite|join|approve|members  Groups of devices that hold the same work
   vaults <cmd>                            Encrypted values, secrets and TOTP codes
   spaces create [--name <n>] [--persistent] A rootless Linux codespace running the device buddy
+               [--setup <file>]             ...and run this script inside it once it is up
   spaces create --fleet <id> [--code <c>]   Put the space in a fleet; it joins and catches up
   spaces list|start|stop|delete|logs|enter|top  Manage the codespaces (local devices)
   vaults <cmd>                            Encrypted values, secrets and TOTP

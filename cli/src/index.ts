@@ -94,6 +94,7 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("ephemeral", "boolean", "Discard the state on stop (default)"),
   flag("image", "string", "Image to use (default: the release's ghcr.io/tuanm/prime-space tag)", { placeholder: "<image>" }),
   flag("cpus", "number", "CPUs for the container (default 2)", { placeholder: "<n>" }),
+  flag("setup", "string", "Run this script inside the space once it is up", { placeholder: "<file>" }),
   flag("memory", "string", "Memory limit, e.g. 4g (default 4g)", { placeholder: "<size>" }),
   flag("offline", "boolean", "No network access (Apple internal network or podman internal)"),
   flag("vault", "string", "Company whose values/secrets/codes the run tool may use; repeatable", { placeholder: "<company>", repeatable: true }),

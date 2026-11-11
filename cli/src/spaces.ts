@@ -121,6 +121,83 @@ function runtimeExec(
   return exec(runtime.bin, args, timeoutMs, env);
 }
 
+/** The commands a space is expected to have, and the packages they come in. */
+const SPACE_TOOLS = ["git", "ssh", "unzip", "curl", "wget", "jq", "rg", "python3", "bun"];
+const SPACE_TOOL_PACKAGES = [
+  "git",
+  "openssh-client",
+  "unzip",
+  "curl",
+  "wget",
+  "jq",
+  "ripgrep",
+  "python3",
+];
+
+/**
+ * Make sure the space has the tools a working space needs.
+ *
+ * The image already carries them; a space on an older image is brought up to
+ * the same place here, so a space made today has the same toolbox as one made
+ * after the image was rebuilt.
+ */
+function ensureSpaceTools(runtime: RuntimeInfo, container: string, ctx: Ctx): void {
+  const probe = runtimeExec(
+    runtime,
+    ["exec", container, "sh", "-c", SPACE_TOOLS.map((t) => "command -v " + t).join(" >/dev/null 2>&1 && ") + " >/dev/null 2>&1 && echo ready"],
+    60_000,
+  );
+  if (probe.code === 0 && probe.out.includes("ready")) return;
+  ctx.note(dim("  installing the space tools (git, ssh, jq, ripgrep, python3, bun ...)"));
+  const install = runtimeExec(
+    runtime,
+    [
+      "exec",
+      container,
+      "sh",
+      "-c",
+      "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " +
+        SPACE_TOOL_PACKAGES.join(" "),
+    ],
+    900_000,
+  );
+  if (install.code !== 0) {
+    fail("cannot install the space tools", (install.err || install.out).slice(0, 400).trim() || undefined);
+  }
+  // bun comes from its own installer, and is put where every shell finds it.
+  const bun = runtimeExec(
+    runtime,
+    ["exec", container, "sh", "-c", "command -v bun >/dev/null 2>&1 || (curl -fsSL https://bun.sh/install | bash && ln -sf /root/.bun/bin/bun /usr/local/bin/bun)"],
+    600_000,
+  );
+  if (bun.code !== 0) {
+    fail("cannot install bun in the space", (bun.err || bun.out).slice(0, 400).trim() || undefined);
+  }
+}
+
+/** Run the operator's script inside the space, as the space's own user. */
+function runSetupScript(runtime: RuntimeInfo, container: string, script: string, ctx: Ctx): void {
+  ctx.note(dim("  running the setup script"));
+  // The script travels in the argument list, encoded, so no quoting of the
+  // shell it lands in can change what it does.
+  const encoded = Buffer.from(script, "utf8").toString("base64");
+  const r = runtimeExec(
+    runtime,
+    [
+      "exec",
+      container,
+      "sh",
+      "-c",
+      "printf %s '" + encoded + "' | base64 -d > /tmp/prime-setup.sh && sh /tmp/prime-setup.sh",
+    ],
+    1_800_000,
+  );
+  if (r.code !== 0) {
+    fail("the setup script failed", (r.err || r.out).slice(-1200).trim() || undefined);
+  }
+  if (r.out.trim()) ctx.note(dim("  " + r.out.trim().split("\n").slice(-5).join("\n  ")));
+}
+
 function fail(message: string, hint?: string): never {
   throw new CliError(message, hint);
 }
@@ -928,8 +1005,15 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   const persistent = bool(ctx.parsed, "persistent");
   if (persistent && bool(ctx.parsed, "ephemeral")) throw new UsageError("--persistent and --ephemeral contradict each other");
   const offline = bool(ctx.parsed, "offline");
-  const expose = bool(ctx.parsed, "expose");
   const fleet = str(ctx.parsed, "fleet");
+  // A space in a fleet already has an identity on the gateway, and the fleet
+  // is what clients reach it through. --expose would make a second, separate
+  // anonymous device, so it is dropped rather than honoured.
+  let expose = bool(ctx.parsed, "expose");
+  if (fleet && expose) {
+    ctx.note(dim("  a fleet space needs no --expose: the fleet is how it is reached"));
+    expose = false;
+  }
   if (fleet && offline) {
     throw new UsageError("--fleet needs network access", "An offline space cannot reach the gateway; drop --offline to put it in a fleet.");
   }
@@ -944,6 +1028,23 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   vaultCompanies = [...new Set(vaultCompanies)].sort();
   const vaultKinds = parseVaultKinds(ctx);
   const trusted = bool(ctx.parsed, "trusted");
+  // A script to run in the space once it is up, so a new space can be given
+  // whatever it needs without a second step.
+  const setupPath = str(ctx.parsed, "setup");
+  let setupScript: string | undefined;
+  if (setupPath) {
+    try {
+      setupScript = readFileSync(setupPath, "utf8");
+    } catch (err) {
+      throw new UsageError(
+        "cannot read the setup script " + setupPath,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    if (setupScript.length > 64 * 1024) {
+      throw new UsageError("--setup script is too large", "Keep it under 64 KiB, or copy a file in with 'prime spaces enter'.");
+    }
+  }
   const image = str(ctx.parsed, "image") ?? defaultImage(version);
   const cpus = num(ctx.parsed, "cpus") ?? 2;
   const memory = str(ctx.parsed, "memory") ?? "4g";
@@ -1107,6 +1208,8 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     url = requireRunningAddress(runtime, space);
     if (!url) fail("the space container started but has no address yet");
     await waitReady(url, token, ctx.quiet);
+    ensureSpaceTools(runtime, container, ctx);
+    if (setupScript !== undefined) runSetupScript(runtime, container, setupScript, ctx);
   } catch (err) {
     runtimeExec(runtime, ["rm", "-f", container], 120_000);
     if (volume && !fleetWork) volumeDelete(runtime, volume);

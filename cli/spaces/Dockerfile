@@ -5,7 +5,14 @@ FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash ca-certificates curl git coreutils findutils grep sed gawk procps \
+      openssh-client unzip wget jq ripgrep python3 \
  && rm -rf /var/lib/apt/lists/*
+
+# bun has no apt package: it comes from its own installer, and is put on the
+# path every shell reads.
+RUN curl -fsSL https://bun.sh/install | bash \
+ && ln -sf /root/.bun/bin/bun /usr/local/bin/bun \
+ && bun --version
 
 ARG BIN=prime-linux-arm64
 COPY ${BIN} /usr/local/bin/prime
