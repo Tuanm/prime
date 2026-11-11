@@ -93,8 +93,10 @@ jobs:
         # unreachable: three tries, because a flaky mirror fails nothing else.
         run: |
           set -uo pipefail
+          # A hang is worse than a failure: each try has a ceiling, so a stuck
+          # mirror costs seven minutes, not the whole job.
           for attempt in 1 2 3; do
-            if npx playwright install --with-deps chromium; then exit 0; fi
+            if timeout 420 npx playwright install --with-deps chromium; then exit 0; fi
             echo "::warning::chromium install failed on attempt $attempt; retrying"
             sleep 10
           done
@@ -149,8 +151,10 @@ jobs:
         # unreachable: three tries, because a flaky mirror fails nothing else.
         run: |
           set -uo pipefail
+          # A hang is worse than a failure: each try has a ceiling, so a stuck
+          # mirror costs seven minutes, not the whole job.
           for attempt in 1 2 3; do
-            if npx playwright install --with-deps chromium; then exit 0; fi
+            if timeout 420 npx playwright install --with-deps chromium; then exit 0; fi
             echo "::warning::chromium install failed on attempt $attempt; retrying"
             sleep 10
           done
