@@ -342,6 +342,13 @@ export const UI_CSS = `      * {
       .dlg-msg.err {
         color: #b91c1c;
       }
+      /* The row of answers in a dialog that asks a question. */
+      .dlg-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        padding: 0 12px 14px;
+      }
       /* Confirmations are toasts, the way the sandbox page shows them: a
          short dark note in the corner that leaves on its own. */
       .toasts {

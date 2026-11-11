@@ -525,13 +525,20 @@ ${UI_CSS}    </style>
               setStatus("");
               return;
             }
-            setStatus("deleting " + id + " ...");
-            api("/admin/api/devices/" + encodeURIComponent(id), { method: "DELETE" })
-              .then(function () {
-                setStatus("deleted " + id);
-                load();
-              })
-              .catch(function (e) { setStatus("delete failed: " + e.message, true); });
+            confirmDialog(
+              "Delete device",
+              "Delete the device " + id + "? Its tunnel is dropped, and a client that still has its id and token stops working.",
+              "Delete",
+              function () {
+                setStatus("deleting " + id + " ...");
+                api("/admin/api/devices/" + encodeURIComponent(id), { method: "DELETE" })
+                  .then(function () {
+                    setStatus("deleted " + id);
+                    load();
+                  })
+                  .catch(function (e) { setStatus("delete failed: " + e.message, true); });
+              },
+            );
           });
 
           if (stateItem) {
@@ -560,6 +567,38 @@ ${UI_CSS}    </style>
         }
 
         // Shared dialog scaffolding (black/white, JetBrains Mono vibe).
+        /**
+         * Ask a question in the page's own dialog.
+         *
+         * The browser's confirm() blocks the page, cannot be styled, and reads
+         * as a warning from the browser rather than a decision by the page. This
+         * is the same dialog the page shows everywhere else.
+         */
+        function confirmDialog(title, message, confirmLabel, onConfirm) {
+          var d = openDialog(title, "");
+          d.bodyEl.innerHTML =
+            '<div class="dlg-msg">' +
+            esc(message) +
+            "</div>" +
+            '<div class="dlg-actions">' +
+            '<button type="button" class="btn" id="confirmYes">' +
+            esc(confirmLabel) +
+            "</button>" +
+            '<button type="button" class="btn" id="confirmNo">Cancel</button>' +
+            "</div>";
+          var yes = d.bodyEl.querySelector("#confirmYes");
+          var no = d.bodyEl.querySelector("#confirmNo");
+          if (yes) {
+            yes.addEventListener("click", function () {
+              d.close();
+              onConfirm();
+            });
+          }
+          if (no) no.addEventListener("click", d.close);
+          if (yes) yes.focus();
+          return d;
+        }
+
         function openDialog(title, deviceId) {
           var overlay = document.createElement("div");
           overlay.className = "overlay";
@@ -1201,7 +1240,15 @@ ${UI_CSS}    </style>
         }
 
         function fleetDelete(fleet) {
-          if (!window.confirm("Delete the fleet " + fleet + "? The spaces in it are not touched.")) return;
+          confirmDialog(
+            "Delete fleet",
+            "Delete the fleet " + fleet + "? The spaces in it are not touched.",
+            "Delete",
+            function () { fleetDeleteNow(fleet); },
+          );
+        }
+
+        function fleetDeleteNow(fleet) {
           api("/admin/api/fleets/" + encodeURIComponent(fleet), { method: "DELETE" })
             .then(function () {
               setStatus("deleted fleet " + fleet);
@@ -1349,14 +1396,21 @@ ${UI_CSS}    </style>
           });
           delItem.addEventListener("click", function () {
             closeMenus();
-            setStatus("deleting " + label + " ...");
-            api("/admin/api/anonymous/" + dev.ref, { method: "DELETE" })
-              .then(function () {
-                setStatus("deleted " + label);
-                loadAnon(true);
-                load();
-              })
-              .catch(function (e) { setStatus("delete failed: " + e.message, true); });
+            confirmDialog(
+              "Delete anonymous device",
+              "Delete the anonymous device " + label + "? Its tunnel is dropped, and a client that still has its code stops working.",
+              "Delete",
+              function () {
+                setStatus("deleting " + label + " ...");
+                api("/admin/api/anonymous/" + dev.ref, { method: "DELETE" })
+                  .then(function () {
+                    setStatus("deleted " + label);
+                    loadAnon(true);
+                    load();
+                  })
+                  .catch(function (e) { setStatus("delete failed: " + e.message, true); });
+              },
+            );
           });
         }
 

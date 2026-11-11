@@ -230,6 +230,7 @@ section. `prime --help` lists everything, and `prime call` is an alias for `prim
 
 ## Documentation
 
+- [docs/fleets.md](docs/fleets.md) - fleets: roles, membership, sync, and how a client reaches one
 - [cli/SERVER.md](cli/SERVER.md) - the device buddy: tools, flags, behaviour
 - [cli/README.md](cli/README.md) - the `prime` CLI: install, commands, configuration, exit codes
 - [api/README.md](api/README.md) - internals, deployment, tunables, tests

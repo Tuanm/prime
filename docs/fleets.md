@@ -1,11 +1,71 @@
 # Fleets
 
-A fleet is a named group of devices that hold the same work and can take
+A fleet is a named group of spaces that hold the same work and can take
 over for each other. Exactly one member is **primary** (may write); the rest
 are **replicas** (read-only, mirroring the primary).
 
-This document covers membership: who may join, how they prove it, and what
-state a new member starts from.
+A fleet is also a device: it answers to its own name, and the operator gives
+it a token, so a client reaches the fleet as a whole without being a member
+of it.
+
+This document covers what a fleet is made of, how a space joins one, what a
+client sees, and what happens when a member stops.
+
+## How it fits together
+
+Three objects and a bucket. The Worker proves every credential; the objects
+hold the state; the bucket holds the snapshots.
+
+```
+                      prime CLI, or an MCP client
+                                  |
+              (gateway token, a device token, or the fleet's own token)
+                                  |
+                                  v
+          +----------------------- Worker (api/) -------------------------+
+          |  proves the credential, then decides what the caller may do   |
+          +-------+---------------------+---------------------+----------+
+                  |                     |                     |
+          +-------v--------+    +-------v-------+    +--------v--------+
+          | RegistryDO     |    | FleetDO       |    | DeviceDO        |
+          | device ids and |    | one per fleet |    | one per device  |
+          | tokens, which  |    | members,      |    | the tunnel, the |
+          | are connected, |    | lease, head,  |    | pending relayed |
+          | fleet ids      |    | invites       |    | requests        |
+          +----------------+    +-------+-------+    +--------+--------+
+                                        |                     |
+                                        | the lease names     | the tunnel
+                                        | the primary         | of one space
+                                        v                     v
+                                +-------------------------------+
+                                | R2: pack + manifest per head  |
+                                | (sealed for the members)      |
+                                +-------------------------------+
+```
+
+The Worker never opens a snapshot: the packs are sealed for the members'
+keys, and the gateway stores ciphertext it cannot read. The registry is the
+one place that says which device is which, so every request starts there.
+
+### How a change travels
+
+The primary watches its work tree, builds a pack of what changed, seals it
+for the members, and advances the head. A replica polls the head and pulls
+what it is missing.
+
+```
+   primary space                gateway                 replica space
+        |                          |                          |
+   change in the work tree        |                          |
+        |-- POST /fleets/:f/snapshot ---> R2: pack + manifest |
+        |   (one round trip)       |--- head advanced ------->|
+        |                          |<-- GET /fleets/:f/head --|
+        |                          |--- the head ------------>|
+        |                          |<-- GET /fleets/:f/pack --|
+        |                          |    (thin delta pack)     |
+        |                          |--- the pack ------------>|
+        |                          |      apply, then report  |
+```
 
 ## The admin interface
 
@@ -19,6 +79,29 @@ The operator runs the fleets from `/admin`, at the top of the page:
   the mirrors are under it.
 - A space that asked to join waits under the card, with **Admit** and
   **Decline**.
+- The fleet's menu carries **Save** (a name to read, beside the id),
+  **Deactivate/Activate**, **Invite** and **Delete**. Deleting a fleet does
+  not touch its spaces.
+
+The card's mark says whether a client can reach the fleet:
+
+| mark | means |
+|---|---|
+| cloud, filled | there is a token, the fleet is not paused, and a space holds the lease |
+| cloud, outline | one of those is missing: no way in |
+| space with a green border | that space holds the lease |
+| space with a red ring | that space is not connected |
+| space drawn grey | the operator switched it off |
+
+Below, in **Buddies**, each fleet has a row of its own: the cloud, its name -
+which is the id a client uses - and its token, masked. **Refresh token** makes
+a new one and shows it once, in a dialog with a copy button. The menu carries
+the actions a buddy has: **View**, **Tools** and **Clients** through the space
+that holds the lease, and **Deactivate/Activate**.
+
+A space that is switched off is out of the running at once: it gives up the
+lease, its tunnel is dropped, and the next member that asks takes over. It is
+still a member - **Remove** is what takes it out of the fleet.
 
 ## Roles
 
@@ -29,17 +112,28 @@ The operator runs the fleets from `/admin`, at the top of the page:
 | member | any admitted device | read sync state, hold the lease |
 | primary | the member holding the lease | publish snapshots |
 | replica | every other member | fetch snapshots, never write |
+| client | holder of the fleet's own token | reach the fleet, and nothing else: it cannot join, admit, remove or publish |
 
 The operator role exists because a fleet sometimes has to be administered
-from a machine that is not itself a member.
+from a machine that is not itself a member. The client role exists for the
+same reason from the other side: work that has to run against the fleet, from
+somewhere that is not one of its spaces.
 
-## Two credentials, two jobs
+## Three credentials, three jobs
 
 - **Gateway token** proves operator authority. It is per-deployment, never
   leaves the operator's machine, and is only used for administration.
 - **Device token** proves the identity of one device. It is per-device, is
   minted when the device registers, and is the only thing that can speak for
   that device.
+- **Fleet token** proves the right to reach one fleet as a whole. It is set
+  by the operator, belongs to the fleet rather than to any space, and is what
+  a client that is not a member presents.
+
+The fleet's token is kept beside the device tokens, in the registry, because
+that is where the gateway looks when it is deciding who is calling. A fleet
+that has none cannot be reached at all: the name falls through to the device
+route, which has no tunnel behind it.
 
 A request never carries an identity that is not backed by one of these. The
 Worker proves the credential, then tells the Durable Object *who* the caller
@@ -88,9 +182,10 @@ are all gone would sit there for ever with nobody able to touch it.
 
 ## Joining
 
-A fleet is made by the operator, in the admin interface, and nowhere else:
-a device cannot bring one into being. The spaces join it, and the
-operator admits them.
+A fleet is made by the operator - from the admin interface, or with
+`prime fleets create` where the gateway token is at hand - and nowhere else:
+a device cannot bring one into being. The spaces join it, and the operator
+admits them.
 
 ```
 operator                      gateway                       new device
@@ -132,12 +227,17 @@ Knowing the fleet name is never enough. A leaked code admits at most one
 device, for at most an hour, and only to the pending list unless the operator
 approves.
 
-### Why not a shared fleet secret?
+### Why identity is not a shared secret
 
 A secret every member holds means every member can act as every other member,
 and revoking one member means rotating for all of them. Per-device identity
 gives per-member leases, per-member revocation, and an audit trail that names
 one device.
+
+The fleet's own token is not that: no member ever uses it, and it proves
+nothing about a member. It is a way in for a client that is not one, and it
+carries exactly one right - talking to the fleet. It cannot join, admit,
+remove or publish, and a caller that presents it is not a member of anything.
 
 ## Bootstrapping the state a new member starts from
 
@@ -193,11 +293,18 @@ In the Durable Object:
 
 | key | contents |
 |---|---|
-| `members` | deviceId to role, addedAt, addedBy |
-| `invites` | invite hash to expiry and auto-approve flag |
+| `members` | deviceId to role, addedAt, pubkey, and the name the operator reads |
+| `invites` | invite hash to expiry and who minted it |
 | `pending` | deviceId to requestedAt and a cosmetic label |
 | `lease` | holder, epoch, expiry |
 | `head` | sequence, manifest key, manifest hash, epoch |
+| `meta` | the operator's own decision: a name to read, and whether the fleet is paused |
+| `applied` | how far each member has got, so the object can refuse a publisher that is behind |
+
+The fleet's token is not here: it lives in the registry, with the device
+tokens, because that is where the Worker looks when it decides who is
+calling. The registry also keeps the list of fleets, because the objects
+cannot be enumerated.
 
 The head and the epoch also live in R2, so that losing the object's storage
 cannot reset them. The epoch is a fencing token: it only ever increases, and a
@@ -227,21 +334,60 @@ around it stays correct.
 ---
 ## Talking to a fleet
 
-A client may address the fleet itself instead of one of its members:
+A fleet is reached under its own name, with its own token:
+
+```
+prime tools call --device <fleet-id> --token <fleet-token> bash '{"command":"ls"}'
+```
+
+A member may also address the fleet explicitly, which is how the fleet is
+reached from inside one of its own spaces:
 
 ```
 prime tools call fleet:<fleet-id>.bash '{"command":"ls"}'
 ```
 
-The call goes to the member that holds the lease - the primary - because
-that is the one whose state the fleet agrees on, and the one that may
-write. The gateway relays on the caller's behalf, so the caller proves
-only that it is a member of the fleet.
+Whichever way in, the call goes to the member that holds the lease, because
+that is the one whose state the fleet agrees on, and the one that may write:
 
-The primary is a moving target: when it dies, its lease runs out and
-another member takes it over. A call made in the meantime fails and says
-so; a call made after that goes to the new primary, with the same state
-the old one had.
+```
+   client                 Worker             FleetDO          primary space
+     |                      |                  |                   |
+     | 1. /mcp/<fleet-id>   |                  |                   |
+     |    + the fleet's     |                  |                   |
+     |    own token         |                  |                   |
+     |--------------------->|                  |                   |
+     |                      | 2. that token    |                   |
+     |                      |    belongs to a  |                   |
+     |                      |    fleet, not a  |                   |
+     |                      |    device        |                   |
+     |                      |-- 3. /fleet/primary --------------->|
+     |                      |<-- 4. the holder is <device id> ----|
+     |                      | 5. relay, with the holder's token   |
+     |                      |------------------------------------>|
+     |                      |                  |  6. MCP over the  |
+     |                      |                  |     primary's own |
+     |                      |                  |     tunnel        |
+     |<---------------------|                  |                   |
+```
+
+The gateway relays on the primary's behalf, so it uses the primary's own
+credential for the last hop. A caller that is a member rather than the fleet's
+token proves its membership instead, and the object is asked whether the
+caller is in the fleet.
+
+The primary is a moving target: when it stops, its lease runs out and another
+member takes it over. A call made in the meantime fails and says so, naming
+the member it could not reach; a call made after that goes to the new primary,
+with the same state the old one had.
+
+### Only the primary is entered
+
+`prime spaces enter` works on any space that is not in a fleet. For a space
+that is in one, it works only on the primary: a fleet is several copies of one
+piece of work, and an edit made in a replica is thrown away the next time it
+mirrors. The answer comes from the fleet, not from the configuration, so a
+space that has just taken over the lease can be entered at once.
 
 ---
 ## Failure behaviour
@@ -257,6 +403,11 @@ the old one had.
 | a fleet nobody has touched for a day | any proven device may clean it up; a fleet that is not being run is not worth keeping |
 | primary dies | the lease expires; a member that finds no lease takes it, applies the state it is replacing, and only then may publish |
 | the space of the primary is stopped | it gives up the lease at once, so another member takes over without waiting for the lease to run out |
+| the operator switches a space off | the same: the lease goes back at once, its tunnel is dropped, and the next member that asks takes it. It stays a member until it is removed |
+| the operator pauses a fleet | nothing joins it, nobody takes a place in it, and nothing is published to it; the leases and the members stay |
+| no member holds the lease | the fleet has no primary, so there is nowhere to send a call: it answers that it has none, and the card says so |
+| a fleet has no token | no client can reach it; a member still can, and the spaces keep syncing |
+| a device already has the name a fleet wants | the fleet is refused: a fleet is reached under its own name, so the two names must not collide (and `anon-` is reserved for the anonymous devices) |
 | a member comes back with a new key | the fleet learns the new key when it takes its place, and seals the next snapshot for it |
 | a replica's workspace is changed by hand | the change is left alone and reported, rather than thrown away by the next pull |
 | object storage lost | head and epoch re-read from R2; membership is rebuilt by re-inviting |
@@ -268,4 +419,5 @@ the old one had.
 | members per fleet | 32 | each member is a replication target; beyond this the primary's fan-out dominates |
 | pending requests | 32 | bounds the approval queue |
 | invite lifetime | 10 min default, 1 h max | long enough to walk to another machine, short enough that a leaked code expires |
-| fleet id | 1-32 chars, `[a-z0-9-]` | readable, unambiguous, no path tricks |
+| fleet token | 8 to 256 printable characters | long enough to be a secret, short enough to be pasted |
+| fleet id | `[a-z0-9][a-z0-9-]`, up to 32, not starting `anon-` | it is also the id a client uses, so it must be one the gateway gives out to nothing else |

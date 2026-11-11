@@ -65,6 +65,9 @@ prime spaces create [--name <n>] [--persistent] [--cpus <n>] [--memory <4g>]
 prime spaces list|start|stop|delete|logs <name>
 prime spaces top <name> [--once] [--json]
 prime spaces create --expose [--gateway <url>]
+prime spaces create --setup <file>
+prime spaces create --fleet <fleet-id> [--code <code>]
+prime fleets list|create|invite|join|pending|approve|members|remove|leave|status|sync|agent
 prime spaces create --vault <company> [--vault <company>...] [--vault-kind <values|secrets|codes>]
 prime vaults init|company|set|list|get|code|rm|assign|status
 prime spaces doctor [--json]
@@ -334,9 +337,25 @@ prime spaces enter dev -- cat /etc/os-release     # or one command
 prime spaces logs work
 prime spaces top dev                              # live cpu/mem/processes (q quits)
 prime spaces create --name pub --expose           # anonymous device via the gateway
+prime spaces create --name work --setup ./boot.sh  # run a script inside once it is up
+prime spaces create --name alpha --fleet acme --code <code>   # join a fleet
 prime spaces doctor                               # rootless? systemd? crun? limits?
 prime spaces delete work                          # container + volume + device entry
 ```
+
+**The toolbox.** A new space has git, ssh, unzip, curl, wget, jq, ripgrep,
+python3 and bun. The image carries them; a space made on an older image is
+brought to the same place when it is created, so either way a space made today
+has what a working space needs. `--setup <file>` runs a script inside the space
+once it is up, so a particular job's needs can be given to it in the same step.
+
+**In a fleet.** `--fleet <id> --code <code>` puts the space in a fleet: it
+joins with the operator's invite, waits to be admitted, then takes its place -
+the first admitted space is the primary that writes, the rest mirror it.
+`--expose` is dropped for a fleet space, because the fleet is how it is
+reached. `prime spaces enter` works only on the primary of a fleet: an edit
+made in a replica is thrown away when it mirrors. See
+[fleets.md](../docs/fleets.md).
 
 **Runtimes.** macOS uses the Apple container CLI: one lightweight micro-VM per
 space, so root inside is not root on the host, and no Docker Desktop is needed.
