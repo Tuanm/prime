@@ -26,22 +26,25 @@ __CSS__
       /* The picture is drawn with the marks the admin page uses: a status dot
          outside the card, a square card with a 1px rule, and a green 2px rule
          for the space that is in charge. */
-      .arch { margin: 26px 0; }
+      .arch { margin: 26px 0; max-width: 470px; }
       .a-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
       .a-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
       .a-dot.on { background: #16a34a; }
       .a-dot.off { background: #fff; border: 1.5px solid #b91c1c; }
-      .a-cloud { width: 12px; height: 12px; flex: none; color: #111; }
+      /* The fleet is reachable, so its mark is green, as it is in the admin list. */
+      .a-cloud { width: 13px; height: 13px; flex: none; color: #16a34a; }
       .a-cloud svg { display: block; width: 100%; height: 100%; fill: currentColor; }
       .a-box {
         position: relative;
         flex: 1;
         display: flex;
         align-items: center;
+        gap: 8px;
         border: 1px solid #111;
         background: #fff;
-        padding: 8px 10px;
-        font-size: 12px;
+        padding: 10px 12px;
+        font-size: 13px;
+        min-height: 42px;
       }
       .a-name { font-weight: 700; }
       /* The tag is pinned to the right edge, so it reads in the same place on
@@ -49,24 +52,55 @@ __CSS__
          animation do not push the one that is showing about. */
       .a-tag {
         position: absolute;
-        right: 10px;
+        right: 12px;
         font-size: 11px;
         color: #666;
-        transition: none;
       }
+      /* What the operator sees while a space waits: the two answers, in the
+         weights the admin page gives them. */
+      .a-btns {
+        position: absolute;
+        right: 8px;
+        display: flex;
+        gap: 6px;
+      }
+      .a-btn {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 4px 10px;
+        color: #fff;
+      }
+      .a-btn.admit { background: #111; border: 1px solid #111; }
+      .a-btn.decline { background: #b91c1c; border: 1px solid #b91c1c; }
       .a-leaves { list-style: none; margin: 8px 0 0; padding: 0 0 0 24px; }
       .a-leaves > li { margin-bottom: 8px; }
 
       /* From the person to the fleet: the dashes keep moving, because the
          requests do - including while a space changes places. */
       .a-flow {
+        position: relative;
         width: 2px;
-        height: 26px;
+        height: 38px;
         margin: -2px 0 8px 5px;
         background-image: repeating-linear-gradient(180deg, #111 0 4px, transparent 4px 9px);
         background-size: 2px 9px;
         animation: a-dash 0.8s linear infinite;
       }
+      /* The gateway: everything that crosses between the person and the fleet
+         goes through a door that is locked in their favour. */
+      .a-lock {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 15px;
+        height: 15px;
+        margin: -7.5px 0 0 -7.5px;
+        background: #fff;
+        color: #16a34a;
+        padding: 1px;
+        box-sizing: content-box;
+      }
+      .a-lock svg { display: block; width: 100%; height: 100%; fill: currentColor; }
       @keyframes a-dash {
         from { background-position: 0 0; }
         to { background-position: 0 9px; }
@@ -80,8 +114,8 @@ __CSS__
       .a-alpha .a-tag.stopped,
       .a-alpha .a-tag.step,
       .a-beta .a-tag.charge,
-      .a-delta .a-tag.joining,
-      .a-delta .a-tag.step { opacity: 0; }
+      .a-delta .a-tag.step,
+      .a-delta .a-btns { opacity: 0; }
 
       /* The loop: one space stops, another takes over, a new one joins, the
          stopped one comes back. Sixteen seconds, then again. */
@@ -95,34 +129,39 @@ __CSS__
       .a-alpha .a-tag.stopped { animation: a-alpha-stopped 16s ease-in-out infinite; }
       .a-delta { animation: a-delta-row 16s ease-in-out infinite; }
       .a-delta .a-box { animation: a-delta-box 16s ease-in-out infinite; }
-      .a-delta .a-tag.joining { animation: a-delta-joining 16s ease-in-out infinite; }
+      .a-delta .a-tag.waiting { animation: a-delta-waiting 16s ease-in-out infinite; }
       .a-delta .a-tag.step { animation: a-delta-step 16s ease-in-out infinite; }
+      .a-delta .a-btns { animation: a-delta-btns 16s ease-in-out infinite; }
 
       @keyframes a-alpha-dot {
         0%, 19% { background: #16a34a; border: 0; }
-        22%, 52% { background: #fff; border: 1.5px solid #b91c1c; }
-        56%, 100% { background: #16a34a; border: 0; }
+        22%, 57% { background: #fff; border: 1.5px solid #b91c1c; }
+        61%, 100% { background: #16a34a; border: 0; }
       }
       @keyframes a-alpha-box {
-        0%, 19% { border: 2px solid #16a34a; background: #f0fdf4; padding: 7px 9px; }
-        23%, 52% { border: 1px dashed #b91c1c; background: #fff; padding: 8px 10px; color: #999; }
-        56%, 86% { border: 1px solid #111; background: #fff; padding: 8px 10px; color: #111; }
-        90%, 100% { border: 2px solid #16a34a; background: #f0fdf4; padding: 7px 9px; color: #111; }
+        0%, 19% { border: 2px solid #16a34a; background: #f0fdf4; padding: 9px 11px; }
+        23%, 57% { border: 1px dashed #b91c1c; background: #fff; padding: 10px 12px; color: #999; }
+        61%, 86% { border: 1px solid #111; background: #fff; padding: 10px 12px; color: #111; }
+        90%, 100% { border: 2px solid #16a34a; background: #f0fdf4; padding: 9px 11px; color: #111; }
       }
       @keyframes a-beta-box {
-        0%, 20% { border: 1px solid #111; background: #fff; padding: 8px 10px; }
-        24%, 86% { border: 2px solid #16a34a; background: #f0fdf4; padding: 7px 9px; }
-        90%, 100% { border: 1px solid #111; background: #fff; padding: 8px 10px; }
+        0%, 20% { border: 1px solid #111; background: #fff; padding: 10px 12px; }
+        24%, 86% { border: 2px solid #16a34a; background: #f0fdf4; padding: 9px 11px; }
+        90%, 100% { border: 1px solid #111; background: #fff; padding: 10px 12px; }
       }
       @keyframes a-alpha-charge { 0%, 19% { opacity: 1; } 22%, 86% { opacity: 0; } 90%, 100% { opacity: 1; } }
-      @keyframes a-alpha-stopped { 0%, 19% { opacity: 0; } 22%, 52% { opacity: 1; } 56%, 100% { opacity: 0; } }
-      @keyframes a-alpha-step { 0%, 19% { opacity: 0; } 22%, 52% { opacity: 0; } 56%, 86% { opacity: 1; } 90%, 100% { opacity: 0; } }
+      @keyframes a-alpha-stopped { 0%, 19% { opacity: 0; } 22%, 57% { opacity: 1; } 61%, 100% { opacity: 0; } }
+      @keyframes a-alpha-step { 0%, 19% { opacity: 0; } 22%, 57% { opacity: 0; } 61%, 86% { opacity: 1; } 90%, 100% { opacity: 0; } }
       @keyframes a-beta-charge { 0%, 20% { opacity: 0; } 24%, 86% { opacity: 1; } 90%, 100% { opacity: 0; } }
       @keyframes a-beta-step { 0%, 20% { opacity: 1; } 24%, 86% { opacity: 0; } 90%, 100% { opacity: 1; } }
-      @keyframes a-delta-row { 0%, 39% { opacity: 0; height: 0; margin: 0; overflow: hidden; } 43%, 92% { opacity: 1; height: auto; margin-bottom: 8px; } 96%, 100% { opacity: 0; height: 0; margin: 0; overflow: hidden; } }
-      @keyframes a-delta-box { 0%, 46% { border: 1px dashed #111; background: #fff; } 50%, 100% { border: 1px solid #111; background: #fff; } }
-      @keyframes a-delta-joining { 0%, 46% { opacity: 1; } 50%, 100% { opacity: 0; } }
-      @keyframes a-delta-step { 0%, 46% { opacity: 0; } 50%, 92% { opacity: 1; } 96%, 100% { opacity: 0; } }
+
+      /* A space that wants in asks first: it waits, drawn as an outline, with
+         the two answers the operator has - and only then takes its place. */
+      @keyframes a-delta-row { 0%, 37% { opacity: 0; height: 0; margin: 0; overflow: hidden; } 41%, 93% { opacity: 1; height: auto; margin-bottom: 8px; } 97%, 100% { opacity: 0; height: 0; margin: 0; overflow: hidden; } }
+      @keyframes a-delta-box { 0%, 52% { border: 1px dashed #111; background: #fff; } 56%, 100% { border: 1px solid #111; background: #fff; } }
+      @keyframes a-delta-waiting { 0%, 52% { opacity: 1; } 56%, 100% { opacity: 0; } }
+      @keyframes a-delta-btns { 0%, 41% { opacity: 0; } 44%, 52% { opacity: 1; } 56%, 100% { opacity: 0; } }
+      @keyframes a-delta-step { 0%, 52% { opacity: 0; } 56%, 93% { opacity: 1; } 97%, 100% { opacity: 0; } }
 
       /* Nothing moves for a reader who asked for no motion: it stops on the
          first frame, with alpha in charge. */
@@ -157,7 +196,9 @@ __CSS__
         <span class="a-dot on"></span>
         <div class="a-box"><span class="a-name">only you</span><span class="a-tag">requests</span></div>
       </div>
-      <div class="a-flow"></div>
+      <div class="a-flow">
+        <span class="a-lock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm0 2a3 3 0 0 1 3 3v3H9V7a3 3 0 0 1 3-3z"/></svg></span>
+      </div>
       <div class="a-row">
         <span class="a-cloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg></span>
         <div class="a-box"><span class="a-name">acme</span><span class="a-tag">a fleet</span></div>
@@ -195,7 +236,8 @@ __CSS__
             <span class="a-dot on"></span>
             <div class="a-box">
               <span class="a-name">delta</span>
-              <span class="a-tag joining">joining</span>
+              <span class="a-tag waiting">waiting</span>
+              <span class="a-btns"><span class="a-btn admit">Admit</span><span class="a-btn decline">Decline</span></span>
               <span class="a-tag step">in step</span>
             </div>
           </div>
