@@ -409,6 +409,7 @@ space that has just taken over the lease can be entered at once.
 | a fleet has no token | no client can reach it; a member still can, and the spaces keep syncing |
 | a device already has the name a fleet wants | the fleet is refused: a fleet is reached under its own name, so the two names must not collide (and `anon-` is reserved for the anonymous devices) |
 | a member comes back with a new key | the fleet learns the new key when it takes its place, and seals the next snapshot for it |
+| a space is renamed, or an identity is taken over by another space | the name the operator reads is corrected on the next round of the agent, because the space says what it is called every time it takes its place |
 | a replica's workspace is changed by hand | the change is left alone and reported, rather than thrown away by the next pull |
 | object storage lost | head and epoch re-read from R2; membership is rebuilt by re-inviting |
 

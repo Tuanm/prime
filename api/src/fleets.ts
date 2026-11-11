@@ -94,6 +94,12 @@ export interface Member {
    * secret: it is the half the gateway is not given.
    */
   pubkey?: string;
+  /**
+   * What the operator reads in the list: the space's name, as the space itself
+   * gives it on every round. It is not an identity - the id is - and a space
+   * that was renamed says so the next time it takes its place.
+   */
+  label?: string;
 }
 
 export interface PendingRequest {

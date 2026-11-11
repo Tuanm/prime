@@ -257,7 +257,7 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   if (stale || !loop.primary) {
     const began = Date.now();
     const keys = loadOrCreateKeyPair(paths.keyFile);
-    const placed = await bootstrapHere(creds, fleet, keys.publicKey);
+    const placed = await bootstrapHere(creds, fleet, keys.publicKey, loop.name);
     loop.timing.bootstrap = Date.now() - began;
     loop.lastBootstrap = now;
     if (!placed.ok) throw new Error(placed.error);
@@ -354,13 +354,15 @@ interface BootstrapResult {
 }
 
 /** Take a place in the fleet, without the CLI's machinery. */
-async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: string): Promise<BootstrapResult> {
+async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: string, label?: string): Promise<BootstrapResult> {
   const res = await fetch(creds.gateway + "/fleets/" + encodeURIComponent(fleet) + "/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json", "x-prime-device": creds.deviceId, "x-device-token": creds.deviceToken },
     // The key travels with it: a member that lost its key can only catch up
-    // if the fleet learns the new one.
-    body: JSON.stringify(pubkey ? { pubkey } : {}),
+    // if the fleet learns the new one. The name travels too, so a space that
+    // was renamed - or an identity another space took over - reads correctly
+    // in the operator's list.
+    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(label ? { label } : {}) }),
     signal: AbortSignal.timeout(creds.timeoutMs ?? 60_000),
   });
   if (!res.ok) return { ok: false, primary: false, error: "status " + res.status };

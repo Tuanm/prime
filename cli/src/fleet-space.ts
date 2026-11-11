@@ -136,7 +136,11 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
 
   // Take a place in the fleet. The fleet decides: the first member with no
   // state becomes the primary, any other member becomes a replica.
-  const bootstrapped = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet) + "/bootstrap", {});
+  // The name goes with it, so the fleet's list shows the space by the name it
+  // has now rather than the one it had when it joined.
+  const bootstrapped = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet) + "/bootstrap", {
+    label: opts.spaceName,
+  });
   if (bootstrapped.status >= 400) {
     throw new CliError("could not take a place in the fleet: " + (bootstrapped.json?.error ?? bootstrapped.status));
   }

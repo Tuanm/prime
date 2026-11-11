@@ -686,10 +686,21 @@ export class FleetDO implements DurableObject {
     // proving itself, and the snapshots sealed for the old key are of no use
     // to it.
     const pubkey = cleanPubkey(body.pubkey);
+    const label = cleanLabel(body.label);
+    // A space that is renamed, or an identity that was taken over by another
+    // space, says what it is called now. The name is only for the operator to
+    // read, but it is read on every round of the agent, so a stale one is
+    // corrected the next time the space takes its place.
+    let membersChanged = false;
     if (pubkey && members[caller.deviceId]!.pubkey !== pubkey) {
       members[caller.deviceId]!.pubkey = pubkey;
-      await this.state.storage.put("members", members);
+      membersChanged = true;
     }
+    if (label !== undefined && members[caller.deviceId]!.label !== label) {
+      members[caller.deviceId]!.label = label;
+      membersChanged = true;
+    }
+    if (membersChanged) await this.state.storage.put("members", members);
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {

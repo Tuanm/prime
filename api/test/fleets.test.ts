@@ -705,3 +705,17 @@ describe("a fleet the registry has forgotten", () => {
     expect([...registry.fleets]).not.toContain("acme");
   });
 });
+
+describe("the name a space gives for itself", () => {
+  test("is kept in step on every round, so a stale one is corrected", async () => {
+    const { doInstance, state } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    // The name the space gives when it takes its place.
+    await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { label: "renamed" } });
+    const members = state.data.get("members") as Record<string, { label?: string }>;
+    expect(members["owner-1"]?.label).toBe("renamed");
+    // And a later round that says nothing does not wipe it.
+    await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: {} });
+    expect(members["owner-1"]?.label).toBe("renamed");
+  });
+});
