@@ -379,6 +379,15 @@ export class FleetDO implements DurableObject {
         out = Response.json({ error: "fleet already exists" }, { status: 409 });
         return;
       }
+      // The fleet is reached as a device under its own name, so a name a
+      // device already has belongs to that device.
+      if (await this.nameTaken(fleetId)) {
+        out = Response.json(
+          { error: "a device already has that id", hint: "give the fleet another name" },
+          { status: 409 },
+        );
+        return;
+      }
       // The fleet starts empty. The first member the operator admits owns
       // it: a fleet with nobody in it cannot be run by anybody, so the
       // first one in takes it.
@@ -388,6 +397,18 @@ export class FleetDO implements DurableObject {
       await this.registerWithRegistry(fleetId, true);
     });
     return out;
+  }
+
+  /** Whether a device on this gateway already answers to the name. */
+  private async nameTaken(fleetId: string): Promise<boolean> {
+    try {
+      const reg = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global"));
+      const res = await reg.fetch("https://registry/name-taken?kind=fleet&id=" + encodeURIComponent(fleetId));
+      if (!res.ok) return false;
+      return ((await res.json()) as { taken?: boolean }).taken === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Whether this fleet has been created, whether anybody is in it yet or not. */

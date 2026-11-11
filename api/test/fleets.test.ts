@@ -187,6 +187,13 @@ describe("fleet ids", () => {
     expect(validFleetId("")).toBe(false);
     expect(validFleetId("x".repeat(33))).toBe(false);
   });
+
+  test("leaves the ids the gateway gives out to the anonymous devices", () => {
+    // An anonymous device is anon-<hex>; a fleet with that name would answer
+    // to a device's id.
+    expect(validFleetId("anon-0123456789abcdef")).toBe(false);
+    expect(validFleetId("anonymous")).toBe(true);
+  });
 });
 
 describe("invite codes", () => {

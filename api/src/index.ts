@@ -101,6 +101,7 @@ interface RegistrySnapshot {
   map: Map<string, string>; // deviceId -> token (registered, anonymous and virtual)
   anon: Set<string>; // which of those are anonymous
   locked: Set<string>; // anonymous devices locked after too many wrong codes
+  buddies: Map<string, string>; // fleetId -> the token its clients present
 }
 let mapCache: { at: number; snap: RegistrySnapshot } | null = null;
 const MAP_CACHE_TTL_MS = 2_000;
@@ -181,16 +182,24 @@ function hasNonVirtualDevice(snap: RegistrySnapshot, env: Env): boolean {
 // Always read the authoritative registry snapshot, bypassing the TTL cache.
 async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  const snap: RegistrySnapshot = { map: new Map(), anon: new Set(), locked: new Set() };
+  const snap: RegistrySnapshot = { map: new Map(), anon: new Set(), locked: new Set(), buddies: new Map() };
   try {
     const r = await reg.fetch("https://registry/map");
     if (r.ok) {
-      const j = (await r.json()) as { map?: Record<string, string>; anonymous?: string[]; locked?: string[] };
+      const j = (await r.json()) as {
+        map?: Record<string, string>;
+        anonymous?: string[];
+        locked?: string[];
+        buddies?: Record<string, string>;
+      };
       for (const [id, tok] of Object.entries(j.map || {})) {
         if (typeof tok === "string" && tok.length > 0) snap.map.set(id, tok);
       }
       for (const id of j.anonymous || []) snap.anon.add(id);
       for (const id of j.locked || []) snap.locked.add(id);
+      for (const [id, tok] of Object.entries(j.buddies || {})) {
+        if (typeof tok === "string" && tok.length > 0) snap.buddies.set(id, tok);
+      }
     }
   } catch {}
   return snap;
@@ -251,11 +260,17 @@ async function relayToFleet(
   cfg: GatewayConfig,
   fleetId: string,
   callerId: string,
+  asBuddy = false,
 ): Promise<Response> {
-  const auth = await authorizeDevice(callerId, request, url, cfg, env);
-  if (auth.denied) return auth.denied;
-  // The caller is alive: it just proved it.
-  await markSeen(env, callerId);
+  // A fleet has a token of its own, set by the operator: a client that
+  // presents it reaches the fleet without being a member of it. The token
+  // was checked before this was called.
+  if (!asBuddy) {
+    const auth = await authorizeDevice(callerId, request, url, cfg, env);
+    if (auth.denied) return auth.denied;
+    // The caller is alive: it just proved it.
+    await markSeen(env, callerId);
+  }
   if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
   // The name is checked before the Durable Object is touched: an unchecked
   // name would let a caller create an object per name, and every object
@@ -268,10 +283,15 @@ async function relayToFleet(
   headers.set("x-prime-caller", "device");
   headers.set("x-prime-device", callerId);
   headers.set("x-prime-fleet", fleetId);
-  const info = await stub.fetch("https://fleet/primary", { method: "GET", headers });
+  // A member asks as itself; a fleet's own token has already been proved by
+  // the gateway, so the fleet answers the gateway itself.
+  const info = await stub.fetch("https://fleet/primary", {
+    method: "GET",
+    headers: asBuddy ? adminHeaders(headers) : headers,
+  });
   if (!info.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
   const body = (await info.json()) as { member?: boolean; primary?: string | null };
-  if (!body.member) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+  if (!asBuddy && !body.member) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
   if (!body.primary) {
     return Response.json(
       { error: "the fleet has no primary right now: none has taken over yet" },
@@ -322,6 +342,27 @@ async function relayToFleet(
   return relayed;
 }
 
+/**
+ * The token a fleet answers to as a device, if it is a fleet at all.
+ *
+ * A fleet is reached under its own name: the operator gives it a token, and
+ * a client that presents it talks to the fleet's primary without being a
+ * member of the fleet. Nothing is returned for a name that is not a fleet,
+ * so a device keeps its own route.
+ */
+async function fleetBuddyToken(env: Env, id: string): Promise<string | undefined> {
+  // The token rides in the registry snapshot, which every request already
+  // reads: looking a fleet up costs nothing extra.
+  const snap = await effectiveSnapshot(env);
+  return snap.buddies.get(id);
+}
+
+/** Whether the request carries the given token. */
+function tokenMatches(request: Request, url: URL, expected: string): boolean {
+  const given = extractDeviceToken(request, url);
+  return !!given && timingSafeEq(given, expected);
+}
+
 /** The same headers, but the gateway speaking for itself. */
 function adminHeaders(headers: Headers): Headers {
   const out = new Headers(headers);
@@ -352,6 +393,7 @@ async function adminFleets(env: Env): Promise<Response> {
   const liveBody = live ? ((await live.json()) as { online?: string[]; disabled?: string[] }) : {};
   const online = new Set(liveBody.online ?? []);
   const off = new Set(liveBody.disabled ?? []);
+  const snapshot = await effectiveSnapshot(env);
   const fleets: Array<Record<string, unknown>> = [];
   for (const id of ids) {
     if (!env.FLEET) break;
@@ -388,6 +430,8 @@ async function adminFleets(env: Env): Promise<Response> {
       fleet: id,
       label: body.meta?.label ?? "",
       disabled: body.meta?.disabled === true,
+      // The token this fleet answers to as a device, if the operator set one.
+      buddy: snapshot.buddies.get(id) ?? "",
       members,
       memberCount: members.length,
       primary: primaryBody.primary ?? null,
@@ -820,6 +864,20 @@ export default {
         if (request.method === "POST" && step === "reap") {
           return await adminFleetAction(env, fleetId, "reap", {});
         }
+        if (request.method === "POST" && step === "buddy") {
+          // The token a client presents to reach the fleet as a device.
+          const body = (await request.json().catch(() => ({}))) as { token?: unknown };
+          const token = typeof body.token === "string" ? body.token.trim() : "";
+          mapCache = null;
+          if (!env.REGISTRY) return Response.json({ error: "fleets are not enabled" }, { status: 503 });
+          const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+          const res = await reg.fetch("https://registry/fleet-buddy?id=" + encodeURIComponent(fleetId), {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ token }),
+          });
+          return new Response(res.body, { status: res.status, headers: res.headers });
+        }
         if (request.method === "POST" && step === "meta") {
           const body = (await request.json().catch(() => ({}))) as { label?: unknown; disabled?: unknown };
           const patch: Record<string, unknown> = {};
@@ -834,6 +892,19 @@ export default {
         return reg.fetch("https://registry/full");
       }
       if (request.method === "POST" && url.pathname === "/admin/api/devices") {
+        // A fleet answers to its own name as a device, so a device cannot
+        // take the name of a fleet.
+        try {
+          const peek = (await request.clone().json()) as { deviceId?: unknown };
+          const wanted = typeof peek.deviceId === "string" ? peek.deviceId : "";
+          if (wanted) {
+            const r = await reg.fetch("https://registry/name-taken?kind=device&id=" + encodeURIComponent(wanted));
+            const answered = r.ok ? ((await r.json()) as { taken?: boolean }) : {};
+            if (answered.taken) {
+              return Response.json({ error: "a fleet already has that id", hint: "give the device another id" }, { status: 409 });
+            }
+          }
+        } catch {}
         mapCache = null;
         // A new token must invalidate a tunnel opened with the old one: compare
         // with the current map before the upsert lands.
@@ -1034,6 +1105,14 @@ export default {
       const fleetId = url.searchParams.get("fleet");
       if (fleetId) {
         return await relayToFleet(env, request, url, cfg, fleetId, deviceId);
+      }
+
+      // A fleet also answers to its own name, with the token the operator
+      // gave it: the client does not have to be a member of the fleet.
+      const buddy = await fleetBuddyToken(env, deviceId);
+      if (buddy !== undefined) {
+        if (!buddy || !tokenMatches(request, url, buddy)) return unauthorized();
+        return await relayToFleet(env, request, url, cfg, deviceId, deviceId, true);
       }
 
       const auth = await authorizeDevice(deviceId, request, url, cfg, env);

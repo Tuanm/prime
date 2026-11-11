@@ -312,4 +312,39 @@ describe("the fleets in the admin interface", () => {
     type(field(1), "a-token");
     expect(action(row, "Save")!.disabled).toBe(false);
   });
+
+  test("a fleet is a buddy in the list, with a token for a client", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        label: "",
+        disabled: false,
+        buddy: "0123456789abcdef0123456789abcdef01234567",
+        members: [],
+        primary: "d1",
+        pending: [],
+      },
+    ]);
+    await page.settle();
+    const rows = page.byId["list"]!.children;
+    expect(rows.length).toBe(1);
+    const row = rows[0]!;
+    // A fleet is a group, so it carries the cloud.
+    expect(row.children[0]!.className).toContain("cloud-ic");
+    const box = row.children.find((c) => c.className === "box")!;
+    // Its own name is the id it answers to, and the token is masked.
+    expect(box.children[0]!.value).toBe("acme");
+    expect(box.children[1]!.value).not.toContain("0123456789abcdef");
+    expect(menuOf(row)).toEqual(["Save", "New token"]);
+    expect(action(row, "Save")!.disabled).toBe(true);
+  });
+
+  test("the sections are named for what they hold", () => {
+    const page = readFileSync("src/admin-ui.ts", "utf8");
+    expect(page).toContain("<h2>Fleets</h2>");
+    expect(page).toContain("<h2>Buddies</h2>");
+    expect(page).toContain("<h2>Anonymous</h2>");
+    expect(page).not.toContain("Anonymous Devices");
+    expect(page).not.toContain('placeholder = "device id"');
+  });
 });

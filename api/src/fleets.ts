@@ -17,7 +17,9 @@
 // code that the operator hands to the new device out of band. Knowing the fleet
 // name is not enough to join, and a leaked code cannot be replayed.
 
-export const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+// A fleet id doubles as the id of the device that reaches it, so it must not
+// be one the gateway gives out: anon- is where the anonymous devices live.
+export const FLEET_ID_RE = /^(?!anon-)[a-z0-9][a-z0-9-]{0,31}$/;
 export const INVITE_PREFIX = "pf1_";
 export const INVITE_DEFAULT_TTL_MS = 10 * 60 * 1000;
 export const INVITE_MAX_TTL_MS = 60 * 60 * 1000;

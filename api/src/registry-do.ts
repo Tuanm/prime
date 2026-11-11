@@ -113,6 +113,7 @@ export class RegistryDO extends DurableObject<Env> {
   private anonLockedUntil = new Map<string, number>(); // deviceId -> lock expiry (memory)
   private fleetCreates = new FleetCreationAllowance();
   private fleets = new Set<string>(); // the fleets that exist (persisted)
+  private fleetBuddies = new Map<string, string>(); // fleetId -> token (persisted)
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -125,6 +126,12 @@ export class RegistryDO extends DurableObject<Env> {
       try {
         const savedFleets = (await this.ctx.storage.get<string[]>("fleets")) || [];
         for (const id of savedFleets) if (validFleetId(id)) this.fleets.add(id);
+      } catch {}
+      try {
+        const buddies = (await this.ctx.storage.get<Record<string, string>>("fleet_buddies")) || {};
+        for (const [id, token] of Object.entries(buddies)) {
+          if (validFleetId(id) && typeof token === "string" && token.length > 0) this.fleetBuddies.set(id, token);
+        }
       } catch {}
       try {
         const saved = (await this.ctx.storage.get<string[]>("online")) || [];
@@ -230,9 +237,53 @@ export class RegistryDO extends DurableObject<Env> {
       const id = url.searchParams.get("id") || "";
       if (!validFleetId(id)) return Response.json({ error: "invalid fleet id" }, { status: 400 });
       if (path === "/fleet-add") this.fleets.add(id);
-      else this.fleets.delete(id);
+      else {
+        this.fleets.delete(id);
+        // A fleet that no longer exists cannot be reached as a device.
+        if (this.fleetBuddies.delete(id)) await this.persistFleetBuddies();
+      }
       await this.persistFleets();
       return Response.json({ ok: true, fleets: this.fleets.size });
+    }
+
+    // Whether an id is already spoken for. A fleet is reached as a device
+    // under its own name, so the two namespaces must not overlap.
+    if (request.method === "GET" && path === "/name-taken") {
+      const id = url.searchParams.get("id") || "";
+      const kind = url.searchParams.get("kind") || "";
+      if (kind === "fleet") {
+        return Response.json({ taken: this.tokens.has(id) || this.anon.has(id), by: "device" });
+      }
+      if (kind === "device") {
+        const byFleet = this.fleets.has(id) || this.fleetBuddies.has(id);
+        return Response.json({ taken: byFleet, by: byFleet ? "fleet" : "" });
+      }
+      return Response.json({ error: "kind is fleet or device" }, { status: 400 });
+    }
+
+    // A fleet may be reached as a device: the operator gives it a token, and
+    // a client that presents it talks to the fleet's primary. The token is
+    // kept here, with the device tokens, because this is where the gateway
+    // looks when it is deciding who is calling.
+    if (request.method === "GET" && path === "/fleet-buddies") {
+      return Response.json({ buddies: Object.fromEntries(this.fleetBuddies) });
+    }
+    if (request.method === "POST" && path === "/fleet-buddy") {
+      const id = url.searchParams.get("id") || "";
+      if (!validFleetId(id)) return Response.json({ error: "invalid fleet id" }, { status: 400 });
+      const body = (await request.json().catch(() => ({}))) as { token?: unknown };
+      const token = typeof body.token === "string" ? body.token.trim() : "";
+      if (token === "") {
+        this.fleetBuddies.delete(id);
+        await this.persistFleetBuddies();
+        return Response.json({ ok: true, cleared: true });
+      }
+      if (token.length < 8 || token.length > 256 || !/^[\x21-\x7e]+$/.test(token)) {
+        return Response.json({ error: "a token is 8 to 256 printable characters" }, { status: 400 });
+      }
+      this.fleetBuddies.set(id, token);
+      await this.persistFleetBuddies();
+      return Response.json({ ok: true });
     }
 
     // A device may create only a few fleets an hour. The counter lives here
@@ -281,6 +332,7 @@ export class RegistryDO extends DurableObject<Env> {
         map: Object.fromEntries(this.tokens),
         anonymous: [...this.anon.keys()],
         locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([id]) => id),
+        buddies: Object.fromEntries(this.fleetBuddies),
       });
     }
 
@@ -702,6 +754,12 @@ export class RegistryDO extends DurableObject<Env> {
   private async persist(): Promise<void> {
     try {
       await this.ctx.storage.put("online", [...this.online.keys()]);
+    } catch {}
+  }
+
+  private async persistFleetBuddies(): Promise<void> {
+    try {
+      await this.ctx.storage.put("fleet_buddies", Object.fromEntries(this.fleetBuddies));
     } catch {}
   }
 

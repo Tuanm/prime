@@ -33,13 +33,13 @@ ${UI_CSS}    </style>
     <ul id="fleetList"></ul>
 
     <div class="row-head section">
-      <h2>Devices</h2>
-      <button class="plus" id="addBtn" type="button" title="Add device">+</button>
+      <h2>Buddies</h2>
+      <button class="plus" id="addBtn" type="button" title="Add a buddy">+</button>
     </div>
     <ul id="list"></ul>
 
     <div class="row-head section">
-      <h2>Anonymous Devices</h2>
+      <h2>Anonymous</h2>
     </div>
     <ul id="anonList"></ul>
     <div class="status" id="status"></div>
@@ -85,10 +85,10 @@ ${UI_CSS}    </style>
 
         function render() {
           listEl.innerHTML = "";
-          if (!devices.length && !pendingNew.length) {
+          if (!devices.length && !pendingNew.length && !fleets.length) {
             var empty = document.createElement("li");
             empty.className = "empty";
-            empty.textContent = "No devices registered. Click + to add one.";
+            empty.textContent = "No buddies yet. Click + to add one.";
             listEl.appendChild(empty);
             return;
           }
@@ -98,6 +98,89 @@ ${UI_CSS}    </style>
           pinned.forEach(function (d) { renderRow(d, false, null); });
           rest.forEach(function (d) { renderRow(d, false, null); });
           pendingNew.forEach(function (p) { renderRow({ deviceId: p.id, token: p.token, online: false }, true, p); });
+          // A fleet is a buddy too: it answers to its own name, with a token
+          // the operator sets here.
+          fleets.forEach(fleetBuddyRow);
+        }
+
+        // The row a fleet gets in the list: the same shape a device has, with
+        // the cloud a group is drawn with, and its own token for clients.
+        function fleetBuddyRow(f) {
+          var li = document.createElement("li");
+          li.className = "row" + (f.disabled ? " disabled" : "");
+          li.dataset.fleetBuddy = f.fleet;
+
+          var cloud = document.createElement("span");
+          cloud.className = "cloud-ic " + (f.disabled || !f.primary ? "off" : "on");
+          cloud.title = f.disabled
+            ? "a fleet of spaces, paused"
+            : f.primary
+              ? "a fleet of spaces, reached through " + f.primary
+              : "a fleet of spaces with no primary right now";
+          cloud.innerHTML = FLEET_CLOUD;
+
+          var box = document.createElement("div");
+          box.className = "box";
+          var idInput = document.createElement("input");
+          idInput.className = "id-input";
+          idInput.readOnly = true;
+          idInput.value = f.fleet;
+          idInput.title = "the fleet, reached as a device of this name";
+          var tokInput = document.createElement("input");
+          tokInput.className = "tok-input";
+          tokInput.placeholder = "token";
+          var real = f.buddy || "";
+          var masked = maskToken(real);
+          tokInput.value = masked;
+          tokInput.addEventListener("focus", function () {
+            if (tokInput.value === masked) tokInput.select();
+          });
+
+          function dirty() {
+            var v = tokInput.value.trim();
+            return !(v === masked || v === real);
+          }
+
+          var saveSpec = {
+            text: "Save",
+            disabled: true,
+            onClick: function () { fleetBuddySave(f.fleet, tokInput.value.trim()); },
+          };
+          var genSpec = {
+            text: "New token",
+            onClick: function () {
+              tokInput.value = randomToken();
+              saveSpec.el.disabled = false;
+            },
+          };
+          tokInput.addEventListener("input", function () { saveSpec.el.disabled = !dirty(); });
+          box.appendChild(idInput);
+          box.appendChild(tokInput);
+          box.appendChild(fleetMenu([saveSpec, genSpec]));
+          li.appendChild(cloud);
+          li.appendChild(box);
+          listEl.appendChild(li);
+        }
+
+        /** A fresh token for a client to keep. */
+        function randomToken() {
+          var bytes = new Uint8Array(24);
+          crypto.getRandomValues(bytes);
+          var s = "";
+          for (var i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, "0");
+          return s;
+        }
+
+        function fleetBuddySave(fleet, token) {
+          api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/buddy", {
+            method: "POST",
+            body: JSON.stringify({ token: token }),
+          })
+            .then(function () {
+              setStatus("saved the token for " + fleet);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not save the token: " + e.message, true); });
         }
 
         function renderRow(dev, isNew, pendingObj) {
@@ -130,7 +213,7 @@ ${UI_CSS}    </style>
 
           var idInput = document.createElement("input");
           idInput.className = "id-input";
-          idInput.placeholder = "device id";
+          idInput.placeholder = "id";
           idInput.value = dev.deviceId || "";
           // Cloud devices are registry-managed: the id is read-only.
           if (virtual) idInput.readOnly = true;
@@ -1022,6 +1105,8 @@ ${UI_CSS}    </style>
             .then(function (j) {
               fleets = (j && j.fleets) || [];
               fleetRender();
+              // The fleets are rows of the list above as well.
+              render();
             })
             .catch(function (e) { setStatus("could not load the fleets: " + e.message, true); });
         }
