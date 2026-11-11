@@ -70,6 +70,32 @@ function fakeBucket() {
   };
 }
 
+/** A stand-in for the registry: the fleet ids it knows. */
+function fakeRegistry() {
+  const fleets = new Set<string>();
+  return {
+    fleets,
+    idFromName: () => "global",
+    get: () => ({
+      fetch: async (input: Request | string, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.url;
+        const path = new URL(url).pathname;
+        const id = new URL(url).searchParams.get("id") || "";
+        if (path === "/fleet-add" && id) {
+          fleets.add(id);
+          return Response.json({ ok: true });
+        }
+        if (path === "/fleet-remove" && id) {
+          fleets.delete(id);
+          return Response.json({ ok: true });
+        }
+        if (path === "/fleets") return Response.json({ fleets: [...fleets] });
+        return Response.json({ ok: true });
+      },
+    }),
+  };
+}
+
 function makeDo(bucket = fakeBucket()) {
   const state = fakeState();
   const env = { BUCKET: bucket } as unknown as Record<string, unknown>;
@@ -631,5 +657,44 @@ describe("head advance", () => {
     const head = JSON.parse(bucket.objects.get("fleets/acme/head")!.body);
     expect(head.seq).toBe(1);
     expect(head.manifestKey).toBe("m1");
+  });
+});
+
+describe("a fleet the registry has forgotten", () => {
+  test("says who it is again when it is woken up", async () => {
+    const registry = fakeRegistry();
+    const state = fakeState();
+    const env = { BUCKET: fakeBucket(), REGISTRY: registry } as unknown as never;
+    const wake = () =>
+      new FleetDO({ storage: state.storage, blockConcurrencyWhile: state.blockConcurrencyWhile } as unknown as DurableObjectState, env);
+
+    const first = wake();
+    await call(first, "/create", { caller: "admin", device: "operator" });
+    expect([...registry.fleets]).toContain("acme");
+
+    // A fleet made before the registry existed, or one whose entry was lost,
+    // is invisible to the operator: the list of fleets lives there.
+    registry.fleets.clear();
+
+    const second = wake();
+    await call(second, "/members", { caller: "admin", device: "operator" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect([...registry.fleets]).toContain("acme");
+  });
+
+  test("a fleet that was deleted does not come back", async () => {
+    const registry = fakeRegistry();
+    const state = fakeState();
+    const env = { BUCKET: fakeBucket(), REGISTRY: registry } as unknown as never;
+    const wake = () =>
+      new FleetDO({ storage: state.storage, blockConcurrencyWhile: state.blockConcurrencyWhile } as unknown as DurableObjectState, env);
+    const first = wake();
+    await call(first, "/create", { caller: "admin", device: "operator" });
+    await call(first, "/delete", { caller: "admin", device: "operator", method: "POST" });
+    expect([...registry.fleets]).not.toContain("acme");
+    const second = wake();
+    await call(second, "/members", { caller: "admin", device: "operator" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect([...registry.fleets]).not.toContain("acme");
   });
 });

@@ -27,6 +27,7 @@ import {
   RECENT_SNAPSHOTS,
   MAX_PENDING,
   newInviteCode,
+  validFleetId,
 } from "./fleets";
 import type { Env } from "./config";
 
@@ -236,6 +237,9 @@ export class FleetDO implements DurableObject {
     return Response.json({ ok: true, applied: applied[caller.deviceId] ?? 0 });
   }
 
+  /** Whether this object has told the registry it exists. */
+  private announced = false;
+
   private async members(): Promise<Members> {
     return (await this.state.storage.get<Members>("members")) ?? {};
   }
@@ -274,6 +278,18 @@ export class FleetDO implements DurableObject {
     const kind = request.headers.get("x-prime-caller") === "admin" ? "admin" : "device";
     const deviceId = request.headers.get("x-prime-device") ?? "";
     const caller: Caller = { kind, deviceId };
+
+    // The operator lists the fleets from the registry, because the objects
+    // cannot be enumerated. A fleet made before the registry existed, or one
+    // whose registration was lost, would be invisible to the operator for
+    // ever; it puts itself back on the first request the object sees.
+    if (!this.announced) {
+      this.announced = true;
+      const name = request.headers.get("x-prime-fleet") ?? "";
+      if (validFleetId(name)) {
+        void this.exists().then((there) => (there ? this.registerWithRegistry(name, true) : undefined)).catch(() => {});
+      }
+    }
 
     // A paused fleet takes no part in the work: nothing joins it, nobody
     // takes a place in it, and nothing is published to it. The operator
