@@ -77,30 +77,32 @@ __CSS__
 
       /* From the person to the fleet: the dashes keep moving, because the
          requests do - including while a space changes places. */
-      .a-flow {
-        position: relative;
-        width: 2px;
-        height: 38px;
+      /* The wire from the person to the fleet. Faint on purpose: what it carries
+         is the story, the line itself is not. */
+      .a-wire {
+        display: flex;
+        align-items: center;
+        gap: 10px;
         margin: -2px 0 8px 5px;
-        background-image: repeating-linear-gradient(180deg, #111 0 4px, transparent 4px 9px);
+      }
+      .a-flow {
+        width: 2px;
+        height: 40px;
+        background-image: repeating-linear-gradient(180deg, #cfcfcf 0 4px, transparent 4px 9px);
         background-size: 2px 9px;
         animation: a-dash 0.8s linear infinite;
       }
       /* The gateway: everything that crosses between the person and the fleet
          goes through a door that is locked in their favour. */
       .a-lock {
-        position: absolute;
-        left: 50%;
-        top: 50%;
-        width: 15px;
-        height: 15px;
-        margin: -7.5px 0 0 -7.5px;
-        background: #fff;
+        display: flex;
+        align-items: center;
+        gap: 6px;
         color: #16a34a;
-        padding: 1px;
-        box-sizing: content-box;
+        font-size: 11px;
       }
-      .a-lock svg { display: block; width: 100%; height: 100%; fill: currentColor; }
+      .a-lock svg { display: block; width: 14px; height: 14px; fill: currentColor; }
+      .a-lock .a-lock-text { color: #999; }
       @keyframes a-dash {
         from { background-position: 0 0; }
         to { background-position: 0 9px; }
@@ -158,9 +160,21 @@ __CSS__
       /* A space that wants in asks first: it waits, drawn as an outline, with
          the two answers the operator has - and only then takes its place. */
       @keyframes a-delta-row { 0%, 37% { opacity: 0; height: 0; margin: 0; overflow: hidden; } 41%, 93% { opacity: 1; height: auto; margin-bottom: 8px; } 97%, 100% { opacity: 0; height: 0; margin: 0; overflow: hidden; } }
-      @keyframes a-delta-box { 0%, 52% { border: 1px dashed #111; background: #fff; } 56%, 100% { border: 1px solid #111; background: #fff; } }
+      @keyframes a-delta-box {
+        0%, 51% { border: 1px dashed #111; background: #fff; padding: 10px 12px; }
+        53% { border: 2px solid #16a34a; background: #f0fdf4; padding: 9px 11px; }
+        58%, 100% { border: 1px solid #111; background: #fff; padding: 10px 12px; }
+      }
+      /* The click: the button goes down, turns green, and the card it admitted
+         answers with the same green. */
+      @keyframes a-admit-press {
+        0%, 51% { transform: none; background: #111; }
+        53% { transform: scale(0.94); background: #16a34a; }
+        56%, 100% { transform: none; background: #111; }
+      }
+      .a-delta .a-btn.admit { animation: a-admit-press 16s ease-in-out infinite; }
       @keyframes a-delta-waiting { 0%, 52% { opacity: 1; } 56%, 100% { opacity: 0; } }
-      @keyframes a-delta-btns { 0%, 41% { opacity: 0; } 44%, 52% { opacity: 1; } 56%, 100% { opacity: 0; } }
+      @keyframes a-delta-btns { 0%, 41% { opacity: 0; } 44%, 55% { opacity: 1; } 58%, 100% { opacity: 0; } }
       @keyframes a-delta-step { 0%, 52% { opacity: 0; } 56%, 93% { opacity: 1; } 97%, 100% { opacity: 0; } }
 
       /* Nothing moves for a reader who asked for no motion: it stops on the
@@ -196,8 +210,12 @@ __CSS__
         <span class="a-dot on"></span>
         <div class="a-box"><span class="a-name">only you</span><span class="a-tag">requests</span></div>
       </div>
-      <div class="a-flow">
-        <span class="a-lock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm0 2a3 3 0 0 1 3 3v3H9V7a3 3 0 0 1 3-3z"/></svg></span>
+      <div class="a-wire">
+        <div class="a-flow"></div>
+        <span class="a-lock">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm0 2a3 3 0 0 1 3 3v3H9V7a3 3 0 0 1 3-3z"/></svg>
+          <span class="a-lock-text">gateway</span>
+        </span>
       </div>
       <div class="a-row">
         <span class="a-cloud"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg></span>
