@@ -430,6 +430,9 @@ export class RegistryDO extends DurableObject<Env> {
       const now = Date.now();
       const devices = [...this.anon.entries()]
         .map(([id, rec]) => ({
+          // The id is for the gateway, which needs it to tell a fleet's space
+          // from a stray; it is stripped before the list reaches a page.
+          id,
           ref: rec.ref,
           online: this.online.has(id),
           disabled: this.disabled.has(id),

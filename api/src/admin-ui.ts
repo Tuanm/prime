@@ -27,6 +27,11 @@ ${UI_CSS}    </style>
     <div class="sub">device registry &middot; admin<span id="count"></span></div>
 
     <div class="row-head">
+      <h2>Usage this month</h2>
+    </div>
+    <div class="usage" id="usage"></div>
+
+    <div class="row-head section">
       <h2>Fleets</h2>
       <button class="plus" id="fleetAddBtn" type="button" title="New fleet">+</button>
     </div>
@@ -42,10 +47,6 @@ ${UI_CSS}    </style>
       <h2>Anonymous</h2>
     </div>
     <ul id="anonList"></ul>
-    <div class="row-head section">
-      <h2>Usage this month</h2>
-    </div>
-    <div class="usage" id="usage"></div>
 
     <div class="toasts" id="toasts"></div>
 

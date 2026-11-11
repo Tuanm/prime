@@ -362,7 +362,9 @@ export const UI_CSS = `      * {
         border: 1px solid #111;
         padding: 12px 14px;
         font-size: 12px;
-        max-width: 520px;
+        /* The rows put their box after a 10px dot and a 10px gap; the card
+           starts and ends where those boxes do. */
+        margin-left: 20px;
       }
       .usage-top {
         display: flex;

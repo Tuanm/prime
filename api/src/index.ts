@@ -584,6 +584,49 @@ function adminHeaders(headers: Headers): Headers {
  * For each one the object is asked who is in it and who holds the lease; the
  * registry says which of them are connected.
  */
+/** Every device id that some fleet counts as one of its own. */
+async function fleetMemberIds(env: Env): Promise<Set<string>> {
+  const ids = new Set<string>();
+  if (!env.FLEET) return ids;
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const listed = await reg.fetch("https://registry/fleets").catch(() => null);
+  const fleetIds = listed ? (((await listed.json()) as { fleets?: string[] }).fleets ?? []) : [];
+  await Promise.all(
+    fleetIds.map(async (fleetId) => {
+      const headers = new Headers();
+      headers.set("x-prime-caller", "admin");
+      headers.set("x-prime-fleet", fleetId);
+      const stub = env.FLEET!.get(env.FLEET!.idFromName(fleetId));
+      const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
+      if (!roster || !roster.ok) return;
+      const body = (await roster.json().catch(() => ({}))) as { members?: Array<{ deviceId?: string }> };
+      for (const member of body.members ?? []) ids.add(String(member.deviceId ?? ""));
+    }),
+  );
+  return ids;
+}
+
+/**
+ * The anonymous devices that belong to nobody.
+ *
+ * A space joins a fleet as an anonymous device, so it would otherwise be listed
+ * twice: once under the fleet that owns it, and once here, where it looks like a
+ * stray. The fleet is where it belongs - this list is for the ones that belong
+ * to no fleet at all. The id is used to decide that and never leaves the server;
+ * the row still goes to the page by its opaque ref.
+ */
+async function adminAnon(env: Env, reg: DurableObjectStub): Promise<Response> {
+  const [listed, inFleet] = await Promise.all([reg.fetch("https://registry/anon/list"), fleetMemberIds(env)]);
+  if (!listed.ok) return listed;
+  const body = (await listed.json()) as { devices?: Array<{ id?: string }> };
+  // The totals stay as they are: a space is a device, whether or not it is in a
+  // fleet. Only the list of stray devices changes.
+  const devices = (body.devices ?? [])
+    .filter((device) => !device.id || !inFleet.has(device.id))
+    .map(({ id: _id, ...rest }) => rest);
+  return Response.json({ ...body, devices });
+}
+
 async function adminFleets(env: Env): Promise<Response> {
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
   const listed = await reg.fetch("https://registry/fleets").catch(() => null);
@@ -978,7 +1021,7 @@ export default {
       // The admin can see and act on them but never sees their id or code: the
       // ref is resolved to the real device here, server-side.
       if (request.method === "GET" && url.pathname === "/admin/api/anonymous") {
-        return reg.fetch("https://registry/anon/list");
+        return adminAnon(env, reg);
       }
       // Where an anonymous device's tunnel comes from (the admin's View dialog).
       const anonOriginRoute = /^\/admin\/api\/anonymous\/([a-f0-9]{24})\/origin$/.exec(url.pathname);
