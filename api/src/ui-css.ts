@@ -35,12 +35,15 @@ export const UI_CSS = `      * {
         align-items: center;
         justify-content: space-between;
         margin-bottom: 10px;
+        /* The same height whether or not there is a button beside the name, so
+           the first row of every section starts the same distance below its
+           heading - a heading with a + and one without must not look different. */
+        min-height: 28px;
       }
-      /* A second section on the same page (Anonymous under Buddies):
-         clear separation, and the same header height as one with a + button. */
+      /* A second section on the same page (Anonymous under Buddies): the
+         separation, now that the height comes from .row-head itself. */
       .row-head.section {
         margin-top: 40px;
-        min-height: 28px;
       }
       .row-head h2 {
         font-size: 11px;
