@@ -513,6 +513,45 @@ async function vacateSilentPrimary(env: Env, fleetId: string, holder: string | n
   return holder;
 }
 
+/**
+ * The policy the public pages are served under.
+ *
+ * These pages are documents: they hold no user input and run no code, except
+ * the one on /connect. So the default is nothing at all - no frames, no plugins,
+ * no base tag, no forms - plus the two sources they actually use: their own
+ * inline styles, and the web font. The script, on the page that has one, is
+ * named by the hash of its own text, not by `unsafe-inline`.
+ */
+const PAGE_CSP_BASE =
+  // The one request these pages make is /connect asking GitHub for the newest
+  // release, so that is the one place they may connect to.
+  "default-src 'none'; img-src data:; connect-src https://api.github.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/** The base policy, with one script allowed by its hash. */
+let pageCspWithScript: { html: string; csp: string } | null = null;
+async function pageCsp(html: string): Promise<string> {
+  const match = /<script>([\s\S]*?)<\/script>/.exec(html);
+  if (!match) return PAGE_CSP_BASE;
+  if (pageCspWithScript && pageCspWithScript.html === html) return pageCspWithScript.csp;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(match[1]!));
+  let binary = "";
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
+  const csp = PAGE_CSP_BASE + "; script-src 'sha256-" + btoa(binary) + "'";
+  pageCspWithScript = { html, csp };
+  return csp;
+}
+
+/** The headers every public page is served with. */
+async function pageHeaders(html: string, cache: string): Promise<Record<string, string>> {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "content-security-policy": await pageCsp(html),
+    "cache-control": cache,
+  };
+}
+
 /** The same headers, but the gateway speaking for itself. */
 function adminHeaders(headers: Headers): Headers {
   const out = new Headers(headers);
@@ -730,12 +769,7 @@ export default {
     // ---- Front page ----
     if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/" || url.pathname === "/index.html")) {
       return new Response(request.method === "HEAD" ? null : HOME_HTML, {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "public, max-age=300",
-          "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer",
-        },
+        headers: await pageHeaders(HOME_HTML, "public, max-age=300"),
       });
     }
 
@@ -1219,22 +1253,12 @@ export default {
     if (url.pathname === "/mcp" && request.method === "POST" && url.searchParams.has("ticket")) return handleSandbox(request, env, url);
     if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/security") {
       return new Response(request.method === "HEAD" ? null : SECURITY_HTML, {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer",
-          "cache-control": "no-store",
-        },
+        headers: await pageHeaders(SECURITY_HTML, "no-store"),
       });
     }
     if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/join") {
       return new Response(request.method === "HEAD" ? null : JOIN_HTML, {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer",
-          "cache-control": "no-store",
-        },
+        headers: await pageHeaders(JOIN_HTML, "no-store"),
       });
     }
     if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/connect" || url.pathname === "/mcp")) {
@@ -1242,12 +1266,7 @@ export default {
       if (url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
       if (url.searchParams.has("frame") || url.searchParams.has("ticket")) return handleSandbox(request, env, url);
       return new Response(request.method === "HEAD" ? null : LANDING_HTML, {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer",
-          "cache-control": "no-store",
-        },
+        headers: await pageHeaders(LANDING_HTML, "no-store"),
       });
     }
     if ((request.method === "GET" || request.method === "HEAD") && /^\/connect\/[^/]+$/.test(url.pathname)) {
