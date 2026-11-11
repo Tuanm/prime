@@ -130,20 +130,36 @@ function loadPage(fleets: unknown[] = []): Page {
 }
 
 
-/** The labels of the actions in a row's menu. */
-function menuOf(row: El): string[] {
+/** The action buttons in a row's menu. */
+function menuButtons(row: El): El[] {
   // row > box > menu-wrap > [button, menu] and the menu holds the actions.
   for (const child of row.children) {
     if (child.className === "box") {
       for (const inner of child.children) {
         if (inner.className === "menu-wrap") {
           const menu = inner.children.find((c) => c.className === "menu");
-          return (menu?.children || []).map((b) => b.textContent);
+          return menu?.children || [];
         }
       }
     }
   }
   return [];
+}
+
+/** The labels of the actions in a row's menu. */
+function menuOf(row: El): string[] {
+  return menuButtons(row).map((b) => b.textContent);
+}
+
+/** The action with this label, as an element. */
+function action(row: El, label: string): El | undefined {
+  return menuButtons(row).find((b) => b.textContent === label);
+}
+
+/** Type into a field, as a person typing would. */
+function type(input: El, text: string): void {
+  input.value = text;
+  for (const fn of input.listeners["input"] || []) fn({});
 }
 
 describe("the fleets in the admin interface", () => {
@@ -261,5 +277,39 @@ describe("the fleets in the admin interface", () => {
     // The name, and the menu: no member count, no primary line, no meta.
     expect(box.children.length).toBe(2);
     expect(box.children[0]!.tagName).toBe("input");
+  });
+
+  test("Save is off until the name of the fleet is changed", async () => {
+    const page = loadPage([
+      { fleet: "acme", disabled: false, members: [], primary: null, pending: [] },
+    ]);
+    await page.settle();
+    const root = page.list()[0]!.children[0]!;
+    expect(action(root, "Save")!.disabled).toBe(true);
+    const name = root.children.find((c) => c.className === "box")!.children[0]!;
+    type(name, "the office");
+    expect(action(root, "Save")!.disabled).toBe(false);
+  });
+
+  test("there is nothing to create until the fleet has a name", () => {
+    const page = loadPage();
+    page.click("fleetAddBtn");
+    const root = page.list()[0]!.children[0]!;
+    expect(action(root, "Create")!.disabled).toBe(true);
+    const name = root.children.find((c) => c.className === "box")!.children[0]!;
+    type(name, "acme");
+    expect(action(root, "Create")!.disabled).toBe(false);
+  });
+
+  test("there is nothing to save until a new device has a name and a token", () => {
+    const page = loadPage();
+    page.click("addBtn");
+    const row = page.byId["list"]!.children[0]!;
+    expect(action(row, "Save")!.disabled).toBe(true);
+    const field = (i: number) => row.children.find((c) => c.className === "box")!.children[i]!;
+    type(field(0), "my-device");
+    expect(action(row, "Save")!.disabled).toBe(true);
+    type(field(1), "a-token");
+    expect(action(row, "Save")!.disabled).toBe(false);
   });
 });

@@ -145,6 +145,11 @@ export const UI_CSS = `      * {
         outline: none;
         border-bottom-color: #111;
       }
+      /* A field that cannot be edited is not drawn as a field. The rule
+         stays, so nothing moves when a row becomes read-only. */
+      .box input[readonly] {
+        border-bottom-color: transparent;
+      }
       .id-input {
         flex: 1;
         min-width: 0;

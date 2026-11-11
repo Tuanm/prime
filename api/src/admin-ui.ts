@@ -151,6 +151,9 @@ ${UI_CSS}    </style>
             idInput.addEventListener("input", function () { pendingObj.id = idInput.value; });
             tokInput.addEventListener("input", function () { pendingObj.token = tokInput.value; });
           }
+          // What the row may do depends on what is in it.
+          idInput.addEventListener("input", function () { updateMenuState(); });
+          tokInput.addEventListener("input", function () { updateMenuState(); });
 
           var menuWrap = document.createElement("span");
           menuWrap.className = "menu-wrap";
@@ -241,8 +244,14 @@ ${UI_CSS}    </style>
             var online = li.dataset.online === "1";
             toolsItem.disabled = !online; // Tools needs a live tunnel
             clientsItem.disabled = virtual || !online; // Clients needs a live tunnel
-            saveItem.disabled = !isNew && !isDirty(); // Save only after the user edits
+            // Save does nothing until there is something to save: an edited
+            // device, or a new one with a name and a token to give it.
+            saveItem.disabled = isNew
+              ? !idInput.value.trim() || !tokInput.value.trim()
+              : !isDirty();
           }
+          // Start in the right state, not only after the menu is opened.
+          updateMenuState();
 
           viewItem.addEventListener("click", function () {
             closeMenus();
@@ -583,11 +592,14 @@ ${UI_CSS}    </style>
           var menu = document.createElement("span");
           menu.className = "menu";
           items.forEach(function (spec) {
+            // The row keeps the button so it can switch it off while the
+            // action would do nothing (Save with nothing changed).
             var b = document.createElement("button");
             b.type = "button";
             b.textContent = spec.text;
             if (spec.danger) b.className = "danger";
             if (spec.disabled) b.disabled = true;
+            spec.el = b;
             b.addEventListener("click", function (e) {
               e.stopPropagation();
               closeFleetMenus();
@@ -644,15 +656,18 @@ ${UI_CSS}    </style>
         // The card that is filled in to make a new fleet: the same row the
         // device list opens, with the name to type into.
         function fleetNewCard(pending) {
+          // There is nothing to create until a name is typed.
+          var createSpec = {
+            text: "Create",
+            disabled: !(pending.name || "").trim(),
+            onClick: function () {
+              fleetCreate(pending);
+            },
+          };
           var row = fleetRootRow(
             { name: pending.name || "" },
             [
-              {
-                text: "Create",
-                onClick: function () {
-                  fleetCreate(pending);
-                },
-              },
+              createSpec,
               {
                 text: "Cancel",
                 onClick: function () {
@@ -662,7 +677,10 @@ ${UI_CSS}    </style>
             ],
             true
           );
-          row.input.addEventListener("input", function () { pending.name = row.input.value; });
+          row.input.addEventListener("input", function () {
+            pending.name = row.input.value;
+            createSpec.el.disabled = !row.input.value.trim();
+          });
           row.input.addEventListener("keydown", function (e) {
             if (e.key === "Enter") fleetCreate(pending);
           });
@@ -684,15 +702,19 @@ ${UI_CSS}    </style>
 
           // The fleet is the root of the tree: a row of the device list, with
           // the spaces in it as the leaves below.
-          var row = fleetRootRow(
+          // Save does nothing until the name is changed, so it stays off.
+          var saveSpec = {
+            text: "Save",
+            disabled: true,
+            onClick: function () {
+              fleetSaveMeta(f, row.input.value);
+            },
+          };
+          var row;
+          row = fleetRootRow(
             f,
             [
-              {
-                text: "Save",
-                onClick: function () {
-                  fleetSaveMeta(f, row.input.value);
-                },
-              },
+              saveSpec,
               {
                 text: f.disabled ? "Activate" : "Deactivate",
                 danger: !f.disabled,
@@ -717,6 +739,10 @@ ${UI_CSS}    </style>
             false
           );
           var li = row.li;
+          // Save is offered only when the name has been changed.
+          row.input.addEventListener("input", function () {
+            saveSpec.el.disabled = row.input.value.trim() === (f.label || f.fleet);
+          });
 
           // The spaces hang from the fleet as the leaves of a tree: the
           // primary first, then the mirrors in the order they came.
