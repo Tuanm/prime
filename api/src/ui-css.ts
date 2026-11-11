@@ -106,6 +106,14 @@ export const UI_CSS = `      * {
       .cloud-ic.off {
         color: #999;
       }
+      /* A fleet nobody can reach is drawn as an outline: the mark says there is
+         no way in, without a word on the card. */
+      .cloud-ic.hollow svg {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linejoin: round;
+      }
       /* Disabled rows dim via colors, NOT opacity: the context menu lives
          inside .box and opacity would make the menu see-through. */
       .row.disabled .box {

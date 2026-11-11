@@ -313,7 +313,7 @@ describe("the fleets in the admin interface", () => {
     expect(action(row, "Save")!.disabled).toBe(false);
   });
 
-  test("a fleet is a buddy in the list, with a token for a client", async () => {
+  test("a fleet is a buddy in the list, and the token is not on the card", async () => {
     const page = loadPage([
       {
         fleet: "acme",
@@ -329,14 +329,29 @@ describe("the fleets in the admin interface", () => {
     const rows = page.byId["list"]!.children;
     expect(rows.length).toBe(1);
     const row = rows[0]!;
-    // A fleet is a group, so it carries the cloud.
+    // A token is set, so the cloud is filled.
     expect(row.children[0]!.className).toContain("cloud-ic");
+    expect(row.children[0]!.className).not.toContain("hollow");
     const box = row.children.find((c) => c.className === "box")!;
-    // Its own name is the id it answers to, and the token is masked.
+    // Its own name is the id it answers to; the token is never shown here.
     expect(box.children[0]!.value).toBe("acme");
-    expect(box.children[1]!.value).not.toContain("0123456789abcdef");
-    expect(menuOf(row)).toEqual(["Save", "New token"]);
+    expect(box.children[1]!.value).toBe("");
+    expect(menuOf(row)).toEqual(["Save", "Refresh token"]);
     expect(action(row, "Save")!.disabled).toBe(true);
+  });
+
+  test("a fleet with no token is drawn hollow: there is no way in", async () => {
+    const page = loadPage([
+      { fleet: "closed", label: "", disabled: false, buddy: "", members: [], primary: null, pending: [] },
+    ]);
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    expect(row.children[0]!.className).toContain("hollow");
+    const box = row.children.find((c) => c.className === "box")!;
+    // The field is a plain, empty one: nothing is said on the card.
+    expect(box.children[1]!.value).toBe("");
+    expect(box.children[1]!.placeholder).toBe("token");
+    expect(menuOf(row)).toContain("Refresh token");
   });
 
   test("the sections are named for what they hold", () => {
@@ -348,15 +363,4 @@ describe("the fleets in the admin interface", () => {
     expect(page).not.toContain('placeholder = "device id"');
   });
 
-  test("a fleet with no token says that nobody can reach it", async () => {
-    const page = loadPage([
-      { fleet: "open-fleet", label: "", disabled: false, buddy: "", members: [], primary: null, pending: [] },
-    ]);
-    await page.settle();
-    const row = page.byId["list"]!.children[0]!;
-    const box = row.children.find((c) => c.className === "box")!;
-    const token = box.children[1]!;
-    expect(token.value).toBe("");
-    expect(token.placeholder).toContain("no access");
-  });
 });

@@ -111,12 +111,17 @@ ${UI_CSS}    </style>
           li.dataset.fleetBuddy = f.fleet;
 
           var cloud = document.createElement("span");
-          cloud.className = "cloud-ic " + (f.disabled || !f.primary ? "off" : "on");
+          // Filled: a token is set, so a client can reach the fleet. Hollow:
+          // there is no way in.
+          var open = !!f.buddy;
+          cloud.className = "cloud-ic " + (f.disabled ? "off" : open ? "on" : "off hollow");
           cloud.title = f.disabled
             ? "a fleet of spaces, paused"
-            : f.primary
-              ? "a fleet of spaces, reached through " + f.primary
-              : "a fleet of spaces with no primary right now";
+            : open
+              ? f.primary
+                ? "a fleet of spaces, reached through " + f.primary
+                : "a fleet of spaces with no primary right now"
+              : "no token is set, so no client can reach this fleet";
           cloud.innerHTML = FLEET_CLOUD;
 
           var box = document.createElement("div");
@@ -128,38 +133,26 @@ ${UI_CSS}    </style>
           idInput.title = "the fleet, reached as a device of this name";
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
-          var real = f.buddy || "";
-          var masked = maskToken(real);
-          tokInput.value = masked;
-          // Without a token there is no way in at all: say so where the
-          // operator looks, not only in a document.
-          tokInput.placeholder = "no access: no token";
-          if (!real) tokInput.title = "no token is set, so no client can reach this fleet";
-          tokInput.addEventListener("focus", function () {
-            if (tokInput.value === masked) tokInput.select();
-          });
-
-          function dirty() {
-            var v = tokInput.value.trim();
-            return !(v === masked || v === real);
-          }
+          tokInput.placeholder = "token";
+          // The token is never put on the card: it is shown once, in a dialog,
+          // where it can be copied. The cloud says whether there is one.
+          tokInput.title = f.buddy
+            ? "a token is set; Refresh token shows a new one"
+            : "no token is set, so no client can reach this fleet";
 
           var saveSpec = {
             text: "Save",
             disabled: true,
-            onClick: function () { fleetBuddySave(f.fleet, tokInput.value.trim()); },
+            onClick: function () { fleetBuddySave(f.fleet, tokInput.value.trim(), tokInput); },
           };
-          var genSpec = {
-            text: "New token",
-            onClick: function () {
-              tokInput.value = randomToken();
-              saveSpec.el.disabled = false;
-            },
+          var refreshSpec = {
+            text: "Refresh token",
+            onClick: function () { fleetBuddyRefresh(f.fleet); },
           };
-          tokInput.addEventListener("input", function () { saveSpec.el.disabled = !dirty(); });
+          tokInput.addEventListener("input", function () { saveSpec.el.disabled = !tokInput.value.trim(); });
           box.appendChild(idInput);
           box.appendChild(tokInput);
-          box.appendChild(fleetMenu([saveSpec, genSpec]));
+          box.appendChild(fleetMenu([saveSpec, refreshSpec]));
           li.appendChild(cloud);
           li.appendChild(box);
           listEl.appendChild(li);
@@ -174,16 +167,55 @@ ${UI_CSS}    </style>
           return s;
         }
 
-        function fleetBuddySave(fleet, token) {
+        function fleetBuddySave(fleet, token, field) {
           api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/buddy", {
             method: "POST",
             body: JSON.stringify({ token: token }),
           })
             .then(function () {
               setStatus("saved the token for " + fleet);
+              if (field) field.value = "";
               loadFleets();
             })
             .catch(function (e) { setStatus("could not save the token: " + e.message, true); });
+        }
+
+        // A fresh token, handed over once in a dialog the operator can copy
+        // from - the card never shows it.
+        function fleetBuddyRefresh(fleet) {
+          var token = randomToken();
+          api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/buddy", {
+            method: "POST",
+            body: JSON.stringify({ token: token }),
+          })
+            .then(function () {
+              var d = openDialog("Fleet token", fleet);
+              d.bodyEl.innerHTML =
+                '<div class="dlg-msg">A client reaches this fleet with this token. It replaces the one that was set, so a client still using the old one stops working.</div>' +
+                '<div class="dlg-code">' +
+                esc(token) +
+                "</div>" +
+                '<div class="dlg-msg"><button type="button" class="btn" id="copyFleetToken">Copy</button></div>';
+              var copy = d.bodyEl.querySelector("#copyFleetToken");
+              if (copy) {
+                copy.addEventListener("click", function () {
+                  var done = function () {
+                    copy.textContent = "Copied";
+                    setTimeout(function () {
+                      copy.textContent = "Copy";
+                    }, 1500);
+                  };
+                  if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(token).then(done, done);
+                  } else {
+                    done();
+                  }
+                });
+              }
+              setStatus("new token for " + fleet);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not refresh the token: " + e.message, true); });
         }
 
         function renderRow(dev, isNew, pendingObj) {
