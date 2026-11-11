@@ -650,7 +650,7 @@ const PAGE_JS = String.raw`(function () {
       document.addEventListener("keydown", key, true);
       cancel.addEventListener("click", function () { done(false); });
       ok.addEventListener("click", function () { done(true); });
-      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
+      // Escape or one of the buttons; a click on the backdrop leaves it open.
       cancel.focus();
     });
   }
@@ -680,9 +680,19 @@ const PAGE_JS = String.raw`(function () {
     bar.appendChild(save);
     body.appendChild(ta); body.appendChild(msg); body.appendChild(bar);
     dlg.appendChild(head); dlg.appendChild(body); overlay.appendChild(dlg); document.body.appendChild(overlay);
-    function close() { overlay.remove(); }
+    function onKey(e) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    }
+    function close() {
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+    }
     x.addEventListener("click", close);
-    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+    // Escape closes it; a click on the backdrop does not.
+    document.addEventListener("keydown", onKey, true);
     save.addEventListener("click", function () {
       save.disabled = true;
       var filename = tool ? tool.filename || tool.name + ".js" : p.filename;

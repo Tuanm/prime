@@ -309,12 +309,19 @@ export const UI_CSS = `      * {
         cursor: default;
       }
       .dlg-close {
+        width: 26px;
+        height: 26px;
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         border: 1px solid #111;
         background: #fff;
         cursor: pointer;
-        font-size: 14px;
+        font: inherit;
+        font-size: 15px;
         line-height: 1;
-        padding: 2px 7px;
+        padding: 0;
       }
       .dlg-close:hover {
         background: #f5f5f5;

@@ -621,9 +621,20 @@ ${UI_CSS}    </style>
           document.body.appendChild(overlay);
           var bodyEl = overlay.querySelector(".dlg-body");
           var closeBtn = overlay.querySelector(".dlg-close");
-          function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+          function onKey(e) {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              close();
+            }
+          }
+          function close() {
+            document.removeEventListener("keydown", onKey, true);
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+          }
           closeBtn.addEventListener("click", close);
-          overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+          // Escape closes it; clicking the backdrop does not, so a mis-click on
+          // the way to a button never throws away what is in the dialog.
+          document.addEventListener("keydown", onKey, true);
           return { overlay: overlay, bodyEl: bodyEl, close: close };
         }
 

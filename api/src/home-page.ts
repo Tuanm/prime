@@ -31,29 +31,29 @@ __CSS__
   </head>
   <body>
     <h1>Prime</h1>
-    <div class="sub">devices, files, sandbox, spaces</div>
+    <div class="sub">buddies, files, fleets, sandbox</div>
     <p class="desc">A light toolkit for secure execution environments.</p>
 
     <div class="cards">
       <a class="card" href="/connect">
-        <div class="t">Device Connect</div>
-        <div class="d">Any device becomes a buddy.</div>
+        <div class="t">Connect</div>
+        <div class="d">Any machine becomes a buddy.</div>
         <div class="u">/connect</div>
       </a>
       <a class="card" href="/files">
-        <div class="t">File Share</div>
-        <div class="d">Devices park temporary files and hand out a link - optionally protected, always expiring.</div>
+        <div class="t">Share</div>
+        <div class="d">Hand a file over with a link that expires.</div>
         <div class="u">/files</div>
+      </a>
+      <a class="card" href="/join">
+        <div class="t">Join</div>
+        <div class="d">Bring your spaces together in a fleet.</div>
+        <div class="u">/join</div>
       </a>
       <a class="card" href="/sandbox">
         <div class="t">Sandbox</div>
-        <div class="d">Tools you write in the page run in a locked-down frame, with no access to your pages, cookies or data.</div>
+        <div class="d">Write a tool in the page and run it, safely.</div>
         <div class="u">/sandbox</div>
-      </a>
-      <a class="card" href="https://github.com/Tuanm/prime/blob/main/cli/README.md#spaces---disposable-or-persistent-codespaces">
-        <div class="t">Codespaces</div>
-        <div class="d">Spaces are rootless Linux containers with their own network, limits and an encrypted vault, registered as local buddies.</div>
-        <div class="u">spaces</div>
       </a>
     </div>
 

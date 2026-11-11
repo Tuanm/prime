@@ -27,6 +27,7 @@ import { RateLimiter, clientIp } from "./rate-limit";
 import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
 import { HOME_HTML } from "./home-page";
+import { JOIN_HTML } from "./join-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleFleetRoutes, markSeen } from "./fleets-routes";
@@ -1215,6 +1216,16 @@ export default {
     if (url.pathname === "/sandbox" && request.method === "GET" && url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));
     if (url.pathname === "/sandbox") return handleSandbox(request, env, url);
     if (url.pathname === "/mcp" && request.method === "POST" && url.searchParams.has("ticket")) return handleSandbox(request, env, url);
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/join") {
+      return new Response(request.method === "HEAD" ? null : JOIN_HTML, {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+          "cache-control": "no-store",
+        },
+      });
+    }
     if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/connect" || url.pathname === "/mcp")) {
       if (url.pathname === "/mcp") return redirectTo(url, "/connect");
       if (url.searchParams.has("asset")) return sandboxAsset(url.searchParams.get("asset"));

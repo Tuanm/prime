@@ -131,7 +131,12 @@ describe("the sign-in form", () => {
     // (the stylesheet mentions [readonly]; the input itself must not carry it)
     expect(unknown).not.toMatch(/id="gate-device"[^>]*readonly/);
     expect(withDevice).toMatch(/id="gate-device"[^>]*readonly/);
-    expect(unknown).toContain('placeholder="device id"');
+    // The labels say what the fields are; the fields do not repeat it as a
+    // grey hint inside themselves.
+    expect(unknown).toContain('<div class="sub">sign-in</div>');
+    expect(unknown).toContain('>ID</label>');
+    expect(unknown).toContain('>Token</label>');
+    expect(unknown).not.toMatch(/<input[^>]*placeholder=/);
   });
 
   test("its script parses", () => {

@@ -11,7 +11,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Device Connect</title>
+    <title>Connect</title>
     <meta name="description" content="Connect this machine as a device and use its files and shell as tools - from anywhere." />
     <link rel="icon" href="__FAVICON__" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -62,9 +62,12 @@ export const LANDING_HTML = String.raw`<!doctype html>
     </style>
   </head>
   <body>
-    <h1>Device Connect</h1>
-    <div class="sub">this machine as tools, anywhere</div>
-    <p class="desc">Connect this machine's files and shell as tools - from anywhere. Download <b>prime</b>, run <code>prime connect</code>, and use the URL it prints from your client.</p>
+    <h1>Connect</h1>
+    <div class="sub">a buddy in your team</div>
+    <p class="desc">Any machine becomes a buddy in your team: its files and its shell, reachable from anywhere, and nothing of it opened to the network.</p>
+    <p class="desc">A buddy works on its own. Buddies also work together: a few of them can be one team, a <b>fleet</b>. A fleet is one piece of work kept in step across machines, so a job started on one of them carries on where it lands, and the work does not stop because one machine went quiet.</p>
+    <p class="desc">A fleet is made of <b>spaces</b> - a space is a workspace made in a moment, or kept for as long as you want it. Each one carries the same work, and any of them can take over when another stops answering.</p>
+    <p class="desc"><a href="/join">How a fleet fits together</a>, with a picture.</p>
 
     <div class="cg" id="cg">
       <button type="button" class="main" id="connect">Connect</button>
@@ -77,13 +80,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
 
     <div class="guide" id="guide"></div>
 
-    <ul class="more">
-      <li><code>prime connect</code> registers this machine as a device and serves its tools until you stop it.</li>
-      <li><code>prime service install</code> keeps it running at every login.</li>
-      <li><code>prime serve</code> exposes every connected device to a local client.</li>
-      <li><code>prime spaces create</code> runs a rootless Linux codespace as a local device.</li>
-      <li><code>prime vaults</code> keeps encrypted values, secrets and TOTP codes for the run tool.</li>
-    </ul>
+    <p class="desc"><a href="https://github.com/Tuanm/prime/blob/main/cli/README.md">The <b>prime</b> handbook</a> covers what else a buddy can do.</p>
 
     <script>
       (function () {
