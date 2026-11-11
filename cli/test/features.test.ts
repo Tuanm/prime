@@ -56,7 +56,10 @@ describe("bundled code-mcp", () => {
     const version = Bun.spawnSync(["bun", ENTRY, "--version"], { stdout: "pipe", stderr: "pipe" });
     expect(version.stdout.toString()).toMatch(/^prime /);
     expect(version.stderr.toString()).not.toContain("MCP server");
-  });
+    // Two bun subprocesses on a cold Windows runner can take longer than the
+    // five seconds bun gives a test by default; the test is about what the
+    // commands do, not about how fast the runner is.
+  }, 30_000);
 
   test("connect keeps the device code off the child's command line", () => {
     const { command, env } = codeMcpLaunch("https://gw.test", { deviceId: "anon-0123456789abcdef", token: "SECR3T" }, 4321, ["--enable-memory"]);

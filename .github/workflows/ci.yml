@@ -89,7 +89,16 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('api/package-lock.json') }}
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        # apt plus a browser download, on a runner whose mirror is sometimes
+        # unreachable: three tries, because a flaky mirror fails nothing else.
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if npx playwright install --with-deps chromium; then exit 0; fi
+            echo "::warning::chromium install failed on attempt $attempt; retrying"
+            sleep 10
+          done
+          exit 1
 
       # Unit, smoke, files and anonymous-device suites.
       - name: Unit and smoke tests
@@ -136,7 +145,16 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('api/package-lock.json') }}
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        # apt plus a browser download, on a runner whose mirror is sometimes
+        # unreachable: three tries, because a flaky mirror fails nothing else.
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if npx playwright install --with-deps chromium; then exit 0; fi
+            echo "::warning::chromium install failed on attempt $attempt; retrying"
+            sleep 10
+          done
+          exit 1
 
       - name: Sandbox in Chromium with MCP clients
         run: |
