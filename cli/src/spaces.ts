@@ -1412,6 +1412,41 @@ function runtimeInteractive(runtime: RuntimeInfo, args: string[]): number {
   return result.status ?? 1;
 }
 
+/**
+ * Whether this space is the primary of its fleet.
+ *
+ * A fleet is several copies of one piece of work, and only the copy that holds
+ * the lease writes: the others follow it. An edit made in a replica would be
+ * thrown away the next time it mirrors the primary, so a replica is not entered.
+ * The answer comes from the fleet itself, not from the configuration, which is
+ * only as fresh as the last time this machine looked.
+ *
+ * undefined means the fleet could not be asked.
+ */
+async function spaceIsPrimary(space: SpaceEntry): Promise<boolean | undefined> {
+  if (!space.fleet || !space.gateway || !space.gateway_device || !space.remote_token) return undefined;
+  try {
+    const res = await fetch(space.gateway + "/fleets/" + encodeURIComponent(space.fleet) + "/primary", {
+      headers: { "x-prime-device": space.gateway_device, "x-device-token": space.remote_token },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { member?: boolean; primary?: string | null };
+    if (!body.member) return false;
+    return body.primary === space.gateway_device;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The local space that is the primary of a fleet, if this machine has it. */
+function primarySpaceName(config: Config, fleet: string): string | undefined {
+  for (const [name, space] of Object.entries(config.spaces)) {
+    if (space.fleet === fleet && space.fleet_role === "primary") return name;
+  }
+  return undefined;
+}
+
 /** Open a shell in a running space, or run one command after `--`. */
 export async function spacesEnter(ctx: Ctx): Promise<void> {
   const name = positional(ctx);
@@ -1420,6 +1455,21 @@ export async function spacesEnter(ctx: Ctx): Promise<void> {
   const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
   const info = containerInfo(runtime, space.container);
   if (info.state !== "running") fail('space "' + name + '" is not running', "Start it with: prime spaces start " + name);
+  if (space.fleet) {
+    const primary = await spaceIsPrimary(space);
+    if (primary !== true) {
+      const other = primarySpaceName(ctx.config, space.fleet);
+      fail(
+        'space "' + name + '" is ' + (primary === false ? "a replica" : "not known to be the primary") + " of fleet " + space.fleet,
+        primary === false
+          ? "Only the primary of a fleet is entered: it is the one that writes, and an edit in a replica is thrown away when it mirrors." +
+            (other && other !== name
+              ? " The primary is space \"" + other + "\"."
+              : " Wait for this space to take the lease, or enter the one that holds it.")
+          : "The fleet could not be asked who holds the lease. Check that the gateway is reachable, then try again.",
+      );
+    }
+  }
   const command = ctx.parsed.positionals.slice(3);
   const shell = str(ctx.parsed, "shell") ?? "/bin/bash";
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);

@@ -553,6 +553,11 @@ export class DeviceDO extends DurableObject<Env> {
       this.failDevice("keepalive timeout");
       return;
     }
+    // The registry sweeps its online entries, and a tunnel that is open but
+    // quiet - a space doing its work and nothing else - sends nothing for the
+    // message path to refresh from. The alarm says it here, so a connected
+    // device never goes "offline" in the list while it is connected.
+    this.maybeRefreshRegistry();
     this.scheduleKeepaliveCheck();
   }
 
