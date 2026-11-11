@@ -390,6 +390,40 @@ mirrors. The answer comes from the fleet, not from the configuration, so a
 space that has just taken over the lease can be entered at once.
 
 ---
+## What it costs, and the ceiling on it
+
+A fleet is the part of the gateway that is expensive to run: the agents keep
+the objects awake and send a request every few seconds, so the bill is mostly
+Durable Object minutes rather than anything the people using it do.
+
+The gateway counts what it does, so the bill is not a guess:
+
+| Counted | Where |
+|---|---|
+| requests that reached the Worker | the Worker, in batches |
+| requests each object served, and the minutes it was awake | each object, in batches |
+| R2 objects the fleet stored and read | where they are stored and read |
+
+The counts are added to a monthly record in the registry, priced with
+Cloudflare's list prices and the free allowances applied. `/admin` shows the
+month, what it has cost so far, and what it is made of; `/admin/api/usage`
+returns the same numbers.
+
+The ceiling is `FLEET_MONTHLY_BUDGET_USD` (twenty dollars by default). When a
+month's cost reaches it, the fleet routes answer **402** and say why:
+
+```
+{"error":"the gateway's monthly fleet budget is spent",
+ "spent_usd":20.4,"budget_usd":20,
+ "hint":"raise FLEET_MONTHLY_BUDGET_USD, or wait for the month to turn over"}
+```
+
+The admin interface keeps working - the operator has to be able to see the
+number that stopped it and raise it - and so does everything that is not a
+fleet. The counts are batches, not a ledger: a batch in flight when an isolate
+is dropped is a few requests, so the figure is a close estimate rather than an
+invoice, which is all a ceiling needs to be.
+
 ## Failure behaviour
 
 | Situation | Behaviour |

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { ADMIN_HTML } from "../src/admin-ui";
 
 // The admin interface is a page of script. It is run here against a small
 // stand-in for the browser, so that the parts that only show up when someone
@@ -75,8 +75,11 @@ interface Page {
 }
 
 function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean } = {}): Page {
-  const source = readFileSync(new URL("../src/admin-ui.ts", import.meta.url), "utf8");
-  const html = source.slice(source.indexOf("<script>") + 8, source.indexOf("</script>"));
+  // The page as it is served: the template already expanded. Reading the .ts
+  // source instead would compile the escaping of the template rather than what
+  // the browser is given, and a stray backslash would pass unnoticed.
+  const page = ADMIN_HTML;
+  const html = page.slice(page.indexOf("<script>") + 8, page.indexOf("</script>"));
   const byId: Record<string, El> = {};
   const doc = {
     getElementById: (id: string) => (byId[id] ||= makeEl("div")),
@@ -368,11 +371,14 @@ describe("the fleets in the admin interface", () => {
   });
 
   test("the sections are named for what they hold", () => {
-    const page = readFileSync("src/admin-ui.ts", "utf8");
+    const page = ADMIN_HTML;
     expect(page).toContain("<h2>Fleets</h2>");
     expect(page).toContain("<h2>Buddies</h2>");
     expect(page).toContain("<h2>Anonymous</h2>");
-    expect(page).not.toContain("Anonymous Devices");
+    // The headings are what the operator reads: the section names are gone from
+    // them, wherever else the old words might survive in a comment.
+    expect(page).not.toContain("<h2>Anonymous Devices</h2>");
+    expect(page).not.toContain("<h2>Devices</h2>");
     expect(page).not.toContain('placeholder = "device id"');
   });
 

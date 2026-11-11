@@ -36,7 +36,7 @@ export const UI_CSS = `      * {
         justify-content: space-between;
         margin-bottom: 10px;
       }
-      /* A second section on the same page (Anonymous Devices under Devices):
+      /* A second section on the same page (Anonymous under Buddies):
          clear separation, and the same header height as one with a + button. */
       .row-head.section {
         margin-top: 40px;
@@ -349,6 +349,58 @@ export const UI_CSS = `      * {
         gap: 8px;
         justify-content: flex-end;
         padding: 0 12px 14px;
+      }
+      /* What the month has cost: one number, a bar, and what it is made of. */
+      .usage {
+        border: 1px solid #111;
+        padding: 12px 14px;
+        font-size: 12px;
+        max-width: 520px;
+      }
+      .usage-top {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .usage-money {
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+      }
+      .usage-of {
+        color: #666;
+      }
+      .usage-month {
+        margin-left: auto;
+        color: #999;
+        font-size: 11px;
+      }
+      .usage-bar {
+        height: 6px;
+        background: #f2f2f2;
+        border: 1px solid #e5e5e5;
+        margin: 8px 0 6px;
+      }
+      .usage-bar span {
+        display: block;
+        height: 100%;
+        background: #111;
+      }
+      .usage-bar span.over {
+        background: #b91c1c;
+      }
+      .usage-parts {
+        color: #666;
+        font-size: 11px;
+      }
+      .usage-counts {
+        color: #999;
+        font-size: 11px;
+        margin-top: 2px;
+      }
+      .usage-over {
+        margin-top: 8px;
+        color: #b91c1c;
       }
       /* Confirmations are toasts, the way the sandbox page shows them: a
          short dark note in the corner that leaves on its own. */

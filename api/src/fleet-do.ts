@@ -29,6 +29,7 @@ import {
   newInviteCode,
   validFleetId,
 } from "./fleets";
+import { HitMeter, sendUsage } from "./usage";
 import type { Env } from "./config";
 
 
@@ -101,6 +102,7 @@ export class FleetDO implements DurableObject {
 
   private async readHead(fleetId: string): Promise<Head> {
     try {
+      this.meter.r2("read");
       const obj = await this.bucket().get(this.headKey(fleetId));
       if (!obj) return { ...EMPTY_HEAD };
       return (await obj.json()) as Head;
@@ -290,9 +292,15 @@ export class FleetDO implements DurableObject {
     return Response.json({ ok: true, meta });
   }
 
+  /** What this fleet served this month, sent on in batches. */
+  private readonly meter = new HitMeter((add) => {
+    sendUsage(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global")), add);
+  });
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+    this.meter.hit();
     const body = request.method === "POST" ? ((await request.json().catch(() => ({}))) as Record<string, unknown>) : {};
 
     // The Worker has already proved the caller; these headers are internal.
@@ -873,6 +881,7 @@ export class FleetDO implements DurableObject {
     if (!held || held.holder !== caller.deviceId) return Response.json({ error: "not the lease holder" }, { status: 409 });
 
     const key = this.headKey(fleetId);
+    this.meter.r2("read");
     const current = await this.bucket().get(key);
     const etag = current?.etag;
     const currentHead = current ? ((await current.json()) as Head) : { ...EMPTY_HEAD };
@@ -892,6 +901,7 @@ export class FleetDO implements DurableObject {
     const next: Head = { seq: currentHead.seq + 1, manifestKey, manifestHash, epoch: held.epoch };
     let written: R2Object | null;
     try {
+      this.meter.r2("write");
       written = await this.bucket().put(key, JSON.stringify(next), etag ? { onlyIf: { etagMatches: etag } } : { onlyIf: { etagDoesNotMatch: "*" } });
     } catch {
       return Response.json({ error: "head write refused" }, { status: 409 });

@@ -18,6 +18,7 @@ import { DownloadRelay } from "./download-relay";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
 import { validDeviceId, timingSafeEq, extractToken } from "./config";
+import { HitMeter, sendUsage } from "./usage";
 import type { TunnelRequest, TunnelMessage } from "./protocol";
 
 // Per-device token lookup (parsed once per DO instance).
@@ -119,8 +120,14 @@ export class DeviceDO extends DurableObject<Env> {
 
   // ---- fetch(): all requests for this deviceId route here ----------------
 
+  /** What this object served this month, sent on in batches. */
+  private readonly meter = new HitMeter((add) => {
+    sendUsage(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global")), add);
+  });
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    this.meter.hit();
 
     // Internal device auth + identity: the worker entry sets these headers so
     // the DO can enforce per-device auth and know which device it is without

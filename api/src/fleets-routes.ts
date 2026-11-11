@@ -12,6 +12,7 @@
 
 import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
 import { MAX_FLEETS_PER_DEVICE, validFleetId, type FleetAuth } from "./fleets";
+import { countFleetR2 } from "./usage";
 import type { Env } from "./config";
 
 // Captured as a general action segment and then checked against an allowlist,
@@ -126,7 +127,9 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   const manifestHash = await sha256Hex(finalManifest);
   const manifestKey = "fleets/" + fleetId + "/manifests/" + manifestHash;
 
+  countFleetR2("write");
   await bucket.put(packKey, pack, { httpMetadata: { contentType: "application/octet-stream" } });
+  countFleetR2("write");
   await bucket.put(manifestKey, finalManifest, { httpMetadata: { contentType: "application/json" } });
 
   // Move the head. The object decides: it checks the sequence, the lease and
@@ -198,6 +201,7 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     const digest = await sha256Hex(body);
     const key = prefix + digest;
     // Content addressed: writing the same bytes twice is free and idempotent.
+    countFleetR2("write");
     await bucket.put(key, body, { httpMetadata: { contentType: "application/octet-stream" } });
     return Response.json({ ok: true, key, hash: digest, size: body.byteLength, epoch: role.epoch });
   }
@@ -206,6 +210,7 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
   if (deps.request.method === "GET") {
     const id = parts[1];
     if (!id || !HASH_RE.test(id)) return Response.json({ error: "invalid payload id" }, { status: 400 });
+    countFleetR2("read");
     const obj = await bucket.get(prefix + id);
     if (!obj) return Response.json({ error: "no such payload" }, { status: 404 });
     return new Response(obj.body, {

@@ -42,6 +42,11 @@ ${UI_CSS}    </style>
       <h2>Anonymous</h2>
     </div>
     <ul id="anonList"></ul>
+    <div class="row-head section">
+      <h2>Usage this month</h2>
+    </div>
+    <div class="usage" id="usage"></div>
+
     <div class="toasts" id="toasts"></div>
 
     <script>
@@ -1478,7 +1483,58 @@ ${UI_CSS}    </style>
 
         fleetAddBtn.addEventListener("click", fleetAddCard);
 
+        // ---- what the month has cost ----
+        // The gateway keeps a count of what it has done this month and prices
+        // it; the fleets stop when the month passes the budget.
+        var usageEl = document.getElementById("usage");
+        function loadUsage() {
+          fetch("/admin/api/usage")
+            .then(function (res) { return res.json(); })
+            .then(function (j) {
+              if (!j || !j.cost) return;
+              var spent = Number(j.spentUsd || 0);
+              var budget = Number(j.budgetUsd || 0);
+              var pct = budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
+              var c = j.cost;
+              usageEl.innerHTML =
+                '<div class="usage-top"><span class="usage-money">$' +
+                spent.toFixed(2) +
+                '</span><span class="usage-of">of $' +
+                budget.toFixed(2) +
+                ' budget</span><span class="usage-month">' +
+                esc(String(j.month || "")) +
+                "</span></div>" +
+                '<div class="usage-bar"><span style="width:' +
+                pct +
+                '%" class="' +
+                (j.overBudget ? "over" : "") +
+                '"></span></div>' +
+                '<div class="usage-parts">plan $' +
+                c.plan.toFixed(2) +
+                " · requests $" +
+                (c.gatewayRequests + c.doRequests).toFixed(2) +
+                " · duration $" +
+                c.doDuration.toFixed(2) +
+                " · r2 $" +
+                c.r2.toFixed(2) +
+                "</div>" +
+                '<div class="usage-counts">' +
+                Number(j.counts?.gatewayRequests || 0).toLocaleString() +
+                " requests · " +
+                Number(j.counts?.doRequests || 0).toLocaleString() +
+                " object requests · " +
+                Number(j.counts?.doMinutes || 0).toLocaleString() +
+                " object minutes</div>" +
+                (j.overBudget
+                  ? '<div class="usage-over">The fleet budget is spent: the fleets are paused until the month turns over or the budget is raised.</div>'
+                  : "");
+            })
+            .catch(function () {});
+        }
+
         load();
+        loadUsage();
+        setInterval(loadUsage, 30000);
         setInterval(refreshDots, 5000);
         setInterval(loadAnon, 5000);
         setInterval(loadFleets, 10000);

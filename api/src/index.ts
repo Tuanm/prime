@@ -31,6 +31,7 @@ import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleFleetRoutes, markSeen } from "./fleets-routes";
 import { validFleetId } from "./fleets";
+import { sendUsage, takeFleetR2 } from "./usage";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { ipBlockKey } from "./config";
@@ -105,6 +106,48 @@ interface RegistrySnapshot {
   online: Set<string>; // which devices hold a tunnel right now
 }
 let mapCache: { at: number; snap: RegistrySnapshot } | null = null;
+
+// What this isolate has served, sent on in batches: a write per request would
+// cost more than it measures.
+let gatewayHits = 0;
+let gatewayHitsAt = 0;
+function noteGatewayRequest(env: Env): void {
+  gatewayHits += 1;
+  const now = Date.now();
+  if (gatewayHits < 200 && now - gatewayHitsAt < 60_000) return;
+  const count = gatewayHits;
+  const r2 = takeFleetR2();
+  gatewayHits = 0;
+  gatewayHitsAt = now;
+  void sendUsage(env.REGISTRY.get(env.REGISTRY.idFromName("global")), {
+    gatewayRequests: count,
+    r2Writes: r2.writes,
+    r2Reads: r2.reads,
+  });
+}
+
+// The month's spend, as the registry last told this isolate. Cached for a
+// moment: the budget is a monthly ceiling, not a per-request one.
+let usageCache: { at: number; spentUsd: number; budgetUsd: number; over: boolean } | null = null;
+
+async function fleetBudgetSpent(env: Env): Promise<{ over: boolean; spentUsd: number; budgetUsd: number }> {
+  if (usageCache && Date.now() - usageCache.at < 30_000) {
+    return { over: usageCache.over, spentUsd: usageCache.spentUsd, budgetUsd: usageCache.budgetUsd };
+  }
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    const res = await reg.fetch("https://registry/usage");
+    if (res.ok) {
+      const body = (await res.json()) as { spentUsd?: number; budgetUsd?: number; overBudget?: boolean };
+      const spentUsd = Number(body.spentUsd ?? 0);
+      const budgetUsd = Number(body.budgetUsd ?? 0);
+      const over = body.overBudget === true || spentUsd >= budgetUsd;
+      usageCache = { at: Date.now(), spentUsd, budgetUsd, over };
+      return { over, spentUsd, budgetUsd };
+    }
+  } catch {}
+  return { over: false, spentUsd: 0, budgetUsd: 0 };
+}
 const MAP_CACHE_TTL_MS = 2_000;
 
 // Relay requests that authenticated as an anonymous device. Their lower
@@ -655,6 +698,8 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const cfg = loadConfig(env);
     const url = new URL(request.url);
+    // What the gateway is being asked for, for the monthly cost of it.
+    noteGatewayRequest(env);
 
     // ---- Blocked addresses ----
     // A blocked address reaches nothing: not the MCP relay, not a tunnel, not
@@ -752,7 +797,23 @@ export default {
     // ---- Fleets ----
     // Membership and bootstrap. The Worker proves the credential here; the
     // Durable Object only ever sees an identity this Worker established.
+    // ---- Fleets ----
+    // A fleet costs the gateway money to run: the agents keep the objects awake
+    // and the relays keep the requests coming. The budget is a monthly ceiling
+    // the operator sets, and the fleets stop at it.
     if (url.pathname.startsWith("/fleets/") || url.pathname.startsWith("/api/fleets/") || url.pathname === "/fleets") {
+      const budget = await fleetBudgetSpent(env);
+      if (budget.over && !url.pathname.startsWith("/admin/")) {
+        return Response.json(
+          {
+            error: "the gateway's monthly fleet budget is spent",
+            spent_usd: budget.spentUsd,
+            budget_usd: budget.budgetUsd,
+            hint: "raise FLEET_MONTHLY_BUDGET_USD, or wait for the month to turn over",
+          },
+          { status: 402 },
+        );
+      }
       if (url.pathname === "/fleets") {
         // The fleets that exist, for the operator: the list lives in the
         // registry, because the fleet objects cannot be enumerated.
@@ -994,6 +1055,13 @@ export default {
         return Response.json({ error: "not found" }, { status: 404 });
       }
 
+      if (request.method === "GET" && url.pathname === "/admin/api/usage") {
+        // What the month has cost so far, against the budget it must not pass.
+        const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+        const res = await reg.fetch("https://registry/usage");
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        return Response.json({ ...body, ok: res.ok });
+      }
       if (request.method === "GET" && url.pathname === "/admin/api/devices") {
         return reg.fetch("https://registry/full");
       }
