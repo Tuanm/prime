@@ -144,8 +144,17 @@ try {
   check("GET / serves the front page", landing.status === 200 && (landing.headers.get("content-type") ?? "").startsWith("text/html") && landingText.includes("Prime") && landingText.includes('href="/sandbox"'), String(landing.status));
   const product = await fetch(B + "/mcp");
   const productText = await product.text();
-  check("GET /mcp serves the Device Connect page", product.status === 200 && productText.includes("<title>Device Connect</title>") && !productText.includes('class="meta"'), String(product.status));
-  check("the front page carries the releases footer", landingText.includes("All releases") && landingText.includes("Source on GitHub") && !landingText.includes("See the overview"), String(landing.status));
+  check("GET /mcp serves the Connect page", product.status === 200 && productText.includes("<title>Connect</title>") && productText.includes('class="meta"'), String(product.status));
+  // The front page's foot: the two links beside each other, and the mark under them.
+  check(
+    "the front page carries the releases and security footer",
+    landingText.includes(">Releases</a>") &&
+      landingText.includes(">Security</a>") &&
+      landingText.includes('href="/security"') &&
+      landingText.includes("Source on GitHub") &&
+      !landingText.includes("See the overview"),
+    String(landing.status),
+  );
   check("HEAD / answers without a body", (await fetch(B + "/", { method: "HEAD" })).status === 200);
   check("POST / is not the landing page", (await fetch(B + "/", { method: "POST" })).status !== 200);
 
