@@ -313,7 +313,7 @@ describe("the fleets in the admin interface", () => {
     expect(action(row, "Save")!.disabled).toBe(false);
   });
 
-  test("a fleet is a buddy in the list, and the token is not on the card", async () => {
+  test("a fleet is a buddy in the list, and its token is masked like the others", async () => {
     const page = loadPage([
       {
         fleet: "acme",
@@ -333,9 +333,11 @@ describe("the fleets in the admin interface", () => {
     expect(row.children[0]!.className).toContain("cloud-ic");
     expect(row.children[0]!.className).not.toContain("hollow");
     const box = row.children.find((c) => c.className === "box")!;
-    // Its own name is the id it answers to; the token is never shown here.
+    // Its own name is the id it answers to; the token is masked, like every
+    // other token on the page.
     expect(box.children[0]!.value).toBe("acme");
-    expect(box.children[1]!.value).toBe("");
+    expect(box.children[1]!.value).not.toContain("0123456789abcdef");
+    expect(box.children[1]!.value).toContain("***");
     expect(menuOf(row)).toEqual(["Save", "Refresh token"]);
     expect(action(row, "Save")!.disabled).toBe(true);
   });
@@ -348,7 +350,7 @@ describe("the fleets in the admin interface", () => {
     const row = page.byId["list"]!.children[0]!;
     expect(row.children[0]!.className).toContain("hollow");
     const box = row.children.find((c) => c.className === "box")!;
-    // The field is a plain, empty one: nothing is said on the card.
+    // There is no token, so the field is the plain empty one it always was.
     expect(box.children[1]!.value).toBe("");
     expect(box.children[1]!.placeholder).toBe("token");
     expect(menuOf(row)).toContain("Refresh token");

@@ -134,11 +134,17 @@ ${UI_CSS}    </style>
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
           tokInput.placeholder = "token";
-          // The token is never put on the card: it is shown once, in a dialog,
-          // where it can be copied. The cloud says whether there is one.
-          tokInput.title = f.buddy
+          // Masked, like every other token on the page: the whole of it is
+          // handed over once, in the dialog Refresh token opens.
+          var real = f.buddy || "";
+          var masked = maskToken(real);
+          tokInput.value = masked;
+          tokInput.title = real
             ? "a token is set; Refresh token shows a new one"
             : "no token is set, so no client can reach this fleet";
+          tokInput.addEventListener("focus", function () {
+            if (tokInput.value === masked) tokInput.select();
+          });
 
           var saveSpec = {
             text: "Save",
@@ -149,7 +155,11 @@ ${UI_CSS}    </style>
             text: "Refresh token",
             onClick: function () { fleetBuddyRefresh(f.fleet); },
           };
-          tokInput.addEventListener("input", function () { saveSpec.el.disabled = !tokInput.value.trim(); });
+          tokInput.addEventListener("input", function () {
+            var v = tokInput.value.trim();
+            // Save only what would change it: the mask is not the token.
+            saveSpec.el.disabled = v === "" || v === masked || v === real;
+          });
           box.appendChild(idInput);
           box.appendChild(tokInput);
           box.appendChild(fleetMenu([saveSpec, refreshSpec]));
