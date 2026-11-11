@@ -538,6 +538,7 @@ ${UI_CSS}    </style>
                   })
                   .catch(function (e) { setStatus("delete failed: " + e.message, true); });
               },
+              true,
             );
           });
 
@@ -574,17 +575,21 @@ ${UI_CSS}    </style>
          * as a warning from the browser rather than a decision by the page. This
          * is the same dialog the page shows everywhere else.
          */
-        function confirmDialog(title, message, confirmLabel, onConfirm) {
+        function confirmDialog(title, message, confirmLabel, onConfirm, danger) {
           var d = openDialog(title, "");
+          // One main answer and one way out. The main one is filled in - black for
+          // what it does, red for a decision that loses something.
           d.bodyEl.innerHTML =
             '<div class="dlg-msg">' +
             esc(message) +
             "</div>" +
             '<div class="dlg-actions">' +
-            '<button type="button" class="btn" id="confirmYes">' +
+            '<button type="button" class="btn secondary" id="confirmNo">Cancel</button>' +
+            '<button type="button" class="btn' +
+            (danger ? " danger" : "") +
+            '" id="confirmYes">' +
             esc(confirmLabel) +
             "</button>" +
-            '<button type="button" class="btn" id="confirmNo">Cancel</button>' +
             "</div>";
           var yes = d.bodyEl.querySelector("#confirmYes");
           var no = d.bodyEl.querySelector("#confirmNo");
@@ -814,11 +819,13 @@ ${UI_CSS}    </style>
         // never lost.
         var pendingFleets = [];
 
-        // A plain action button: the thing it does is on it.
-        function fleetBtn(text, onClick, danger) {
+        // An action button: the thing it does is on it, and its weight says how
+        // much it matters - "primary" for the main one, "danger" for one that
+        // loses something, nothing for the way out.
+        function fleetBtn(text, onClick, variant) {
           var b = document.createElement("button");
           b.type = "button";
-          b.className = "fleet-btn" + (danger ? " danger" : "");
+          b.className = "fleet-btn" + (variant ? " " + variant : "");
           b.textContent = text;
           b.addEventListener("click", onClick);
           return b;
@@ -1132,10 +1139,10 @@ ${UI_CSS}    </style>
           answers.className = "fleet-actions";
           answers.appendChild(fleetBtn("Admit", function () {
             fleetAction(fleet, "approve", { deviceId: p.deviceId }, "admitted " + (p.label || p.deviceId));
-          }));
+          }, "primary"));
           answers.appendChild(fleetBtn("Decline", function () {
             fleetAction(fleet, "remove", { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
-          }, true));
+          }, "danger"));
 
           box.appendChild(nameInput);
           box.appendChild(answers);
@@ -1245,6 +1252,7 @@ ${UI_CSS}    </style>
             "Delete the fleet " + fleet + "? The spaces in it are not touched.",
             "Delete",
             function () { fleetDeleteNow(fleet); },
+            true,
           );
         }
 
@@ -1410,6 +1418,7 @@ ${UI_CSS}    </style>
                   })
                   .catch(function (e) { setStatus("delete failed: " + e.message, true); });
               },
+              true,
             );
           });
         }

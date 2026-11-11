@@ -48,18 +48,19 @@ export const UI_CSS = `      * {
         text-transform: uppercase;
         letter-spacing: 0.7px;
       }
+      /* The one action a section offers: filled, the way a primary button is. */
       .plus {
         width: 28px;
         height: 28px;
         border: 1px solid #111;
-        background: #fff;
-        color: #111;
+        background: #111;
+        color: #fff;
         font-size: 16px;
         line-height: 1;
         cursor: pointer;
       }
       .plus:hover {
-        background: #f5f5f5;
+        background: #000;
       }
       ul {
         list-style: none;
@@ -410,6 +411,9 @@ export const UI_CSS = `      * {
       }
       /* The plain actions: they say what they do, so they are not hidden
          behind a menu. They are the secondary buttons of the interface. */
+      /* The answers beside a waiting space: the same three weights a dialog
+         has - filled for the main one, red for the one that loses something,
+         outline for the way out. */
       .fleet-btn {
         font: inherit;
         font-size: 12px;
@@ -425,24 +429,25 @@ export const UI_CSS = `      * {
       .fleet-btn:hover {
         background: #f2f2f2;
       }
+      .fleet-btn.primary {
+        background: #111;
+        color: #fff;
+        border-color: #111;
+      }
+      .fleet-btn.primary:hover {
+        background: #000;
+      }
       .fleet-btn.danger {
-        color: #b91c1c;
+        background: #b91c1c;
+        color: #fff;
         border-color: #b91c1c;
       }
-      .fleet-btn {
-        border: 1px solid #111;
-        background: #fff;
-        padding: 5px 10px;
-        font: inherit;
-        font-size: 12px;
-        cursor: pointer;
-        color: #111;
+      .fleet-btn.danger:hover {
+        background: #991b1b;
+        border-color: #991b1b;
       }
-      .fleet-btn:hover {
-        background: #f5f5f5;
-      }
-      .fleet-btn.danger {
-        color: #b91c1c;
+      .fleet-btn.primary:hover {
+        background: #000;
       }
       /* The fleets are roots; the spaces in them are the leaves below.
          The branch is drawn with a line, the way a tree is drawn. */
