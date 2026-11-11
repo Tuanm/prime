@@ -253,7 +253,10 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   // enough to keep the lease and no more: a write on every round would put
   // the gateway under needless load.
   const now = Date.now();
-  const stale = now - loop.lastBootstrap > (options.heartbeatMs ?? 15_000);
+  // The heartbeat is what keeps the lease, and the lease is how long the fleet
+  // waits before it lets another member take over. Five seconds, against a
+  // fifteen-second lease, leaves room for two lost rounds.
+  const stale = now - loop.lastBootstrap > (options.heartbeatMs ?? 5_000);
   if (stale || !loop.primary) {
     const began = Date.now();
     const keys = loadOrCreateKeyPair(paths.keyFile);
@@ -379,7 +382,7 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
 export async function runFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<void> {
   const env = process.env;
   const pollMs = options.pollMs ?? Number(env.PRIME_FLEET_POLL_MS ?? 1500);
-  const heartbeatMs = options.heartbeatMs ?? Number(env.PRIME_FLEET_HEARTBEAT_MS ?? 20_000);
+  const heartbeatMs = options.heartbeatMs ?? Number(env.PRIME_FLEET_HEARTBEAT_MS ?? 5_000);
   const dir = fleetAgentDir(configPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   let stopping = false;

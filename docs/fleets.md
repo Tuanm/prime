@@ -402,6 +402,8 @@ space that has just taken over the lease can be entered at once.
 | the space of a member is deleted | the space leaves the fleet, and the fleet is gone if it was the last one |
 | a fleet nobody has touched for a day | any proven device may clean it up; a fleet that is not being run is not worth keeping |
 | primary dies | the lease expires; a member that finds no lease takes it, applies the state it is replacing, and only then may publish |
+| the primary's tunnel goes away | the next ask for a place finds the holder not connected, takes it out of the running on the spot, and the waiting member takes over: a second or two, not a lease |
+| a member renews its lease | the agent does it every five seconds, against a fifteen-second lease, so two lost rounds are still a live primary |
 | the space of the primary is stopped | it gives up the lease at once, so another member takes over without waiting for the lease to run out |
 | the operator switches a space off | the same: the lease goes back at once, its tunnel is dropped, and the next member that asks takes it. It stays a member until it is removed |
 | the operator pauses a fleet | nothing joins it, nobody takes a place in it, and nothing is published to it; the leases and the members stay |

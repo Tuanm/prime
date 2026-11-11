@@ -723,7 +723,11 @@ export class FleetDO implements DurableObject {
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
     // The lease is short-lived on purpose: a member that stops speaking
     // releases the fleet to the others without anyone having to notice.
-    const ttlMs = 60_000;
+    // The lease is the failover clock: when a primary dies, the fleet is
+    // stuck until it runs out. Fifteen seconds is long enough that a slow
+    // round does not cost a fleet its primary - the agent renews every five -
+    // and short enough that a dead one is replaced in about that time.
+    const ttlMs = 15_000;
     const head = await this.readHead(fleetId);
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();
@@ -758,7 +762,14 @@ export class FleetDO implements DurableObject {
       const held = await this.lease();
 
       if (held && held.holder !== caller.deviceId) {
-        out = Response.json({ ok: true, role: "replica", reason: "lease-held", head, epoch: head.epoch });
+        out = Response.json({
+          ok: true,
+          role: "replica",
+          reason: "lease-held",
+          holder: held.holder,
+          head,
+          epoch: head.epoch,
+        });
         return;
       }
       // A member without a public key can never open a snapshot, so it can

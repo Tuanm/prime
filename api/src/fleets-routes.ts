@@ -268,6 +268,8 @@ export interface FleetDeps {
   cfg: GatewayConfig;
   /** prove a device credential; returns the deviceId or null. */
   authorizeDevice: (deviceId: string) => Promise<{ ok: true } | { ok: false; response: Response }>;
+  /** whether a device holds a tunnel right now, as the registry sees it. */
+  deviceOnline?: (deviceId: string) => Promise<boolean>;
   unauthorized: () => Response;
 }
 
@@ -447,7 +449,27 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   const method = action !== undefined && READ_ACTIONS.has(action) ? "GET" : "POST";
   const body = method === "POST" ? await request.text() : undefined;
 
-  const response = await stub.fetch(target.toString(), { method, headers, body });
+  let response = await stub.fetch(target.toString(), { method, headers, body });
+
+  // A member that asks to take its place is told that the lease is held. If the
+  // one holding it is not connected, the lease is a leftover clock, and the
+  // fleet should not wait it out: the holder is taken out of the running and
+  // the ask is repeated, so the takeover costs a round instead of a lease.
+  if (action === "bootstrap" && response.ok && deps.deviceOnline) {
+    const ask = (await response.clone().json().catch(() => ({}))) as { reason?: string; holder?: string };
+    if (ask.reason === "lease-held" && ask.holder && !(await deps.deviceOnline(ask.holder))) {
+      const vacateHeaders = new Headers(headers);
+      vacateHeaders.set("x-prime-caller", "admin");
+      await stub
+        .fetch("https://fleet/vacate", {
+          method: "POST",
+          headers: vacateHeaders,
+          body: JSON.stringify({ deviceId: ask.holder }),
+        })
+        .catch(() => null);
+      response = await stub.fetch(target.toString(), { method, headers, body });
+    }
+  }
 
   // Count the fleet only once it exists: a retry against a fleet that is
   // already there must not use up the device's allowance.

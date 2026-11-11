@@ -102,6 +102,7 @@ interface RegistrySnapshot {
   anon: Set<string>; // which of those are anonymous
   locked: Set<string>; // anonymous devices locked after too many wrong codes
   buddies: Map<string, string>; // fleetId -> the token its clients present
+  online: Set<string>; // which devices hold a tunnel right now
 }
 let mapCache: { at: number; snap: RegistrySnapshot } | null = null;
 const MAP_CACHE_TTL_MS = 2_000;
@@ -182,7 +183,13 @@ function hasNonVirtualDevice(snap: RegistrySnapshot, env: Env): boolean {
 // Always read the authoritative registry snapshot, bypassing the TTL cache.
 async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  const snap: RegistrySnapshot = { map: new Map(), anon: new Set(), locked: new Set(), buddies: new Map() };
+  const snap: RegistrySnapshot = {
+    map: new Map(),
+    anon: new Set(),
+    locked: new Set(),
+    buddies: new Map(),
+    online: new Set(),
+  };
   try {
     const r = await reg.fetch("https://registry/map");
     if (r.ok) {
@@ -191,6 +198,7 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
         anonymous?: string[];
         locked?: string[];
         buddies?: Record<string, string>;
+        online?: string[];
       };
       for (const [id, tok] of Object.entries(j.map || {})) {
         if (typeof tok === "string" && tok.length > 0) snap.map.set(id, tok);
@@ -200,6 +208,7 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
       for (const [id, tok] of Object.entries(j.buddies || {})) {
         if (typeof tok === "string" && tok.length > 0) snap.buddies.set(id, tok);
       }
+      for (const id of j.online || []) snap.online.add(id);
     }
   } catch {}
   return snap;
@@ -268,8 +277,9 @@ async function relayToFleet(
   if (!asBuddy) {
     const auth = await authorizeDevice(callerId, request, url, cfg, env);
     if (auth.denied) return auth.denied;
-    // The caller is alive: it just proved it.
-    await markSeen(env, callerId);
+    // The caller is alive: it just proved it. The note is for its own
+    // bookkeeping and nothing waits on it, so the call does not either.
+    void markSeen(env, callerId);
   }
   if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
   // The name is checked before the Durable Object is touched: an unchecked
@@ -292,9 +302,27 @@ async function relayToFleet(
   if (!info.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
   const body = (await info.json()) as { member?: boolean; primary?: string | null };
   if (!asBuddy && !body.member) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+  // The lease outlives the space that holds it by design, so a primary whose
+  // tunnel is gone would be the answer for a while yet. It is taken out of the
+  // running here, and the fleet is asked again: the member that is waiting in
+  // the wings takes over on its next round, a second or two away.
+  if (body.primary && (await vacateSilentPrimary(env, fleetId, body.primary))) {
+    const again = await stub.fetch("https://fleet/primary", {
+      method: "GET",
+      headers: asBuddy ? adminHeaders(headers) : headers,
+    });
+    if (again.ok) {
+      const next = (await again.json()) as { member?: boolean; primary?: string | null };
+      if (!asBuddy && !next.member) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+      body.primary = next.primary ?? null;
+    }
+  }
   if (!body.primary) {
     return Response.json(
-      { error: "the fleet has no primary right now: none has taken over yet" },
+      {
+        error: "the fleet has no primary right now: none has taken over yet",
+        hint: "the member that holds the lease is not connected; another one takes over within a few seconds",
+      },
       { status: 503 },
     );
   }
@@ -407,6 +435,37 @@ async function vacateInFleets(env: Env, deviceId: string): Promise<string[]> {
     }
   }
   return vacated;
+}
+
+/**
+ * Whether a device holds a tunnel right now.
+ *
+ * The answer rides in the registry snapshot every request already reads, so
+ * this costs nothing: a primary whose tunnel is gone is not a primary anybody
+ * can reach, and the fleet should not wait the rest of its lease to say so.
+ */
+async function deviceOnline(env: Env, deviceId: string): Promise<boolean> {
+  const snap = await effectiveSnapshot(env);
+  return snap.online.has(deviceId);
+}
+
+/**
+ * Take a primary that is not connected out of the running, so the next member
+ * that asks takes its place.
+ *
+ * The lease is a clock, not a liveness check: a space whose machine went to
+ * sleep still holds it until it runs out. This turns that wait into one round:
+ * the space comes back in a second or two instead of in fifteen.
+ */
+async function vacateSilentPrimary(env: Env, fleetId: string, holder: string | null | undefined): Promise<string | null> {
+  if (!env.FLEET || !holder) return null;
+  if (await deviceOnline(env, holder)) return null;
+  const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
+  const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId });
+  await stub
+    .fetch("https://fleet/vacate", { method: "POST", headers, body: JSON.stringify({ deviceId: holder }) })
+    .catch(() => null);
+  return holder;
 }
 
 /** The same headers, but the gateway speaking for itself. */
@@ -715,6 +774,7 @@ export default {
           const auth = await authorizeDevice(deviceId, request, url, cfg, env);
           return auth.denied ? { ok: false as const, response: auth.denied } : { ok: true as const };
         },
+        deviceOnline: (deviceId: string) => deviceOnline(env, deviceId),
       });
       if (fleetResponse) return fleetResponse;
     }

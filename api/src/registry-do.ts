@@ -331,6 +331,7 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({
         map: Object.fromEntries(this.tokens),
         anonymous: [...this.anon.keys()],
+        online: [...this.online.keys()],
         locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([id]) => id),
         buddies: Object.fromEntries(this.fleetBuddies),
       });
