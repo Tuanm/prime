@@ -80,7 +80,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
 
     <p class="desc" style="margin-top:22px">A buddy works on its own. Buddies also work together: a few of them can be one team, a <b>fleet</b>. A fleet is one piece of work kept in step across machines, so a job started on one of them carries on where it lands, and the work does not stop because one machine went quiet.</p>
     <p class="desc">A fleet is made of <b>spaces</b> - a space is a workspace made in a moment, or kept for as long as you want it. Each one carries the same work, and any of them can take over when another stops answering.</p>
-    <p class="desc"><a href="/join">How a fleet fits together</a>, with a picture.</p>
+    <p class="meta"><a href="/join">Join a fleet</a></p>
 
     <div class="guide" id="guide"></div>
 

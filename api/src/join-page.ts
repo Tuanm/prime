@@ -38,6 +38,7 @@ __CSS__
       .steps b { font-weight: 700; }
       .steps span { color: #666; }
       .meta { margin-top: 26px; font-size: 10px; color: #999; }
+      .meta a { color: #999; }
       .foot { margin-top: 34px; }
       .foot a { color: #111; }
       .foot svg { width: 18px; height: 18px; fill: currentColor; }
