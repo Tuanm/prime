@@ -30,6 +30,8 @@ interface El {
   querySelectorAll(selector: string): El[];
   getAttribute(name: string): string | null;
   contains(other: El): boolean;
+  hidden: boolean;
+  removeAttribute(name: string): void;
 }
 
 function makeEl(tag: string): El {
@@ -49,13 +51,23 @@ function makeEl(tag: string): El {
     listeners: {},
     appendChild(child) { this.children.push(child); return child; },
     removeChild(child) { this.children = this.children.filter((c) => c !== child); },
-    setAttribute() {},
+    setAttribute(name, value) {
+      // hidden is a boolean property in a browser, not a string attribute.
+      if (name === "hidden") this.hidden = true;
+      else (this as Record<string, unknown>)[name] = value;
+    },
     addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); },
     removeEventListener() {},
+
+    hidden: false,
+    removeAttribute(name) {
+      if (name === "hidden") this.hidden = false;
+      else delete (this as Record<string, unknown>)[name];
+    },
     focus() {},
     querySelector() { return null; },
     querySelectorAll() { return []; },
-    getAttribute() { return null; },
+    getAttribute(name) { return ((this as Record<string, unknown>)[name] as string) ?? null; },
     contains() { return false; },
   };
   // Setting the html replaces what is inside, the way a browser does it.
@@ -81,11 +93,36 @@ function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean } = {}): 
   const page = ADMIN_HTML;
   const html = page.slice(page.indexOf("<script>") + 8, page.indexOf("</script>"));
   const byId: Record<string, El> = {};
+  // The tabs the page puts in its markup, so the script can find them the way it
+  // does in a browser.
+  const tabs: El[] = [];
+  const panels: El[] = [];
+  for (const name of page.match(/data-tab="[a-z]+"/g) || []) {
+    const kind = /"([a-z]+)"/.exec(name)![1]!;
+    if (tabs.some((t) => t.dataset.tab === kind)) {
+      const panel = makeEl("div");
+      panel.dataset.tab = kind;
+      panel.setAttribute("data-tab", kind);
+      panel.hidden = kind !== "buddies";
+      panels.push(panel);
+    } else {
+      const tab = makeEl("button");
+      tab.dataset.tab = kind;
+      tab.setAttribute("data-tab", kind);
+      tabs.push(tab);
+    }
+  }
   const doc = {
     getElementById: (id: string) => (byId[id] ||= makeEl("div")),
     createElement: (tag: string) => makeEl(tag),
     querySelector: () => null,
-    querySelectorAll: () => [],
+    querySelectorAll: (selector: string) => {
+      const m = /\.utab$/.exec(selector);
+      if (m) return tabs;
+      const p = /\.utab-panel$/.exec(selector);
+      if (p) return panels;
+      return [];
+    },
     addEventListener() {},
     removeEventListener() {},
     body: makeEl("body"),
@@ -128,6 +165,15 @@ function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean } = {}): 
       for (const handler of byId[id]?.listeners?.click || []) handler({ stopPropagation() {} });
     },
     list() { return byId["fleetList"]?.children || []; },
+    /** Click a tab, as the page's tab bar does. */
+    tab(name: string) {
+      for (const handler of tabs.find((t) => t.dataset.tab === name)?.listeners?.click || []) {
+        handler({ stopPropagation() {} });
+      }
+    },
+    openPanel(): string | undefined {
+      return panels.find((p) => !p.hidden)?.dataset.tab;
+    },
     async settle() {
       // The list arrives over the network; let the promises run.
       for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -173,21 +219,25 @@ describe("the fleets in the admin interface", () => {
   test("the + button opens the card that is filled in", () => {
     const page = loadPage();
     expect(page.list().length).toBe(0);
-    page.click("fleetAddBtn");
+    page.tab("fleets");
+    page.click("addBtn");
     expect(page.list().length).toBe(1);
     expect(page.list()[0]!.className).toContain("fleet-branch");
   });
 
   test("each + opens a card of its own", () => {
     const page = loadPage();
-    page.click("fleetAddBtn");
-    page.click("fleetAddBtn");
+    page.tab("fleets");
+    page.click("addBtn");
+    page.tab("fleets");
+    page.click("addBtn");
     expect(page.list().length).toBe(2);
   });
 
   test("the card that is filled in survives a refresh of the list", async () => {
     const page = loadPage();
-    page.click("fleetAddBtn");
+    page.tab("fleets");
+    page.click("addBtn");
     // The list is fetched again every few seconds: what is being typed must not
     // be thrown away by that.
     await page.settle();
@@ -304,7 +354,8 @@ describe("the fleets in the admin interface", () => {
 
   test("there is nothing to create until the fleet has a name", () => {
     const page = loadPage();
-    page.click("fleetAddBtn");
+    page.tab("fleets");
+    page.click("addBtn");
     const root = page.list()[0]!.children[0]!;
     expect(action(root, "Create")!.disabled).toBe(true);
     const name = root.children.find((c) => c.className === "box")!.children[0]!;
@@ -370,15 +421,33 @@ describe("the fleets in the admin interface", () => {
     expect(menuOf(row)).toContain("Refresh token");
   });
 
-  test("the sections are named for what they hold", () => {
+  test("a tab shows its list and hides the others", () => {
+    const page = loadPage();
+    // Buddies is the tab you land on: the + makes a device, not a fleet.
+    expect(page.openPanel()).toBe("buddies");
+    page.click("addBtn");
+    expect(page.byId["list"]!.children.length).toBe(1);
+    page.tab("fleets");
+    expect(page.openPanel()).toBe("fleets");
+    page.click("addBtn");
+    expect(page.list().length).toBe(1);
+    page.tab("anonymous");
+    expect(page.openPanel()).toBe("anonymous");
+  });
+
+  test("one Devices section, three tabs in the order people look", () => {
     const page = ADMIN_HTML;
-    expect(page).toContain("<h2>Fleets</h2>");
-    expect(page).toContain("<h2>Buddies</h2>");
-    expect(page).toContain("<h2>Anonymous</h2>");
-    // The headings are what the operator reads: the section names are gone from
-    // them, wherever else the old words might survive in a comment.
-    expect(page).not.toContain("<h2>Anonymous Devices</h2>");
-    expect(page).not.toContain("<h2>Devices</h2>");
+    expect(page).toContain("<h2>Devices</h2>");
+    // The three lists are tabs of that section, in this order.
+    const order = [...page.matchAll(/class="utab[^"]*" type="button" role="tab" data-tab="([a-z]+)"/g)].map((m) => m[1]);
+    expect(order).toEqual(["buddies", "fleets", "anonymous"]);
+    expect(page).toContain('data-tab="buddies" role="tabpanel"');
+    expect(page).toContain('data-tab="fleets" role="tabpanel" hidden');
+    expect(page).toContain('data-tab="anonymous" role="tabpanel" hidden');
+    // The old separate headings are gone with the sections they named.
+    expect(page).not.toContain("<h2>Fleets</h2>");
+    expect(page).not.toContain("<h2>Buddies</h2>");
+    expect(page).not.toContain("<h2>Anonymous</h2>");
     expect(page).not.toContain('placeholder = "device id"');
   });
 

@@ -4,6 +4,7 @@
 // layout, the download icon) are added here.
 
 import { FAVICON, UI_CSS } from "./ui-css";
+import { TOASTS_HTML, TOAST_SCRIPT } from "./ui-toast";
 import type { FileLimits } from "./config";
 
 const FILES_CSS = `
@@ -279,7 +280,6 @@ function browserScript(): string {
   return [
     "      (function () {",
     "        var listEl = document.getElementById('list');",
-    "        var statusEl = document.getElementById('status');",
     "        var addBtn = document.getElementById('addBtn');",
     "        var picker = document.getElementById('picker');",
     // Never render a protection key: it is a secret, and the owner has no need to
@@ -293,7 +293,8 @@ function browserScript(): string {
     "        var queued = [];",
     "        var files = window.__FILES__ || [];",
     "        var usageEl = document.getElementById('usage');",
-    "        function setStatus(msg, isErr) { statusEl.textContent = msg || ''; statusEl.style.color = isErr ? '#b91c1c' : '#666'; }",
+    ...TOAST_SCRIPT.split("\n"),
+    "        function setStatus(msg, isErr) { toast(msg, isErr ? 'error' : 'success'); }",
     "        function human(ms) {",
     "          if (ms <= 0) return 'expired';",
     "          var m = Math.floor(ms / 60000);",
@@ -548,7 +549,8 @@ function browserScript(): string {
     "            if (!e.lengthComputable) return;",
     "            var pct = Math.round((e.loaded / e.total) * 100);",
     "            paint(pct);",
-    "            setStatus('uploading ' + q.file.name + ' - ' + pct + '% of ' + fmtBytes(e.total));",
+    "            // The card paints the percentage; a toast on every tick would be a",
+    "            // stream of them, so the words are the start and the end only.",
     "          };",
     "          xhr.onload = function () {",
     "            var j = {};",
@@ -641,7 +643,7 @@ export function renderFilesPage(input: {
     '      <button class="plus" id="addBtn" type="button" title="Add files">+</button>',
     "    </div>",
     '    <ul id="list"></ul>',
-    '    <div class="status" id="status"></div>',
+    "    " + TOASTS_HTML,
     '    <div class="row-head section"><h2>Usage</h2></div>',
     '    <div class="usage" id="usage"></div>',
 
@@ -741,7 +743,10 @@ export function renderDownloadPage(input: {
         esc(new Date(file.expires_at).toUTCString()) +
         "</div>",
     );
-    rows.push('    <div class="status" id="status">' + (locked ? "This file is protected. Enter its key to download." : "") + "</div>");
+    rows.push("    " + TOASTS_HTML);
+    // A file that needs its key says so where the key is asked for: the line
+    // above the field, not a toast, because it is still true until it is typed.
+    if (locked) rows.push('    <div class="status">This file is protected. Enter its key to download.</div>');
   }
 
   if (file && (locked || input.protectedFile)) {
@@ -777,8 +782,8 @@ export function renderDownloadPage(input: {
 function downloadScript(): string {
   return [
     "      (function () {",
-    "        var statusEl = document.getElementById('status');",
-    "        function say(msg, isErr) { if (statusEl) { statusEl.textContent = msg; statusEl.style.color = isErr ? '#b91c1c' : '#666'; } }",
+    ...TOAST_SCRIPT.split("\n"),
+    "        function say(msg, isErr) { toast(msg, isErr ? 'error' : 'success'); }",
     // The owner needs no key (their credentials authorise them); a visitor
     // unlocking a protected file supplies one and it travels as a header.
     "        function save(id, name, key) {",

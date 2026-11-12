@@ -138,13 +138,8 @@ const SANDBOX_CSS = `
       .uc-accordion.open .usel-chev svg { transform: rotate(180deg); }
       .uc-accordion > .uc-body { display: none; flex-direction: column; gap: 10px; padding: 0 14px 12px; }
       .uc-accordion.open > .uc-body { display: flex; }
-      .utabs-bar { display: flex; gap: 0; border-bottom: 1px solid #111; margin-bottom: 12px; overflow-x: auto; }
-      .utab { padding: 7px 14px; font-size: 12px; cursor: pointer; color: #666; border: 1px solid transparent; border-bottom: 0; margin-bottom: -1px; outline: none; white-space: nowrap; user-select: none; }
-      .utab:hover { color: #111; }
-      .utab.on { color: #111; font-weight: 700; border-color: #111; background: #fff; }
-      .utab:focus-visible { text-decoration: underline; }
+      /* .utabs-bar, .utab and .utab-panel come from the shared stylesheet. */
       .utab-panel { display: flex; flex-direction: column; gap: 10px; }
-      .utab-panel[hidden] { display: none; }
       /* Overlays: modal and drawer, inside the dash */
       .uc-overlay { position: absolute; left: 0; right: 0; top: 0; z-index: 15; display: none; }
       .uc-overlay.open { display: block; }
@@ -478,7 +473,7 @@ const PAGE_JS = String.raw`(function () {
   var connected = false;
   var calls = [];
   var list = document.getElementById("list");
-  var statusEl = document.getElementById("status");
+
   var picker = document.getElementById("picker");
 
   // ---- the sandbox runtime (opaque origin, no network, no storage) ----------
@@ -520,7 +515,12 @@ const PAGE_JS = String.raw`(function () {
     catch (e) { setStatus("could not save to this browser's storage: " + (e && e.message || e), true); return false; }
   }
 
-  function setStatus(msg, isErr) { statusEl.textContent = msg || ""; statusEl.style.color = isErr ? "#b91c1c" : "#666"; }
+  // Every page reports by toast now; the sandbox has had one of its own all
+  // along, so this is just its name for it.
+  function setStatus(msg, isErr) {
+    if (!msg) return;
+    toast(msg, { variant: isErr ? "error" : "success" });
+  }
   function argsLabel(t) {
     return "(" + (t.params || []).map(function (p) { return p.name + (p.optional ? "?" : ""); }).join(", ") + ")";
   }
@@ -2571,7 +2571,7 @@ export function renderSandboxPage(deviceId: string): string {
     '      <button class="plus" id="addBtn" type="button" title="Add a tool">+</button>',
     "    </div>",
     '    <ul id="list"></ul>',
-    '    <div class="status" id="status"></div>',
+
     '    <div class="status" id="count"></div>',
     '    <div class="status" id="starters"></div>',
     '    <div class="status" id="data"></div>',

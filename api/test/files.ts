@@ -423,7 +423,7 @@ async function main(): Promise<void> {
   // Halfway through, the card itself should be half filled.
   request!.upload.onprogress?.({ lengthComputable: true, loaded: 500, total: 1000 });
   checkIncludes("progress paints the card", box!.style.background ?? "", "50%");
-  checkIncludes("progress is reported in words", ui.els.status!.textContent, "50%");
+  checkIncludes("the upload is announced by a toast", ui.els.toasts!.descendants().map((n) => n.textContent).join(" "), "uploading queued.bin");
 
   // Clicking a menu entry must close the menu (it stayed open before).
   const uploadMenu = box!.descendants().find((n) => n.classList.contains("menu"));
@@ -541,7 +541,7 @@ async function main(): Promise<void> {
   (badRequest.xhr as { responseText: string }).responseText = JSON.stringify({ error: "file too large" });
   badRequest.onload?.();
   checkIncludes("a failed upload tints its card", failing.els.list!.descendants().find((n) => n.dataset.qid)?.style.background ?? "", "#fee2e2");
-  checkIncludes("a failed upload explains itself", failing.els.status!.textContent, "file too large");
+  checkIncludes("a failed upload explains itself in a toast", failing.els.toasts!.descendants().map((n) => n.textContent).join(" "), "file too large");
   const downloadPage = await fetch(`${BASE}/files/${helloId}`);
   const downloadHtml = await downloadPage.text();
   check("GET /files/{id} -> 200", downloadPage.status === 200);

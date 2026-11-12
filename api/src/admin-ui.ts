@@ -32,21 +32,17 @@ ${UI_CSS}    </style>
     <div class="usage" id="usage"></div>
 
     <div class="row-head section">
-      <h2>Fleets</h2>
-      <button class="plus" id="fleetAddBtn" type="button" title="New fleet">+</button>
-    </div>
-    <ul id="fleetList"></ul>
-
-    <div class="row-head section">
-      <h2>Buddies</h2>
+      <h2>Devices</h2>
       <button class="plus" id="addBtn" type="button" title="Add a buddy">+</button>
     </div>
-    <ul id="list"></ul>
-
-    <div class="row-head section">
-      <h2>Anonymous</h2>
+    <div class="utabs-bar" id="deviceTabs" role="tablist">
+      <button class="utab on" type="button" role="tab" data-tab="buddies">Buddies</button>
+      <button class="utab" type="button" role="tab" data-tab="fleets">Fleets</button>
+      <button class="utab" type="button" role="tab" data-tab="anonymous">Anonymous</button>
     </div>
-    <ul id="anonList"></ul>
+    <div class="utab-panel" data-tab="buddies" role="tabpanel"><ul id="list"></ul></div>
+    <div class="utab-panel" data-tab="fleets" role="tabpanel" hidden><ul id="fleetList"></ul></div>
+    <div class="utab-panel" data-tab="anonymous" role="tabpanel" hidden><ul id="anonList"></ul></div>
 
     <div class="toasts" id="toasts"></div>
 
@@ -830,7 +826,26 @@ ${UI_CSS}    </style>
         // join with an invite code, and the operator admits them. The member
         // that holds the lease is the primary: it is the one that writes.
         var fleetListEl = document.getElementById("fleetList");
-        var fleetAddBtn = document.getElementById("fleetAddBtn");
+        // The three lists are tabs of one section: the page is about devices, and
+        // which kind you are looking at is a view of the same question. The
+        // order is the one that matters most first: a buddy, then the fleets of
+        // them, then the ones nobody has claimed.
+        var tabButtons = document.querySelectorAll("#deviceTabs .utab");
+        var tabPanels = document.querySelectorAll(".utab-panel");
+        var activeTab = "buddies";
+        function showTab(name) {
+          activeTab = name;
+          for (var i = 0; i < tabButtons.length; i++) {
+            tabButtons[i].className = "utab" + (tabButtons[i].getAttribute("data-tab") === name ? " on" : "");
+          }
+          for (var j = 0; j < tabPanels.length; j++) {
+            if (tabPanels[j].getAttribute("data-tab") === name) tabPanels[j].removeAttribute("hidden");
+            else tabPanels[j].setAttribute("hidden", "");
+          }
+          // The + button makes whatever the tab you are looking at holds.
+          addBtn.title = name === "fleets" ? "New fleet" : "Add a buddy";
+          addBtn.style.display = name === "anonymous" ? "none" : "";
+        }
         var fleets = [];
         // The fleets being set up, kept across re-renders so that typing is
         // never lost.
@@ -1484,6 +1499,10 @@ ${UI_CSS}    </style>
         }
 
         addBtn.addEventListener("click", function () {
+          if (activeTab === "fleets") {
+            fleetAddCard();
+            return;
+          }
           // Append ONLY the new row - do not rebuild existing rows, so any
           // in-progress edits elsewhere stay untouched.
           var empty = listEl.querySelector("li.empty");
@@ -1493,7 +1512,14 @@ ${UI_CSS}    </style>
           renderRow({ deviceId: "", token: "", online: false }, true, p);
         });
 
-        fleetAddBtn.addEventListener("click", fleetAddCard);
+        for (var ti = 0; ti < tabButtons.length; ti++) {
+          (function (button) {
+            button.addEventListener("click", function () {
+              showTab(button.getAttribute("data-tab"));
+            });
+          })(tabButtons[ti]);
+        }
+        showTab(activeTab);
 
         // ---- what the month has cost ----
         // The gateway keeps a count of what it has done this month and prices

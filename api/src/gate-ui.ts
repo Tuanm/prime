@@ -4,6 +4,7 @@
 // Styled from the same stylesheet as every other page.
 
 import { FAVICON, UI_CSS } from "./ui-css";
+import { TOASTS_HTML, TOAST_SCRIPT } from "./ui-toast";
 import { esc } from "./files-ui";
 
 export function renderGatePage(opts: { title: string; device: string | null; next: string; error?: string }): string {
@@ -31,7 +32,7 @@ export function renderGatePage(opts: { title: string; device: string | null; nex
     '        <input id="gate-device" class="gate-input" type="text" autocomplete="username" spellcheck="false" value="' + esc(device) + '"' + (device ? " readonly" : "") + " />",
     '        <label class="gate-label" for="gate-token">Token</label>',
     '        <input id="gate-token" class="gate-input" type="password" autocomplete="current-password" spellcheck="false" />',
-    '        <div class="status" id="gate-err"></div>',
+    "    " + TOASTS_HTML,
     '        <div class="dlg-bar" style="padding:12px 0 0"><button class="btn" id="gate-go" type="submit">Unlock</button></div>',
     "      </div>",
     "    </form>",
@@ -48,13 +49,13 @@ export function renderGatePage(opts: { title: string; device: string | null; nex
     "        var deviceEl = document.getElementById('gate-device');",
     "        var tokenEl = document.getElementById('gate-token');",
     "        var go = document.getElementById('gate-go');",
-    "        var errEl = document.getElementById('gate-err');",
-    "        function fail(msg) { errEl.textContent = msg; errEl.style.color = '#b91c1c'; }",
+    ...TOAST_SCRIPT.split("\n"),
+    "        function fail(msg) { toast(msg, 'error'); }",
     "        form.addEventListener('submit', function (e) {",
     "          e.preventDefault();",
     "          var device = (deviceEl.value || '').trim(), token = tokenEl.value || '';",
     "          if (!device || !token) { fail('Enter the ID and the token.'); return; }",
-    "          go.disabled = true; errEl.textContent = '';",
+    "          go.disabled = true;",
     "          fetch('/api/session', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', cache: 'no-store', body: JSON.stringify({ device: device, token: token }) })",
     "            .then(function (r) {",
     "              if (r.ok) return checkCookie();",

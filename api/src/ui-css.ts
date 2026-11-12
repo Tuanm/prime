@@ -40,10 +40,49 @@ export const UI_CSS = `      * {
            heading - a heading with a + and one without must not look different. */
         min-height: 28px;
       }
-      /* A second section on the same page (Anonymous under Buddies): the
+      /* A second section on the same page (Devices under Usage): the
          separation, now that the height comes from .row-head itself. */
       .row-head.section {
         margin-top: 40px;
+      }
+      /* Tabs: one section, several lists, the tab you are on drawn as the page's
+         own card - a 1px rule with its bottom join closed. The sandbox uses the
+         same marks for its panels, so the two pages read the same. */
+      .utabs-bar {
+        display: flex;
+        gap: 0;
+        border-bottom: 1px solid #111;
+        margin-bottom: 12px;
+        overflow-x: auto;
+      }
+      .utab {
+        padding: 7px 14px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        color: #666;
+        background: #fff;
+        border: 1px solid transparent;
+        border-bottom: 0;
+        margin-bottom: -1px;
+        outline: none;
+        white-space: nowrap;
+        user-select: none;
+      }
+      .utab:hover {
+        color: #111;
+      }
+      .utab.on {
+        color: #111;
+        font-weight: 700;
+        border-color: #111;
+        background: #fff;
+      }
+      .utab:focus-visible {
+        text-decoration: underline;
+      }
+      .utab-panel[hidden] {
+        display: none;
       }
       .row-head h2 {
         font-size: 11px;
