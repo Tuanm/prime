@@ -766,7 +766,7 @@ async function main(): Promise<void> {
     // The storage budget is part of the usage card now, not a line of its own.
     const budgetPageText = await budgetPage.text();
     checkIncludes("the page shows the usage card", budgetPageText, 'id="usage"');
-    checkIncludes("with the budget in it", budgetPageText, '"__BUDGET__"');
+    checkIncludes("with the budget in it", budgetPageText, "__BUDGET__");
   } finally {
     stopBudget();
   }
