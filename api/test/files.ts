@@ -763,7 +763,10 @@ async function main(): Promise<void> {
     // And the page still renders, showing the cap rather than failing.
     const budgetPage = await fetch(`${BUDGET_BASE}/files`, { headers: DEMO });
     check("the page still renders at the cap", budgetPage.status === 200, String(budgetPage.status));
-    checkIncludes("the page shows the budget", await budgetPage.text(), 'id="budget"');
+    // The storage budget is part of the usage card now, not a line of its own.
+    const budgetPageText = await budgetPage.text();
+    checkIncludes("the page shows the usage card", budgetPageText, 'id="usage"');
+    checkIncludes("with the budget in it", budgetPageText, '"__BUDGET__"');
   } finally {
     stopBudget();
   }

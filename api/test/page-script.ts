@@ -126,7 +126,7 @@ export interface PageHarness {
 /** Execute the page's inline scripts against a fake document. */
 export function runPage(html: string, init: Record<string, any> = {}): PageHarness {
   const nodes: FakeEl[] = [];
-  const ids = ["list", "status", "addBtn", "picker", "usage", "budget"];
+  const ids = ["list", "status", "addBtn", "picker", "usage"];
   const els: Record<string, FakeEl> = {};
   for (const id of ids) els[id] = new FakeEl("div", nodes);
 
