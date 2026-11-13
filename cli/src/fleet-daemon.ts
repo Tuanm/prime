@@ -227,6 +227,8 @@ interface SpaceLoop {
   lastBootstrap: number;
   /** How long the fleet says a place lasts, from the last bootstrap. */
   leaseMs?: number;
+  /** A placement in flight, so the timer and the round cannot both ask. */
+  placing?: boolean;
   timing: RoundTiming;
   /** The runtime, so the agent can tell whether the space is running. */
   runtime?: RuntimeInfo;
@@ -254,27 +256,12 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   // Taking a place renews the lease, and that is a write. It is done often
   // enough to keep the lease and no more: a write on every round would put
   // the gateway under needless load.
-  const now = Date.now();
   // The heartbeat is what keeps the lease, and the lease is how long the fleet
   // waits before it lets another member take over. The fleet says how long its
   // lease is; the heartbeat is a third of that, so two renewals can be lost
   // before the place is gone. Five seconds is the ceiling on a long lease.
-  const heartbeatMs = Math.max(
-    500,
-    Math.min(options.heartbeatMs ?? 5_000, Math.floor((loop.leaseMs ?? 15_000) / 3)),
-  );
-  const stale = now - loop.lastBootstrap > heartbeatMs;
-  if (stale || !loop.primary) {
-    const began = Date.now();
-    const keys = loadOrCreateKeyPair(paths.keyFile);
-    const placed = await bootstrapHere(creds, fleet, keys.publicKey, loop.name);
-    loop.timing.bootstrap = Date.now() - began;
-    loop.lastBootstrap = now;
-    if (!placed.ok) throw new Error(placed.error);
-    loop.primary = placed.primary;
-    // What the fleet says a place lasts. An agent that renews at its own pace
-    // against a lease it never asked about is how a live primary loses it.
-    if (placed.ttlMs) loop.leaseMs = placed.ttlMs;
+  if (Date.now() - loop.lastBootstrap > options.heartbeatMs! || !loop.primary) {
+    await takePlace(loop);
   }
 
   if (loop.primary) {
@@ -389,6 +376,36 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
   };
 }
 
+/** How often this space must renew its place, from the lease the fleet reports. */
+function heartbeatFor(loop: SpaceLoop, ceilingMs: number): number {
+  return Math.max(500, Math.min(ceilingMs, Math.floor((loop.leaseMs ?? 15_000) / 3)));
+}
+
+/**
+ * Take (or take back) this space's place in the fleet.
+ *
+ * Callable outside the round on purpose: a round can spend a minute pulling a
+ * large pack, and the place in the fleet does not wait for that. The heartbeat
+ * is on a timer of its own, so the lease is renewed while the work is still
+ * arriving.
+ */
+async function takePlace(loop: SpaceLoop): Promise<void> {
+  if (loop.placing) return;
+  loop.placing = true;
+  try {
+    const keys = loadOrCreateKeyPair(loop.paths.keyFile);
+    const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name);
+    loop.lastBootstrap = Date.now();
+    if (!placed.ok) throw new Error(placed.error);
+    loop.primary = placed.primary;
+    // What the fleet says a place lasts. An agent that renews at its own pace
+    // against a lease it never asked about is how a live primary loses it.
+    if (placed.ttlMs) loop.leaseMs = placed.ttlMs;
+  } finally {
+    loop.placing = false;
+  }
+}
+
 /**
  * The agent's loop.
  *
@@ -398,7 +415,9 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
 export async function runFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<void> {
   const env = process.env;
   const pollMs = options.pollMs ?? Number(env.PRIME_FLEET_POLL_MS ?? 1500);
+  // The heartbeat never exceeds this; the fleet's own lease can lower it.
   const heartbeatMs = options.heartbeatMs ?? Number(env.PRIME_FLEET_HEARTBEAT_MS ?? 5_000);
+  options = { ...options, heartbeatMs };
   const dir = fleetAgentDir(configPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   let stopping = false;
@@ -471,6 +490,18 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       ...(runtime ? { runtime } : {}),
     };
     loops.set(name, loop);
+    // The heartbeat runs on its own clock, not as a step of the round: a round
+    // that spends a minute pulling a large pack would otherwise let the place
+    // lapse while it works, and another member would take the fleet.
+    let beat: ReturnType<typeof setTimeout> | undefined;
+    const beatTick = (): void => {
+      beat = setTimeout(() => {
+        void takePlace(loop)
+          .catch(() => {})
+          .finally(beatTick);
+      }, heartbeatFor(loop, options.heartbeatMs ?? heartbeatMs));
+    };
+    beatTick();
     const watcher = watchTree(work, () => {
       loop.dirty = true;
       wake(name);
@@ -479,7 +510,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
 
     while (!stopping) {
       try {
-        await round(loop, { ...options, heartbeatMs }, (what) => {
+        await round(loop, options, (what) => {
           lastAction = name + ": " + what;
           lastError = undefined;
         });
@@ -503,6 +534,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         });
       });
     }
+    if (beat) clearTimeout(beat);
   };
 
   let spacesSeen = 0;
