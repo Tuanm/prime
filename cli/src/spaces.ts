@@ -1347,7 +1347,7 @@ export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promis
       const result = await refreshSpaceImage(ctx, name, image);
       if (result.changed) {
         moved++;
-        ctx.out(green("  " + name + " moved from ") + dim(from) + green(" to ") + image.split("/").pop());
+        ctx.out(green("  " + name + " moved from ") + dim(from) + green(" to ") + (image.split(":").pop() ?? image));
       } else {
         ctx.out(yellow("  " + name + " left on " + from));
       }
