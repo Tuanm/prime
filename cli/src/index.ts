@@ -26,7 +26,7 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { isSpaceCommand, spacesCreate, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
+import { isSpaceCommand, refreshFleetSpaceImages, spacesCreate, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
 import {
   fleetsAgent,
   fleetsApprove,
@@ -48,7 +48,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.43-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.44-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -226,6 +226,7 @@ const SERVE_FLAGS: FlagSpec[] = [
 const UPDATE_FLAGS: FlagSpec[] = [
   flag("check", "boolean", "Only report whether a newer release exists"),
   flag("force", "boolean", "Reinstall even when the version is already current"),
+  flag("no-spaces", "boolean", "Leave the spaces on the image they have"),
   flag("to", "string", "Install to this path instead of replacing the running binary", { placeholder: "<path>" }),
   flag("release-version", "string", "Install this specific version instead of the newest", { placeholder: "<version>" }),
 ];
@@ -469,6 +470,12 @@ async function main(argv: string[]): Promise<void> {
       });
       if (ctx.json) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
       else process.stdout.write(`${renderUpdate(outcome)}\n`);
+      // The spaces run their image inside a container, which `prime update` did
+      // not touch: a fleet whose spaces are on the old image is a fleet of old
+      // agents with a new CLI beside them.
+      if (outcome.updated && !bool(ctx.parsed, "no-spaces")) {
+        await refreshFleetSpaceImages(ctx, outcome.installed_version ?? outcome.latest);
+      }
       return;
     }
     default:

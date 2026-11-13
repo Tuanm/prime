@@ -308,11 +308,16 @@ EXAMPLES
 const UPDATE = `prime update - install the newest release   (alias: prime upgrade)
 
 USAGE
-  prime update [--check] [--force] [--release-version <v>] [--to <path>] [--json]
+  prime update [--check] [--force] [--no-spaces] [--release-version <v>] [--to <path>] [--json]
 
 Checks the GitHub releases for a newer 'prime-v<version>' tag and, if there is
 one, downloads the asset for this platform, verifies it against the release's
 SHA256SUMS, and swaps it in.
+
+The spaces of a fleet run their own copy of prime inside a container, which the
+new binary does not reach. They are moved onto the image that matches it: the
+container is recreated, the volume and the gateway identity stay, and the fleet
+carries on around the member while it restarts.
 
   current   26.10.3
   latest    26.10.4
@@ -321,6 +326,7 @@ SHA256SUMS, and swaps it in.
 OPTIONS
   --check                    Report whether an update exists; install nothing
   --force                    Reinstall even when the version is already current
+  --no-spaces                Leave the fleet's spaces on the image they have
   --release-version <v>      Install one specific version instead of the newest
   --to <path>                Install to this path instead of replacing the
                              running binary (useful for a prefix you own)

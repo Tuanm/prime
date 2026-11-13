@@ -14,7 +14,7 @@ import { GatewayClient, MAX_ATTEMPTS, backoffFor, isSafeToRetry } from "../src/c
 import { pool } from "../src/pool.ts";
 import { compareVersions, isValidVersion, versionProblem } from "../src/version.ts";
 import { expiryParams, formatBytes, formatExpiry, parseContentDispositionName, resolveFilesTarget } from "../src/files.ts";
-import { defaultImage, entrypointScript, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace, spaceEnterArgs } from "../src/spaces.ts";
+import { defaultImage, entrypointScript, fleetSpaceNames, isPodmanCgroupFailure, newSpaceId, parseAppleStats, parseHumanBytes, parsePodmanStats, parseSpaceMode, parseTopProcesses, redactSecrets, requireSpace, spaceEnterArgs } from "../src/spaces.ts";
 import { parseOtpAuth, totpAt } from "../src/vaults.ts";
 import { apiBase, assetNameFor, currentInstall, repoSlug, withFileRetry, parseChecksums, selectLatest, versionFromTag, type Release } from "../src/update.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
@@ -132,6 +132,27 @@ describe("targets", () => {
     } finally {
       if (saved !== undefined) process.env.PRIME_GATEWAY_URL = saved;
     }
+  });
+});
+
+describe("spaces and the image they run", () => {
+  const config = emptyConfig();
+  config.spaces = {
+    alpha: { id: "space-1", image: "ghcr.io/tuanm/prime-space:26.11.40", fleet: "acme" } as never,
+    solo: { id: "space-2", image: "ghcr.io/tuanm/prime-space:26.11.40" } as never,
+    beta: { id: "space-3", image: "ghcr.io/tuanm/prime-space:26.11.40", fleet: "acme" } as never,
+  };
+
+  test("the image a version runs is its tag", () => {
+    expect(defaultImage("26.11.44")).toBe("ghcr.io/tuanm/prime-space:26.11.44");
+    // A development build is still the release's image.
+    expect(defaultImage("26.11.44-dev")).toBe("ghcr.io/tuanm/prime-space:26.11.44");
+  });
+
+  test("'prime update' moves the fleet's spaces, and only those", () => {
+    // A space outside a fleet is the person's own: its image is their choice,
+    // and nothing in it goes stale when the CLI is updated.
+    expect(fleetSpaceNames(config).sort()).toEqual(["alpha", "beta"]);
   });
 });
 

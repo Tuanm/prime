@@ -1280,6 +1280,88 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
 
 export async function spacesStart(ctx: Ctx): Promise<void> {
   const name = requirePositional(ctx, "<name>", "prime spaces start <name>");
+  return startSpace(ctx, name);
+}
+
+/**
+ * Recreate a space's container from a newer image, keeping everything else.
+ *
+ * The container goes; the volume, the token and the gateway identity stay. The
+ * work directory is the space's state, and the identity is what makes it a
+ * member of its fleet - neither is the image's business. So 'prime update' can
+ * move a fleet's spaces onto the image that matches the CLI it just installed.
+ */
+export async function refreshSpaceImage(
+  ctx: Ctx,
+  name: string,
+  image: string,
+): Promise<{ changed: boolean; from?: string }> {
+  const space = requireSpace(ctx.config, name);
+  if (space.image === image) return { changed: false, from: space.image };
+  const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
+  const from = space.image;
+  try {
+    await ensureImage(runtime, image, (text) => ctx.note(text));
+  } catch (err) {
+    // An unreachable registry is not a reason to break a space that is
+    // running: it stays where it is, on the image it has.
+    ctx.note(yellow("  " + name + ": " + (err instanceof Error ? err.message : String(err))));
+    return { changed: false, from };
+  }
+  if (containerInfo(runtime, space.container).state !== "missing") {
+    runtimeExec(runtime, ["rm", "-f", space.container], 120_000);
+  }
+  space.image = image;
+  saveConfig(ctx.configPath, ctx.config);
+  await startSpace(ctx, name);
+  return { changed: true, from };
+}
+
+/**
+ * Move this machine's fleet spaces onto the image that matches a version.
+ *
+ * Called by 'prime update' after the new binary is in place. Only fleet spaces:
+ * they are the ones whose agent has to match the gateway, and the ones a
+ * restart is harmless for (the fleet takes over while a member is away). A
+ * space outside a fleet is left alone - its image is the person's choice, and
+ * nothing in it goes stale.
+ */
+export function fleetSpaceNames(config: Config): string[] {
+  return Object.keys(config.spaces).filter((name) => Boolean(config.spaces[name]!.fleet));
+}
+
+export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promise<void> {
+  const image = defaultImage(version);
+  const names = fleetSpaceNames(ctx.config);
+  if (names.length === 0) return;
+  ctx.out(bold("  spaces"));
+  let moved = 0;
+  for (const name of names) {
+    const space = ctx.config.spaces[name]!;
+    if (space.image === image) {
+      ctx.out(dim("  " + name + " " + green("already on " + image.split("/").pop())));
+      continue;
+    }
+    const from = (space.image.split(":").pop() ?? space.image);
+    try {
+      const result = await refreshSpaceImage(ctx, name, image);
+      if (result.changed) {
+        moved++;
+        ctx.out(green("  " + name + " moved from ") + dim(from) + green(" to ") + image.split("/").pop());
+      } else {
+        ctx.out(yellow("  " + name + " left on " + from));
+      }
+    } catch (err) {
+      // A space that will not come back is worse than a space on an old image:
+      // it is reported, and the update itself has already succeeded.
+      ctx.out(yellow("  " + name + " could not be moved: " + (err instanceof Error ? err.message : String(err))));
+    }
+  }
+  if (moved > 0) ctx.out(dim("  " + moved + " space(s) now on " + image));
+}
+
+/** Start the named space, whatever the command that asked for it. */
+async function startSpace(ctx: Ctx, name: string): Promise<void> {
   const space = requireSpace(ctx.config, name);
   const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
   const allowNoLimits = bool(ctx.parsed, "allow-no-limits");
