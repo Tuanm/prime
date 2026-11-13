@@ -86,6 +86,18 @@ interface Lease {
 
 const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 };
 
+/**
+ * How long a place in a fleet lasts without being renewed.
+ *
+ * This has to be comfortably longer than the heartbeat of every agent that may
+ * be deployed, not just the newest one: an agent renewing every fifteen seconds
+ * against a fifteen-second lease loses it between two renewals, and the fleet
+ * spends part of every cycle with no primary at all. The CLI now adapts its
+ * heartbeat to the `ttlMs` this file returns, but an older agent still polls at
+ * its own pace, so the lease is set to three of the slowest one.
+ */
+const LEASE_TTL_MS = 45_000;
+
 export class FleetDO implements DurableObject {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
 
@@ -729,13 +741,13 @@ export class FleetDO implements DurableObject {
   private async bootstrap(caller: Caller, request: Request, body: Record<string, unknown>): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
-    // The lease is short-lived on purpose: a member that stops speaking
-    // releases the fleet to the others without anyone having to notice.
-    // The lease is the failover clock: when a primary dies, the fleet is
-    // stuck until it runs out. Fifteen seconds is long enough that a slow
-    // round does not cost a fleet its primary - the agent renews every five -
-    // and short enough that a dead one is replaced in about that time.
-    const ttlMs = 15_000;
+    // The lease is the failover clock: when a primary dies, the fleet is stuck
+    // until it runs out. It must also be long enough that the agent's own
+    // heartbeat fits inside it several times over, or a live primary loses the
+    // lease between two renewals and the fleet flaps with no primary at all -
+    // which is exactly what happened when the agents renewed every fifteen
+    // seconds against a fifteen-second lease.
+    const ttlMs = LEASE_TTL_MS;
     const head = await this.readHead(fleetId);
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();
@@ -827,7 +839,7 @@ export class FleetDO implements DurableObject {
 
   private async renew(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
-    const ttlMs = typeof body.ttlMs === "number" && body.ttlMs > 0 ? Math.min(body.ttlMs, 300_000) : 15_000;
+    const ttlMs = typeof body.ttlMs === "number" && body.ttlMs > 0 ? Math.min(body.ttlMs, 300_000) : LEASE_TTL_MS;
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {
       const held = await this.lease();

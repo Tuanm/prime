@@ -225,6 +225,8 @@ interface SpaceLoop {
   primary: boolean;
   /** When it last took a place in the fleet. */
   lastBootstrap: number;
+  /** How long the fleet says a place lasts, from the last bootstrap. */
+  leaseMs?: number;
   timing: RoundTiming;
   /** The runtime, so the agent can tell whether the space is running. */
   runtime?: RuntimeInfo;
@@ -254,9 +256,14 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   // the gateway under needless load.
   const now = Date.now();
   // The heartbeat is what keeps the lease, and the lease is how long the fleet
-  // waits before it lets another member take over. Five seconds, against a
-  // fifteen-second lease, leaves room for two lost rounds.
-  const stale = now - loop.lastBootstrap > (options.heartbeatMs ?? 5_000);
+  // waits before it lets another member take over. The fleet says how long its
+  // lease is; the heartbeat is a third of that, so two renewals can be lost
+  // before the place is gone. Five seconds is the ceiling on a long lease.
+  const heartbeatMs = Math.max(
+    500,
+    Math.min(options.heartbeatMs ?? 5_000, Math.floor((loop.leaseMs ?? 15_000) / 3)),
+  );
+  const stale = now - loop.lastBootstrap > heartbeatMs;
   if (stale || !loop.primary) {
     const began = Date.now();
     const keys = loadOrCreateKeyPair(paths.keyFile);
@@ -265,6 +272,9 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
     loop.lastBootstrap = now;
     if (!placed.ok) throw new Error(placed.error);
     loop.primary = placed.primary;
+    // What the fleet says a place lasts. An agent that renews at its own pace
+    // against a lease it never asked about is how a live primary loses it.
+    if (placed.ttlMs) loop.leaseMs = placed.ttlMs;
   }
 
   if (loop.primary) {
@@ -354,6 +364,8 @@ interface BootstrapResult {
   ok: boolean;
   primary: boolean;
   error?: string;
+  /** How long the fleet says a place lasts; the heartbeat is derived from it. */
+  ttlMs?: number;
 }
 
 /** Take a place in the fleet, without the CLI's machinery. */
@@ -369,8 +381,12 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     signal: AbortSignal.timeout(creds.timeoutMs ?? 60_000),
   });
   if (!res.ok) return { ok: false, primary: false, error: "status " + res.status };
-  const body = (await res.json()) as { role?: string };
-  return { ok: true, primary: body.role === "primary" };
+  const body = (await res.json()) as { role?: string; ttlMs?: number };
+  return {
+    ok: true,
+    primary: body.role === "primary",
+    ...(typeof body.ttlMs === "number" && body.ttlMs > 0 ? { ttlMs: body.ttlMs } : {}),
+  };
 }
 
 /**
