@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
 import { effectiveCodeMcpArgv, serviceEnv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
+import { FLEET_AGENT_LABEL, FLEET_AGENT_NAME, fleetAgentSpec } from "../src/fleet-service.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
 import { rememberAnonymous } from "../src/connect.ts";
 import {
@@ -162,6 +163,22 @@ describe("service definitions", () => {
     const plist = renderLaunchdPlist({ ...spec, command: ["/x/mcp", "code-mcp", "--config", "/a&b/<c>.yaml"] });
     expect(plist).toContain("<string>/a&amp;b/&lt;c&gt;.yaml</string>");
     expect(plist).toContain("<key>SuccessfulExit</key><false/>");
+    expect(plist).toContain("<key>RunAtLoad</key><true/>");
+  });
+
+  test("the fleet agent gets its own name, and comes back after any exit", () => {
+    const agent = fleetAgentSpec("/home/u/.prime/config.yaml", "linux");
+    const unit = renderSystemdUnit({ ...agent, command: ["/opt/prime", "__fleet-agent", "--config", "/home/u/.prime/config.yaml"] });
+    // The unit name comes from the spec: the agent is not the buddy, and the two
+    // cannot share a unit file.
+    expect(agent.name).toBe(FLEET_AGENT_NAME);
+    expect(unit).toContain("Description=Prime fleet agent");
+    expect(unit).toContain('ExecStart="/opt/prime" "__fleet-agent" "--config" "/home/u/.prime/config.yaml"');
+    // A buddy may exit cleanly; an agent that stops takes the fleet's place with it.
+    expect(unit).toContain("Restart=always");
+    const plist = renderLaunchdPlist(agent);
+    expect(plist).toContain("<key>Label</key><string>" + FLEET_AGENT_LABEL + "</string>");
+    expect(plist).toContain("<key>KeepAlive</key><true/>");
     expect(plist).toContain("<key>RunAtLoad</key><true/>");
   });
 

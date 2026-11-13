@@ -218,6 +218,16 @@ prime fleets sync --space beta --watch        # keep the spaces in step
 prime fleets leave acme
 ```
 
+The agent is what keeps a member a member. It runs on the machine, renews the
+space's place in the fleet every few seconds, and publishes or pulls. Run it as a
+login service, or it stops when the terminal does:
+
+```bash
+prime fleets agent install                    # starts at login, comes back if it stops
+prime fleets agent status                     # rounds, last action, and whether it is a service
+prime fleets agent uninstall                  # back to running it by hand
+```
+
 ```mermaid
 sequenceDiagram
   participant Operator

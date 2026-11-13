@@ -42,6 +42,16 @@ export interface ServiceSpec {
   /** PATH captured at install: services otherwise get a minimal one, and code-mcp runs the user's commands. */
   pathEnv: string;
   home: string;
+  /** The service's own name: "code-mcp" for the buddy, "prime-fleet-agent" for a fleet member. */
+  name?: string;
+  /** The launchd label, which is a domain name rather than a file name. */
+  label?: string;
+  /** One line the person reads in systemctl/list and in the unit file. */
+  description?: string;
+  /** What to do after the process exits. A buddy may exit cleanly; an agent should stay. */
+  restart?: "on-failure" | "always";
+  /** Run at login and come back after any exit, including a clean one. */
+  keepAlive?: boolean;
 }
 
 // ---- paths -------------------------------------------------------------------
@@ -50,13 +60,17 @@ export function overridesPath(configPath: string): string {
   return join(dirname(configPath), "service.yaml");
 }
 
-export function systemdUnitPath(env: Record<string, string | undefined> = process.env, home = homedir()): string {
+export function systemdUnitPath(
+  env: Record<string, string | undefined> = process.env,
+  home = homedir(),
+  name = SERVICE_NAME,
+): string {
   const base = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() ? env.XDG_CONFIG_HOME : join(home, ".config");
-  return join(base, "systemd", "user", SERVICE_NAME + ".service");
+  return join(base, "systemd", "user", name + ".service");
 }
 
-export function launchdPlistPath(home = homedir()): string {
-  return join(home, "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist");
+export function launchdPlistPath(home = homedir(), label = LAUNCHD_LABEL): string {
+  return join(home, "Library", "LaunchAgents", label + ".plist");
 }
 
 export function defaultLogPath(platform: Platform, configPath: string, home = homedir()): string {
@@ -159,7 +173,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
   return [
     "# Installed by 'prime service install'. Remove with 'prime service uninstall'.",
     "[Unit]",
-    "Description=code-mcp (Prime gateway device buddy)",
+    "Description=" + (spec.description ?? "code-mcp (Prime gateway device buddy)"),
     "Wants=network-online.target",
     "After=network-online.target",
     "",
@@ -169,7 +183,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     // A bare path: WorkingDirectory= does not take quotes (only % is special).
     "WorkingDirectory=" + spec.home.replace(/%/g, "%%"),
     envLine("PATH", spec.pathEnv),
-    "Restart=on-failure",
+    "Restart=" + (spec.restart ?? "on-failure"),
     "RestartSec=5",
     "",
     "[Install]",
@@ -190,7 +204,7 @@ export function renderLaunchdPlist(spec: ServiceSpec): string {
     "<!-- Installed by 'prime service install'. Remove with 'prime service uninstall'. -->",
     '<plist version="1.0">',
     "<dict>",
-    "  <key>Label</key>" + s(LAUNCHD_LABEL),
+    "  <key>Label</key>" + s(spec.label ?? LAUNCHD_LABEL),
     "  <key>ProgramArguments</key>",
     "  <array>",
     ...spec.command.map((a) => "    " + s(a)),
@@ -201,9 +215,9 @@ export function renderLaunchdPlist(spec: ServiceSpec): string {
     "    <key>PATH</key>" + s(spec.pathEnv),
     "  </dict>",
     "  <key>RunAtLoad</key><true/>",
-    "  <!-- Restart after a crash, not after a clean stop. -->",
-    "  <key>KeepAlive</key>",
-    "  <dict><key>SuccessfulExit</key><false/></dict>",
+    spec.keepAlive
+      ? "  <!-- Back after any exit: an agent that stops is a fleet with no primary. -->\n  <key>KeepAlive</key><true/>"
+      : "  <!-- Restart after a crash, not after a clean stop. -->\n  <key>KeepAlive</key>\n  <dict><key>SuccessfulExit</key><false/></dict>",
     "  <key>ThrottleInterval</key><integer>10</integer>",
     "  <key>StandardOutPath</key>" + s(spec.logPath),
     "  <key>StandardErrorPath</key>" + s(spec.logPath),
@@ -332,16 +346,22 @@ function uid(): number {
 
 // ---- status / install / uninstall per platform -------------------------------
 
-export function serviceStatus(platform: Platform = process.platform as Platform, configPath: string = defaultConfigPath()): ServiceStatus {
+export function serviceStatus(
+  platform: Platform = process.platform as Platform,
+  configPath: string = defaultConfigPath(),
+  identity: { name?: string; label?: string } = {},
+): ServiceStatus {
+  const name = identity.name ?? SERVICE_NAME;
+  const label = identity.label ?? LAUNCHD_LABEL;
   if (platform === "linux") {
-    const where = systemdUnitPath();
+    const where = systemdUnitPath(process.env, homedir(), name);
     if (!Bun.which("systemctl")) return { installed: existsSync(where), running: false, where, detail: "systemctl not found" };
-    const active = run(["systemctl", "--user", "is-active", SERVICE_NAME + ".service"]).out.trim();
+    const active = run(["systemctl", "--user", "is-active", name + ".service"]).out.trim();
     return { installed: existsSync(where), running: active === "active", where, detail: active || undefined };
   }
   if (platform === "darwin") {
-    const where = launchdPlistPath();
-    const printed = run(["launchctl", "print", "gui/" + uid() + "/" + LAUNCHD_LABEL]);
+    const where = launchdPlistPath(homedir(), label);
+    const printed = run(["launchctl", "print", "gui/" + uid() + "/" + label]);
     const state = /^\s*state = (\S+)/m.exec(printed.out)?.[1];
     return { installed: existsSync(where), running: printed.code === 0 && state === "running", where, detail: printed.code === 0 ? state : "not loaded" };
   }
@@ -367,20 +387,22 @@ export function serviceSpecFor(platform: Platform, configPath: string): ServiceS
 export function installService(platform: Platform, spec: ServiceSpec): string {
   if (platform === "linux") {
     if (!Bun.which("systemctl")) throw new CliError("systemctl not found: 'prime service' needs systemd on Linux");
-    const unit = systemdUnitPath();
+    const unit = systemdUnitPath(process.env, homedir(), spec.name ?? SERVICE_NAME);
     mkdirSync(dirname(unit), { recursive: true });
     writeFileSync(unit, renderSystemdUnit(spec), { mode: 0o644 });
+    const unitName = (spec.name ?? SERVICE_NAME) + ".service";
     const hint = "Is a systemd user session running? (systemctl --user status). Over SSH: loginctl enable-linger $USER, then log in again.";
     must(run(["systemctl", "--user", "daemon-reload"]), "systemctl --user daemon-reload", hint);
-    must(run(["systemctl", "--user", "enable", SERVICE_NAME + ".service"]), "systemctl --user enable", hint);
+    must(run(["systemctl", "--user", "enable", unitName]), "systemctl --user enable", hint);
     // restart, not start: a reinstall must pick up the new definition.
-    must(run(["systemctl", "--user", "restart", SERVICE_NAME + ".service"]), "systemctl --user restart", hint);
+    must(run(["systemctl", "--user", "restart", unitName]), "systemctl --user restart", hint);
     return unit;
   }
   if (platform === "darwin") {
-    const plist = launchdPlistPath();
+    const label = spec.label ?? LAUNCHD_LABEL;
+    const plist = launchdPlistPath(homedir(), label);
     const target = "gui/" + uid();
-    run(["launchctl", "bootout", target + "/" + LAUNCHD_LABEL]); // a reinstall replaces the old one
+    run(["launchctl", "bootout", target + "/" + label]); // a reinstall replaces the old one
     mkdirSync(dirname(plist), { recursive: true });
     mkdirSync(dirname(spec.logPath), { recursive: true });
     writeFileSync(plist, renderLaunchdPlist(spec), { mode: 0o644 });
@@ -407,24 +429,26 @@ export function installService(platform: Platform, spec: ServiceSpec): string {
 }
 
 /** Stop and remove. Returns what was there (false: nothing was installed). */
-export function uninstallService(platform: Platform, configPath: string): boolean {
+export function uninstallService(platform: Platform, configPath: string, identity: { name?: string; label?: string } = {}): boolean {
+  const name = identity.name ?? SERVICE_NAME;
+  const label = identity.label ?? LAUNCHD_LABEL;
   if (platform === "linux") {
-    const unit = systemdUnitPath();
+    const unit = systemdUnitPath(process.env, homedir(), name);
     const had = existsSync(unit);
     if (Bun.which("systemctl")) {
-      run(["systemctl", "--user", "disable", "--now", SERVICE_NAME + ".service"]);
+      run(["systemctl", "--user", "disable", "--now", name + ".service"]);
       rmSync(unit, { force: true });
       run(["systemctl", "--user", "daemon-reload"]);
-      run(["systemctl", "--user", "reset-failed", SERVICE_NAME + ".service"]);
+      run(["systemctl", "--user", "reset-failed", name + ".service"]);
     } else {
       rmSync(unit, { force: true });
     }
     return had;
   }
   if (platform === "darwin") {
-    const plist = launchdPlistPath();
+    const plist = launchdPlistPath(homedir(), label);
     const had = existsSync(plist);
-    const out = run(["launchctl", "bootout", "gui/" + uid() + "/" + LAUNCHD_LABEL]);
+    const out = run(["launchctl", "bootout", "gui/" + uid() + "/" + label]);
     rmSync(plist, { force: true });
     return had || out.code === 0;
   }

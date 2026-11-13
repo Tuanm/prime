@@ -186,7 +186,9 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | its tunnel goes away | the next ask finds the holder not connected, takes it out of the running, and the waiting member takes over in a second or two |
 | the operator switches a space off | the same, at once; it stays a member until it is removed |
 | the operator pauses the fleet | nothing joins, nobody takes a place, nothing is published; members and leases stay |
-| no member holds the lease | the fleet says so; a call is refused with "no primary right now" |
+| no member holds the lease | the next member whose agent asks takes it; a call in that gap is refused with "no primary right now" |
+| the holder's agent stops | its place lapses when the lease runs out; five seconds later another member's agent asks and takes it |
+| the holder's machine reboots | the same, and the reason the agent belongs in a service: `prime fleets agent install` |
 | a fleet has no token | no client can reach it; members still sync |
 | the invite expired or was used | the request is refused, and the code is gone |
 | the fleet is full | refused, at thirty-two members |
@@ -195,6 +197,23 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | the name a fleet wants is a device's | refused: a fleet is reached under its own name, so the two must not collide |
 | two spaces would share a name | the second is refused when it asks to join, and told to pass `--name`; names are compared without case |
 | a member comes back with a new key | the fleet learns it when the member takes its place, and seals the next snapshot for it |
+
+## The agent belongs in a service
+
+The agent renews this machine's place in the fleet every few seconds. It is what
+keeps the fleet alive: while it runs, the space holds or mirrors; while it does
+not, the place lapses and the fleet waits for someone else to take it.
+
+So it has to outlive the terminal that started it, and the reboot:
+
+```bash
+prime fleets agent install      # a login service: starts at login, restarts if it stops
+prime fleets agent status       # rounds, the last thing it did, and whether it is a service
+```
+
+The lease and the heartbeat are two numbers that have to agree. The heartbeat is
+a third of the lease the fleet reports, so two renewals can be lost before the
+place is gone - and a fleet keeps answering its clients meanwhile.
 
 ## What it costs
 

@@ -22,6 +22,7 @@ import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
 import { snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
+import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, stopFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
 
@@ -426,6 +427,28 @@ export async function fleetsLeave(ctx: Ctx): Promise<void> {
  */
 export async function fleetsAgent(ctx: Ctx): Promise<void> {
   const what = ctx.parsed.positionals[2] ?? "status";
+  // The agent holds the fleet's lease while it runs, so it has to outlive the
+  // terminal that started it: a login service, not a background process.
+  if (what === "install") {
+    const where = installFleetAgentService(ctx.configPath);
+    if (ctx.json) {
+      printJson({ installed: true, where });
+      return;
+    }
+    ctx.out(green("installed the fleet agent as a service"));
+    ctx.out(dim("  " + where));
+    ctx.out(dim("  it starts at login, and comes back if it stops"));
+    return;
+  }
+  if (what === "uninstall") {
+    const had = uninstallFleetAgentService(ctx.configPath);
+    if (ctx.json) {
+      printJson({ removed: had });
+      return;
+    }
+    ctx.out(had ? green("removed the fleet agent service") : dim("the fleet agent was not installed as a service"));
+    return;
+  }
   if (what === "stop") {
     const stopped = stopFleetAgent(ctx.configPath);
     if (ctx.json) {
@@ -449,11 +472,17 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
     printJson(status);
     return;
   }
+  const service = fleetAgentServiceStatus(ctx.configPath);
   if (!status.running) {
     ctx.out(dim("the fleet agent is not running"));
+    if (!service.installed) {
+      ctx.out(dim("  not installed as a service: run 'prime fleets agent install'"));
+    }
     return;
   }
   ctx.out(green("the fleet agent is running") + " (pid " + status.pid + ")");
+  if (service.installed) ctx.out(dim("  service   " + service.where));
+  else ctx.out(yellow("  service   not installed: it stops when this machine logs out (run 'prime fleets agent install')"));
   ctx.out(dim("  started   " + (status.started_at ?? "-")));
   ctx.out(dim("  spaces    " + (status.spaces ?? 0)));
   ctx.out(dim("  rounds    " + (status.rounds ?? 0)));

@@ -419,7 +419,11 @@ USAGE
   prime fleets sync <fleet-id> --space <name>     One round: publish if primary, pull if replica
   prime fleets sync ... --watch [--interval <s>]  Keep going, so the space stays in step on its own
   prime fleets agent status|start|stop          The agent that keeps the fleet in step
+  prime fleets agent install                    Run the agent as a login service (it starts at login)
   prime fleets status <fleet-id>                 Show this device's standing in the fleet
+
+The agent holds the fleet's lease while it runs, so it belongs in a service:
+'prime fleets agent install' is what keeps a member a member across a reboot.
 
 A fleet holds one primary and any number of replicas. The primary has the
 lease and may write; the replicas mirror it. Membership takes two steps: the
