@@ -68,8 +68,10 @@ export const UI_CSS = `      * {
         color: #666;
         background: #fff;
         border: 1px solid transparent;
+        /* The bar's rule is what closes the selected tab at the bottom: the tab
+           stops above it rather than overlapping it, so the rule reads as one
+           unbroken line across the whole bar. */
         border-bottom: 0;
-        margin-bottom: -1px;
         outline: none;
         white-space: nowrap;
         user-select: none;
