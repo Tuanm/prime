@@ -50,6 +50,14 @@ export interface UpdateOptions {
   to?: string;
   json?: boolean;
   quiet?: boolean;
+  /**
+   * Where progress goes as it happens.
+   *
+   * The update spends its time on the network - listing releases, downloading a
+   * hundred megabytes, hashing it - and it used to say nothing until the end,
+   * which reads as a hang. Each step is announced as it starts.
+   */
+  note?: (text: string) => void;
 }
 
 export interface UpdateOutcome {
@@ -330,6 +338,10 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
     );
   }
 
+  const say = (text: string): void => {
+    if (options.note) options.note("  " + text);
+  };
+  say("checking " + repoSlug() + " for the newest release");
   const releases = await fetchReleases();
   if (releases.length === 0) {
     throw new CliError(
@@ -383,6 +395,7 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
     );
   }
 
+  say("downloading " + assetName + (asset.size ? " (" + (asset.size / 1_048_576).toFixed(1) + " MB)" : ""));
   const bytes = await download(asset.url, assetName);
 
   // Mandatory, not best-effort: a self-updater that silently installs whatever it
@@ -398,6 +411,7 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
   if (!expected) {
     throw new CliError(`SHA256SUMS has no entry for ${assetName}`, "Refusing to install an unverifiable download.");
   }
+  say("verifying the checksum");
   const actual = sha256Hex(bytes);
   if (expected !== actual) {
     throw new CliError(
@@ -406,6 +420,7 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
     );
   }
 
+  say("installing into " + target);
   installBytes(target, bytes, 0o755);
   outcome.updated = true;
   outcome.installed_version = chosen.version;

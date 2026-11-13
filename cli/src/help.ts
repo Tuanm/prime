@@ -319,6 +319,10 @@ new binary does not reach. They are moved onto the image that matches it: the
 container is recreated, the volume and the gateway identity stay, and the fleet
 carries on around the member while it restarts.
 
+That happens on every run, not only on the run that installed something: a space
+can be a version behind because the CLI was updated by a build that predates
+this rule. 'already up to date' still means "and the spaces are now too".
+
   current   26.10.3
   latest    26.10.4
   installed 26.10.4 -> /Users/you/.local/bin/prime

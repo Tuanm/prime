@@ -48,7 +48,7 @@ import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
-const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.45-dev";
+const VERSION = process.env.MCP_CLI_VERSION ?? "26.11.46-dev";
 
 // ---- per-command flag sets -------------------------------------------------
 
@@ -463,6 +463,7 @@ async function main(argv: string[]): Promise<void> {
       return serveCommand(ctx, VERSION);
     case "update": {
       const outcome = await runUpdate(VERSION, {
+        note: (text) => ctx.note(text),
         check: bool(ctx.parsed, "check"),
         force: bool(ctx.parsed, "force"),
         version: str(ctx.parsed, "release-version"),
@@ -471,9 +472,12 @@ async function main(argv: string[]): Promise<void> {
       if (ctx.json) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
       else process.stdout.write(`${renderUpdate(outcome)}\n`);
       // The spaces run their image inside a container, which `prime update` did
-      // not touch: a fleet whose spaces are on the old image is a fleet of old
-      // agents with a new CLI beside them.
-      if (outcome.updated && !bool(ctx.parsed, "no-spaces")) {
+      // not touch, and an
+      // update that says "already up to date" still has spaces to move: they
+      // are a version behind whenever the CLI was updated before this rule
+      // existed, or by a binary that predates it. So the spaces converge on
+      // every run, not only on the run that installed something.
+      if (!bool(ctx.parsed, "check") && !bool(ctx.parsed, "no-spaces")) {
         await refreshFleetSpaceImages(ctx, outcome.installed_version ?? outcome.latest);
       }
       return;
