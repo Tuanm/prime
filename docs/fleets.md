@@ -197,6 +197,8 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | the name a fleet wants is a device's | refused: a fleet is reached under its own name, so the two must not collide |
 | two spaces would share a name | the second is refused when it asks to join, and told to pass `--name`; names are compared without case |
 | a member comes back with a new key | the fleet learns it when the member takes its place, and seals the next snapshot for it |
+| a replica's work tree was edited locally | the edit is moved aside into `local-change-<time>` beside the work tree, and the mirror is brought up to date: a replica that cannot catch up is a fleet that cannot promote it |
+| no member can be promoted | every member is behind the head (each one was edited and could not sync); the move above is what lets them catch up again |
 
 ## The agent belongs in a service
 
