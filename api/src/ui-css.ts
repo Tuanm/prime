@@ -53,6 +53,11 @@ export const UI_CSS = `      * {
         gap: 0;
         border-bottom: 1px solid #111;
         margin-bottom: 12px;
+      }
+      /* Only a bar with more tabs than fit scrolls. An overflow container clips
+         the selected tab's box, which is drawn over the bar's rule - so the
+         three tabs on the admin page must not be one. */
+      .utabs-bar.scroll {
         overflow-x: auto;
       }
       .utab {

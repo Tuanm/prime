@@ -441,6 +441,10 @@ describe("the fleets in the admin interface", () => {
     // The three lists are tabs of that section, in this order.
     const order = [...page.matchAll(/class="utab[^"]*" type="button" role="tab" data-tab="([a-z]+)"/g)].map((m) => m[1]);
     expect(order).toEqual(["buddies", "fleets", "anonymous"]);
+    // Three tabs fit: the bar must not be a scroll container, which would clip
+    // the selected tab's box. Only a bar with more tabs than fit asks for it.
+    expect(page).toContain('<div class="utabs-bar" id="deviceTabs"');
+    expect(page).toContain(".utabs-bar.scroll {");
     expect(page).toContain('data-tab="buddies" role="tabpanel"');
     expect(page).toContain('data-tab="fleets" role="tabpanel" hidden');
     expect(page).toContain('data-tab="anonymous" role="tabpanel" hidden');

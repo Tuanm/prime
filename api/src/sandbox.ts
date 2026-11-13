@@ -1454,7 +1454,7 @@ const PAGE_JS = String.raw`(function () {
       var names = (Array.isArray(spec.tabs) ? spec.tabs : []).slice(0, 12).map(function (x) { return str(x, 60); }).filter(Boolean);
       if (!names.length) throw new Error("tabs: give it tab names, e.g. tabs: ['Overview', 'Logs']");
       if (names.indexOf(spec.value) < 0) spec.value = names[0];
-      var bar = document.createElement("div"); bar.className = "utabs-bar"; bar.setAttribute("role", "tablist");
+      var bar = document.createElement("div"); bar.className = "utabs-bar scroll"; bar.setAttribute("role", "tablist");
       el.appendChild(bar);
       el.__bodies = {}; el.__tabEls = {};
       names.forEach(function (n) {
