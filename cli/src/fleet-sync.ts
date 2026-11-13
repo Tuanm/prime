@@ -19,7 +19,7 @@
 
 import { createHash, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -367,3 +367,75 @@ export function timingSafeEqualBytes(a: Buffer, b: Buffer): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
 }
+
+/**
+ * The paths that differ from the state the fleet gave this member.
+ *
+ * `tree` is the tree the member recorded for the last state it took (the same
+ * tree the state file keeps), so this answers "what has changed here since".
+ */
+export async function localChanges(work: string, gitDir: string, tree: string): Promise<string[]> {
+  if (!tree) return [];
+  const indexFile = join(gitDir, "local-check.index");
+  rmSync(indexFile, { force: true });
+  const env = gitEnv(gitDir, work, indexFile);
+  await ensureStore(gitDir, work, env);
+  // Stage exactly what the fleet gave us, then let git say what differs. The
+  // temporary index is thrown away afterwards; the member's own store is not
+  // touched.
+  await gitRun(gitDir, ["read-tree", tree], env);
+  const out = (await gitRun(gitDir, ["status", "--porcelain", "-z", "--", "."], env)).toString("utf8");
+  const paths = new Set<string>();
+  let i = 0;
+  while (i < out.length) {
+    const end = out.indexOf("\u0000", i);
+    if (end < 0) break;
+    const entry = out.slice(i, end);
+    i = end + 1;
+    // "XY <path>", and a rename carries a second NUL-terminated path.
+    const path = entry.slice(3);
+    if (path) paths.add(path);
+    if (entry[0] === "R" || entry[0] === "C") {
+      const endSecond = out.indexOf("\u0000", i);
+      if (endSecond >= 0) paths.add(out.slice(i, endSecond));
+      i = endSecond + 1;
+    }
+  }
+  rmSync(indexFile, { force: true });
+  return [...paths].filter(Boolean);
+}
+
+/**
+ * Move this member's local changes aside so the mirror can be updated.
+ *
+ * The work tree is the fleet's, and a mirror that was edited cannot be updated
+ * without throwing the edit away. So the edit is not deleted: it is moved to a
+ * folder beside the work tree, the path it came from is recorded, and the pull
+ * that follows brings the mirror up to the fleet's state. The person can move
+ * anything back with a single `mv`.
+ */
+export async function preserveLocalChange(
+  work: string,
+  gitDir: string,
+  tree: string,
+): Promise<{ moved: number; to: string }> {
+  const changed = await localChanges(work, gitDir, tree);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const to = join(work, "..", "local-change-" + stamp);
+  let moved = 0;
+  for (const path of changed) {
+    const from = join(work, path);
+    if (!existsSync(from)) continue;
+    const dest = join(to, path);
+    mkdirSync(join(dest, ".."), { recursive: true });
+    try {
+      renameSync(from, dest);
+      moved++;
+    } catch {
+      // A path that cannot be moved (a busy file) stays where it is: the pull
+      // below will report the conflict instead of silently dropping anything.
+    }
+  }
+  return { moved, to };
+}
+

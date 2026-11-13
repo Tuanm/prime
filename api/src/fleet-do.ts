@@ -113,13 +113,26 @@ export class FleetDO implements DurableObject {
   }
 
   private async readHead(fleetId: string): Promise<Head> {
+    return (await this.readHeadOrNull(fleetId)) ?? { ...EMPTY_HEAD };
+  }
+
+  /**
+   * The head, or null when the read failed.
+   *
+   * A failed read is not "no head": a fleet that has published has one, and
+   * saying otherwise would let a member that is behind take the lease with the
+   * state it already had - the one thing the lease exists to prevent. Callers
+   * that decide whether to grant the lease use this and refuse on null;
+   * callers that only read use readHead, where an empty head is a safe answer.
+   */
+  private async readHeadOrNull(fleetId: string): Promise<Head | null> {
     try {
       this.meter.r2("read");
       const obj = await this.bucket().get(this.headKey(fleetId));
       if (!obj) return { ...EMPTY_HEAD };
       return (await obj.json()) as Head;
     } catch {
-      return { ...EMPTY_HEAD };
+      return null;
     }
   }
 
@@ -748,7 +761,13 @@ export class FleetDO implements DurableObject {
     // which is exactly what happened when the agents renewed every fifteen
     // seconds against a fifteen-second lease.
     const ttlMs = LEASE_TTL_MS;
-    const head = await this.readHead(fleetId);
+    // The head decides whether this member is caught up, and the lease must not
+    // be granted on a guess: a failed read refuses the bootstrap instead of
+    // pretending the fleet has published nothing.
+    const head = await this.readHeadOrNull(fleetId);
+    if (head === null) {
+      return Response.json({ error: "the fleet's head could not be read" }, { status: 503 });
+    }
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();
 

@@ -28,7 +28,7 @@ import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "./fleet-agent.ts";
-import { settle, snapshot } from "./fleet-sync.ts";
+import { preserveLocalChange, settle, snapshot } from "./fleet-sync.ts";
 import { fetchHead, fetchMemberKeys, releaseLease, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, writeFleetState } from "./fleets.ts";
@@ -320,13 +320,15 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   if (head.seq <= (state.seq ?? 0)) return;
 
   // A replica mirrors the primary. If its workspace was changed locally, the
-  // pull would throw that work away, so it is not applied: the change is
-  // reported instead, and the person who made it decides what to do with it.
+  // pull would throw that work away - but refusing forever is worse than the
+  // edit it protects: the replica never catches up, and a fleet whose members
+  // are all behind has nobody it may promote. So the change is moved aside
+  // (nothing deleted) and the mirror is brought up to date.
   if (state.tree !== undefined) {
     const local = await snapshot({ work: paths.work, gitDir: paths.gitDir, base: state.base ?? null, seq: state.seq ?? 0 });
     if (local.tree !== state.tree) {
-      report("the workspace was changed locally and the fleet has moved on; the change was left alone");
-      return;
+      const kept = await preserveLocalChange(paths.work, paths.gitDir, state.tree);
+      report("kept " + kept.moved + " locally changed path(s) aside in " + kept.to + ", then caught up");
     }
   }
 

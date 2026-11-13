@@ -20,7 +20,7 @@ import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
-import { snapshot } from "./fleet-sync.ts";
+import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, stopFleetAgent } from "./fleet-daemon.ts";
@@ -606,6 +606,14 @@ export async function syncFleetSpace(
     return "published " + result.seq;
   }
 
+  // A mirror that was edited locally cannot be updated without losing the
+  // edit, so the edit is moved aside first - the same rule the agent follows.
+  if (state.tree !== undefined) {
+    const local = await snapshot({ work, gitDir: paths.gitDir, base: state.base ?? null, seq: state.seq ?? 0 });
+    if (local.tree !== state.tree) {
+      await preserveLocalChange(work, paths.gitDir, state.tree);
+    }
+  }
   const pulled = await pull(creds, fleetId, paths, state.seq ?? 0);
   if (pulled.applied) {
     writeFleetState(configPath, fleetId, spaceName, { ...state, seq: pulled.seq, base: pulled.commit });
