@@ -486,6 +486,9 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
   ctx.out(dim("  started   " + (status.started_at ?? "-")));
   ctx.out(dim("  spaces    " + (status.spaces ?? 0)));
   ctx.out(dim("  rounds    " + (status.rounds ?? 0)));
+  if (status.updates === "push") ctx.out(dim("  updates   pushed by the gateway"));
+  else if (status.updates === "polling") ctx.out(dim("  updates   polling the gateway"));
+  if (status.paused) ctx.out(yellow("  paused    the fleet is paused"));
   if (status.last_action) ctx.out(dim("  last      " + status.last_action));
   if (status.last_error) ctx.out(yellow("  error     " + status.last_error));
   const t = status.timing;

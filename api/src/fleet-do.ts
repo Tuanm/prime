@@ -63,6 +63,8 @@ interface FleetMeta {
 
 /** The routes a paused fleet refuses. */
 const PAUSED_ROUTES = new Set(["/join", "/bootstrap", "/head/advance"]);
+/** How long a member is told to wait before asking a paused fleet again. */
+const PAUSED_RETRY_MS = 60_000;
 
 interface Caller {
   kind: "admin" | "device";
@@ -99,7 +101,130 @@ const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 }
 const LEASE_TTL_MS = 45_000;
 
 export class FleetDO implements DurableObject {
-  constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
+  constructor(private readonly state: DurableObjectState, private readonly env: Env) {
+    // A member's agent keeps a socket open to hear about the fleet instead of asking
+    // every second. It sends "ping" to know the socket is alive, and the runtime
+    // answers "pong" without waking this object - so an idle fleet costs nothing.
+    try {
+      if (typeof WebSocketRequestResponsePair !== "undefined") {
+        this.state.setWebSocketAutoResponse?.(new WebSocketRequestResponsePair("ping", "pong"));
+      }
+    } catch {}
+  }
+
+  // ---- events: what the fleet tells the members that listen ----
+  //
+  // Sockets are hibernatable, so they survive this object being unloaded, and a
+  // test double that has none sees an empty list rather than an error.
+
+  private sockets(tag?: string): WebSocket[] {
+    const s = this.state as unknown as { getWebSockets?: (tag?: string) => WebSocket[] };
+    try {
+      return s.getWebSockets ? s.getWebSockets(tag) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Tell every listening member, except the one named. */
+  private broadcast(event: Record<string, unknown>, except?: string): void {
+    const text = JSON.stringify(event);
+    for (const ws of this.sockets()) {
+      try {
+        if (except) {
+          const attached = ws.deserializeAttachment?.() as { deviceId?: string } | null | undefined;
+          if (attached?.deviceId === except) continue;
+        }
+        ws.send(text);
+      } catch {}
+    }
+  }
+
+  /** Hang up on a member's socket, or on all of them. */
+  private hangUp(reason: string, deviceId?: string): void {
+    for (const ws of this.sockets(deviceId)) {
+      try {
+        ws.send(JSON.stringify({ type: "bye", reason }));
+        ws.close(1000, reason);
+      } catch {}
+    }
+  }
+
+  /**
+   * Wake the listeners when the lease runs out.
+   *
+   * A lease that lapses is silence, and silence has no event: nobody is sending
+   * anything to hear it end. So an alarm is set for the moment it would, and it
+   * tells the replicas to ask for the place. It moves with every renewal, so it
+   * only ever fires for a lease that really ended - and only when someone is
+   * listening, because otherwise nothing needs the call.
+   */
+  private async scheduleLeaseAlarm(expiresAt: number): Promise<void> {
+    if (this.sockets().length === 0) return;
+    const s = this.state.storage as unknown as { setAlarm?: (at: number) => Promise<void> };
+    try {
+      await s.setAlarm?.(expiresAt + 250);
+    } catch {}
+  }
+
+  async alarm(): Promise<void> {
+    const raw = await this.state.storage.get<Lease>("lease");
+    if (raw && raw.expiresAt + 250 > Date.now()) {
+      await this.scheduleLeaseAlarm(raw.expiresAt);
+      return;
+    }
+    // A paused fleet has nobody asking for the place, so nobody is told it is free.
+    if (await this.paused()) return;
+    this.broadcast({ type: "lease-free" });
+  }
+
+  async webSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {
+    // Nothing is expected from a member over this socket but its ping, which the
+    // runtime answers on its own.
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    // 1005 and 1006 describe how a socket ended; they cannot be sent back.
+    const sendable = code === 1005 || code === 1006 || code === 1015 ? 1000 : code;
+    try {
+      ws.close(sendable, reason);
+    } catch {}
+  }
+
+  async webSocketError(_ws: WebSocket): Promise<void> {}
+
+  /** The first thing a listener hears: how the fleet is now. */
+  private async helloFrame(): Promise<Record<string, unknown>> {
+    const meta = await this.meta();
+    const held = await this.lease();
+    return { type: "hello", paused: meta.disabled === true, leaseHolder: held ? held.holder : null, leaseMs: LEASE_TTL_MS };
+  }
+
+  /** A member opens a socket to be told what happens in the fleet. */
+  private async events(caller: Caller, request: Request): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return Response.json({ error: "expected a websocket upgrade" }, { status: 426 });
+    }
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    if (!members[caller.deviceId]) return this.deny();
+
+    // One listener per member: a reconnect replaces the one that is left over.
+    for (const old of this.sockets(caller.deviceId)) {
+      try {
+        old.send(JSON.stringify({ type: "bye", reason: "replaced" }));
+        old.close(1000, "replaced");
+      } catch {}
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.state.acceptWebSocket(server!, [caller.deviceId]);
+    server!.serializeAttachment({ deviceId: caller.deviceId });
+    server!.send(JSON.stringify(await this.helloFrame()));
+    const held = await this.lease();
+    if (held) await this.scheduleLeaseAlarm(held.expiresAt);
+    return new Response(null, { status: 101, webSocket: client });
+  }
 
   // The head and the epoch live in R2, not in this object's storage: losing the
   // object must not reset them, or a stale primary could replay an old head.
@@ -150,6 +275,9 @@ export class FleetDO implements DurableObject {
 
   // Forget everything about this fleet.
   private async clear(fleetId: string): Promise<void> {
+    this.hangUp("the fleet is gone");
+    // A fleet that is deleted is not still paused: the name can be made again.
+    await this.state.storage.delete("meta");
     await this.state.storage.delete("members");
     await this.state.storage.delete("created");
     await this.state.storage.delete("invites");
@@ -312,8 +440,10 @@ export class FleetDO implements DurableObject {
       if (label === undefined) delete meta.label;
       else meta.label = label;
     }
+    const wasPaused = meta.disabled === true;
     if (typeof body.disabled === "boolean") meta.disabled = body.disabled;
     await this.state.storage.put("meta", meta);
+    if ((meta.disabled === true) !== wasPaused) this.broadcast({ type: meta.disabled === true ? "paused" : "resumed" });
     return Response.json({ ok: true, meta });
   }
 
@@ -348,8 +478,15 @@ export class FleetDO implements DurableObject {
     // A paused fleet takes no part in the work: nothing joins it, nobody
     // takes a place in it, and nothing is published to it. The operator
     // still runs it, so the routes that manage it are left alone.
+    //
+    // The events socket is the one thing a paused fleet still offers: it is how the
+    // members hear that the pause is over, instead of asking.
+    if (path === "/events" && request.method === "GET") return this.events(caller, request);
     if (PAUSED_ROUTES.has(path) && (await this.paused())) {
-      return Response.json({ error: "the fleet is paused" }, { status: 409 });
+      return Response.json(
+        { error: "the fleet is paused", paused: true, retryAfterMs: PAUSED_RETRY_MS },
+        { status: 409, headers: { "retry-after": String(Math.ceil(PAUSED_RETRY_MS / 1000)) } },
+      );
     }
 
     if (path === "/create" && request.method === "POST") return this.create(caller, body, request);
@@ -657,6 +794,8 @@ export class FleetDO implements DurableObject {
     }
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
+    let wasMember = false;
+    let freedLease = false;
     await this.state.blockConcurrencyWhile(async () => {
       const members = await this.members();
       const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
@@ -672,11 +811,13 @@ export class FleetDO implements DurableObject {
         return;
       }
       delete members[deviceId];
+      wasMember = true;
       // A member that leaves gives up the lease, so the fleet is not held by
       // somebody who is no longer there.
       const held = await this.lease();
       if (held && held.holder === deviceId) {
         await this.state.storage.delete("lease");
+        freedLease = true;
       }
       // Removing the owner hands the fleet to the member that has been in it
       // the longest. A fleet whose owner is gone and that nobody can take
@@ -698,6 +839,11 @@ export class FleetDO implements DurableObject {
       await this.state.storage.put("members", members);
       out = Response.json({ ok: true, removed: "member" });
     });
+    // Told after the decision is made and stored, outside the block that made it:
+    // a socket closed while the object is held shut is not let go of cleanly.
+    if (freedLease) this.broadcast({ type: "lease-free" }, deviceId);
+    // It is not a member any more, so it has nothing to listen for.
+    if (wasMember) this.hangUp("removed", deviceId);
     return out;
   }
 
@@ -843,6 +989,7 @@ export class FleetDO implements DurableObject {
       const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs };
       await this.state.storage.put("lease", lease);
       await this.state.storage.put("epoch", epoch);
+      await this.scheduleLeaseAlarm(lease.expiresAt);
       out = Response.json({
         ok: true,
         role: "primary",
@@ -866,7 +1013,9 @@ export class FleetDO implements DurableObject {
         out = Response.json({ error: "not the lease holder" }, { status: 409 });
         return;
       }
-      await this.state.storage.put("lease", { ...held, expiresAt: Date.now() + ttlMs });
+      const expiresAt = Date.now() + ttlMs;
+      await this.state.storage.put("lease", { ...held, expiresAt });
+      await this.scheduleLeaseAlarm(expiresAt);
       out = Response.json({ ok: true, epoch: held.epoch });
     });
     return out;
@@ -885,6 +1034,11 @@ export class FleetDO implements DurableObject {
       return Response.json({ ok: true, vacated: false, primary: held ? held.holder : null });
     }
     await this.state.storage.delete("lease");
+    // The caller that asked for the place right after (the Worker, when a member
+    // finds the holder gone) is about to give it to that member itself. Telling
+    // everyone else the place is free would send all of them after it at once, and
+    // whoever lost would find the new holder just as unreachable, and ask the same.
+    if (body.quiet !== true) this.broadcast({ type: "lease-free" });
     return Response.json({ ok: true, vacated: true, primary: null });
   }
 
@@ -893,6 +1047,7 @@ export class FleetDO implements DurableObject {
     const held = await this.lease();
     if (!held || held.holder !== caller.deviceId) return Response.json({ error: "not the lease holder" }, { status: 409 });
     await this.state.storage.delete("lease");
+    this.broadcast({ type: "lease-free" });
     return Response.json({ ok: true });
   }
 
@@ -941,6 +1096,9 @@ export class FleetDO implements DurableObject {
     // CAS losing the race, not an error.
     if (!written) return Response.json({ error: "head changed" }, { status: 409 });
     await this.state.storage.put("epoch", next.epoch);
+    // The members that listen pull now instead of at their next look; the one that
+    // published already has it.
+    this.broadcast({ type: "head", seq: next.seq }, caller.deviceId);
 
     // Keep a bounded number of snapshots. A member that falls further behind
     // than this is given a whole tree again, so the old ones are of no use.

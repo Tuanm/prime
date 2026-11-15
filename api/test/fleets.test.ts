@@ -14,6 +14,7 @@ import {
   validFleetId,
 } from "../src/fleets";
 import { FleetDO } from "../src/fleet-do";
+import { handleFleetRoutes } from "../src/fleets-routes";
 
 // ---- helpers -------------------------------------------------------------
 
@@ -769,3 +770,265 @@ describe("two spaces of a fleet cannot share a name", () => {
     expect(members["member-2"]?.label).toBe("beta");
   });
 });
+
+// ---- the fleet tells the members that listen ---------------------------------
+//
+// A member's agent holds a socket open instead of asking every second. The object
+// pushes what happened; a paused fleet is answered without being woken at all.
+
+/** A socket as the runtime hands it to the object: what it was sent, and whether it was closed. */
+function fakeSocket(deviceId: string) {
+  const sock = {
+    deviceId,
+    sent: [] as string[],
+    closed: null as null | { code: number; reason: string },
+    send(text: string) {
+      sock.sent.push(text);
+    },
+    close(code: number, reason: string) {
+      sock.closed = { code, reason };
+    },
+    deserializeAttachment() {
+      return { deviceId };
+    },
+    events() {
+      return sock.sent.map((t) => JSON.parse(t) as Record<string, any>);
+    },
+  };
+  return sock;
+}
+
+function makeListeningDo(sockets: ReturnType<typeof fakeSocket>[]) {
+  const bucket = fakeBucket();
+  const state = fakeState();
+  const alarms: number[] = [];
+  const storage = { ...state.storage, async setAlarm(at: number) { alarms.push(at); } };
+  const real = {
+    storage,
+    blockConcurrencyWhile: state.blockConcurrencyWhile,
+    getWebSockets: (tag?: string) => (tag ? sockets.filter((s) => s.deviceId === tag) : sockets),
+  } as unknown as DurableObjectState;
+  return { doInstance: new FleetDO(real, { BUCKET: bucket } as never), state, bucket, alarms };
+}
+
+async function twoMembers(doInstance: FleetDO) {
+  await makeFleet(doInstance, "dev-owner");
+  const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
+  await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: inv.json.code } });
+  await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+}
+
+describe("what the fleet pushes to the members that listen", () => {
+  test("pausing and resuming are announced once each", async () => {
+    const owner = fakeSocket("dev-owner");
+    const two = fakeSocket("dev-two");
+    const { doInstance } = makeListeningDo([owner, two]);
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    // Saying it again changes nothing, so nobody is woken for it.
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: false } });
+    for (const s of [owner, two]) expect(s.events()).toEqual([{ type: "paused" }, { type: "resumed" }]);
+  });
+
+  test("renaming a fleet is not a pause", async () => {
+    const owner = fakeSocket("dev-owner");
+    const { doInstance } = makeListeningDo([owner]);
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { label: "Acme" } });
+    expect(owner.events()).toEqual([]);
+  });
+
+  test("a paused fleet says how long to wait, in the body and in the header", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "device", "x-prime-device": "dev-owner", "x-prime-fleet": "acme" });
+    const res = await doInstance.fetch(new Request("https://fleet/bootstrap", { method: "POST", headers, body: "{}" }));
+    expect(res.status).toBe(409);
+    expect(res.headers.get("retry-after")).toBe("60");
+    expect(await res.json()).toEqual({ error: "the fleet is paused", paused: true, retryAfterMs: 60000 });
+  });
+
+  test("a new head is pushed to the others and not to the one that published it", async () => {
+    const owner = fakeSocket("dev-owner");
+    const two = fakeSocket("dev-two");
+    const { doInstance } = makeListeningDo([owner, two]);
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    await call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "m1", manifestHash: "h1" } });
+    expect(two.events()).toEqual([{ type: "head", seq: 1 }]);
+    expect(owner.events()).toEqual([]);
+  });
+
+  test("a lease that is given up or vacated tells the members to ask for it", async () => {
+    const owner = fakeSocket("dev-owner");
+    const two = fakeSocket("dev-two");
+    const { doInstance } = makeListeningDo([owner, two]);
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    await call(doInstance, "/lease/release", { caller: "device", device: "dev-owner", body: {} });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    await call(doInstance, "/vacate", { caller: "admin", device: "operator", body: { deviceId: "dev-owner" } });
+    expect(two.events()).toEqual([{ type: "lease-free" }, { type: "lease-free" }]);
+  });
+
+  test("a removed member is hung up on, and the others are not", async () => {
+    const owner = fakeSocket("dev-owner");
+    const two = fakeSocket("dev-two");
+    const { doInstance } = makeListeningDo([owner, two]);
+    await twoMembers(doInstance);
+    await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    expect(two.events()).toEqual([{ type: "bye", reason: "removed" }]);
+    expect(two.closed?.code).toBe(1000);
+    expect(owner.closed).toBeNull();
+  });
+
+  test("deleting a fleet hangs up on everyone, and the name is not paused when it comes back", async () => {
+    const owner = fakeSocket("dev-owner");
+    const { doInstance } = makeListeningDo([owner]);
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    await call(doInstance, "/delete", { caller: "admin", device: "operator", body: {} });
+    expect(owner.closed).not.toBeNull();
+    await makeFleet(doInstance, "dev-owner");
+    const boot = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    expect(boot.status).toBe(200);
+    expect(boot.json.role).toBe("primary");
+  });
+
+  test("a listener is asked to be a websocket, and a non-member is refused", async () => {
+    const { doInstance } = makeListeningDo([]);
+    await makeFleet(doInstance, "dev-owner");
+    const plain = await doInstance.fetch(
+      new Request("https://fleet/events", { method: "GET", headers: { "x-prime-caller": "device", "x-prime-device": "dev-owner", "x-prime-fleet": "acme" } }),
+    );
+    expect(plain.status).toBe(426);
+    const stranger = await doInstance.fetch(
+      new Request("https://fleet/events", { method: "GET", headers: { upgrade: "websocket", "x-prime-caller": "device", "x-prime-device": "dev-stranger", "x-prime-fleet": "acme" } }),
+    );
+    expect(stranger.status).toBe(403);
+  });
+});
+
+describe("the alarm that ends a lease", () => {
+  test("it is set for the moment the lease would lapse, and only when someone listens", async () => {
+    const silent = makeListeningDo([]);
+    await makeFleet(silent.doInstance, "dev-owner");
+    await call(silent.doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    expect(silent.alarms).toEqual([]);
+
+    const owner = fakeSocket("dev-owner");
+    const heard = makeListeningDo([owner]);
+    await makeFleet(heard.doInstance, "dev-owner");
+    const before = Date.now();
+    await call(heard.doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    expect(heard.alarms.length).toBe(1);
+    // The lease is forty-five seconds; the alarm waits a moment past it.
+    expect(heard.alarms[0]! - before).toBeGreaterThan(45_000);
+    expect(heard.alarms[0]! - before).toBeLessThan(46_500);
+  });
+
+  test("a lease that really ended is announced, one that was renewed is not", async () => {
+    const two = fakeSocket("dev-two");
+    const { doInstance, state, alarms } = makeListeningDo([two]);
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    // Renewed meanwhile: the alarm that fires is the old one, and it only moves on.
+    const live = state.data.get("lease") as { expiresAt: number };
+    await doInstance.alarm();
+    expect(two.events()).toEqual([]);
+    expect(alarms.length).toBeGreaterThan(1);
+    // Ended: it is announced.
+    state.data.set("lease", { ...live, expiresAt: Date.now() - 60_000 });
+    await doInstance.alarm();
+    expect(two.events()).toEqual([{ type: "lease-free" }]);
+  });
+
+  test("a paused fleet announces nothing: nobody is asking for the place", async () => {
+    const two = fakeSocket("dev-two");
+    const { doInstance, state } = makeListeningDo([two]);
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    const live = state.data.get("lease") as { expiresAt: number };
+    state.data.set("lease", { ...live, expiresAt: Date.now() - 60_000 });
+    await doInstance.alarm();
+    expect(two.events()).toEqual([{ type: "paused" }]);
+  });
+});
+
+describe("the Worker answers for a paused fleet", () => {
+  function route(opts: { paused: boolean; method?: string; path: string; upgrade?: boolean; bearer?: string }) {
+    const fetched: { url: string; headers: Headers }[] = [];
+    const stub = {
+      async fetch(input: Request | string) {
+        const req = typeof input === "string" ? new Request(input) : input;
+        fetched.push({ url: req.url, headers: req.headers });
+        return Response.json({ ok: true });
+      },
+    };
+    const env = { FLEET: { idFromName: (n: string) => n, get: () => stub } } as never;
+    const headers = new Headers({ "x-prime-device": "dev-a", "content-type": "application/json" });
+    if (opts.upgrade) headers.set("upgrade", "websocket");
+    if (opts.bearer) headers.set("authorization", "Bearer " + opts.bearer);
+    const method = opts.method ?? "POST";
+    const url = new URL("https://gateway" + opts.path);
+    const request = new Request(url, { method, headers, body: method === "GET" ? undefined : "{}" });
+    const answer = handleFleetRoutes({
+      request,
+      env,
+      url,
+      cfg: { gatewayToken: "op-secret" } as never,
+      authorizeDevice: async () => ({ ok: true as const }),
+      unauthorized: () => new Response(null, { status: 401 }),
+      fleetPaused: async () => opts.paused,
+    });
+    return { answer, fetched };
+  }
+
+  test("bootstrap, join, snapshot and head advance are refused before the object is touched", async () => {
+    for (const path of ["/fleets/acme/bootstrap", "/fleets/acme/join", "/fleets/acme/snapshot", "/fleets/acme/head/advance"]) {
+      const { answer, fetched } = route({ paused: true, path });
+      const res = (await answer)!;
+      expect(res.status).toBe(409);
+      expect(res.headers.get("retry-after")).toBe("60");
+      expect(await res.json()).toEqual({ error: "the fleet is paused", paused: true, retryAfterMs: 60000 });
+      expect(fetched).toEqual([]);
+    }
+  });
+
+  test("a fleet that is not paused reaches its object", async () => {
+    const { answer, fetched } = route({ paused: false, path: "/fleets/acme/bootstrap" });
+    expect((await answer)!.status).toBe(200);
+    expect(fetched.length).toBe(1);
+  });
+
+  test("what only reads is still served while paused", async () => {
+    const { answer, fetched } = route({ paused: true, path: "/fleets/acme/members", method: "GET" });
+    expect((await answer)!.status).toBe(200);
+    expect(fetched.length).toBe(1);
+  });
+
+  test("a member may still listen to a paused fleet: that is how it hears the pause end", async () => {
+    const { answer, fetched } = route({ paused: true, path: "/fleets/acme/events", method: "GET", upgrade: true });
+    await answer;
+    expect(fetched.length).toBe(1);
+    expect(fetched[0]!.url).toBe("https://fleet/events");
+    // The object is told who is listening by the Worker, not by the caller.
+    expect(fetched[0]!.headers.get("x-prime-caller")).toBe("device");
+    expect(fetched[0]!.headers.get("x-prime-device")).toBe("dev-a");
+    expect(fetched[0]!.headers.get("x-prime-fleet")).toBe("acme");
+    expect(fetched[0]!.headers.get("upgrade")).toBe("websocket");
+  });
+
+  test("listening is a websocket upgrade, and the operator is not a member", async () => {
+    const plain = route({ paused: false, path: "/fleets/acme/events", method: "GET" });
+    expect((await plain.answer)!.status).toBe(426);
+    expect(plain.fetched).toEqual([]);
+    const operator = route({ paused: false, path: "/fleets/acme/events", method: "GET", upgrade: true, bearer: "op-secret" });
+    expect((await operator.answer)!.status).toBe(401);
+    expect(operator.fetched).toEqual([]);
+  });
+});
+

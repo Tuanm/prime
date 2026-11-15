@@ -12,6 +12,7 @@ bindings = [
   { name = "REGISTRY", class_name = "RegistryDO" },
   { name = "CODING_SANDBOX", class_name = "CodingSandbox" },
   { name = "FILES", class_name = "FilesDO" },
+  { name = "FLEET", class_name = "FleetDO" },
 ]
 
 # Local R2: miniflare simulates the bucket on disk, so the whole file pipeline
@@ -31,6 +32,10 @@ new_sqlite_classes = ["CodingSandbox"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["FilesDO"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["FleetDO"]
 
 [[kv_namespaces]]
 binding = "KV"

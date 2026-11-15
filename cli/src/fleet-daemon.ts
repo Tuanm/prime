@@ -27,6 +27,7 @@ import { dirname, join } from "node:path";
 import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
+import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "./fleet-agent.ts";
 import { preserveLocalChange, settle, snapshot } from "./fleet-sync.ts";
 import { fetchHead, fetchMemberKeys, releaseLease, type FleetCredentials } from "./fleet-transport.ts";
@@ -47,6 +48,10 @@ export interface FleetAgentState {
   last_action?: string;
   /** How long the last round took, in milliseconds. */
   timing?: RoundTiming;
+  /** Told by the fleet (push) or asking it (polling). */
+  updates?: "push" | "polling";
+  /** True while a fleet this agent keeps is paused. */
+  paused?: boolean;
 }
 
 export interface FleetAgentOptions {
@@ -154,6 +159,8 @@ export function fleetAgentStatus(configPath: string): {
   last_error?: string;
   last_action?: string;
   timing?: RoundTiming;
+  updates?: "push" | "polling";
+  paused?: boolean;
 } {
   const state = readFleetAgentState(configPath);
   if (!state || !pidAlive(state.pid)) return { running: false };
@@ -166,6 +173,8 @@ export function fleetAgentStatus(configPath: string): {
     last_error: state.last_error,
     last_action: state.last_action,
     timing: state.timing,
+    ...(state.updates ? { updates: state.updates } : {}),
+    ...(state.paused ? { paused: true } : {}),
   };
 }
 
@@ -232,6 +241,23 @@ interface SpaceLoop {
   timing: RoundTiming;
   /** The runtime, so the agent can tell whether the space is running. */
   runtime?: RuntimeInfo;
+  /** The operator paused the fleet: no place is taken and nothing is renewed. */
+  paused: boolean;
+  /** How long the gateway asked to wait before looking at a paused fleet again. */
+  retryAfterMs?: number;
+  /** The held connection that tells this space what happened. */
+  events: FleetEvents;
+}
+
+/**
+ * The most often a place is renewed. With events the fleet tells a replica
+ * when the place is free, so a slow heartbeat is enough; without them the
+ * short one stays.
+ */
+const EVENTS_HEARTBEAT_MS = 15_000;
+
+function heartbeatCeiling(loop: SpaceLoop, ceilingMs: number): number {
+  return loop.events.connected ? Math.max(ceilingMs, EVENTS_HEARTBEAT_MS) : ceilingMs;
 }
 
 /** One round for one space: take a place, then publish or pull. */
@@ -260,8 +286,23 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   // waits before it lets another member take over. The fleet says how long its
   // lease is; the heartbeat is a third of that, so two renewals can be lost
   // before the place is gone. Five seconds is the ceiling on a long lease.
-  if (Date.now() - loop.lastBootstrap > options.heartbeatMs! || !loop.primary) {
+  // A paused fleet takes no one in. With a live socket the fleet says when it
+  // is resumed, so there is nothing to ask; without one, a look now and then
+  // (as often as the gateway asked) finds out.
+  if (loop.paused) {
+    if (loop.events.connected) return;
+    if (Date.now() - loop.lastBootstrap < (loop.retryAfterMs ?? 60_000)) return;
     await takePlace(loop);
+    if (loop.paused) {
+      report("the fleet is paused");
+      return;
+    }
+  } else if (Date.now() - loop.lastBootstrap > heartbeatCeiling(loop, options.heartbeatMs!) || !loop.primary) {
+    await takePlace(loop);
+    if (loop.paused) {
+      report("the fleet is paused");
+      return;
+    }
   }
 
   if (loop.primary) {
@@ -353,6 +394,10 @@ interface BootstrapResult {
   ok: boolean;
   primary: boolean;
   error?: string;
+  /** The fleet is paused: it will not take anyone in until it is resumed. */
+  paused?: boolean;
+  /** How long the fleet asked to wait before looking again. */
+  retryAfterMs?: number;
   /** How long the fleet says a place lasts; the heartbeat is derived from it. */
   ttlMs?: number;
 }
@@ -369,7 +414,22 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(label ? { label } : {}) }),
     signal: AbortSignal.timeout(creds.timeoutMs ?? 60_000),
   });
-  if (!res.ok) return { ok: false, primary: false, error: "status " + res.status };
+  if (!res.ok) {
+    // A paused fleet answers with a reason and how long to wait: that is not
+    // a failure to report, it is the operator's choice.
+    const body = (await res.json().catch(() => undefined)) as { paused?: unknown; retryAfterMs?: unknown } | undefined;
+    if (body && body.paused === true) {
+      const header = Number(res.headers.get("retry-after"));
+      const asked =
+        typeof body.retryAfterMs === "number" && body.retryAfterMs > 0
+          ? body.retryAfterMs
+          : Number.isFinite(header) && header > 0
+            ? header * 1000
+            : undefined;
+      return { ok: false, primary: false, paused: true, error: "the fleet is paused", ...(asked ? { retryAfterMs: asked } : {}) };
+    }
+    return { ok: false, primary: false, error: "status " + res.status };
+  }
   const body = (await res.json()) as { role?: string; ttlMs?: number };
   return {
     ok: true,
@@ -398,7 +458,14 @@ async function takePlace(loop: SpaceLoop): Promise<void> {
     const keys = loadOrCreateKeyPair(loop.paths.keyFile);
     const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name);
     loop.lastBootstrap = Date.now();
+    if (placed.paused) {
+      loop.paused = true;
+      loop.primary = false;
+      loop.retryAfterMs = placed.retryAfterMs;
+      return;
+    }
     if (!placed.ok) throw new Error(placed.error);
+    loop.paused = false;
     loop.primary = placed.primary;
     // What the fleet says a place lasts. An agent that renews at its own pace
     // against a lease it never asked about is how a live primary loses it.
@@ -423,8 +490,11 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   const dir = fleetAgentDir(configPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   let stopping = false;
+  const wakeups = new Map<string, () => void>();
   const stop = (): void => {
     stopping = true;
+    // A loop may be asleep for minutes now; it has to see the signal at once.
+    for (const w of wakeups.values()) w();
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
@@ -437,6 +507,16 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   let lastAction: string | undefined;
   let timing: RoundTiming | undefined;
   let rounds = 0;
+  // Whether the agent is told what happens or has to ask, and whether a fleet
+  // it keeps is paused. Only said when there is a space to speak of.
+  const pushState = (): Pick<FleetAgentState, "updates" | "paused"> => {
+    const all = [...loops.values()];
+    if (all.length === 0) return {};
+    return {
+      updates: all.every((l) => l.events.connected) ? "push" : "polling",
+      ...(all.some((l) => l.paused) ? { paused: true } : {}),
+    };
+  };
   const write = (spaces: number): void => {
     const state: FleetAgentState = {
       pid: process.pid,
@@ -447,20 +527,24 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       ...(lastError ? { last_error: lastError } : {}),
       ...(lastAction ? { last_action: lastAction } : {}),
       ...(timing ? { timing } : {}),
+      ...pushState(),
     };
     writeFileSync(fleetAgentStatePath(configPath), JSON.stringify(state), { mode: 0o600 });
   };
 
   const loops = new Map<string, SpaceLoop>();
   const watchers = new Map<string, { stop: () => void }>();
-  const wakeups = new Map<string, () => void>();
+  // A wake that came while the loop was busy, so it is not lost: an event that
+  // says "pull now" must not wait for the next sleep to end.
+  const pending = new Set<string>();
   write(0);
 
   // A signal that a space's work tree changed, so a sleeping loop wakes at once
   // rather than waiting for its next turn.
-  const wake = (name: string): void => {
+  const wake = (name: string, remember = false): void => {
     const w = wakeups.get(name);
     if (w) w();
+    else if (remember) pending.add(name);
   };
 
   const runSpace = async (name: string, space: SpaceEntry): Promise<void> => {
@@ -490,7 +574,21 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       lastBootstrap: 0,
       timing: {},
       ...(runtime ? { runtime } : {}),
+      paused: false,
+      events: undefined as unknown as FleetEvents,
     };
+    loop.events = new FleetEvents({
+      gateway: loop.creds.gateway,
+      fleet,
+      deviceId: loop.creds.deviceId,
+      deviceToken: loop.creds.deviceToken,
+      onEvent: (event) => onEvent(loop, event),
+      onStatus: (connected) => {
+        // Without the socket the sleep is shorter, so look again now.
+        if (!connected) wake(name, true);
+        write(spacesSeen);
+      },
+    });
     loops.set(name, loop);
     // The heartbeat runs on its own clock, not as a step of the round: a round
     // that spends a minute pulling a large pack would otherwise let the place
@@ -498,12 +596,13 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
     let beat: ReturnType<typeof setTimeout> | undefined;
     const beatTick = (): void => {
       beat = setTimeout(() => {
-        void takePlace(loop)
-          .catch(() => {})
-          .finally(beatTick);
-      }, heartbeatFor(loop, options.heartbeatMs ?? heartbeatMs));
+        // A paused fleet takes no one in, so there is nothing to renew.
+        const renew = loop.paused ? Promise.resolve() : takePlace(loop);
+        void renew.catch(() => {}).finally(beatTick);
+      }, heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs ?? heartbeatMs)));
     };
     beatTick();
+    loop.events.start();
     const watcher = watchTree(work, () => {
       loop.dirty = true;
       wake(name);
@@ -525,11 +624,19 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       rounds++;
       write(spacesSeen);
       // Sleep until the next turn, or until something happens.
+      if (pending.delete(name)) continue;
+      const sleepMs = roundSleepMs({
+        paused: loop.paused,
+        connected: loop.events.connected,
+        supported: loop.events.supported,
+        retryAfterMs: loop.retryAfterMs,
+        pollMs,
+      });
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           wakeups.delete(name);
           resolve();
-        }, pollMs);
+        }, sleepMs);
         wakeups.set(name, () => {
           clearTimeout(timer);
           resolve();
@@ -537,6 +644,42 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       });
     }
     if (beat) clearTimeout(beat);
+    loop.events.stop();
+  };
+
+  // What the fleet told a space. The socket only says that something happened;
+  // the loop does the work, so each case just changes what the next round does.
+  const onEvent = (loop: SpaceLoop, event: FleetEvent): void => {
+    switch (event.type) {
+      case "hello":
+        loop.paused = event.paused;
+        // The lease length is what the heartbeat is derived from; take it if
+        // no place has been taken yet to tell it.
+        if (event.leaseMs > 0 && !loop.leaseMs) loop.leaseMs = event.leaseMs;
+        wake(loop.name, true);
+        break;
+      case "paused":
+        loop.paused = true;
+        break;
+      case "resumed":
+        loop.paused = false;
+        // Take a place now rather than at the next heartbeat.
+        loop.lastBootstrap = 0;
+        wake(loop.name, true);
+        break;
+      case "head":
+        wake(loop.name, true);
+        break;
+      case "lease-free":
+        // Whoever held the place has let go: ask for it.
+        loop.primary = false;
+        wake(loop.name, true);
+        break;
+      default:
+        // "bye": the connection closes and is opened again by itself.
+        break;
+    }
+    write(spacesSeen);
   };
 
   let spacesSeen = 0;

@@ -106,6 +106,7 @@ interface RegistrySnapshot {
   locked: Set<string>; // anonymous devices locked after too many wrong codes
   buddies: Map<string, string>; // fleetId -> the token its clients present
   online: Set<string>; // which devices hold a tunnel right now
+  paused: Set<string>; // the fleets the operator has paused
 }
 let mapCache: { at: number; snap: RegistrySnapshot } | null = null;
 
@@ -234,6 +235,7 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
     locked: new Set(),
     buddies: new Map(),
     online: new Set(),
+    paused: new Set(),
   };
   try {
     const r = await reg.fetch("https://registry/map");
@@ -244,6 +246,7 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
         locked?: string[];
         buddies?: Record<string, string>;
         online?: string[];
+        paused?: string[];
       };
       for (const [id, tok] of Object.entries(j.map || {})) {
         if (typeof tok === "string" && tok.length > 0) snap.map.set(id, tok);
@@ -254,6 +257,7 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
         if (typeof tok === "string" && tok.length > 0) snap.buddies.set(id, tok);
       }
       for (const id of j.online || []) snap.online.add(id);
+      for (const id of j.paused || []) snap.paused.add(id);
     }
   } catch {}
   return snap;
@@ -653,6 +657,8 @@ async function adminFleets(env: Env): Promise<Response> {
     const info = await stub.fetch("https://fleet/reap", { method: "POST", headers }).catch(() => null);
     if (!info || !info.ok) continue;
     const body = (await info.json()) as { members?: string[]; lastActivity?: number; meta?: { label?: string; disabled?: boolean } };
+    // The registry's copy of "paused" is only a copy: put it right if it fell behind.
+    if ((body.meta?.disabled === true) !== snapshot.paused.has(id)) void setFleetPaused(env, id, body.meta?.disabled === true);
     const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
     const rosterBody = roster && roster.ok ? ((await roster.json()) as { members?: Array<Record<string, unknown>> }) : {};
     const primary = await stub.fetch("https://fleet/primary", { method: "GET", headers: adminHeaders(headers) }).catch(() => null);
@@ -697,6 +703,21 @@ async function adminFleets(env: Env): Promise<Response> {
  * The operator acts for the fleet: the gateway passes itself as the caller,
  * so an operator can admit a member or clear a fleet away.
  */
+/**
+ * Tell the registry whether a fleet is paused.
+ *
+ * Best effort on purpose: the fleet object is the authority and still refuses a
+ * paused fleet's calls by itself, so a missed write costs a woken object, not a
+ * wrong answer. The operator's list heals a registry that fell behind.
+ */
+async function setFleetPaused(env: Env, fleetId: string, paused: boolean): Promise<void> {
+  try {
+    const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+    await reg.fetch("https://registry/fleet-paused?id=" + encodeURIComponent(fleetId) + "&paused=" + (paused ? "1" : "0"), { method: "POST" });
+    mapCache = null;
+  } catch {}
+}
+
 async function adminFleetAction(env: Env, fleetId: string, step: string, body: Record<string, unknown>): Promise<Response> {
   if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
   const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
@@ -932,6 +953,7 @@ export default {
           return auth.denied ? { ok: false as const, response: auth.denied } : { ok: true as const };
         },
         deviceOnline: (deviceId: string) => deviceOnline(env, deviceId),
+        fleetPaused: async (fleetId: string) => (await effectiveSnapshot(env)).paused.has(fleetId),
       });
       if (fleetResponse) return fleetResponse;
     }
@@ -1146,7 +1168,11 @@ export default {
           const patch: Record<string, unknown> = {};
           if (typeof body.label === "string") patch.label = body.label;
           if (typeof body.disabled === "boolean") patch.disabled = body.disabled;
-          return await adminFleetAction(env, fleetId, "meta", patch);
+          const done = await adminFleetAction(env, fleetId, "meta", patch);
+          // The fleet object decided; the registry is told so the Worker can answer
+          // for a paused fleet without waking the object.
+          if (done.ok && typeof patch.disabled === "boolean") await setFleetPaused(env, fleetId, patch.disabled);
+          return done;
         }
         return Response.json({ error: "not found" }, { status: 404 });
       }

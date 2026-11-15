@@ -44,8 +44,27 @@ const ALLOWED_ACTIONS = new Set([
   "packs",
   "manifests",
   "keys",
+  "events",
 ]);
 const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys"]);
+
+/**
+ * The routes a paused fleet does not serve.
+ *
+ * The same set the fleet object refuses, plus the snapshot upload, which would
+ * store a pack in R2 before the object got the chance to say no. They are
+ * answered here, from the registry's copy, so a paused fleet's object is not
+ * woken by a member that keeps asking.
+ */
+const PAUSED_ACTIONS = new Set(["join", "bootstrap", "head/advance", "snapshot"]);
+const PAUSED_RETRY_MS = 60_000;
+
+function pausedAnswer(): Response {
+  return Response.json(
+    { error: "the fleet is paused", paused: true, retryAfterMs: PAUSED_RETRY_MS },
+    { status: 409, headers: { "retry-after": String(Math.ceil(PAUSED_RETRY_MS / 1000)) } },
+  );
+}
 
 
 // ---- payloads ----------------------------------------------------------
@@ -275,6 +294,8 @@ export interface FleetDeps {
   authorizeDevice: (deviceId: string) => Promise<{ ok: true } | { ok: false; response: Response }>;
   /** whether a device holds a tunnel right now, as the registry sees it. */
   deviceOnline?: (deviceId: string) => Promise<boolean>;
+  /** whether the operator has paused this fleet, from the registry's copy. */
+  fleetPaused?: (fleetId: string) => Promise<boolean>;
   unauthorized: () => Response;
 }
 
@@ -337,6 +358,11 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     const verdict = await deps.authorizeDevice(claimed);
     if (!verdict.ok) return verdict.response;
     caller = { admin: false, deviceId: claimed };
+    // A paused fleet is answered here, before anything that wakes an object: not
+    // the fleet's, and not the registry's (markSeen below).
+    if (deps.fleetPaused && action !== undefined && PAUSED_ACTIONS.has(action) && (await deps.fleetPaused(fleetId))) {
+      return pausedAnswer();
+    }
     // The device is alive: it just proved it. Without this a device that
     // only ever talks to the fleet would be collected as unused.
     await markSeen(env, claimed);
@@ -360,6 +386,23 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     if ((body.count ?? 0) >= MAX_FLEETS_PER_DEVICE) {
       return Response.json({ error: "too many fleets created by this device" }, { status: 429 });
     }
+  }
+
+  // A member listens for what happens in the fleet over a socket, so it does not
+  // have to ask. Only a member may listen - the object checks - and a paused
+  // fleet still lets it, because that is how the member hears the pause end.
+  if (action === "events") {
+    if (request.method !== "GET") return Response.json({ error: "events is a GET" }, { status: 405 });
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return Response.json({ error: "expected a websocket upgrade" }, { status: 426 });
+    }
+    if (caller.admin || !caller.deviceId) return deps.unauthorized();
+    const listenHeaders = new Headers(request.headers);
+    listenHeaders.set("x-prime-caller", "device");
+    listenHeaders.set("x-prime-device", caller.deviceId);
+    listenHeaders.set("x-prime-fleet", fleetId);
+    const listenStub = namespace.get(namespace.idFromName(fleetId));
+    return await listenStub.fetch(new Request("https://fleet/events", { method: "GET", headers: listenHeaders }));
   }
 
   // Reaping a fleet nobody can reach.
@@ -469,7 +512,9 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
         .fetch("https://fleet/vacate", {
           method: "POST",
           headers: vacateHeaders,
-          body: JSON.stringify({ deviceId: ask.holder }),
+          // quiet: the asker takes the place on the repeat just below; nobody else
+          // needs to be woken for it.
+          body: JSON.stringify({ deviceId: ask.holder, quiet: true }),
         })
         .catch(() => null);
       response = await stub.fetch(target.toString(), { method, headers, body });

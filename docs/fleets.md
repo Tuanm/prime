@@ -185,7 +185,9 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | the space in charge stops | it gives up the lease at once; the next member that asks takes over |
 | its tunnel goes away | the next ask finds the holder not connected, takes it out of the running, and the waiting member takes over in a second or two |
 | the operator switches a space off | the same, at once; it stays a member until it is removed |
-| the operator pauses the fleet | nothing joins, nobody takes a place, nothing is published; members and leases stay |
+| the operator pauses the fleet | nothing joins, nobody takes a place, nothing is published; members stay, the lease runs out. The agents are told over their socket and stop asking, so a paused fleet costs the gateway nothing until it is resumed |
+| the operator resumes it | the agents are told at once and a primary is back in about a second |
+| the agent's socket drops, or the gateway has none | the agent falls back to asking, as it always did; it looks for the socket again by itself |
 | no member holds the lease | the next member whose agent asks takes it; a call in that gap is refused with "no primary right now" |
 | the holder's agent stops | its place lapses when the lease runs out; five seconds later another member's agent asks and takes it |
 | the holder's machine reboots | the same, and the reason the agent belongs in a service: `prime fleets agent install` |
@@ -222,6 +224,22 @@ place is gone - and a fleet keeps answering its clients meanwhile.
 A fleet is the expensive part of the gateway: its agents keep the objects awake
 and send a request every few seconds, so the bill is mostly object minutes, not
 traffic.
+
+An agent that can **listen** does not ask. It keeps one socket to its fleet, and the
+fleet says when something happens: a new snapshot, the lease free, a pause, a resume.
+The ping that keeps the socket honest is answered by the runtime without waking the
+fleet, and an object with nothing to say is allowed to sleep. So while a fleet is
+**paused** the gateway sees no request at all from its members, apart from one now and
+then to renew the socket. Measured against a live gateway, three spaces over ninety
+seconds:
+
+| | requests to the Worker | requests to objects |
+|---|---|---|
+| paused, agents that ask (before) | 114 | 200 |
+| paused, agents that listen | 4 | 0 |
+
+A running fleet still sends the requests that are its work: the primary renews the
+lease and publishes, the others pull what was published.
 
 The gateway counts what it does - requests, the minutes each object was awake,
 the objects stored and read - and prices them at Cloudflare's list prices with

@@ -116,6 +116,10 @@ export class RegistryDO extends DurableObject<Env> {
   private fleetCreates = new FleetCreationAllowance();
   private fleets = new Set<string>(); // the fleets that exist (persisted)
   private fleetBuddies = new Map<string, string>(); // fleetId -> token (persisted)
+  // The fleets the operator has paused. The fleet object is the authority on this;
+  // the registry keeps a copy so the Worker can answer for a paused fleet without
+  // waking the object, which is the whole point of pausing one.
+  private pausedFleets = new Set<string>(); // fleetId (persisted)
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -128,6 +132,10 @@ export class RegistryDO extends DurableObject<Env> {
       try {
         const savedFleets = (await this.ctx.storage.get<string[]>("fleets")) || [];
         for (const id of savedFleets) if (validFleetId(id)) this.fleets.add(id);
+      } catch {}
+      try {
+        const paused = (await this.ctx.storage.get<string[]>("paused_fleets")) || [];
+        for (const id of paused) if (validFleetId(id)) this.pausedFleets.add(id);
       } catch {}
       try {
         const buddies = (await this.ctx.storage.get<Record<string, string>>("fleet_buddies")) || {};
@@ -286,9 +294,24 @@ export class RegistryDO extends DurableObject<Env> {
         this.fleets.delete(id);
         // A fleet that no longer exists cannot be reached as a device.
         if (this.fleetBuddies.delete(id)) await this.persistFleetBuddies();
+        // ...and a fleet that is gone is not paused: the name may be made again.
+        if (this.pausedFleets.delete(id)) await this.persistPaused();
       }
       await this.persistFleets();
       return Response.json({ ok: true, fleets: this.fleets.size });
+    }
+
+    // Whether the fleet is paused, as the operator last said. The Worker reads it
+    // from the snapshot and answers for a paused fleet itself.
+    if (request.method === "POST" && path === "/fleet-paused") {
+      const id = url.searchParams.get("id") || "";
+      if (!validFleetId(id)) return Response.json({ error: "invalid fleet id" }, { status: 400 });
+      const want = url.searchParams.get("paused") === "1";
+      const had = this.pausedFleets.has(id);
+      if (want && !had) this.pausedFleets.add(id);
+      if (!want && had) this.pausedFleets.delete(id);
+      if (want !== had) await this.persistPaused();
+      return Response.json({ ok: true, paused: want });
     }
 
     // Whether an id is already spoken for. A fleet is reached as a device
@@ -379,6 +402,7 @@ export class RegistryDO extends DurableObject<Env> {
         online: [...this.online.keys()],
         locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([id]) => id),
         buddies: Object.fromEntries(this.fleetBuddies),
+        paused: [...this.pausedFleets],
       });
     }
 
@@ -846,6 +870,12 @@ export class RegistryDO extends DurableObject<Env> {
   private async persistFleetBuddies(): Promise<void> {
     try {
       await this.ctx.storage.put("fleet_buddies", Object.fromEntries(this.fleetBuddies));
+    } catch {}
+  }
+
+  private async persistPaused(): Promise<void> {
+    try {
+      await this.ctx.storage.put("paused_fleets", [...this.pausedFleets]);
     } catch {}
   }
 
