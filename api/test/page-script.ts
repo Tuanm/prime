@@ -67,8 +67,20 @@ export class FakeEl {
     };
   }
 
+  /** The element this one was appended to, as in a browser; a toast looks here when it fades. */
+  parentNode: FakeEl | null = null;
+
   appendChild(child: FakeEl): FakeEl {
     this.children.push(child);
+    child.parentNode = this;
+    return child;
+  }
+  /** A page that keeps a short list - toasts - drops the oldest by removing it. */
+  removeChild(child: FakeEl): FakeEl {
+    const at = this.children.indexOf(child);
+    if (at >= 0) this.children.splice(at, 1);
+    child.parentNode = null;
+    child.markDetached();
     return child;
   }
   addEventListener(ev: string, fn: Listener): void {
