@@ -143,7 +143,7 @@ try {
     ok((await gp.evaluate(() => typeof (window as any).__sandbox)) === "undefined", "no page content (its script never ran) before signing in");
     await gp.fill("#gate-token", "definitely-wrong");
     await gp.click("#gate-go");
-    await gp.waitForFunction(() => /do not match/.test(document.getElementById("gate-err")?.textContent || ""), null, { timeout: 15000 });
+    await gp.waitForFunction(() => /do not match/.test(document.getElementById("toasts")?.textContent || ""), null, { timeout: 15000 });
     ok(true, "a wrong token is refused with the form still up");
     await gp.fill("#gate-token", TOKEN);
     await gp.click("#gate-go");
@@ -174,7 +174,7 @@ try {
       await hp.fill("#gate-device", ID);
       await hp.fill("#gate-token", TOKEN);
       await hp.click("#gate-go");
-      await hp.waitForFunction(() => /not keeping the session cookie/.test(document.getElementById("gate-err")?.textContent || ""), null, { timeout: 15000 });
+      await hp.waitForFunction(() => /not keeping the session cookie/.test(document.getElementById("toasts")?.textContent || ""), null, { timeout: 15000 });
       ok(true, "a browser that drops the cookie is told so instead of looping back to the form");
       await hostile.close();
     }
@@ -625,7 +625,7 @@ try {
   ok(squatter.ok, "(another device connects as " + ID + ")");
   await sleep(500);
   await page.click("#connect");
-  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "idle" && /already connected/.test(document.getElementById("status").textContent), null, { timeout: 15000 });
+  await page.waitForFunction(() => window.__sandbox && window.__sandbox.state() === "idle" && /already connected/.test(document.querySelector(".utoasts")?.textContent || ""), null, { timeout: 15000 });
   ok(true, "Connect while " + ID + " is online elsewhere: refused with a clear message");
   squatter.ws.close();
   ok(!(await page.getAttribute("#favicon", "href")).includes("%2316a34a"), "disconnected: the tab icon is back to black");

@@ -148,6 +148,8 @@ describe("admin View dialog", () => {
     const admin = await openAdmin();
     try {
       const { page } = admin;
+      // Anonymous devices have their own tab; the row is not on screen until it is chosen.
+      await page.click("#deviceTabs .utab[data-tab=anonymous]");
       const row = await rowWith(page, "e8aaeb02");
       await row.locator(".menu-btn").click();
       expect((await row.locator(".menu button").allTextContents())[0]).toBe("View");

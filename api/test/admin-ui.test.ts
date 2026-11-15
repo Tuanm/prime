@@ -32,6 +32,8 @@ interface El {
   contains(other: El): boolean;
   hidden: boolean;
   removeAttribute(name: string): void;
+  classList: { add(name: string): void; remove(name: string): void; contains(name: string): boolean };
+  parentNode?: El;
 }
 
 function makeEl(tag: string): El {
@@ -49,6 +51,14 @@ function makeEl(tag: string): El {
     disabled: false,
     innerHTML: "",
     listeners: {},
+    // A toast fades by adding a class a few seconds after it appears. A stand-in that
+    // lacks it throws from that timer, long after the test that made it has ended, and
+    // the runner blames whichever test is running by then.
+    classList: {
+      add(name) { const have = new Set(el.className.split(/\s+/).filter(Boolean)); have.add(name); el.className = [...have].join(" "); },
+      remove(name) { el.className = el.className.split(/\s+/).filter((c) => c && c !== name).join(" "); },
+      contains(name) { return el.className.split(/\s+/).includes(name); },
+    },
     appendChild(child) { this.children.push(child); return child; },
     removeChild(child) { this.children = this.children.filter((c) => c !== child); },
     setAttribute(name, value) {
