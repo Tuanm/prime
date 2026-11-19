@@ -10,6 +10,7 @@ import { sessionFrom } from "./session";
 import { FAVICON, UI_CSS } from "./ui-css";
 import { authorizeDevice } from "./files-routes";
 import type { Env } from "./config";
+import { pepperFrom, ticketKey, verifierFor } from "./token-hash";
 
 const SANDBOX_CSS = `
       /* 720px is the comfortable desktop width; on a phone it must not force a
@@ -2622,10 +2623,11 @@ const RUNTIME_CSP = [
 ].join("; ");
 
 // ---- WebSocket tickets ----------------------------------------------------------
-// "<exp>.<nonce>.<sig>", sig = HMAC-SHA256(device token, "sandbox|id|exp|nonce").
+// "<exp>.<nonce>.<sig>", sig = HMAC-SHA256(ticketKey(verifier), "sandbox|id|exp|nonce").
 // Short-lived (30 s), bound to the device id, single-use (the DO remembers the
-// nonce). Signed with the device's own token: no extra secret to manage, and
-// rotating the token invalidates outstanding tickets.
+// nonce). The key comes from the device's verifier through TOKEN_PEPPER
+// (token-hash.ts): the verifiers alone cannot mint a ticket, and replacing the
+// token invalidates outstanding tickets.
 export const TICKET_TTL_MS = 30_000;
 
 function b64url(bytes: Uint8Array): string {
@@ -2634,24 +2636,31 @@ function b64url(bytes: Uint8Array): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function ticketSig(deviceId: string, token: string, exp: string, nonce: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(token), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+async function ticketSig(env: { TOKEN_PEPPER?: string }, deviceId: string, verifier: string, exp: string, nonce: string): Promise<string> {
+  const key = await ticketKey(env, verifier);
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("sandbox|" + deviceId + "|" + exp + "|" + nonce));
   return b64url(new Uint8Array(sig));
 }
 
-export async function signTicket(deviceId: string, token: string, now = Date.now()): Promise<string> {
+export async function signTicket(env: { TOKEN_PEPPER?: string }, deviceId: string, verifier: string, now = Date.now()): Promise<string> {
   const exp = String(now + TICKET_TTL_MS);
   const nonce = b64url(crypto.getRandomValues(new Uint8Array(16)));
-  return exp + "." + nonce + "." + (await ticketSig(deviceId, token, exp, nonce));
+  return exp + "." + nonce + "." + (await ticketSig(env, deviceId, verifier, exp, nonce));
 }
 
-export async function verifyTicket(deviceId: string, ticket: string, token: string, now = Date.now()): Promise<{ nonce: string } | null> {
+export async function verifyTicket(
+  env: { TOKEN_PEPPER?: string },
+  deviceId: string,
+  ticket: string,
+  verifier: string,
+  now = Date.now(),
+): Promise<{ nonce: string } | null> {
+  if (pepperFrom(env) === null) return null;
   const parts = ticket.split(".");
   if (parts.length !== 3 || !/^\d{13}$/.test(parts[0]) || !/^[\w-]{16,64}$/.test(parts[1])) return null;
   const exp = Number(parts[0]);
   if (exp < now || exp > now + TICKET_TTL_MS + 5_000) return null;
-  const expected = await ticketSig(deviceId, token, parts[0], parts[1]);
+  const expected = await ticketSig(env, deviceId, verifier, parts[0], parts[1]);
   if (expected.length !== parts[2].length) return null;
   let diff = 0;
   for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ parts[2].charCodeAt(i);
@@ -2727,8 +2736,9 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
     if (request.headers.get("x-sandbox") !== "1") return Response.json({ error: "missing x-sandbox header" }, { status: 400, headers: base });
     const auth = await authorizeDevice(env, request);
     if (auth instanceof Response) return refusal(auth, base);
-    // The ticket is signed with the device's token: either the Basic password a
-    // script sends, or the one the page's sign-in form stored in its cookie.
+    // The ticket is signed for the device's verifier, made from its token:
+    // either the Basic password a script sends, or the one the page's sign-in
+    // form stored in its cookie. authorizeDevice has just checked it.
     const token = basicPassword(request) ?? sessionFrom(request)?.token ?? null;
     if (!token) return sandboxUnauthorized(base);
     let online = false;
@@ -2736,7 +2746,7 @@ export async function handleSandbox(request: Request, env: Env, url: URL): Promi
       const r = await env.DEVICES.get(env.DEVICES.idFromName(auth.deviceId)).fetch("https://device/online");
       online = ((await r.json()) as { online?: boolean }).online === true;
     } catch {}
-    const ticket = await signTicket(auth.deviceId, token);
+    const ticket = await signTicket(env, auth.deviceId, await verifierFor(env, "device", token));
     const wsBase = (url.protocol === "https:" ? "wss://" : "ws://") + url.host;
     return Response.json(
       { device_id: auth.deviceId, online, ticket, ws_url: wsBase + "/device/ws/" + encodeURIComponent(auth.deviceId) + "?ticket=" + encodeURIComponent(ticket), device_url: url.origin + "/device/" + encodeURIComponent(auth.deviceId), expires_in_ms: TICKET_TTL_MS },

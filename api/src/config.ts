@@ -137,6 +137,9 @@ export interface Env {
   DEVICE_TOKEN?: string;
   DEVICE_TOKENS?: string; // JSON map { deviceId: token } - per-device secrets (secret)
   ADMIN_TOKEN?: string;
+  // Keys the verifiers the gateway keeps instead of tokens (src/token-hash.ts).
+  // A secret of at least 32 characters; without it no device token is checked.
+  TOKEN_PEPPER?: string;
   RATE_LIMIT_WINDOW_MS?: string;
   RATE_LIMIT_MAX?: string;
   TIMEOUT_MS?: string;

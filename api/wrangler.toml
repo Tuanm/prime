@@ -2,6 +2,7 @@
 #
 # Deploy:
 #   cd gateway
+#   wrangler secret put TOKEN_PEPPER      # REQUIRED: 32+ random characters, before the first deploy of this version
 #   wrangler secret put GATEWAY_TOKEN     # optional bearer token for /mcp/*
 #   wrangler secret put DEVICE_TOKEN      # optional bearer token for /ws/* device auth
 #   wrangler secret put ADMIN_TOKEN       # optional; defaults to GATEWAY_TOKEN for /devices
@@ -78,6 +79,12 @@ binding = "KV"
 id = "d36acd23e12945058bf9910182deeec7"
 
 # Secrets (set with `wrangler secret put`):
+#   TOKEN_PEPPER    REQUIRED. Keys the verifiers the gateway keeps in place of
+#                   buddy and fleet tokens (src/token-hash.ts). At least 32
+#                   random characters. Set it before deploying; without it no
+#                   device token is accepted. Changing it ends every token.
+#                   The first load migrates the registry, so a deploy of this
+#                   version cannot be rolled back to one without it.
 #   DEVICE_TOKENS   JSON map { "deviceId": "token", ... } - REQUIRED for secure
 #                   deployments. Authenticates devices at /ws connect and
 #                   relay requests at /mcp, so an attacker cannot claim or

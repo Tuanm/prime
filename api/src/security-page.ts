@@ -61,6 +61,7 @@ __CSS__
 
     <h2>Every request is proved</h2>
     <p class="desc">A buddy is an ID and a token. The gateway checks the pair before it moves anything, and a request that does not match gets a refusal and nothing else - it cannot even tell a real ID from a made-up one. A revoked token stops working at the next request.</p>
+    <p class="desc">The gateway keeps only a fingerprint of each token in its storage, never the token itself. The fingerprint is keyed with a secret held apart from that storage, so a copy of what it stores gives nobody a token that works. That is why a token is shown once, when it is made, and a lost one is replaced rather than looked up. A token the operator hands over as a deploy secret stays in the platform's secret store, with the gateway's other secrets.</p>
 
     <h2>The gateway carries, it does not read</h2>
     <p class="desc">What is stored for a buddy or a space is sealed for that space's own key, and the key never leaves the machine it belongs to. The gateway holds ciphertext: it can lose it or refuse to pass it on, but it cannot open it.</p>

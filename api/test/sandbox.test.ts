@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderGatePage, gateResponse } from "../src/gate-ui";
 import { RUNTIME_JS, STARTER_TOOLS, renderSandboxPage, signTicket, verifyTicket } from "../src/sandbox";
+import { verifierFor } from "../src/token-hash";
 
 // Run the runtime's analyzer as the sandboxed iframe would, with a fake parent.
 function analyzer() {
@@ -84,17 +85,29 @@ describe("sandbox tool validation", () => {
 });
 
 describe("sandbox WebSocket tickets", () => {
+  const env = { TOKEN_PEPPER: "sandbox-test-pepper-0123456789abcdef" };
+
   test("valid for its device and token, within 30 s", async () => {
     const now = Date.now();
-    const ticket = await signTicket("demo", "tok", now);
-    expect(await verifyTicket("demo", ticket, "tok", now + 1000)).not.toBeNull();
-    expect(await verifyTicket("other", ticket, "tok", now)).toBeNull();
-    expect(await verifyTicket("demo", ticket, "rotated", now)).toBeNull();
-    expect(await verifyTicket("demo", ticket, "tok", now + 31_000)).toBeNull();
+    const v = await verifierFor(env, "device", "tok");
+    const ticket = await signTicket(env, "demo", v, now);
+    expect(await verifyTicket(env, "demo", ticket, v, now + 1000)).not.toBeNull();
+    expect(await verifyTicket(env, "other", ticket, v, now)).toBeNull();
+    // A replaced token has another verifier: its old tickets stop working.
+    expect(await verifyTicket(env, "demo", ticket, await verifierFor(env, "device", "rotated"), now)).toBeNull();
+    expect(await verifyTicket(env, "demo", ticket, v, now + 31_000)).toBeNull();
     const [exp, nonce, sig] = ticket.split(".");
-    expect(await verifyTicket("demo", [String(Number(exp) + 60_000), nonce, sig].join("."), "tok", now)).toBeNull();
-    expect(await verifyTicket("demo", [exp, nonce, sig.slice(0, -2) + "AA"].join("."), "tok", now)).toBeNull();
-    expect(await verifyTicket("demo", "garbage", "tok", now)).toBeNull();
+    expect(await verifyTicket(env, "demo", [String(Number(exp) + 60_000), nonce, sig].join("."), v, now)).toBeNull();
+    expect(await verifyTicket(env, "demo", [exp, nonce, sig.slice(0, -2) + "AA"].join("."), v, now)).toBeNull();
+    expect(await verifyTicket(env, "demo", "garbage", v, now)).toBeNull();
+  });
+
+  test("the verifiers alone cannot mint one: the pepper is part of the key", async () => {
+    const now = Date.now();
+    const v = await verifierFor(env, "device", "tok");
+    const ticket = await signTicket(env, "demo", v, now);
+    expect(await verifyTicket({ TOKEN_PEPPER: "another-pepper-0123456789abcdefgh" }, "demo", ticket, v, now)).toBeNull();
+    expect(await verifyTicket({}, "demo", ticket, v, now)).toBeNull();
   });
 });
 

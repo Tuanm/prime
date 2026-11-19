@@ -130,6 +130,8 @@ These need Cloudflare Access, unless the row says otherwise. The gateway verifie
 
 **Every call is proved.** A buddy is an id and a token. The gateway checks both before it moves anything, on the tunnel and again on every call. A wrong pair gets a plain refusal, and an unknown id gets the same refusal, so nobody can tell a real buddy from a made-up one. A buddy that is switched off loses its tunnel at once, and a rotated token stops working at the next call. An address the operator blocks reaches nothing but the operator page.
 
+**The gateway keeps a fingerprint, not the token.** For every buddy and every fleet it stores only a fingerprint of the token, keyed with `TOKEN_PEPPER`, a secret held apart from that storage. A copy of what the gateway stores gives nobody a token that works. The operator page shows a token once, when it is made, and after that only a short fingerprint to tell tokens apart; a lost token is replaced, not looked up. Tokens given as deploy secrets (`DEVICE_TOKENS`, `VIRTUAL_DEVICE_TOKENS`, `DEVICE_TOKEN`) stay in Cloudflare's secret store, where every secret of the gateway lives.
+
 **One tunnel, one buddy.** Each buddy has a place of its own. A tunnel can answer only the calls made to its own id, so a call can never land on the wrong machine.
 
 **The gateway carries what it cannot read.** File contents are bytes it never inspects. A fleet's snapshots are sealed for the members' keys, so the gateway stores ciphertext it cannot open. It keeps no request log.
@@ -138,7 +140,7 @@ These need Cloudflare Access, unless the row says otherwise. The gateway verifie
 
 **Anonymous buddies are kept small.** A stranger can ask for a buddy and get a short code. That buddy is rate-limited harder, cannot store files, and locks for ten minutes after twenty wrong codes. A fleet invite is single use, short lived and stored as a hash, and nothing joins a fleet unnoticed: the operator admits each buddy by hand.
 
-**A fleet call carries the primary's credential.** The gateway relays with the token of the member that holds the lease. Which member that is comes from a proven credential, never from a string the caller sends.
+**A fleet call is proved once, at the door.** The gateway checks the caller against the fleet's own token, or against its own membership, then relays the call to the member that holds the lease. Which member that is comes from the fleet's lease, never from a string the caller sends, and no token is handed on.
 
 ## Limits
 
@@ -199,6 +201,7 @@ prime files list                                 # what is left, and when it goe
 Set the secrets once and change the rest only when a machine or a call needs more room. Every default below is chosen to be safe.
 
 ```bash
+npx wrangler secret put TOKEN_PEPPER       # required, first: 32+ random characters
 npx wrangler secret put GATEWAY_TOKEN      # who may call the gateway
 npx wrangler secret put DEVICE_TOKENS      # JSON map of buddy id to token
 npx wrangler secret put ADMIN_TOKEN        # who may list the online buddies
@@ -209,6 +212,7 @@ npx wrangler deploy                        # publish the gateway
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `TOKEN_PEPPER` | unset | Required. The secret the gateway keys every token fingerprint with: at least 32 random characters. Without it no buddy is let in. Changing it ends every buddy and fleet token. |
 | `GATEWAY_TOKEN` | unset | The token a client presents. When unset, the gateway is open. |
 | `DEVICE_TOKENS` | unset | JSON map of buddy id to token. Preferred over one shared token. |
 | `DEVICE_TOKEN` | unset | One token for every buddy, used when there is no map. |

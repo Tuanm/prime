@@ -17,11 +17,13 @@
 //
 // All device state (WebSocket + pending requests) lives in a DeviceDO keyed by
 // deviceId, so every HTTP request finds the right tunnel regardless of which
-// isolate handled it. The device->token registry is writable and lives in the
+// isolate handled it. The device registry is writable and lives in the
 // RegistryDO (durable storage), seeded once from the DEVICE_TOKENS secret, so
-// the admin UI can register devices at runtime without a redeploy.
+// the admin UI can register devices at runtime without a redeploy. It keeps a
+// verifier per device (src/token-hash.ts), never the token.
 
 import { anonConfig, loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
+import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, tokenVerifies } from "./token-hash";
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { ADMIN_HTML } from "./admin-ui";
@@ -291,7 +293,8 @@ async function resolveSnapshot(env: Env, deviceId: string): Promise<RegistrySnap
 
 interface DeviceAuth {
   denied: Response | null;
-  expected?: string; // the token the device must present (undefined in open mode)
+  expected?: string; // what the device's credential must match: a verifier, or the shared DEVICE_TOKEN (undefined in open mode)
+  presented?: string; // the caller's credential in the same form as `expected`, once it matched
   anonymous: boolean;
 }
 
@@ -376,23 +379,22 @@ async function relayToFleet(
     );
   }
 
-  // The gateway relays on the primary's behalf, so it uses the primary's
-  // own credential.
+  // The gateway relays on the primary's behalf. It has proved the caller and
+  // it learned the primary from the fleet's own lease, so it hands nobody's
+  // token on: it keeps none to hand. The primary must still be a device this
+  // gateway knows.
   const snap = await effectiveSnapshot(env);
-  const primaryToken = snap.map.get(body.primary) ?? cfg.deviceToken;
-  if (!primaryToken) return Response.json({ error: "the fleet's primary has no credential" }, { status: 503 });
+  if (!snap.map.has(body.primary) && !cfg.deviceToken) {
+    return Response.json({ error: "the fleet's primary is not registered on this gateway" }, { status: 503 });
+  }
 
   const deviceStub = env.DEVICES.get(env.DEVICES.idFromName(body.primary));
   const doUrl = new URL(url);
   doUrl.pathname = "/mcp";
-  // The credential travels in the header, the same way it does for a call
-  // that names a device: the object forwards it to the device, and the
-  // device checks it.
   doUrl.search = "";
   const relayHeaders = new Headers();
   relayHeaders.set("content-type", request.headers.get("content-type") || "application/json");
   relayHeaders.set("x-device-id", body.primary);
-  relayHeaders.set("x-device-token", primaryToken);
   const cip = clientIp(request);
   if (cip && cip !== "unknown") relayHeaders.set("x-client-ip", cip);
   const sid = request.headers.get("mcp-session-id");
@@ -420,7 +422,7 @@ async function relayToFleet(
 }
 
 /**
- * The token a fleet answers to as a device, if it is a fleet at all.
+ * The verifier of the token a fleet answers to as a device, if it is a fleet at all.
  *
  * A fleet is reached under its own name: the operator gives it a token, and
  * a client that presents it talks to the fleet's primary without being a
@@ -428,16 +430,20 @@ async function relayToFleet(
  * so a device keeps its own route.
  */
 async function fleetBuddyToken(env: Env, id: string): Promise<string | undefined> {
-  // The token rides in the registry snapshot, which every request already
+  // The verifier rides in the registry snapshot, which every request already
   // reads: looking a fleet up costs nothing extra.
   const snap = await effectiveSnapshot(env);
   return snap.buddies.get(id);
 }
 
-/** Whether the request carries the given token. */
-function tokenMatches(request: Request, url: URL, expected: string): boolean {
-  const given = extractDeviceToken(request, url);
-  return !!given && timingSafeEq(given, expected);
+/** What the operator sees of a fleet's token: its fingerprint, or "" for none. */
+async function buddyFingerprint(stored: string | undefined): Promise<string> {
+  return isVerifier(stored) ? fingerprint(stored) : "";
+}
+
+/** Whether the request carries the fleet token this verifier was made from. */
+async function tokenMatches(env: Env, request: Request, url: URL, verifier: string): Promise<boolean> {
+  return tokenVerifies(env, "fleet", extractDeviceToken(request, url), verifier);
 }
 
 /**
@@ -685,8 +691,9 @@ async function adminFleets(env: Env): Promise<Response> {
       fleet: id,
       label: body.meta?.label ?? "",
       disabled: body.meta?.disabled === true,
-      // The token this fleet answers to as a device, if the operator set one.
-      buddy: snapshot.buddies.get(id) ?? "",
+      // Which token this fleet answers to as a device, if the operator set
+      // one: a fingerprint, never the token.
+      buddy: await buddyFingerprint(snapshot.buddies.get(id)),
       members,
       memberCount: members.length,
       primary: primaryBody.primary ?? null,
@@ -731,7 +738,19 @@ async function adminFleetAction(env: Env, fleetId: string, step: string, body: R
   return Response.json(answer);
 }
 
-async function authorizeDevice(deviceId: string, request: Request, url: URL, cfg: GatewayConfig, env: Env): Promise<DeviceAuth> {
+async function authorizeDevice(
+  deviceId: string,
+  request: Request,
+  url: URL,
+  cfg: GatewayConfig,
+  env: Env,
+  // A sandbox ticket for this device that the caller has already verified: it
+  // stands in for the token, which a browser WebSocket cannot send.
+  ticketVerified = false,
+): Promise<DeviceAuth> {
+  // Without the pepper no token can be checked, so none is accepted - and the
+  // refusal says why, instead of passing for an open gateway or a wrong token.
+  if (pepperFrom(env) === null) return { denied: pepperMissingResponse(), anonymous: false };
   const snap = await resolveSnapshot(env, deviceId);
   const anonymous = snap.anon.has(deviceId);
   if (hasNonVirtualDevice(snap, env) && !snap.map.has(deviceId)) return { denied: unauthorized(), anonymous };
@@ -743,10 +762,22 @@ async function authorizeDevice(deviceId: string, request: Request, url: URL, cfg
       anonymous,
     };
   }
-  const expected = snap.map.get(deviceId) ?? cfg.deviceToken;
+  // The registry holds a verifier; the one shared DEVICE_TOKEN is an env secret
+  // and compares as it is. `presented` is the caller's credential in the same
+  // form as `expected`, for the Durable Object's own check on the upgrade.
+  const stored = snap.map.get(deviceId);
+  const expected = stored ?? cfg.deviceToken;
+  const given = extractDeviceToken(request, url);
+  let presented: string | undefined = given ?? undefined;
   if (expected !== undefined) {
-    const given = extractDeviceToken(request, url);
-    if (!given || !timingSafeEq(given, expected)) {
+    let match: boolean;
+    if (stored !== undefined) {
+      match = ticketVerified || (await tokenVerifies(env, "device", given, stored));
+      presented = match ? stored : undefined;
+    } else {
+      match = !!given && timingSafeEq(given, expected);
+    }
+    if (!match) {
       if (anonymous) {
         try {
           const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
@@ -761,7 +792,7 @@ async function authorizeDevice(deviceId: string, request: Request, url: URL, cfg
   if ((await effectiveDisabledSet(env)).has(deviceId)) {
     return { denied: Response.json({ error: "device disabled" }, { status: 403 }), expected, anonymous };
   }
-  return { denied: null, expected, anonymous };
+  return { denied: null, expected, presented, anonymous };
 }
 
 
@@ -1057,7 +1088,7 @@ export default {
       if (anonRoute) {
         const resolved = await reg.fetch("https://registry/anon/resolve?ref=" + anonRoute[1]);
         if (!resolved.ok) return Response.json({ error: "not found" }, { status: 404 });
-        const { deviceId, token } = (await resolved.json()) as { deviceId: string; token: string };
+        const { deviceId } = (await resolved.json()) as { deviceId: string };
         const action = anonRoute[3] || "";
         if (request.method === "DELETE" && action === "") {
           mapCache = null;
@@ -1092,12 +1123,13 @@ export default {
           return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch("https://device/clients");
         }
         if (request.method === "POST" && action === "tools") {
-          // Same answer the registered-device Tools dialog gets from /mcp, but
-          // relayed here so the code never reaches the browser.
+          // Same answer the registered-device Tools dialog gets, relayed by the
+          // gateway itself: the operator is proved by Access, and the gateway
+          // has no code to hand on.
           if ((await effectiveDisabledSet(env)).has(deviceId)) {
             return Response.json({ error: "device disabled" }, { status: 403 });
           }
-          const headers = new Headers({ "content-type": "application/json", "x-device-id": deviceId, "x-device-token": token });
+          const headers = new Headers({ "content-type": "application/json", "x-device-id": deviceId });
           return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch(new Request("https://device/mcp", {
             method: "POST",
             headers,
@@ -1202,29 +1234,24 @@ export default {
           }
         } catch {}
         mapCache = null;
-        // A new token must invalidate a tunnel opened with the old one: compare
-        // with the current map before the upsert lands.
-        let rotated: string | null = null;
-        try {
-          const body = (await request.clone().json()) as { deviceId?: unknown; token?: unknown };
-          const id = typeof body.deviceId === "string" ? body.deviceId : "";
-          const token = typeof body.token === "string" ? body.token : "";
-          if (validDeviceId(id) && token) {
-            const r = await reg.fetch("https://registry/map");
-            if (r.ok) {
-              const before = ((await r.json()) as { map?: Record<string, string> }).map?.[id];
-              if (before !== undefined && before !== token) rotated = id;
-            }
-          }
-        } catch {}
+        const sent = await request.text();
         const upstream = new Request("https://registry/upsert", {
           method: "POST",
           headers: { "content-type": request.headers.get("content-type") || "application/json" },
-          body: request.body,
+          body: sent,
         });
         const res = await reg.fetch(upstream);
-        if (rotated && res.ok) await kickDeviceTunnel(env, rotated);
-        return res;
+        // A new token must invalidate a tunnel opened with the old one. The
+        // registry is the one that can tell: it compares the verifiers.
+        const answer = (await res.json().catch(() => ({}))) as { rotated?: unknown };
+        if (res.ok && answer.rotated === true) {
+          let id: unknown;
+          try {
+            id = (JSON.parse(sent) as { deviceId?: unknown }).deviceId;
+          } catch {}
+          if (typeof id === "string" && validDeviceId(id.trim())) await kickDeviceTunnel(env, id.trim());
+        }
+        return Response.json(answer, { status: res.status });
       }
       if (request.method === "GET" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/origin")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/origin".length);
@@ -1238,18 +1265,19 @@ export default {
         return stub.fetch("https://device/clients");
       }
       if (request.method === "POST" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/tools")) {
-        // The same answer the tools dialog gets from /mcp, relayed here so
-        // the token never reaches the browser. A fleet member is an
-        // anonymous device, and the admin is not given its token.
+        // A device's tools, for the operator's Tools dialog: relayed by the
+        // gateway itself, which keeps no token to hand on. The operator is
+        // proved by Access; a fleet member is an anonymous device and goes
+        // the same way.
         const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/tools".length);
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
         if ((await effectiveDisabledSet(env)).has(deviceId)) {
           return Response.json({ error: "device disabled" }, { status: 403 });
         }
         const map = await reg.fetch("https://registry/map");
-        const token = map.ok ? ((await map.json()) as { map?: Record<string, string> }).map?.[deviceId] : undefined;
-        if (!token) return Response.json({ error: "no such device" }, { status: 404 });
-        const headers = new Headers({ "content-type": "application/json", "x-device-id": deviceId, "x-device-token": token });
+        const known = map.ok ? ((await map.json()) as { map?: Record<string, string> }).map?.[deviceId] !== undefined : false;
+        if (!known) return Response.json({ error: "no such device" }, { status: 404 });
+        const headers = new Headers({ "content-type": "application/json", "x-device-id": deviceId });
         return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch(new Request("https://device/mcp", {
           method: "POST",
           headers,
@@ -1415,7 +1443,8 @@ export default {
       // gave it: the client does not have to be a member of the fleet.
       const buddy = await fleetBuddyToken(env, deviceId);
       if (buddy !== undefined) {
-        if (!buddy || !tokenMatches(request, url, buddy)) return unauthorized();
+        if (pepperFrom(env) === null) return pepperMissingResponse();
+        if (!buddy || !(await tokenMatches(env, request, url, buddy))) return unauthorized();
         return await relayToFleet(env, request, url, cfg, deviceId, deviceId, true);
       }
 
@@ -1554,20 +1583,21 @@ export default {
       // A Sandbox page connects with ?ticket= (a browser WebSocket cannot send
       // headers, and the device token must never sit in a URL). A valid ticket
       // stands in for the token; the DO then refuses its nonce a second time.
+      if (pepperFrom(env) === null) return pepperMissingResponse();
       let ticketNonce: string | null = null;
       const ticket = url.searchParams.get("ticket");
       if (ticket) {
         const registered = (await resolveSnapshot(env, deviceId)).map.get(deviceId);
-        const verdict = registered === undefined ? null : await verifyTicket(deviceId, ticket, registered);
+        const verdict = registered === undefined ? null : await verifyTicket(env, deviceId, ticket, registered);
         if (!verdict) return unauthorized();
         ticketNonce = verdict.nonce;
         url.searchParams.delete("ticket");
-        const withToken = new Headers(request.headers);
-        withToken.set("x-device-token", registered!);
-        request = new Request(url, { headers: withToken, method: request.method });
+        request = new Request(url, { headers: request.headers, method: request.method });
       }
 
-      const auth = await authorizeDevice(deviceId, request, url, cfg, env);
+      // A verified ticket stands in for the token; the lock and the disabled
+      // checks still run.
+      const auth = await authorizeDevice(deviceId, request, url, cfg, env, ticketNonce !== null);
       if (auth.denied) return auth.denied;
       const expected = auth.expected;
 
@@ -1578,11 +1608,14 @@ export default {
 
       const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
       // Keep the upgrade headers; add x-device-id for the DO, and forward the
-      // validated device token as x-auth-token + the effective expected token
-      // as x-expected-token so the DO's defense-in-depth check matches the
-      // registry (the DO reads x-expected-token first, then its env copy).
+      // checked credential as x-auth-token + what it had to match as
+      // x-expected-token, in the same form (a verifier, or the shared env
+      // token), so the DO's defense-in-depth check matches the registry
+      // without the DO ever seeing a stored token. A client cannot set either.
       const headers = new Headers(request.headers);
       headers.delete("x-ticket-nonce");
+      headers.delete("x-expected-token");
+      headers.delete("x-auth-token");
       // Where this tunnel comes from (kept by the DO for the life of the tunnel):
       // the gateway owner can see which machine holds a device.
       headers.delete("x-tunnel-origin");
@@ -1596,8 +1629,7 @@ export default {
       if (ticketNonce) headers.set("x-ticket-nonce", ticketNonce);
       headers.set("x-device-id", deviceId);
       if (expected !== undefined) headers.set("x-expected-token", expected);
-      const givenToken = extractDeviceToken(request, url);
-      if (givenToken) headers.set("x-auth-token", givenToken);
+      if (auth.presented) headers.set("x-auth-token", auth.presented);
       const upstream = new Request(url, { headers, method: request.method });
       return stub.fetch(upstream);
     }

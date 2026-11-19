@@ -53,13 +53,6 @@ ${UI_CSS}    </style>
         var addBtn = document.getElementById("addBtn");
         var anonListEl = document.getElementById("anonList");
         var countEl = document.getElementById("count");
-        function maskToken(t) {
-          if (!t) return "";
-          if (t.length <= 5) return "***";
-          if (t.length <= 8) return t.charAt(0) + "***" + t.charAt(t.length - 1);
-          if (t.length <= 12) return t.slice(0, 2) + "***" + t.slice(-2);
-          return t.slice(0, 3) + "***" + t.slice(-3);
-        }
 
         var toastsEl = document.getElementById("toasts");
 
@@ -161,17 +154,15 @@ ${UI_CSS}    </style>
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
           tokInput.placeholder = "token";
-          // Masked, like every other token on the page: the whole of it is
-          // handed over once, in the dialog Refresh token opens.
-          var real = f.buddy || "";
-          var masked = maskToken(real);
-          tokInput.value = masked;
-          tokInput.title = real
+          // The gateway keeps a fingerprint of the token, never the token: the
+          // field says which one is set. A token is handed over once, in the
+          // dialog Refresh token opens; typing one here replaces it.
+          var fp = f.buddy || "";
+          tokInput.value = "";
+          if (fp) tokInput.placeholder = "token set · " + fp;
+          tokInput.title = fp
             ? "a token is set; Refresh token shows a new one"
             : "no token is set, so no client can reach this fleet";
-          tokInput.addEventListener("focus", function () {
-            if (tokInput.value === masked) tokInput.select();
-          });
 
           var saveSpec = {
             text: "Save",
@@ -222,9 +213,8 @@ ${UI_CSS}    </style>
             refreshSpec,
           ];
           tokInput.addEventListener("input", function () {
-            var v = tokInput.value.trim();
-            // Save only what would change it: the mask is not the token.
-            saveSpec.el.disabled = v === "" || v === masked || v === real;
+            // Save only what would change it: a token typed in.
+            saveSpec.el.disabled = tokInput.value.trim() === "";
           });
           box.appendChild(idInput);
           box.appendChild(tokInput);
@@ -269,6 +259,37 @@ ${UI_CSS}    </style>
             .catch(function (e) { setStatus("could not save the token: " + e.message, true); });
         }
 
+        /**
+         * Hand a token over, once, in a dialog the operator can copy from.
+         * The gateway keeps only a fingerprint of it: closing the dialog is the
+         * last time anyone sees this token on this page.
+         */
+        function showTokenOnce(title, who, message, token) {
+          var d = openDialog(title, esc(who));
+          d.bodyEl.innerHTML =
+            '<div class="dlg-msg">' + message + " It is shown only this once: copy it now.</div>" +
+            '<div class="dlg-code">' +
+            esc(token) +
+            "</div>" +
+            '<div class="dlg-msg"><button type="button" class="btn" id="copyToken">Copy</button></div>';
+          var copy = d.bodyEl.querySelector("#copyToken");
+          if (copy) {
+            copy.addEventListener("click", function () {
+              var done = function () {
+                copy.textContent = "Copied";
+                setTimeout(function () {
+                  copy.textContent = "Copy";
+                }, 1500);
+              };
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(token).then(done, done);
+              } else {
+                done();
+              }
+            });
+          }
+        }
+
         // A fresh token, handed over once in a dialog the operator can copy
         // from - the card never shows it.
         function fleetBuddyRefresh(fleet) {
@@ -278,29 +299,12 @@ ${UI_CSS}    </style>
             body: JSON.stringify({ token: token }),
           })
             .then(function () {
-              var d = openDialog("Fleet token", fleet);
-              d.bodyEl.innerHTML =
-                '<div class="dlg-msg">A client reaches this fleet with this token. It replaces the one that was set, so a client still using the old one stops working.</div>' +
-                '<div class="dlg-code">' +
-                esc(token) +
-                "</div>" +
-                '<div class="dlg-msg"><button type="button" class="btn" id="copyFleetToken">Copy</button></div>';
-              var copy = d.bodyEl.querySelector("#copyFleetToken");
-              if (copy) {
-                copy.addEventListener("click", function () {
-                  var done = function () {
-                    copy.textContent = "Copied";
-                    setTimeout(function () {
-                      copy.textContent = "Copy";
-                    }, 1500);
-                  };
-                  if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(token).then(done, done);
-                  } else {
-                    done();
-                  }
-                });
-              }
+              showTokenOnce(
+                "Fleet token",
+                fleet,
+                "A client reaches this fleet with this token. It replaces the one that was set, so a client still using the old one stops working.",
+                token,
+              );
               setStatus("new token for " + fleet);
               loadFleets();
             })
@@ -332,9 +336,6 @@ ${UI_CSS}    </style>
           var box = document.createElement("div");
           box.className = "box";
 
-          var realToken = dev.token || "";
-          var masked = maskToken(realToken);
-
           var idInput = document.createElement("input");
           idInput.className = "id-input";
           idInput.placeholder = "id";
@@ -342,17 +343,15 @@ ${UI_CSS}    </style>
           // Cloud devices are registry-managed: the id is read-only.
           if (virtual) idInput.readOnly = true;
 
+          // The gateway keeps a fingerprint of a device's token, never the
+          // token: a registered device's field is empty and says which token it
+          // has. Typing one in replaces it. A new device may leave it empty,
+          // and the page makes one.
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
           tokInput.type = "text";
-          tokInput.value = isNew ? realToken : masked;
-          tokInput.placeholder = "token";
-          if (!isNew) {
-            // Selecting the masked token on focus makes editing replace it.
-            tokInput.addEventListener("focus", function () {
-              if (tokInput.value === masked) tokInput.select();
-            });
-          }
+          tokInput.value = isNew ? dev.token || "" : "";
+          tokInput.placeholder = isNew ? "token (empty: make one)" : dev.fingerprint ? "token set · " + dev.fingerprint : "token";
           if (isNew && pendingObj) {
             // Keep the pending row in sync so a later re-render preserves it.
             idInput.addEventListener("input", function () { pendingObj.id = idInput.value; });
@@ -382,6 +381,11 @@ ${UI_CSS}    </style>
           var saveItem = document.createElement("button");
           saveItem.type = "button";
           saveItem.textContent = "Save";
+          // A fresh token for the device, shown once. Cloud devices take theirs
+          // from the gateway's own secrets, so they have none to replace here.
+          var newTokenItem = document.createElement("button");
+          newTokenItem.type = "button";
+          newTokenItem.textContent = "New token";
           var delItem = document.createElement("button");
           delItem.type = "button";
           delItem.className = "danger";
@@ -406,6 +410,7 @@ ${UI_CSS}    </style>
             menu.appendChild(toolsItem);
             menu.appendChild(clientsItem);
             menu.appendChild(saveItem);
+            if (!virtual) menu.appendChild(newTokenItem);
             menu.appendChild(stateItem);
             if (!virtual) menu.appendChild(delItem);
           }
@@ -428,8 +433,6 @@ ${UI_CSS}    </style>
           // Per-row state: online marker + dirty detection for the menu items.
           li.dataset.online = dev.online ? "1" : "0";
           var origId = dev.deviceId || "";
-          var origToken = realToken;
-          var maskedTok = masked;
 
           cancelItem.addEventListener("click", function () {
             closeMenus();
@@ -440,11 +443,10 @@ ${UI_CSS}    </style>
             }
           });
 
+          // A registered device's field starts empty, so anything typed into it
+          // is a new token.
           function isDirty() {
-            var idChanged = idInput.value.trim() !== origId;
-            var tok = tokInput.value.trim();
-            var tokChanged = !(tok === maskedTok || tok === origToken);
-            return idChanged || tokChanged;
+            return idInput.value.trim() !== origId || tokInput.value.trim() !== "";
           }
 
           function updateMenuState() {
@@ -452,10 +454,8 @@ ${UI_CSS}    </style>
             toolsItem.disabled = !online; // Tools needs a live tunnel
             clientsItem.disabled = virtual || !online; // Clients needs a live tunnel
             // Save does nothing until there is something to save: an edited
-            // device, or a new one with a name and a token to give it.
-            saveItem.disabled = isNew
-              ? !idInput.value.trim() || !tokInput.value.trim()
-              : !isDirty();
+            // device, or a new one with a name (the page makes its token).
+            saveItem.disabled = isNew ? !idInput.value.trim() : !isDirty();
           }
           // Start in the right state, not only after the menu is opened.
           updateMenuState();
@@ -469,7 +469,7 @@ ${UI_CSS}    </style>
           toolsItem.addEventListener("click", function () {
             closeMenus();
             if (li.dataset.online !== "1") return;
-            showToolsDialog(idInput.value.trim() || dev.deviceId, realToken);
+            showToolsDialog(dev.deviceId);
           });
 
           clientsItem.addEventListener("click", function () {
@@ -497,23 +497,49 @@ ${UI_CSS}    </style>
             closeMenus();
             var id = (idInput.value || "").trim();
             var tokVal = tokInput.value.trim();
-            // Unchanged masked token means "keep the real token".
-            if (!isNew && tokVal === masked) tokVal = realToken;
             if (!id) return setStatus("enter a device ID", true);
-            if (!tokVal) return setStatus("enter a token", true);
+            // A new device with no token typed gets one made here, and shown
+            // once: the gateway keeps only its fingerprint.
+            var made = isNew && !tokVal ? randomToken() : "";
+            if (made) tokVal = made;
+            // An id change on an existing device is a rename: the registry swaps
+            // the old entry for the new one in a single step, so it also works
+            // when the gateway is at its device limit. With no token typed the
+            // device keeps the one it has.
+            var payload = { deviceId: id };
+            if (tokVal) payload.token = tokVal;
+            if (!isNew && id !== dev.deviceId) payload.replaces = dev.deviceId;
+            if (!payload.token && !payload.replaces) return setStatus("nothing to save", true);
             setStatus("saving " + id + " ...");
             function fail(e) { setStatus("save failed: " + e.message, true); }
             function done() {
               dropPending();
               setStatus("saved " + id);
+              if (made) {
+                showTokenOnce("Device token", id, "The buddy connects with this id and this token.", made);
+              }
               load();
             }
-            // An id change on an existing device is a rename: the registry swaps
-            // the old entry for the new one in a single step, so it also works
-            // when the gateway is at its device limit.
-            var payload = { deviceId: id, token: tokVal };
-            if (!isNew && id !== dev.deviceId) payload.replaces = dev.deviceId;
             api("/admin/api/devices", { method: "POST", body: JSON.stringify(payload) }).then(done).catch(fail);
+          });
+
+          newTokenItem.addEventListener("click", function () {
+            closeMenus();
+            var id = dev.deviceId;
+            var token = randomToken();
+            setStatus("making a new token for " + id + " ...");
+            api("/admin/api/devices", { method: "POST", body: JSON.stringify({ deviceId: id, token: token }) })
+              .then(function () {
+                showTokenOnce(
+                  "Device token",
+                  id,
+                  "The buddy connects with this token now. It replaces the one it had: the old one stops working, and the tunnel it opened is dropped.",
+                  token,
+                );
+                setStatus("new token for " + id);
+                load();
+              })
+              .catch(function (e) { setStatus("could not make a new token: " + e.message, true); });
           });
 
           delItem.addEventListener("click", function () {
@@ -716,12 +742,11 @@ ${UI_CSS}    </style>
           loadView();
         }
 
-        // List the device's tools, relayed through the gateway tunnel.
-        function showToolsDialog(deviceId, token) {
-          showTools(deviceId, fetch("/mcp/" + encodeURIComponent(deviceId), {
+        // List the device's tools: the gateway relays the call itself, so no
+        // token is needed here (the page never has one).
+        function showToolsDialog(deviceId) {
+          showTools(deviceId, fetch("/admin/api/devices/" + encodeURIComponent(deviceId) + "/tools", {
             method: "POST",
-            headers: { "content-type": "application/json", "x-device-token": token },
-            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
             signal: AbortSignal.timeout(20000),
           }));
         }

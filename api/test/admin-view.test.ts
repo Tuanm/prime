@@ -12,7 +12,7 @@ async function openAdmin(size = { width: 1000, height: 760 }): Promise<{ page: P
   await page.route("**/admin/api/**", (route) => {
     const url = new URL(route.request().url());
     const json = (o: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(o) });
-    if (url.pathname === "/admin/api/devices") return json({ devices: [{ deviceId: "ui-dev", token: "x", online: true }, { deviceId: "other-dev", online: false }], count: 2, max_devices: 100 });
+    if (url.pathname === "/admin/api/devices") return json({ devices: [{ deviceId: "ui-dev", fingerprint: "a1b2c3d4", online: true }, { deviceId: "other-dev", online: false }], count: 2, max_devices: 100 });
     if (url.pathname === "/admin/api/anonymous") return json({ devices: [{ ref: "e8aaeb02ffffffffffffffff", online: true, disabled: false, locked: false, createdAt: Date.now() - 60_000, lastSeenAt: Date.now() - 5_000 }], count: 3, max_devices: 100 });
     if (url.pathname.endsWith("/origin")) {
       if (url.pathname.includes("/anonymous/")) return json({ online: true, origin: { ...origin, ip: "2001:bc8:17c0:420::d8c0" }, block_key: "ipv6:2001:bc8:17c0:420::/64", blocked });
@@ -60,7 +60,7 @@ describe("admin View dialog", () => {
       const { page } = admin;
       const row = await rowWith(page, "ui-dev");
       await row.locator(".menu-btn").click();
-      expect(await row.locator(".menu button").allTextContents()).toEqual(["View", "Tools", "Clients", "Save", "Deactivate", "Delete"]);
+      expect(await row.locator(".menu button").allTextContents()).toEqual(["View", "Tools", "Clients", "Save", "New token", "Deactivate", "Delete"]);
       await row.locator(".menu button", { hasText: "View" }).click();
       await page.waitForFunction(() => /203\.0\.113\.7/.test(document.querySelector(".dlg-body")?.textContent || ""), null, { timeout: 15_000 });
       const body = (await page.textContent(".dlg-body")) || "";

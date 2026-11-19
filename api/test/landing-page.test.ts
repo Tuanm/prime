@@ -34,3 +34,14 @@ describe("landing page", () => {
     expect(script).toContain('/^prime-v/');
   });
 });
+
+describe("security page", () => {
+  test("says the gateway keeps a fingerprint of each token, never the token", async () => {
+    const { SECURITY_HTML } = await import("../src/security-page");
+    const text = SECURITY_HTML.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    expect(text).toContain("keeps only a fingerprint of each token in its storage, never the token itself");
+    // The claim is about the gateway's storage: tokens an operator hands over as
+    // deploy secrets live where every secret lives, and the page says so.
+    expect(text).toContain("deploy secret");
+  });
+});

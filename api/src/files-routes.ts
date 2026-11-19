@@ -15,6 +15,7 @@ import type { FileRecord, FileUsage } from "./files-do";
 import { renderDownloadPage, renderFilesPage, type FileView } from "./files-ui";
 import { clientIp, type RateLimiter } from "./rate-limit";
 import { timingSafeEq } from "./config";
+import { pepperFrom, pepperMissingResponse, tokenVerifies } from "./token-hash";
 import { effectiveDisabledSet } from "./device-state";
 import { gateResponse } from "./gate-ui";
 import { clearSessionCookie, sessionCookie, sessionFrom } from "./session";
@@ -111,6 +112,8 @@ export async function authorizeDevice(env: Env, request: Request): Promise<Devic
 
   const deviceId = basic?.deviceId ?? headerId ?? session?.deviceId ?? "";
   const token = basic?.token ?? headerToken ?? session?.token ?? "";
+  // Without the pepper no token can be checked: say so instead of a 401.
+  if (pepperFrom(env) === null) return pepperMissingResponse();
   if (!validDeviceId(deviceId)) return unauthorized();
   if (!token) return unauthorized();
 
@@ -119,7 +122,7 @@ export async function authorizeDevice(env: Env, request: Request): Promise<Devic
   // rather than falling back to any shared token, so file access always
   // requires a real per-device credential.
   if (expected === undefined) return unauthorized();
-  if (!timingSafeEq(token, expected)) return unauthorized();
+  if (!(await tokenVerifies(env, "device", token, expected))) return unauthorized();
   // Deactivated devices are cut off everywhere, not just at the MCP relay: the
   // pages, the files API and WebSocket tickets all use this credential.
   if ((await effectiveDisabledSet(env)).has(deviceId)) {
@@ -248,8 +251,9 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
     if (request.method === "GET") {
       const session = sessionFrom(request);
       if (!session) return jsonError(401, "no session");
+      if (pepperFrom(env) === null) return pepperMissingResponse();
       const expected = (await deviceMap(env)).get(session.deviceId);
-      if (expected === undefined || !timingSafeEq(session.token, expected)) return jsonError(401, "no session");
+      if (!(await tokenVerifies(env, "device", session.token, expected))) return jsonError(401, "no session");
       if ((await effectiveDisabledSet(env)).has(session.deviceId)) return jsonError(403, "device disabled");
       return new Response(JSON.stringify({ ok: true, device: session.deviceId }), {
         headers: { "content-type": "application/json; charset=utf-8", ...NO_STORE },
@@ -271,8 +275,9 @@ export async function handleFiles(ctx: FilesRouteContext): Promise<Response | nu
     const deviceId = typeof body.device === "string" ? body.device.trim() : "";
     const token = typeof body.token === "string" ? body.token : "";
     if (!validDeviceId(deviceId) || !token) return jsonError(401, "unauthorized");
+    if (pepperFrom(env) === null) return pepperMissingResponse();
     const expected = (await deviceMap(env)).get(deviceId);
-    if (expected === undefined || !timingSafeEq(token, expected)) return jsonError(401, "unauthorized");
+    if (!(await tokenVerifies(env, "device", token, expected))) return jsonError(401, "unauthorized");
     if ((await effectiveDisabledSet(env)).has(deviceId)) return jsonError(403, "device disabled");
     return new Response(JSON.stringify({ ok: true, device: deviceId }), {
       headers: { "content-type": "application/json; charset=utf-8", "set-cookie": sessionCookie(deviceId, token, secure), ...NO_STORE },

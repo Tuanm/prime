@@ -360,9 +360,24 @@ async function s22_admin_registry(): Promise<void> {
     // 2. API is open to the Access-protected path (no worker-level token);
     //    the seeded device is listed
     r = await fetch(g.base + "/admin/api/devices");
-    const list = (await r.json()) as any;
+    const listText = await r.text();
+    const list = JSON.parse(listText) as any;
     if (r.status !== 200 || !(list.devices || []).some((d: any) => d.deviceId === "seed-dev")) {
-      return bad("s22_admin_list", "status=" + r.status + " body=" + JSON.stringify(list));
+      return bad("s22_admin_list", "status=" + r.status + " body=" + listText);
+    }
+    // The list shows which token a device has, never the token itself.
+    const seeded = (list.devices || []).find((d: any) => d.deviceId === "seed-dev");
+    if (listText.includes("seed-tok") || "token" in seeded || !/^[0-9a-f]{8}$/.test(String(seeded.fingerprint))) {
+      return bad("s22_admin_list_no_token", "body=" + listText);
+    }
+    ok("s22_admin_list_no_token");
+    // The token the seed gave still opens the tunnel.
+    {
+      const seedWs = await connectWs(g.base + "/device/ws/seed-dev?token=seed-tok");
+      await recvJson(seedWs, (m) => m.type === "registered");
+      seedWs.close();
+      await Bun.sleep(200);
+      ok("s22_seed_token_works");
     }
     // 3. register a device -> it can now connect over WS
     r = await fetch(g.base + "/admin/api/devices", {
@@ -454,6 +469,19 @@ async function s22_admin_registry(): Promise<void> {
     await recvJson(wsR2, (m) => m.type === "registered");
     wsR2.close();
     ok("s22_rotate_new_token_works");
+    // 6. a rename sends no token: the device keeps the one it has, under the new id
+    await Bun.sleep(300);
+    r = await fetch(g.base + "/admin/api/devices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: "rot-dev2", replaces: "rot-dev" }),
+    });
+    if (r.status !== 200) return bad("s22_rename_without_token", "status=" + r.status + " body=" + (await r.text()));
+    await Bun.sleep(2500);
+    const wsN = await connectWs(g.base + "/device/ws/rot-dev2?token=tok-b");
+    await recvJson(wsN, (m) => m.type === "registered");
+    wsN.close();
+    ok("s22_rename_keeps_token");
     ok("s22_admin_registry");
   } finally {
     await stopWrangler(g.proc);
@@ -680,6 +708,30 @@ async function s20_per_device_unknown_id_401(): Promise<void> {
     try { await connectWs(g.base + "/device/ws/known-dev?token=wrong"); } catch { failed = true; }
     if (!failed) return bad("s20_ws_wrong_token_rejected", "connect succeeded");
     ok("s20_per_device_unknown_id_401");
+  } finally {
+    await stopWrangler(g.proc);
+  }
+}
+
+async function s35_no_pepper_fails_closed(): Promise<void> {
+  // Without a usable TOKEN_PEPPER no token can be checked: every way in is a
+  // 503 that names the missing secret - never an open gateway, never a 401
+  // that hides why.
+  const g = await startWrangler(8815, ["TOKEN_PEPPER=short", "DEVICE_TOKENS=" + JSON.stringify({ "known-dev": "tok-a" }), "GATEWAY_TOKEN=" + GW]);
+  try {
+    let r = await fetch(g.base + "/device/known-dev?token=tok-a", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
+    let body = await r.text();
+    if (r.status !== 503 || !body.includes("TOKEN_PEPPER")) return bad("s35_relay_503", "status=" + r.status + " body=" + body);
+    r = await fetch(g.base + "/device/never-registered", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
+    body = await r.text();
+    if (r.status !== 503 || !body.includes("TOKEN_PEPPER")) return bad("s35_unknown_503", "status=" + r.status + " body=" + body);
+    let failed = false;
+    try { await connectWs(g.base + "/device/ws/known-dev?token=tok-a", {}, 1); } catch { failed = true; }
+    if (!failed) return bad("s35_ws_refused", "connect succeeded");
+    r = await fetch(g.base + "/api/files", { headers: { authorization: "Basic " + btoa("known-dev:tok-a") } });
+    body = await r.text();
+    if (r.status !== 503 || !body.includes("TOKEN_PEPPER")) return bad("s35_files_503", "status=" + r.status + " body=" + body);
+    ok("s35_no_pepper_fails_closed");
   } finally {
     await stopWrangler(g.proc);
   }
@@ -1064,6 +1116,7 @@ async function main(): Promise<void> {
     ["s17", s17_devices_lists_online],
     ["s18", s18_relay_token_forwarded],
     ["s20", s20_per_device_unknown_id_401],
+    ["s35", s35_no_pepper_fails_closed],
     ["s21", s21_long_call],
     ["s22", s22_admin_registry],
     ["s33", s33_blocked_address],

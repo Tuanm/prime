@@ -37,6 +37,7 @@ interface El {
 }
 
 function makeEl(tag: string): El {
+  const parts: Record<string, El> = {};
   const el: El = {
     tagName: tag,
     children: [],
@@ -75,7 +76,13 @@ function makeEl(tag: string): El {
       else delete (this as Record<string, unknown>)[name];
     },
     focus() {},
-    querySelector() { return null; },
+    // The parts of a dialog the page reaches for by selector exist, one per
+    // selector, so what the page writes into a dialog can be read back.
+    // Anything else is not found, as before.
+    querySelector(selector: string) {
+      if (!/^(\.dlg-|#copy)/.test(selector)) return null;
+      return (parts[selector] ||= makeEl("div"));
+    },
     querySelectorAll() { return []; },
     getAttribute(name) { return ((this as Record<string, unknown>)[name] as string) ?? null; },
     contains() { return false; },
@@ -89,14 +96,23 @@ function makeEl(tag: string): El {
   return el;
 }
 
+interface Call {
+  path: string;
+  method: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown> | null;
+}
+
 interface Page {
   byId: Record<string, El>;
+  body: El;
+  calls: Call[];
   click(id: string): void;
   list(): El[];
   settle(): Promise<void>;
 }
 
-function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean } = {}): Page {
+function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean; devices?: unknown[] } = {}): Page {
   // The page as it is served: the template already expanded. Reading the .ts
   // source instead would compile the escaping of the template rather than what
   // the browser is given, and a stray backslash would pass unnoticed.
@@ -137,13 +153,18 @@ function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean } = {}): 
     removeEventListener() {},
     body: makeEl("body"),
   };
-  const fetchStub = async (path: string) => {
+  const calls: Call[] = [];
+  const fetchStub = async (path: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
+    let body: Record<string, unknown> | null = null;
+    try { body = init.body ? JSON.parse(init.body) : null; } catch {}
+    calls.push({ path: String(path), method: init.method || "GET", headers: init.headers || {}, body });
     const fleetsCall = String(path).indexOf("/admin/api/fleets") === 0;
+    const devicesCall = String(path) === "/admin/api/devices" && (init.method || "GET") === "GET";
     const failing = fleetsCall && opts.failFleets;
     return {
       ok: !failing,
       status: failing ? 500 : 200,
-      json: async () => (fleetsCall ? { fleets } : {}),
+      json: async () => (fleetsCall ? { fleets } : devicesCall ? { devices: opts.devices || [] } : {}),
       text: async () => "{}",
       headers: { get: () => null },
     };
@@ -171,6 +192,8 @@ function loadPage(fleets: unknown[] = [], opts: { failFleets?: boolean } = {}): 
   );
   return {
     byId,
+    body: doc.body,
+    calls,
     click(id) {
       for (const handler of byId[id]?.listeners?.click || []) handler({ stopPropagation() {} });
     },
@@ -373,25 +396,24 @@ describe("the fleets in the admin interface", () => {
     expect(action(root, "Create")!.disabled).toBe(false);
   });
 
-  test("there is nothing to save until a new device has a name and a token", () => {
+  test("there is nothing to save until a new device has a name", () => {
     const page = loadPage();
     page.click("addBtn");
     const row = page.byId["list"]!.children[0]!;
     expect(action(row, "Save")!.disabled).toBe(true);
     const field = (i: number) => row.children.find((c) => c.className === "box")!.children[i]!;
+    // The token may stay empty: the page makes one.
     type(field(0), "my-device");
-    expect(action(row, "Save")!.disabled).toBe(true);
-    type(field(1), "a-token");
     expect(action(row, "Save")!.disabled).toBe(false);
   });
 
-  test("a fleet is a buddy in the list, and its token is masked like the others", async () => {
+  test("a fleet is a buddy in the list, and shows which token it has, never the token", async () => {
     const page = loadPage([
       {
         fleet: "acme",
         label: "",
         disabled: false,
-        buddy: "0123456789abcdef0123456789abcdef01234567",
+        buddy: "a1b2c3d4",
         members: [],
         primary: "d1",
         pending: [],
@@ -405,11 +427,11 @@ describe("the fleets in the admin interface", () => {
     expect(row.children[0]!.className).toContain("cloud-ic");
     expect(row.children[0]!.className).not.toContain("hollow");
     const box = row.children.find((c) => c.className === "box")!;
-    // Its own name is the id it answers to; the token is masked, like every
-    // other token on the page.
+    // Its own name is the id it answers to; the field is empty and says which
+    // token is set.
     expect(box.children[0]!.value).toBe("acme");
-    expect(box.children[1]!.value).not.toContain("0123456789abcdef");
-    expect(box.children[1]!.value).toContain("***");
+    expect(box.children[1]!.value).toBe("");
+    expect(box.children[1]!.placeholder).toBe("token set · a1b2c3d4");
     // The actions a buddy has, acting on the space that holds the lease.
     expect(menuOf(row)).toEqual(["View", "Tools", "Clients", "Save", "Deactivate", "Refresh token"]);
     expect(action(row, "Save")!.disabled).toBe(true);
@@ -490,5 +512,99 @@ describe("the fleets in the admin interface", () => {
     expect(toasts.length).toBeGreaterThan(0);
     expect(toasts[toasts.length - 1]!.className).toContain("toast");
     expect(toasts[toasts.length - 1]!.className).toContain("error");
+  });
+});
+
+/** Run an action's click handlers, as a click on it would. */
+function press(el: El | undefined): void {
+  for (const fn of el?.listeners["click"] || []) fn({ stopPropagation() {} });
+}
+
+/** The text of every dialog the page has opened, newest last. */
+function dialogs(page: Page): string[] {
+  return page.body.children
+    .filter((c) => c.className === "overlay")
+    .map((o) => o.querySelector(".dlg-body")!.innerHTML);
+}
+
+describe("a buddy's token in the admin interface", () => {
+  const field = (row: El, i: number) => row.children.find((c) => c.className === "box")!.children[i]!;
+  const posts = (page: Page) => page.calls.filter((c) => c.path === "/admin/api/devices" && c.method === "POST");
+
+  test("a new device needs only a name: the page makes its token and shows it once", async () => {
+    const page = loadPage();
+    page.click("addBtn");
+    const row = page.byId["list"]!.children[0]!;
+    type(field(row, 0), "laptop");
+    press(action(row, "Save"));
+    await page.settle();
+    const sent = posts(page);
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.body!.deviceId).toBe("laptop");
+    const token = String(sent[0]!.body!.token);
+    expect(token).toMatch(/^[0-9a-f]{48}$/);
+    const shown = dialogs(page);
+    expect(shown.length).toBe(1);
+    expect(shown[0]).toContain(token);
+  });
+
+  test("a token the operator types is sent as it is, and not shown back", async () => {
+    const page = loadPage();
+    page.click("addBtn");
+    const row = page.byId["list"]!.children[0]!;
+    type(field(row, 0), "laptop");
+    type(field(row, 1), "their-own-token");
+    press(action(row, "Save"));
+    await page.settle();
+    expect(posts(page)[0]!.body).toEqual({ deviceId: "laptop", token: "their-own-token" });
+    expect(dialogs(page)).toEqual([]);
+  });
+
+  test("a registered device shows which token it has, never a token", async () => {
+    const page = loadPage([], { devices: [{ deviceId: "d1", fingerprint: "a1b2c3d4", online: true }] });
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    expect(field(row, 1).value).toBe("");
+    expect(field(row, 1).placeholder).toBe("token set · a1b2c3d4");
+    expect(action(row, "Save")!.disabled).toBe(true);
+  });
+
+  test("a rename sends no token: the device keeps the one it has", async () => {
+    const page = loadPage([], { devices: [{ deviceId: "d1", fingerprint: "a1b2c3d4", online: true }] });
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    type(field(row, 0), "d2");
+    expect(action(row, "Save")!.disabled).toBe(false);
+    press(action(row, "Save"));
+    await page.settle();
+    expect(posts(page)[0]!.body).toEqual({ deviceId: "d2", replaces: "d1" });
+  });
+
+  test("New token replaces the token and shows the new one once", async () => {
+    const page = loadPage([], { devices: [{ deviceId: "d1", fingerprint: "a1b2c3d4", online: true }] });
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    expect(menuOf(row)).toContain("New token");
+    press(action(row, "New token"));
+    await page.settle();
+    const sent = posts(page);
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.body!.deviceId).toBe("d1");
+    const token = String(sent[0]!.body!.token);
+    expect(token).toMatch(/^[0-9a-f]{48}$/);
+    expect(dialogs(page).at(-1)).toContain(token);
+  });
+
+  test("Tools asks the gateway, and sends no token", async () => {
+    const page = loadPage([], { devices: [{ deviceId: "d1", fingerprint: "a1b2c3d4", online: true }] });
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    press(action(row, "Tools"));
+    await page.settle();
+    const tools = page.calls.filter((c) => c.path.endsWith("/tools"));
+    expect(tools.length).toBe(1);
+    expect(tools[0]!.path).toBe("/admin/api/devices/d1/tools");
+    expect(tools[0]!.method).toBe("POST");
+    expect(JSON.stringify(page.calls).includes("x-device-token")).toBe(false);
   });
 });

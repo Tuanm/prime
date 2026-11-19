@@ -122,7 +122,8 @@ reaches whichever one is answering.
 ## Security, in short
 
 - Nothing listens on your machine; the only connections are ones it makes.
-- Every request carries an id and a token, checked before anything moves.
+- Every request carries an id and a token, checked before anything moves; the
+  gateway's storage holds only a fingerprint of each token, never the token.
 - What the gateway stores for a space is sealed for that space's key.
 - A space is rootless, in its own network, with no host folder and no socket.
 

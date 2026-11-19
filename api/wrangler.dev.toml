@@ -51,3 +51,5 @@ database_id = "00e3f87d-928a-47ba-b6f0-d1c607bade9f"
 ADMIN_ACCESS = "off"
 ENVIRONMENT = "dev"
 VIRTUAL_DEVICE_IDS = "cloud"
+# A fixed pepper for local runs only; a deployment sets its own secret.
+TOKEN_PEPPER = "dev-pepper-not-secret-0123456789abcdef"

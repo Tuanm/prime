@@ -268,9 +268,11 @@ export class DeviceDO extends DurableObject<Env> {
 
   private async handleUpgrade(request: Request, url: URL, authToken: string | null): Promise<Response> {
     // Device auth at connect time (defense in depth; the worker entry already
-    // checked). The worker forwards the effective expected token (registry-
-    // backed) as x-expected-token; fall back to the env-based per-device /
-    // shared token when absent (legacy paths).
+    // checked). The worker forwards what the credential had to match as
+    // x-expected-token and the checked credential as x-auth-token, in the same
+    // form: the registry's verifier for a registered device, or the shared env
+    // token. Fall back to the env-based per-device / shared token when absent
+    // (legacy paths).
     const expectedHeader = request.headers.get("x-expected-token");
     if (this.deviceId) this.perDeviceToken = perDeviceToken(this.env, this.deviceId) ?? null;
     const expected = expectedHeader ?? this.perDeviceToken ?? this.deviceToken;

@@ -27,9 +27,11 @@ import {
   virtualDeviceIds,
 } from "./config";
 import { costOf, monthlyBudget, ZERO_USAGE, type UsageCounts } from "./usage";
+import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, verifierFor, type TokenKind } from "./token-hash";
 
 const ONLINE_TTL_DEFAULT_MS = 150_000; // longer than keepalive timeout; swept on read
 const TOKEN_MAX = 256; // token length cap (sanity bound)
+const UNMIGRATED = "unmigrated"; // served in place of a value that is not a verifier yet
 
 /** fileId -> owning deviceId, for /files/{id} downloads that carry only an id. */
 interface FileIndexEntry {
@@ -102,7 +104,10 @@ function monthKey(now: number = Date.now()): string {
 
 export class RegistryDO extends DurableObject<Env> {
   private online = new Map<string, DeviceRec>();
-  private tokens = new Map<string, string>(); // deviceId -> token (authoritative)
+  // deviceId -> verifier of its token (authoritative; see token-hash.ts). A value
+  // that is not a verifier can only be one waiting for TOKEN_PEPPER to be
+  // migrated: it is kept, but never served and never matched.
+  private tokens = new Map<string, string>();
   private virtual = new Set<string>(); // in-process devices: always online, never swept
   private disabled = new Set<string>(); // deactivated devices: rejected at /mcp + /ws
   private blockedIps = new Set<string>(); // addresses refused everywhere (see ipBlockKey)
@@ -115,7 +120,7 @@ export class RegistryDO extends DurableObject<Env> {
   private anonLockedUntil = new Map<string, number>(); // deviceId -> lock expiry (memory)
   private fleetCreates = new FleetCreationAllowance();
   private fleets = new Set<string>(); // the fleets that exist (persisted)
-  private fleetBuddies = new Map<string, string>(); // fleetId -> token (persisted)
+  private fleetBuddies = new Map<string, string>(); // fleetId -> verifier of its token (persisted)
   // The fleets the operator has paused. The fleet object is the authority on this;
   // the registry keeps a copy so the Worker can answer for a paused fleet without
   // waking the object, which is the whole point of pausing one.
@@ -142,6 +147,7 @@ export class RegistryDO extends DurableObject<Env> {
         for (const [id, token] of Object.entries(buddies)) {
           if (validFleetId(id) && typeof token === "string" && token.length > 0) this.fleetBuddies.set(id, token);
         }
+        if (await this.migrate(this.fleetBuddies, "fleet")) await this.persistFleetBuddies();
       } catch {}
       try {
         const saved = (await this.ctx.storage.get<string[]>("online")) || [];
@@ -155,25 +161,37 @@ export class RegistryDO extends DurableObject<Env> {
         for (const [id, tok] of Object.entries(saved)) {
           if (validDeviceId(id) && typeof tok === "string" && tok.length > 0) this.tokens.set(id, tok);
         }
-        if (this.tokens.size === 0 && this.env.DEVICE_TOKENS) {
+        // A value that is not a verifier yet becomes one here, and is written
+        // back before the first answer leaves this object.
+        if (await this.migrate(this.tokens, "device")) await this.persistTokens();
+        // The seeds are secrets; what is stored from them is their verifiers.
+        // Without a pepper nothing can be hashed, so nothing is seeded yet.
+        const peppered = pepperFrom(this.env) !== null;
+        if (peppered && this.tokens.size === 0 && this.env.DEVICE_TOKENS) {
           try {
             const seed = JSON.parse(this.env.DEVICE_TOKENS) as Record<string, unknown>;
             for (const [id, tok] of Object.entries(seed)) {
-              if (typeof tok === "string" && validDeviceId(id) && tok.length > 0) this.tokens.set(id, tok);
+              if (typeof tok === "string" && validDeviceId(id) && tok.length > 0) {
+                this.tokens.set(id, await verifierFor(this.env, "device", tok));
+              }
             }
             if (this.tokens.size > 0) await this.persistTokens();
           } catch {}
         }
         // Virtual devices: merge their tokens unconditionally (they may be the
-        // only entries on a fresh registry) and mark them always-online.
-        if (this.env.VIRTUAL_DEVICE_TOKENS) {
+        // only entries on a fresh registry) and mark them always-online. Only a
+        // verifier that differs is a change worth writing.
+        if (peppered && this.env.VIRTUAL_DEVICE_TOKENS) {
           try {
             const seed = JSON.parse(this.env.VIRTUAL_DEVICE_TOKENS) as Record<string, unknown>;
             let changed = false;
             for (const [id, tok] of Object.entries(seed)) {
               if (typeof tok === "string" && validDeviceId(id) && tok.length > 0) {
-                this.tokens.set(id, tok);
-                changed = true;
+                const verifier = await verifierFor(this.env, "device", tok);
+                if (this.tokens.get(id) !== verifier) {
+                  this.tokens.set(id, verifier);
+                  changed = true;
+                }
               }
             }
             if (changed) await this.persistTokens();
@@ -334,7 +352,7 @@ export class RegistryDO extends DurableObject<Env> {
     // kept here, with the device tokens, because this is where the gateway
     // looks when it is deciding who is calling.
     if (request.method === "GET" && path === "/fleet-buddies") {
-      return Response.json({ buddies: Object.fromEntries(this.fleetBuddies) });
+      return Response.json({ buddies: RegistryDO.verifiersOnly(this.fleetBuddies) });
     }
     if (request.method === "POST" && path === "/fleet-buddy") {
       const id = url.searchParams.get("id") || "";
@@ -349,7 +367,8 @@ export class RegistryDO extends DurableObject<Env> {
       if (token.length < 8 || token.length > 256 || !/^[\x21-\x7e]+$/.test(token)) {
         return Response.json({ error: "a token is 8 to 256 printable characters" }, { status: 400 });
       }
-      this.fleetBuddies.set(id, token);
+      if (pepperFrom(this.env) === null) return pepperMissingResponse();
+      this.fleetBuddies.set(id, await verifierFor(this.env, "fleet", token));
       await this.persistFleetBuddies();
       return Response.json({ ok: true });
     }
@@ -397,11 +416,11 @@ export class RegistryDO extends DurableObject<Env> {
       await this.gcAnon();
       const now = Date.now();
       return Response.json({
-        map: Object.fromEntries(this.tokens),
+        map: RegistryDO.verifiersOnly(this.tokens),
         anonymous: [...this.anon.keys()],
         online: [...this.online.keys()],
         locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([id]) => id),
-        buddies: Object.fromEntries(this.fleetBuddies),
+        buddies: RegistryDO.verifiersOnly(this.fleetBuddies),
         paused: [...this.pausedFleets],
       });
     }
@@ -434,8 +453,10 @@ export class RegistryDO extends DurableObject<Env> {
       let id = "";
       do id = "anon-" + randomHex(8);
       while (this.tokens.has(id) || this.virtual.has(id));
+      if (pepperFrom(this.env) === null) return pepperMissingResponse();
+      // The code is answered once, here; what is kept is its verifier.
       const token = randomDeviceCode();
-      this.tokens.set(id, token);
+      this.tokens.set(id, await verifierFor(this.env, "device", token));
       this.anon.set(id, { ref: randomHex(12), createdAt: now, lastSeenAt: null });
       recent.push(now);
       this.anonCreates.set(ip, recent);
@@ -468,12 +489,12 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({ devices, count: this.deviceCount(), max_devices: policy.maxDevices });
     }
 
-    // Internal only (the entry never exposes it): ref -> id + token, so the admin
-    // API can act on an anonymous device without the UI ever holding either.
+    // Internal only (the entry never exposes it): ref -> id, so the admin API
+    // can act on an anonymous device without the UI ever holding the id.
     if (request.method === "GET" && path === "/anon/resolve") {
       const ref = url.searchParams.get("ref") || "";
       for (const [id, rec] of this.anon) {
-        if (rec.ref === ref) return Response.json({ deviceId: id, token: this.tokens.get(id) });
+        if (rec.ref === ref) return Response.json({ deviceId: id });
       }
       return Response.json({ error: "not found" }, { status: 404 });
     }
@@ -657,15 +678,7 @@ export class RegistryDO extends DurableObject<Env> {
     if (request.method === "GET" && path === "/full") {
       this.sweep();
       await this.gcAnon();
-      const devices = [...this.tokens.entries()]
-        .filter(([deviceId]) => !this.anon.has(deviceId))
-        .map(([deviceId, token]) => ({
-          deviceId,
-          token,
-          online: this.online.has(deviceId),
-          virtual: this.virtual.has(deviceId),
-          disabled: this.disabled.has(deviceId),
-        }));
+      const devices = await this.deviceList();
       return Response.json({ devices, count: this.deviceCount(), max_devices: anonConfig(this.env).maxDevices });
     }
 
@@ -681,7 +694,12 @@ export class RegistryDO extends DurableObject<Env> {
       const tok = String(token || "").trim();
       const old = String(replaces || "").trim();
       if (!validDeviceId(id)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
-      if (!tok || tok.length > TOKEN_MAX) {
+      // A rename (id changed in the UI) replaces a registered device in one step,
+      // so it still works with the registry full.
+      const renaming = old !== "" && old !== id && this.tokens.has(old) && !this.anon.has(old) && !this.virtual.has(old);
+      // A rename may come without a token: the device keeps the one it has.
+      // Anything else needs a token to store.
+      if (tok.length > TOKEN_MAX || (!tok && !renaming)) {
         return Response.json({ error: "token must be 1-" + TOKEN_MAX + " chars" }, { status: 400 });
       }
       // The anonymous namespace is the gateway's: an admin-made "anon-..." device
@@ -690,15 +708,15 @@ export class RegistryDO extends DurableObject<Env> {
       if (ANON_ID_RE.test(id) || this.anon.has(id)) {
         return Response.json({ error: "device ids starting with anon- are reserved for anonymous devices" }, { status: 400 });
       }
-      // A rename (id changed in the UI) replaces a registered device in one step,
-      // so it still works with the registry full.
-      const renaming = old !== "" && old !== id && this.tokens.has(old) && !this.anon.has(old) && !this.virtual.has(old);
+      if (tok && pepperFrom(this.env) === null) return pepperMissingResponse();
       await this.gcAnon();
       const max = anonConfig(this.env).maxDevices;
       if (!this.tokens.has(id) && !renaming && this.deviceCount() >= max) {
         return Response.json({ error: "device limit reached (" + max + " devices, registered and anonymous)", max_devices: max }, { status: 409 });
       }
-      this.tokens.set(id, tok);
+      const before = this.tokens.get(id);
+      const stored = tok ? await verifierFor(this.env, "device", tok) : (this.tokens.get(old) as string);
+      this.tokens.set(id, stored);
       if (renaming) {
         this.tokens.delete(old);
         this.online.delete(old);
@@ -707,15 +725,10 @@ export class RegistryDO extends DurableObject<Env> {
       }
       await this.persistTokens();
       this.sweep();
-      return Response.json({
-        ok: true,
-        devices: [...this.tokens.entries()].filter(([deviceId]) => !this.anon.has(deviceId)).map(([deviceId, t]) => ({
-          deviceId,
-          token: t,
-          online: this.online.has(deviceId),
-          virtual: this.virtual.has(deviceId),
-        })),
-      });
+      // Whether a device that was here now answers to another token: the
+      // entry drops a tunnel the old token opened.
+      const rotated = before !== undefined && before !== stored;
+      return Response.json({ ok: true, rotated, devices: await this.deviceList() });
     }
 
     if (request.method === "POST" && path === "/remove") {
@@ -729,15 +742,7 @@ export class RegistryDO extends DurableObject<Env> {
       if (!validDeviceId(id)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
       await this.removeDevice(id);
       this.sweep();
-      return Response.json({
-        ok: true,
-        devices: [...this.tokens.entries()].filter(([deviceId]) => !this.anon.has(deviceId)).map(([deviceId, t]) => ({
-          deviceId,
-          token: t,
-          online: this.online.has(deviceId),
-          virtual: this.virtual.has(deviceId),
-        })),
-      });
+      return Response.json({ ok: true, devices: await this.deviceList() });
     }
 
     return Response.json({ error: "not found" }, { status: 404 });
@@ -883,6 +888,50 @@ export class RegistryDO extends DurableObject<Env> {
     try {
       await this.ctx.storage.put("fleets", [...this.fleets]);
     } catch {}
+  }
+
+  /**
+   * Replace every value in the map that is not yet a verifier by its verifier.
+   * Returns whether anything changed. Without a pepper nothing is touched: the
+   * values stay as stored, unserved and unmatched, until the secret is set.
+   */
+  private async migrate(map: Map<string, string>, kind: TokenKind): Promise<boolean> {
+    if (pepperFrom(this.env) === null) return false;
+    let changed = false;
+    for (const [id, value] of map) {
+      if (isVerifier(value)) continue;
+      map.set(id, await verifierFor(this.env, kind, value));
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * A map as it may leave this object: verifiers as they are, and anything else
+   * (a value still waiting for TOKEN_PEPPER) as a placeholder no token matches.
+   * The id stays listed, so a registry that cannot be checked yet still reads
+   * as one that has devices - never as an open gateway.
+   */
+  private static verifiersOnly(map: Map<string, string>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, value] of map) out[id] = isVerifier(value) ? value : UNMIGRATED;
+    return out;
+  }
+
+  /** The registered devices as the admin page sees them: a fingerprint, never a token. */
+  private async deviceList(): Promise<Array<{ deviceId: string; fingerprint: string; online: boolean; virtual: boolean; disabled: boolean }>> {
+    const out = [];
+    for (const [deviceId, stored] of this.tokens) {
+      if (this.anon.has(deviceId)) continue;
+      out.push({
+        deviceId,
+        fingerprint: isVerifier(stored) ? await fingerprint(stored) : "",
+        online: this.online.has(deviceId),
+        virtual: this.virtual.has(deviceId),
+        disabled: this.disabled.has(deviceId),
+      });
+    }
+    return out;
   }
 
   private async persistTokens(): Promise<void> {
