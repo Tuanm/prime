@@ -1,6 +1,17 @@
 import { expect, mock, test } from "bun:test";
 
-mock.module("cloudflare:workers", () => ({ DurableObject: class {} }));
+// The base keeps ctx and env as the real one does: test files share one module
+// cache, so whichever mock loads device-do first serves every file after it.
+mock.module("cloudflare:workers", () => ({
+  DurableObject: class {
+    ctx: unknown;
+    env: unknown;
+    constructor(ctx: unknown, env: unknown) {
+      this.ctx = ctx;
+      this.env = env;
+    }
+  },
+}));
 const { DeviceDO } = await import("../src/device-do");
 
 for (const method of ["webSocketClose", "webSocketError"] as const) {

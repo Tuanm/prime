@@ -560,6 +560,19 @@ async function s24_admin_clients(): Promise<void> {
     if (r.status !== 200 || !c || c.name !== "test-client" || c.count < 2 || !c.ip) {
       return bad("s24_clients", "status=" + r.status + " clients=" + JSON.stringify(clients));
     }
+    // The sessions the device was opened with, kept in its storage: the name a
+    // client gave on initialize and when, with the live client list beside it.
+    r = await fetch(g.base + "/admin/api/devices/client-dev/sessions");
+    const s = (await r.json()) as any;
+    const sess = (s.sessions || [])[0];
+    if (r.status !== 200 || s.deviceId !== "client-dev" || !sess || sess.name !== "test-client" || typeof sess.at !== "number" || !sess.sid
+      || !Array.isArray(s.clients) || s.clients[0]?.name !== "test-client") {
+      return bad("s24_sessions", "status=" + r.status + " body=" + JSON.stringify(s));
+    }
+    // Read-only: the route answers GET and nothing else.
+    r = await fetch(g.base + "/admin/api/devices/client-dev/sessions", { method: "POST" });
+    if (r.status === 200) return bad("s24_sessions_get_only", "POST status=" + r.status);
+    ok("s24_admin_sessions");
     dev.close();
     await Bun.sleep(200);
     ok("s24_admin_clients");

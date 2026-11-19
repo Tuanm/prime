@@ -261,6 +261,24 @@ export class DeviceDO extends DurableObject<Env> {
       return Response.json({ clients: list });
     }
 
+    // Admin: the MCP sessions this device has been opened with - the clientInfo
+    // name each client gave on initialize, and when (see clientTag). Read-only:
+    // nothing is pruned or rewritten, so an entry past pruneSessions' week is
+    // still shown for as long as it is stored. Oldest first.
+    if (request.method === "GET" && url.pathname === "/sessions") {
+      const stored = await this.ctx.storage.list<unknown>({ prefix: "sess:" });
+      const sessions: Array<{ sid: string; name: string | null; at: number | null; raw?: unknown }> = [];
+      for (const [key, value] of stored) {
+        const v = value as { name?: unknown; at?: unknown } | null;
+        const name = v && typeof v === "object" && typeof v.name === "string" ? v.name : null;
+        const at = v && typeof v === "object" && typeof v.at === "number" ? v.at : null;
+        // Anything not in the shape clientTag writes is shown as it is, not dropped.
+        sessions.push(name === null && at === null ? { sid: key.slice("sess:".length), name, at, raw: value } : { sid: key.slice("sess:".length), name, at });
+      }
+      sessions.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+      return Response.json({ sessions });
+    }
+
     return Response.json({ error: "not found" }, { status: 404 });
   }
 

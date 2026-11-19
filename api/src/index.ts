@@ -1258,6 +1258,17 @@ export default {
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
         return originFor(env, env.DEVICES.get(env.DEVICES.idFromName(deviceId)));
       }
+      // The MCP sessions a device was opened with (clientInfo name and time, from
+      // its own storage), with the relay clients seen in the last ten minutes
+      // beside them. Read-only: the object lists, it does not prune.
+      if (request.method === "GET" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/sessions")) {
+        const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/sessions".length);
+        if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+        const stub = env.DEVICES.get(env.DEVICES.idFromName(deviceId));
+        const sessions = (await (await stub.fetch("https://device/sessions")).json().catch(() => ({}))) as { sessions?: unknown };
+        const clients = (await (await stub.fetch("https://device/clients")).json().catch(() => ({}))) as { clients?: unknown };
+        return Response.json({ deviceId, sessions: sessions.sessions ?? [], clients: clients.clients ?? [] });
+      }
       if (request.method === "GET" && url.pathname.startsWith("/admin/api/devices/") && url.pathname.endsWith("/clients")) {
         const deviceId = url.pathname.slice("/admin/api/devices/".length, -"/clients".length);
         if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
