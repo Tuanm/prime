@@ -49,6 +49,9 @@ ${UI_CSS}    </style>
     <script>
       (function () {
         var listEl = document.getElementById("list");
+        // What a set token looks like on this page. The gateway keeps only a
+        // fingerprint of each token, so there is nothing of the token to show.
+        var TOKEN_MASK = "***";
         // (the old status line is a toast now: see toast() below)
         var addBtn = document.getElementById("addBtn");
         var anonListEl = document.getElementById("anonList");
@@ -154,15 +157,17 @@ ${UI_CSS}    </style>
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
           tokInput.placeholder = "token";
-          // The gateway keeps a fingerprint of the token, never the token: the
-          // field says which one is set. A token is handed over once, in the
-          // dialog Refresh token opens; typing one here replaces it.
+          // Masked, like every other token on the page. The gateway keeps only a
+          // fingerprint of it, shown in the tooltip; the token is handed over
+          // once, in the dialog Refresh token opens. Typing one here replaces it.
           var fp = f.buddy || "";
-          tokInput.value = "";
-          if (fp) tokInput.placeholder = "token set · " + fp;
+          tokInput.value = fp ? TOKEN_MASK : "";
           tokInput.title = fp
-            ? "a token is set; Refresh token shows a new one"
+            ? "a token is set (fingerprint " + fp + "); Refresh token shows a new one"
             : "no token is set, so no client can reach this fleet";
+          tokInput.addEventListener("focus", function () {
+            if (tokInput.value === TOKEN_MASK) tokInput.select();
+          });
 
           var saveSpec = {
             text: "Save",
@@ -213,8 +218,9 @@ ${UI_CSS}    </style>
             refreshSpec,
           ];
           tokInput.addEventListener("input", function () {
-            // Save only what would change it: a token typed in.
-            saveSpec.el.disabled = tokInput.value.trim() === "";
+            // Save only what would change it: a token typed in, not the mask.
+            var v = tokInput.value.trim();
+            saveSpec.el.disabled = v === "" || v === TOKEN_MASK;
           });
           box.appendChild(idInput);
           box.appendChild(tokInput);
@@ -343,15 +349,22 @@ ${UI_CSS}    </style>
           // Cloud devices are registry-managed: the id is read-only.
           if (virtual) idInput.readOnly = true;
 
-          // The gateway keeps a fingerprint of a device's token, never the
-          // token: a registered device's field is empty and says which token it
-          // has. Typing one in replaces it. A new device may leave it empty,
-          // and the page makes one.
+          // A registered device's token is masked. The gateway keeps only a
+          // fingerprint of it, shown in the tooltip; typing a token over the
+          // mask replaces it. A new device may leave the field empty, and the
+          // page makes one.
           var tokInput = document.createElement("input");
           tokInput.className = "tok-input";
           tokInput.type = "text";
-          tokInput.value = isNew ? dev.token || "" : "";
-          tokInput.placeholder = isNew ? "token (empty: make one)" : dev.fingerprint ? "token set · " + dev.fingerprint : "token";
+          tokInput.value = isNew ? dev.token || "" : TOKEN_MASK;
+          tokInput.placeholder = isNew ? "token (empty: make one)" : "token";
+          if (!isNew && dev.fingerprint) tokInput.title = "token fingerprint " + dev.fingerprint;
+          if (!isNew) {
+            // Selecting the mask on focus makes typing replace it.
+            tokInput.addEventListener("focus", function () {
+              if (tokInput.value === TOKEN_MASK) tokInput.select();
+            });
+          }
           if (isNew && pendingObj) {
             // Keep the pending row in sync so a later re-render preserves it.
             idInput.addEventListener("input", function () { pendingObj.id = idInput.value; });
@@ -443,10 +456,14 @@ ${UI_CSS}    </style>
             }
           });
 
-          // A registered device's field starts empty, so anything typed into it
-          // is a new token.
+          // A registered device's field starts as the mask: anything else typed
+          // into it is a new token.
+          function typedToken() {
+            var t = tokInput.value.trim();
+            return t === TOKEN_MASK ? "" : t;
+          }
           function isDirty() {
-            return idInput.value.trim() !== origId || tokInput.value.trim() !== "";
+            return idInput.value.trim() !== origId || typedToken() !== "";
           }
 
           function updateMenuState() {
@@ -496,7 +513,7 @@ ${UI_CSS}    </style>
           saveItem.addEventListener("click", function () {
             closeMenus();
             var id = (idInput.value || "").trim();
-            var tokVal = tokInput.value.trim();
+            var tokVal = typedToken();
             if (!id) return setStatus("enter a device ID", true);
             // A new device with no token typed gets one made here, and shown
             // once: the gateway keeps only its fingerprint.

@@ -427,11 +427,11 @@ describe("the fleets in the admin interface", () => {
     expect(row.children[0]!.className).toContain("cloud-ic");
     expect(row.children[0]!.className).not.toContain("hollow");
     const box = row.children.find((c) => c.className === "box")!;
-    // Its own name is the id it answers to; the field is empty and says which
-    // token is set.
+    // Its own name is the id it answers to; the token is masked, like every
+    // other token on the page, and its fingerprint is in the tooltip.
     expect(box.children[0]!.value).toBe("acme");
-    expect(box.children[1]!.value).toBe("");
-    expect(box.children[1]!.placeholder).toBe("token set · a1b2c3d4");
+    expect(box.children[1]!.value).toBe("***");
+    expect(box.children[1]!.title).toContain("a1b2c3d4");
     // The actions a buddy has, acting on the space that holds the lease.
     expect(menuOf(row)).toEqual(["View", "Tools", "Clients", "Save", "Deactivate", "Refresh token"]);
     expect(action(row, "Save")!.disabled).toBe(true);
@@ -560,13 +560,38 @@ describe("a buddy's token in the admin interface", () => {
     expect(dialogs(page)).toEqual([]);
   });
 
-  test("a registered device shows which token it has, never a token", async () => {
+  test("a registered device's token is masked, with its fingerprint in the tooltip", async () => {
     const page = loadPage([], { devices: [{ deviceId: "d1", fingerprint: "a1b2c3d4", online: true }] });
     await page.settle();
     const row = page.byId["list"]!.children[0]!;
-    expect(field(row, 1).value).toBe("");
-    expect(field(row, 1).placeholder).toBe("token set · a1b2c3d4");
+    expect(field(row, 1).value).toBe("***");
+    expect(field(row, 1).title).toContain("a1b2c3d4");
     expect(action(row, "Save")!.disabled).toBe(true);
+  });
+
+  test("a token typed over the mask replaces it; the mask itself is never sent", async () => {
+    const page = loadPage([], { devices: [{ deviceId: "d1", fingerprint: "a1b2c3d4", online: true }] });
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    type(field(row, 1), "a-new-token");
+    expect(action(row, "Save")!.disabled).toBe(false);
+    press(action(row, "Save"));
+    await page.settle();
+    expect(posts(page)[0]!.body).toEqual({ deviceId: "d1", token: "a-new-token" });
+    // Typing the mask back is no change at all.
+    type(field(row, 1), "***");
+    expect(action(row, "Save")!.disabled).toBe(true);
+  });
+
+  test("a fleet's mask is not a token: Save stays off until one is typed", async () => {
+    const page = loadPage([{ fleet: "acme", label: "", disabled: false, buddy: "a1b2c3d4", members: [], primary: "d1", pending: [] }]);
+    await page.settle();
+    const row = page.byId["list"]!.children[0]!;
+    const tok = row.children.find((c) => c.className === "box")!.children[1]!;
+    type(tok, "***");
+    expect(action(row, "Save")!.disabled).toBe(true);
+    type(tok, "a-new-fleet-token");
+    expect(action(row, "Save")!.disabled).toBe(false);
   });
 
   test("a rename sends no token: the device keeps the one it has", async () => {

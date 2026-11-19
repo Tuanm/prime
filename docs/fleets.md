@@ -159,9 +159,10 @@ Each fleet is a card, with its spaces under it. The marks say what is going on:
 | dashed card | a space asking to join, with Admit and Decline |
 
 Beside the fleet tree, **Buddies** carries a row for the fleet itself: its name -
-the id a client uses - and a short fingerprint of its token. The gateway keeps
-only that fingerprint, never the token. **Refresh token** makes a new one and
-shows it once, because there is no second chance.
+the id a client uses - and its token, masked, with a short fingerprint of it in
+the tooltip. The gateway keeps only that fingerprint, never the token.
+**Refresh token** makes a new one and shows it once, because there is no second
+chance.
 
 ## Three credentials, three jobs
 
