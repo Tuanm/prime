@@ -26,7 +26,7 @@ import {
   validDeviceId,
   virtualDeviceIds,
 } from "./config";
-import { costOf, monthlyBudget, ZERO_USAGE, type UsageCounts } from "./usage";
+import { costOf, HitMeter, monthlyBudget, ZERO_USAGE, type UsageCounts } from "./usage";
 import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, verifierFor, type TokenKind } from "./token-hash";
 
 const ONLINE_TTL_DEFAULT_MS = 150_000; // longer than keepalive timeout; swept on read
@@ -229,18 +229,20 @@ export class RegistryDO extends DurableObject<Env> {
     });
   }
 
-  /** Its own hits, kept in memory and folded into the month as they arrive. */
-  private hits = 0;
-  private hitMinutes = new Set<number>();
+  /** Its own hits and busy time, kept in memory and folded into the month in batches. */
+  private readonly meter = new HitMeter((add) => {
+    this.addUsage(add).catch(() => {});
+  });
 
   async fetch(request: Request): Promise<Response> {
     // The metering routes are the meter itself: counting them would be a tail
     // chasing itself.
-    if (!request.url.includes("/usage-add")) {
-      this.hits += 1;
-      this.hitMinutes.add(Math.floor(Date.now() / 60_000));
-      if (this.hits >= 100) await this.flushOwnHits();
-    }
+    if (request.url.includes("/usage-add")) return this.serve(request);
+    this.meter.hit();
+    return this.meter.busy(() => this.serve(request));
+  }
+
+  private async serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -272,14 +274,14 @@ export class RegistryDO extends DurableObject<Env> {
     // ---- what the gateway has used this month ----
     //
     // The counts are added by whoever made them: the Worker adds the requests
-    // it served, each Durable Object adds the requests it served and the
-    // minutes it was awake, and the fleet routes add the R2 calls they made.
+    // it served, each Durable Object adds the requests it served and how long
+    // it was busy, and the fleet routes add the R2 calls they made.
     // They are added in batches, because a write per request would itself cost
     // more than it measures.
     if (request.method === "POST" && path === "/usage-add") {
       const body = (await request.json().catch(() => ({}))) as Partial<UsageCounts>;
       const add: Partial<UsageCounts> = {};
-      for (const key of ["gatewayRequests", "doRequests", "doMinutes", "r2Writes", "r2Reads"] as const) {
+      for (const key of ["gatewayRequests", "doRequests", "doActiveMs", "r2Writes", "r2Reads"] as const) {
         const value = Number((body as Record<string, unknown>)[key] ?? 0);
         if (Number.isFinite(value) && value > 0) add[key] = Math.floor(value);
       }
@@ -839,18 +841,13 @@ export class RegistryDO extends DurableObject<Env> {
     } catch {}
   }
 
-  private async flushOwnHits(): Promise<void> {
-    const requests = this.hits;
-    const minutes = this.hitMinutes.size;
-    this.hits = 0;
-    this.hitMinutes = new Set();
-    if (requests > 0) await this.addUsage({ doRequests: requests, doMinutes: minutes });
-  }
-
   /** This month's counts, kept as one small record. */
   private async readUsage(month: string): Promise<UsageCounts> {
-    const saved = (await this.ctx.storage.get<Partial<UsageCounts>>("usage:" + month)) ?? {};
-    return { ...ZERO_USAGE, ...saved };
+    const saved = (await this.ctx.storage.get<Partial<UsageCounts> & { doMinutes?: number }>("usage:" + month)) ?? {};
+    // Minutes were how busy time was once guessed: a minute with a request in
+    // it counted as sixty seconds, many times what is billed. They are dropped.
+    const { doMinutes: _minutes, ...counts } = saved;
+    return { ...ZERO_USAGE, ...counts };
   }
 
   private async addUsage(add: Partial<UsageCounts>): Promise<void> {

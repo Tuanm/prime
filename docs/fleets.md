@@ -223,9 +223,10 @@ place is gone - and a fleet keeps answering its clients meanwhile.
 
 ## What it costs
 
-A fleet is the expensive part of the gateway: its agents keep the objects awake
-and send a request every few seconds, so the bill is mostly object minutes, not
-traffic.
+A fleet is the expensive part of the gateway: its agents send a request every
+few seconds, and each one is a request to an object, so the bill is mostly
+object requests. An object is billed for its time only while it is working; one
+that waits on a hibernated socket costs nothing.
 
 An agent that can **listen** does not ask. It keeps one socket to its fleet, and the
 fleet says when something happens: a new snapshot, the lease free, a pause, a resume.
@@ -243,8 +244,8 @@ seconds:
 A running fleet still sends the requests that are its work: the primary renews the
 lease and publishes, the others pull what was published.
 
-The gateway counts what it does - requests, the minutes each object was awake,
-the objects stored and read - and prices them at Cloudflare's list prices with
+The gateway counts what it does - requests, how long each object was busy
+serving them, the objects stored and read - and prices them at Cloudflare's list prices with
 the free allowances taken off. `/admin` shows the month, the cost and what it is
 made of.
 

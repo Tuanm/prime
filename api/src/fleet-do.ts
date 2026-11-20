@@ -168,6 +168,10 @@ export class FleetDO implements DurableObject {
   }
 
   async alarm(): Promise<void> {
+    return this.meter.busy(() => this.onAlarm());
+  }
+
+  private async onAlarm(): Promise<void> {
     const raw = await this.state.storage.get<Lease>("lease");
     if (raw && raw.expiresAt + 250 > Date.now()) {
       await this.scheduleLeaseAlarm(raw.expiresAt);
@@ -453,9 +457,13 @@ export class FleetDO implements DurableObject {
   });
 
   async fetch(request: Request): Promise<Response> {
+    this.meter.hit();
+    return this.meter.busy(() => this.serve(request));
+  }
+
+  private async serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
-    this.meter.hit();
     const body = request.method === "POST" ? ((await request.json().catch(() => ({}))) as Record<string, unknown>) : {};
 
     // The Worker has already proved the caller; these headers are internal.

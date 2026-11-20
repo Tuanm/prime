@@ -126,8 +126,12 @@ export class DeviceDO extends DurableObject<Env> {
   });
 
   async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
     this.meter.hit();
+    return this.meter.busy(() => this.serve(request));
+  }
+
+  private async serve(request: Request): Promise<Response> {
+    const url = new URL(request.url);
 
     // Internal device auth + identity: the worker entry sets these headers so
     // the DO can enforce per-device auth and know which device it is without
@@ -353,6 +357,10 @@ export class DeviceDO extends DurableObject<Env> {
   // Hibernation callbacks -----------------------------------------------------
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    return this.meter.busy(() => this.onMessage(ws, message));
+  }
+
+  private async onMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (ws !== this.ws) return;
     this.lastSeen = Date.now();
     // The registry TTL-sweeps its online entries; re-register periodically so
@@ -582,6 +590,10 @@ export class DeviceDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    return this.meter.busy(() => this.onAlarm());
+  }
+
+  private async onAlarm(): Promise<void> {
     if (!this.ws) return;
     if (Date.now() - this.lastSeen > this.keepaliveTimeoutMs) {
       try {

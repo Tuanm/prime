@@ -3,7 +3,7 @@
  *
  * The numbers here are counted, not guessed: every request that reaches the
  * gateway is counted, every Durable Object counts the requests it serves and
- * the minutes it was awake, and the R2 calls the fleets make are counted where
+ * how long it was busy serving them, and the R2 calls the fleets make are counted where
  * they are made. What is left is arithmetic over Cloudflare's list prices, so
  * the operator can compare a month against a budget.
  *
@@ -18,8 +18,11 @@ export interface UsageCounts {
   gatewayRequests: number;
   /** Requests served by the Durable Objects. */
   doRequests: number;
-  /** Minutes in which a Durable Object was awake (any one of them). */
-  doMinutes: number;
+  /**
+   * Milliseconds in which a Durable Object was working: a request, a socket
+   * message or an alarm in hand. Summed over the objects.
+   */
+  doActiveMs: number;
   /** R2 writes (Class A). */
   r2Writes: number;
   /** R2 reads (Class B). */
@@ -29,7 +32,7 @@ export interface UsageCounts {
 export const ZERO_USAGE: UsageCounts = {
   gatewayRequests: 0,
   doRequests: 0,
-  doMinutes: 0,
+  doActiveMs: 0,
   r2Writes: 0,
   r2Reads: 0,
 };
@@ -44,7 +47,10 @@ export const PRICES = {
   /** Durable Object requests beyond the included million. */
   perMillionDoRequests: 0.15,
   includedDoRequests: 1_000_000,
-  /** A Durable Object is billed for the time it is loaded: 128 MB each. */
+  /**
+   * A Durable Object is billed for the time it is working, at 128 MB each. An
+   * object whose sockets are hibernated is not billed while it waits.
+   */
   perMillionGbSeconds: 12.5,
   includedGbSeconds: 400_000,
   gbPerDo: 0.125,
@@ -71,8 +77,8 @@ export function costOf(usage: UsageCounts): UsageCost {
     PRICES.perMillionGatewayRequests;
   const doRequests =
     (Math.max(0, usage.doRequests - PRICES.includedDoRequests) / 1_000_000) * PRICES.perMillionDoRequests;
-  // A minute awake is sixty seconds of the object's memory.
-  const gbSeconds = usage.doMinutes * 60 * PRICES.gbPerDo;
+  // A second of work is a second of the object's memory.
+  const gbSeconds = ((usage.doActiveMs || 0) / 1000) * PRICES.gbPerDo;
   const doDuration =
     (Math.max(0, gbSeconds - PRICES.includedGbSeconds) / 1_000_000) * PRICES.perMillionGbSeconds;
   const r2 =
@@ -142,13 +148,17 @@ export async function sendUsage(
 /**
  * Counts kept in memory by one Durable Object, sent on in batches.
  *
- * A Durable Object is billed for the time it is loaded, so the minutes it was
- * touched in are counted as well as the requests: a minute with a request in
- * it is a minute it was up.
+ * A Durable Object is billed for the time it is working, so that is measured
+ * as well as the requests: from when a request, a socket message or an alarm
+ * is taken up until it is done. Work that overlaps is counted once, because
+ * the object is up once. The time between is not counted: the objects here
+ * hibernate their sockets, and an object with nothing in hand is not billed.
  */
 export class HitMeter {
   private requests = 0;
-  private readonly minutes = new Set<number>();
+  private activeMs = 0;
+  private working = 0;
+  private since = 0;
   private r2Writes = 0;
   private r2Reads = 0;
   private at = Date.now();
@@ -158,9 +168,31 @@ export class HitMeter {
   /** Note one request served. */
   hit(now = Date.now()): void {
     this.requests += 1;
-    this.minutes.add(Math.floor(now / 60_000));
     // Batched: a hundred requests, or a minute of them, whichever comes first.
     if (this.requests >= 100 || now - this.at >= 60_000) this.flush(now);
+  }
+
+  /** Note that the object took up some work; call what it returns when it is done. */
+  begin(now = Date.now()): (end?: number) => void {
+    if (this.working === 0) this.since = now;
+    this.working += 1;
+    let done = false;
+    return (end = Date.now()) => {
+      if (done) return;
+      done = true;
+      this.working -= 1;
+      if (this.working === 0) this.activeMs += Math.max(0, end - this.since);
+    };
+  }
+
+  /** Measure one piece of work, however it ends. */
+  async busy<T>(work: () => Promise<T>): Promise<T> {
+    const done = this.begin();
+    try {
+      return await work();
+    } finally {
+      done();
+    }
   }
 
   /** Note the object storing or reading something in R2 on the fleet's behalf. */
@@ -171,15 +203,20 @@ export class HitMeter {
 
   /** Send what has been counted so far. */
   flush(now = Date.now()): void {
-    if (this.requests === 0 && this.minutes.size === 0 && this.r2Writes === 0 && this.r2Reads === 0) return;
+    // Work still in hand is counted up to now, and the rest of it from now.
+    if (this.working > 0) {
+      this.activeMs += Math.max(0, now - this.since);
+      this.since = now;
+    }
+    if (this.requests === 0 && this.activeMs === 0 && this.r2Writes === 0 && this.r2Reads === 0) return;
     const add = {
       doRequests: this.requests,
-      doMinutes: this.minutes.size,
+      doActiveMs: Math.round(this.activeMs),
       r2Writes: this.r2Writes,
       r2Reads: this.r2Reads,
     };
     this.requests = 0;
-    this.minutes.clear();
+    this.activeMs = 0;
     this.r2Writes = 0;
     this.r2Reads = 0;
     this.at = now;

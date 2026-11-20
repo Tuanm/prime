@@ -1603,8 +1603,8 @@ ${UI_CSS}    </style>
                 " requests · " +
                 Number(j.counts?.doRequests || 0).toLocaleString() +
                 " object requests · " +
-                Number(j.counts?.doMinutes || 0).toLocaleString() +
-                " object minutes</div>" +
+                Math.round(Number(j.counts?.doActiveMs || 0) / 1000).toLocaleString() +
+                " object seconds busy</div>" +
                 (j.overBudget
                   ? '<div class="usage-over">The fleet budget is spent: the fleets are paused until the month turns over or the budget is raised.</div>'
                   : "");
