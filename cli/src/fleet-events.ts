@@ -81,12 +81,17 @@ export const PAUSED_RETRY_MS = 60_000;
  * connected socket, so it already falls through to the normal poll. A wake
  * (a file changed, an event came) ends any sleep early; that is not decided here.
  */
+/** The longest a round that keeps failing waits before it tries again. */
+export const FAILING_MAX_MS = 5 * 60_000;
+
 export function roundSleepMs(input: {
   paused: boolean;
   connected: boolean;
   supported?: boolean;
   retryAfterMs?: number;
   pollMs: number;
+  /** Rounds in a row that failed: each one doubles the wait. */
+  failures?: number;
 }): number {
   if (input.paused) {
     if (input.connected) return PAUSED_SAFETY_MS;
@@ -96,8 +101,13 @@ export function roundSleepMs(input: {
     }
     return PAUSED_RETRY_MS;
   }
-  if (input.connected) return EVENTS_SAFETY_POLL_MS;
-  return input.pollMs;
+  const base = input.connected ? EVENTS_SAFETY_POLL_MS : input.pollMs;
+  const failures = Math.min(30, Math.max(0, Math.floor(input.failures ?? 0)));
+  if (failures === 0) return base;
+  // A gateway that keeps refusing - an answer this agent does not understand,
+  // a credential that was revoked - is asked less and less often, not every
+  // round for as long as the agent runs.
+  return Math.max(base, Math.min(FAILING_MAX_MS, input.pollMs * 2 ** failures));
 }
 
 const KNOWN = new Set(["hello", "paused", "resumed", "head", "lease-free", "bye"]);

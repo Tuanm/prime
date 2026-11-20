@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 import {
   EVENTS_SAFETY_POLL_MS,
+  FAILING_MAX_MS,
   FleetEvents,
   PAUSED_RETRY_MS,
   PAUSED_SAFETY_MS,
@@ -457,5 +458,18 @@ describe("roundSleepMs", () => {
     expect(roundSleepMs({ paused: false, connected: false, supported: false, pollMs: 250 })).toBe(250);
     // A retryAfter left over from an earlier pause means nothing now.
     expect(roundSleepMs({ paused: false, connected: false, supported: true, retryAfterMs: 60_000, pollMs: poll })).toBe(poll);
+  });
+  test("a round that keeps failing waits longer each time, up to five minutes", () => {
+    // An answer the agent does not understand must not become a request every
+    // second and a half for as long as the agent runs.
+    expect(roundSleepMs({ paused: false, connected: false, pollMs: poll, failures: 0 })).toBe(poll);
+    expect(roundSleepMs({ paused: false, connected: false, pollMs: poll, failures: 1 })).toBe(3_000);
+    expect(roundSleepMs({ paused: false, connected: false, pollMs: poll, failures: 3 })).toBe(12_000);
+    expect(roundSleepMs({ paused: false, connected: false, pollMs: poll, failures: 30 })).toBe(FAILING_MAX_MS);
+    expect(FAILING_MAX_MS).toBe(5 * 60_000);
+    // Never shorter than what the agent would wait anyway.
+    expect(roundSleepMs({ paused: false, connected: true, pollMs: poll, failures: 1 })).toBe(EVENTS_SAFETY_POLL_MS);
+    // A pause is not a failure: it keeps its own wait.
+    expect(roundSleepMs({ paused: true, connected: false, pollMs: poll, failures: 4 })).toBe(PAUSED_RETRY_MS);
   });
 });

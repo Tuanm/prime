@@ -247,6 +247,8 @@ interface SpaceLoop {
   retryAfterMs?: number;
   /** The held connection that tells this space what happened. */
   events: FleetEvents;
+  /** Rounds in a row that failed; the agent waits longer after each. */
+  failures?: number;
 }
 
 /**
@@ -596,8 +598,10 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
     let beat: ReturnType<typeof setTimeout> | undefined;
     const beatTick = (): void => {
       beat = setTimeout(() => {
-        // A paused fleet takes no one in, so there is nothing to renew.
-        const renew = loop.paused ? Promise.resolve() : takePlace(loop);
+        // A paused fleet takes no one in, so there is nothing to renew. A space
+        // whose rounds keep failing is retried by the round, on its longer wait,
+        // not here every few seconds as well.
+        const renew = loop.paused || (loop.failures ?? 0) > 0 ? Promise.resolve() : takePlace(loop);
         void renew.catch(() => {}).finally(beatTick);
       }, heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs ?? heartbeatMs)));
     };
@@ -615,11 +619,13 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
           lastAction = name + ": " + what;
           lastError = undefined;
         });
+        loop.failures = 0;
         timing = loop.timing;
       } catch (err) {
         // A space that cannot be reached this round is not a reason to stop the
         // agent: the network blinks, and the next round tries again.
         lastError = name + ": " + (err instanceof Error ? err.message : String(err));
+        loop.failures = (loop.failures ?? 0) + 1;
       }
       rounds++;
       write(spacesSeen);
@@ -631,6 +637,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         supported: loop.events.supported,
         retryAfterMs: loop.retryAfterMs,
         pollMs,
+        failures: loop.failures,
       });
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
