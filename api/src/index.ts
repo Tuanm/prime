@@ -109,6 +109,8 @@ interface RegistrySnapshot {
   buddies: Map<string, string>; // fleetId -> the token its clients present
   online: Set<string>; // which devices hold a tunnel right now
   paused: Set<string>; // the fleets the operator has paused
+  blocked: Set<string>; // address keys that reach nothing (see ipBlockKey)
+  disabled: Set<string>; // devices the operator switched off
 }
 let mapCache: { at: number; snap: RegistrySnapshot } | null = null;
 
@@ -169,27 +171,15 @@ function markAnonymous(headers: Headers, request: Request, cfg: GatewayConfig, e
   headers.set("x-client-ip", cip && cip !== "unknown" ? cip : "unknown");
 }
 
-// Cached set of blocked address keys (see ipBlockKey). Same short TTL as the
-// device map, invalidated by the admin block routes.
-let blockedCache: { at: number; set: Set<string> } | null = null;
-
+// The blocked address keys (see ipBlockKey) travel in the registry snapshot:
+// one ask of the registry per request, not one per list the gateway checks.
+// Changing them invalidates the snapshot.
 async function effectiveBlockedSet(env: Env): Promise<Set<string>> {
-  if (blockedCache && Date.now() - blockedCache.at < MAP_CACHE_TTL_MS) return blockedCache.set;
-  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-  const set = new Set<string>();
-  try {
-    const r = await reg.fetch("https://registry/blocked");
-    if (r.ok) {
-      const j = (await r.json()) as { ips?: string[] };
-      for (const key of j.ips || []) if (typeof key === "string" && key) set.add(key);
-    }
-  } catch {}
-  blockedCache = { at: Date.now(), set };
-  return set;
+  return (await effectiveSnapshot(env)).blocked;
 }
 
 function invalidateBlockedCache(): void {
-  blockedCache = null;
+  mapCache = null;
 }
 
 /** A device's tunnel origin, plus the address key blocking would use. */
@@ -238,6 +228,8 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
     buddies: new Map(),
     online: new Set(),
     paused: new Set(),
+    blocked: new Set(),
+    disabled: new Set(),
   };
   try {
     const r = await reg.fetch("https://registry/map");
@@ -249,6 +241,8 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
         buddies?: Record<string, string>;
         online?: string[];
         paused?: string[];
+        blocked?: string[];
+        disabled?: string[];
       };
       for (const [id, tok] of Object.entries(j.map || {})) {
         if (typeof tok === "string" && tok.length > 0) snap.map.set(id, tok);
@@ -260,6 +254,8 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
       }
       for (const id of j.online || []) snap.online.add(id);
       for (const id of j.paused || []) snap.paused.add(id);
+      for (const key of j.blocked || []) if (typeof key === "string" && key) snap.blocked.add(key);
+      for (const id of j.disabled || []) if (validDeviceId(id)) snap.disabled.add(id);
     }
   } catch {}
   return snap;
@@ -789,7 +785,8 @@ async function authorizeDevice(
       return { denied: unauthorized(), expected, anonymous };
     }
   }
-  if ((await effectiveDisabledSet(env)).has(deviceId)) {
+  // Read from the snapshot the credential was checked against: one ask.
+  if (snap.disabled.has(deviceId)) {
     return { denied: Response.json({ error: "device disabled" }, { status: 403 }), expected, anonymous };
   }
   return { denied: null, expected, presented, anonymous };

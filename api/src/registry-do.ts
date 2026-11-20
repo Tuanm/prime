@@ -422,6 +422,10 @@ export class RegistryDO extends DurableObject<Env> {
         locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([id]) => id),
         buddies: RegistryDO.verifiersOnly(this.fleetBuddies),
         paused: [...this.pausedFleets],
+        // Read on every request the Worker gates, so they come in the same
+        // answer instead of an ask of their own each.
+        blocked: [...this.blockedIps].sort(),
+        disabled: [...this.disabled],
       });
     }
 
