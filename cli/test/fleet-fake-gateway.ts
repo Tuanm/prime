@@ -23,7 +23,7 @@ export class FakeGateway {
   /** What the index lists; tests may cut holes in it. */
   indexEntries: Array<{ seq: number; manifestKey: string; full: boolean; packBytes?: number; deltaBytes?: number }> = [];
   /** Who is catching up to take the free lease, and until when. */
-  claim: { device: string; since: number; until: number; barred?: { device: string; until: number } } | null = null;
+  claim: { device: string; since: number; until: number; queue?: Array<{ device: string; at: number; by: number }> } | null = null;
   /** Publishers that predate the roster in manifests. */
   stripRoster = false;
   /** Publishers that predate the key fingerprint in wrapped keys. */
@@ -71,23 +71,28 @@ export class FakeGateway {
       }
       const current = this.head?.seq ?? 0;
       if (current > 0 && (this.applied.get(creds.deviceId) ?? 0) < current) {
-        // The first to ask has a claim on catching up; the others wait (as the real object
-        // does). A claim lasts a minute at most, and its holder may not take the next.
+        // The first to ask has a claim on catching up; the others wait, in the order they
+        // asked (as the real object does). A claim lasts a minute at most, and its holder is
+        // behind everyone who waits when it is over.
         const now = Date.now();
         const c = this.claim;
         const live = c !== null && c.until > now;
-        const wait = (holder: string, ms: number): Response =>
-          Response.json({ ok: true, role: "replica", reason: "claimed", holder, head: this.head, retryAfterMs: Math.max(1000, ms) });
+        const queue = (c?.queue ?? []).filter((w) => w.by > now);
+        const wait = (holder: string, ms: number): Response => {
+          const by = now + Math.max(1000, ms) + 15_000;
+          const mine = queue.find((w) => w.device === creds.deviceId);
+          if (mine) mine.by = by;
+          else queue.push({ device: creds.deviceId, at: now, by });
+          this.claim = { device: c?.device ?? "", since: c?.since ?? 0, until: c?.until ?? 0, queue };
+          return Response.json({ ok: true, role: "replica", reason: "claimed", holder, head: this.head, retryAfterMs: Math.max(1000, ms) });
+        };
         if (c && live && c.device !== creds.deviceId) return wait(c.device, c.until - now);
         if (c && live) {
-          if (now - c.since >= 60_000) {
-            this.claim = { device: c.device, since: c.since, until: now, barred: { device: c.device, until: now + 30_000 } };
-            return wait(c.device, 30_000);
-          }
-          this.claim = { device: c.device, since: c.since, until: Math.min(now + 30_000, c.since + 60_000) };
+          this.claim = { device: c.device, since: c.since, until: Math.min(now + 30_000, c.since + 60_000), queue };
         } else {
-          if (c?.barred && c.barred.device === creds.deviceId && c.barred.until > now) return wait(c.barred.device, c.barred.until - now);
-          this.claim = { device: creds.deviceId, since: now, until: now + 30_000 };
+          const head = queue[0];
+          if (head && head.device !== creds.deviceId) return wait(head.device, Math.min(30_000, head.by - now));
+          this.claim = { device: creds.deviceId, since: now, until: now + 30_000, queue: queue.filter((w) => w.device !== creds.deviceId) };
         }
         return Response.json({ ok: true, role: "replica", reason: "not-caught-up", catchUpTo: current, head: this.head ?? { seq: 0 } });
       }

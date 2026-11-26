@@ -666,48 +666,128 @@ describe("replicas racing for a free lease", () => {
     expect(state.data.has("claim")).toBe(false);
   });
 
-  test("a holder that is alive and never catches up cannot hold the claim for ever, whatever asks it makes", async () => {
-    const { doInstance, state } = await three();
-    // dev-two asks every round, as a client that ignores the answer does, and never applies.
-    for (let i = 0; i < 40; i++) expect(["not-caught-up", "claimed"]).toContain((await ask(doInstance, "dev-two")).json.reason);
-    const claim = state.data.get("claim") as { since: number; until: number };
-    // The claim's total life is bounded however often it was renewed.
-    expect(claim.until).toBeLessThanOrEqual(claim.since + 60_000);
+  // The tests below move the clock through the real path (every answer is the object's
+  // own); nothing is written into its storage.
+  async function withClock<T>(run: (advance: (ms: number) => void) => Promise<T>): Promise<T> {
+    const real = Date.now;
+    let now = real.call(Date);
+    Date.now = () => now;
+    try {
+      return await run((ms) => {
+        now += ms;
+      });
+    } finally {
+      Date.now = real;
+    }
+  }
 
-    // A minute in, it is still asking: the claim lapses, and it may not take it again at once.
-    state.data.set("claim", { ...claim, since: Date.now() - 61_000, until: Date.now() + 25_000 });
-    const lapsed = await ask(doInstance, "dev-two");
-    expect(lapsed.json.reason).toBe("claimed");
-    expect(lapsed.json.holder).toBe("dev-two");
-    expect(lapsed.json.retryAfterMs).toBeGreaterThan(0);
-    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
+  // A replica that asks again when it was told to (and never catches up if it is given the claim),
+  // and one that asks every 1.5 s whatever it is told.
+  const patient = (d: FleetDO, dev: string) => {
+    let at = 0;
+    return async (now: number): Promise<string | undefined> => {
+      if (now < at) return undefined;
+      const answer = await ask(d, dev);
+      at = answer.json.reason === "claimed" ? now + answer.json.retryAfterMs : now;
+      return answer.json.reason as string;
+    };
+  };
 
-    // The next replica to ask is given it, and can catch up and take the lease.
-    expect((await ask(doInstance, "dev-three")).json.reason).toBe("not-caught-up");
-    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
-    await call(doInstance, "/applied", { caller: "device", device: "dev-three", body: { seq: 1 } });
-    expect((await ask(doInstance, "dev-three")).json.role).toBe("primary");
-  });
+  test("a holder that is alive and never catches up cannot hold the claim for ever, whatever asks it makes", () =>
+    withClock(async (advance) => {
+      const { doInstance, state } = await three();
+      // dev-two asks every 1.5 s and never applies; dev-three asks when it is told to and does not apply either.
+      const threeAsks = patient(doInstance, "dev-three");
+      const turns: Array<[string, number]> = [];
+      let t = 0;
+      for (; t < 190_000; t += 1500) {
+        const two = await ask(doInstance, "dev-two");
+        const three = await threeAsks(t);
+        const holder = two.json.reason === "not-caught-up" ? "dev-two" : three === "not-caught-up" ? "dev-three" : null;
+        if (holder && turns[turns.length - 1]?.[0] !== holder) turns.push([holder, t]);
+        const claim = state.data.get("claim") as { since: number; until: number };
+        // However often it is renewed, a claim's total life is bounded.
+        expect(claim.until).toBeLessThanOrEqual(claim.since + 60_000);
+        advance(1500);
+      }
+      // dev-two has the claim for its life and no more; dev-three, who was told to wait, has the next one
+      // (not dev-two again, which asked in that very second); then dev-two, which waited behind it.
+      expect(turns.map(([d]) => d)).toEqual(["dev-two", "dev-three", "dev-two", "dev-three"]);
+      expect(turns[1]![1]).toBeGreaterThanOrEqual(58_000);
+      expect(turns[1]![1]).toBeLessThanOrEqual(64_000);
+      expect(turns[2]![1] - turns[1]![1]).toBeLessThanOrEqual(64_000);
+    }));
 
-  test("the one that was barred may claim again once its window has gone", async () => {
-    const { doInstance, state } = await three();
-    await ask(doInstance, "dev-two");
-    const claim = state.data.get("claim") as { since: number; until: number };
-    state.data.set("claim", { ...claim, since: Date.now() - 61_000, until: Date.now() + 25_000 });
-    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
-    const barred = state.data.get("claim") as { barred: { device: string; until: number } };
-    state.data.set("claim", { ...barred, barred: { ...barred.barred, until: Date.now() - 1 } });
-    expect((await ask(doInstance, "dev-two")).json.reason).toBe("not-caught-up");
-  });
+  test("the one that asked first is next, not one that asks more often", () =>
+    withClock(async (advance) => {
+      const { doInstance } = await three();
+      const invite = await call(doInstance, "/invite", { caller: "admin", device: "dev-one", body: {} });
+      await call(doInstance, "/join", { caller: "device", device: "dev-four", body: { code: invite.json.code } });
+      await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-four" } });
+      const threeAsks = patient(doInstance, "dev-three");
+      const fourAsks = patient(doInstance, "dev-four");
 
-  test("a claim that lapses (its holder died half way) lets the next ask take over the catching up", async () => {
-    const { doInstance, state } = await three();
-    await ask(doInstance, "dev-two");
-    const claim = state.data.get("claim") as { until: number };
-    state.data.set("claim", { ...claim, until: Date.now() - 1 });
-    expect((await ask(doInstance, "dev-three")).json.reason).toBe("not-caught-up");
-    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
-  });
+      expect((await ask(doInstance, "dev-two")).json.reason).toBe("not-caught-up"); // takes the claim
+      advance(2000);
+      expect(await threeAsks(2000)).toBe("claimed"); // the first to wait
+      advance(1000);
+      expect(await fourAsks(3000)).toBe("claimed"); // the second
+      // dev-two runs its claim out, asking every 1.5 s, and the two that wait ask when they were told to.
+      let t = 3000;
+      let first: string | null = null;
+      for (; t < 66_000; t += 1500) {
+        advance(1500);
+        const two = (await ask(doInstance, "dev-two")).json.reason as string;
+        const four = await fourAsks(t); // dev-four asks before dev-three in every round
+        const three = await threeAsks(t);
+        if (!first) first = two === "not-caught-up" ? null : four === "not-caught-up" ? "dev-four" : three === "not-caught-up" ? "dev-three" : null;
+      }
+      expect(first).toBe("dev-three");
+    }));
+
+  test("a holder nobody is waiting for may go on: the claim only changes hands when somebody asks", () =>
+    withClock(async (advance) => {
+      const { doInstance } = await three();
+      expect((await ask(doInstance, "dev-two")).json.reason).toBe("not-caught-up");
+      for (let t = 0; t < 70_000; t += 1500) {
+        advance(1500);
+        expect((await ask(doInstance, "dev-two")).json.reason).toBe("not-caught-up");
+      }
+    }));
+
+  test("a replica that was told to wait and never came back loses its place", () =>
+    withClock(async (advance) => {
+      const { doInstance } = await three();
+      await ask(doInstance, "dev-two");
+      expect((await ask(doInstance, "dev-three")).json.reason).toBe("claimed"); // queued, then gone
+      // dev-two's claim runs out without dev-three asking again; it is not kept waiting for.
+      for (let t = 0; t < 120_000; t += 1500) {
+        advance(1500);
+        await ask(doInstance, "dev-two");
+      }
+      const two = await ask(doInstance, "dev-two");
+      expect(two.json.reason).toBe("not-caught-up");
+    }));
+
+  test("a claim that lapses (its holder died half way) lets the next ask take over the catching up", () =>
+    withClock(async (advance) => {
+      const { doInstance } = await three();
+      await ask(doInstance, "dev-two");
+      advance(31_000);
+      expect((await ask(doInstance, "dev-three")).json.reason).toBe("not-caught-up");
+      expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
+    }));
+
+  test("the queue does not outlive the lease it was for: the claimant that caught up takes it, and the claim goes", () =>
+    withClock(async (advance) => {
+      const { doInstance, state } = await three();
+      await ask(doInstance, "dev-two");
+      await ask(doInstance, "dev-three");
+      advance(5000);
+      await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1 } });
+      expect((await ask(doInstance, "dev-two")).json.role).toBe("primary");
+      expect(state.data.has("claim")).toBe(false);
+    }));
 });
 
 describe("head advance", () => {

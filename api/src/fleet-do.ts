@@ -106,14 +106,35 @@ const CLAIM_MS = 30_000;
 /** The most a claim lasts in all, however often its holder asks again. */
 const CLAIM_MAX_MS = 60_000;
 
+/**
+ * How long past the time it was told to ask again a waiting replica keeps its place in
+ * the queue. A replica that does not come back by then is taken for gone.
+ */
+const WAIT_GRACE_MS = 15_000;
+
+/** A replica that asked for the free lease while another was catching up, and is waiting its turn. */
+interface Waiter {
+  device: string;
+  /** When it first asked: the queue is in this order, and asking again does not change it. */
+  at: number;
+  /** It keeps its place until then; each ask moves this on. */
+  by: number;
+}
+
 /** A replica that is catching up to take a free lease. */
 interface Claim {
   device: string;
   /** When it was first made: a claim does not outlive this by more than CLAIM_MAX_MS. */
   since: number;
   until: number;
-  /** A holder whose claim ran its whole life, and may not claim again until then. */
-  barred?: { device: string; until: number };
+  /**
+   * Who asked while the claim was held, in the order they first asked. When the claim
+   * ends, the first of them (who still comes back) has the next one, and a holder that
+   * ran its whole life is behind all of them: it cannot take the claim again while any
+   * other replica is waiting, and no replica that asks again and again can take it
+   * ahead of those that were told to wait.
+   */
+  queue?: Waiter[];
 }
 
 /** One snapshot the fleet keeps, as the index lists it. */
@@ -1045,39 +1066,56 @@ export class FleetDO implements DurableObject {
         const live = claim !== undefined && claim.until > now && members[claim.device] !== undefined;
         const wait = (holder: string, ms: number): Response =>
           Response.json({ ok: true, role: "replica", reason: "claimed", holder, head, epoch: head.epoch, retryAfterMs: Math.max(1000, ms) });
+        // Those waiting, in the order they asked, minus the ones that stopped coming back.
+        const queue = (claim?.queue ?? []).filter((w) => w.by > now && members[w.device] !== undefined);
+        // Put the caller in the queue (or keep its place) and tell it to ask again in `ms`.
+        const queued = async (holder: string, ms: number): Promise<Response> => {
+          const by = now + Math.max(1000, ms) + WAIT_GRACE_MS;
+          const mine = queue.find((w) => w.device === caller.deviceId);
+          if (!mine || mine.by !== by) {
+            if (mine) mine.by = by;
+            else queue.push({ device: caller.deviceId, at: now, by });
+            await this.state.storage.put("claim", {
+              device: claim?.device ?? "",
+              since: claim?.since ?? 0,
+              until: claim?.until ?? 0,
+              queue,
+            } satisfies Claim);
+          }
+          return wait(holder, ms);
+        };
         if (claim && live && claim.device !== caller.deviceId) {
-          out = wait(claim.device, claim.until - now);
+          out = await queued(claim.device, claim.until - now);
           return;
         }
         if (claim && live) {
-          // The holder asks again. A claim is renewed while it is working, but not
-          // for ever: a member that is alive and cannot catch up (nothing sealed for
-          // it, a work tree it cannot write) asks again and again, and would keep
-          // the others waiting as long as it lives. Past its total life the claim
-          // lapses, and the member may not take the next one for a window - which
-          // the others, asking when they were told to, will have used.
-          if (now - claim.since >= CLAIM_MAX_MS) {
-            await this.state.storage.put("claim", {
-              device: claim.device,
-              since: claim.since,
-              until: now,
-              barred: { device: claim.device, until: now + CLAIM_MS },
-            } satisfies Claim);
-            out = wait(claim.device, CLAIM_MS);
+          // The holder asks again. A claim is renewed while it is working, but not for
+          // ever: a member that is alive and cannot catch up (nothing sealed for it, a
+          // work tree it cannot write) asks again and again, and would keep the others
+          // waiting as long as it lives. The renewal never goes past the total life;
+          // when that is over the claim lapses, and the holder - behind everyone that
+          // is waiting - does not get the next one while there is somebody who is.
+          const since = Number.isFinite(claim.since) ? claim.since : claim.until - CLAIM_MS;
+          await this.state.storage.put("claim", {
+            device: claim.device,
+            since,
+            until: Math.min(now + CLAIM_MS, since + CLAIM_MAX_MS),
+            queue,
+          } satisfies Claim);
+        } else {
+          // Nobody holds the claim. It goes to the replica that has waited longest,
+          // and to anyone if nobody has been waiting.
+          const head = queue[0];
+          if (head && head.device !== caller.deviceId) {
+            out = await queued(head.device, Math.min(CLAIM_MS, head.by - now));
             return;
           }
           await this.state.storage.put("claim", {
-            device: claim.device,
-            since: claim.since,
-            until: Math.min(now + CLAIM_MS, claim.since + CLAIM_MAX_MS),
+            device: caller.deviceId,
+            since: now,
+            until: now + CLAIM_MS,
+            queue: queue.filter((w) => w.device !== caller.deviceId),
           } satisfies Claim);
-        } else {
-          const barred = claim?.barred;
-          if (barred && barred.device === caller.deviceId && barred.until > now) {
-            out = wait(barred.device, barred.until - now);
-            return;
-          }
-          await this.state.storage.put("claim", { device: caller.deviceId, since: now, until: now + CLAIM_MS } satisfies Claim);
         }
         out = Response.json({
           ok: true,
