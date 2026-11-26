@@ -115,6 +115,54 @@ describe("one fleet agent per configuration", () => {
     expect(readdirSync(dir).filter((n) => n.startsWith("agent.lock"))).toEqual([]);
   });
 
+  test("two agents that find the same dead lock do not both take it: the one that was too slow puts the other's lock back", async () => {
+    const dir = scratch();
+    writeFileSync(agentLockPath(dir), "999999\n");
+    const alive = (pid: number) => pid !== 999999;
+    let a: Awaited<ReturnType<typeof acquireAgentLock>> | undefined;
+    let once = false;
+    // B has judged the lock dead and is about to take it away; A, which saw the same lock, has just done so.
+    const b = await acquireAgentLock(dir, {
+      pid: 2222,
+      isAgent: alive,
+      beforeTakeover: async () => {
+        if (once) return;
+        once = true;
+        a = await acquireAgentLock(dir, { pid: 1111, isAgent: alive });
+      },
+    });
+    expect(a?.held).toBe(true);
+    expect(b).toEqual({ held: false, holder: 1111 });
+    expect(readFileSync(agentLockPath(dir), "utf8").trim()).toBe("1111");
+    expect(readdirSync(dir).filter((n) => n !== "agent.lock")).toEqual([]);
+    if (a?.held) a.release();
+  });
+
+  test("the leftovers of attempts that were cut short are swept once they are old, not while they might be in use", async () => {
+    const dir = scratch();
+    const old = new Date(Date.now() - 3_600_000);
+    for (const name of ["agent.lock.123.abcd1234.tmp", "agent.lock.stale.deadbeef"]) {
+      writeFileSync(join(dir, name), "x");
+      utimesSync(join(dir, name), old, old);
+    }
+    writeFileSync(join(dir, "agent.lock.456.ffff0000.tmp"), "x");
+    const lock = await acquireAgentLock(dir);
+    expect(readdirSync(dir).sort()).toEqual(["agent.lock", "agent.lock.456.ffff0000.tmp"]);
+    if (lock.held) lock.release();
+  });
+
+  test("where the file system has no hard links the lock is still taken exactly once, with its pid in it", async () => {
+    const dir = scratch();
+    const noLinks = (): void => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    };
+    const first = await acquireAgentLock(dir, { pid: 1111, isAgent: () => true, link: noLinks });
+    expect(first.held).toBe(true);
+    expect(readFileSync(agentLockPath(dir), "utf8").trim()).toBe("1111");
+    expect(await acquireAgentLock(dir, { pid: 2222, isAgent: () => true, link: noLinks })).toEqual({ held: false, holder: 1111 });
+    if (first.held) first.release();
+  });
+
   test("a lock that is empty and only just made (an older build's, being written) is waited for, an old empty one is not", async () => {
     const dir = scratch();
     writeFileSync(agentLockPath(dir), "");

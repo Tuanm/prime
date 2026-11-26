@@ -9,7 +9,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The lock lives in the agent's own directory (`fleetAgentDir`). */
@@ -102,6 +102,10 @@ export interface AgentLockOptions {
   touchMs?: number;
   /** Called after this process has written its pid and before it puts the lock in place; for tests. */
   beforeLink?: () => Promise<void> | void;
+  /** Called after a lock was judged dead and before it is taken away; for tests. */
+  beforeTakeover?: () => Promise<void> | void;
+  /** How the lock is put in place (a hard link); replaced in tests. */
+  link?: (from: string, to: string) => void;
 }
 
 export type AgentLock = { held: true; release: () => void } | { held: false; holder: number };
@@ -132,6 +136,7 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
   const me = opts.pid ?? process.pid;
   const isAgent = opts.isAgent ?? ((pid: number) => isFleetAgentProcess(pid, agentDir));
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+  sweepLeftovers(agentDir);
   const mine = join(agentDir, `agent.lock.${me}.${randomBytes(4).toString("hex")}.tmp`);
   writeFileSync(mine, String(me) + "\n", { mode: 0o600 });
   const until = Date.now() + (opts.waitMs ?? 0);
@@ -139,10 +144,20 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
     for (;;) {
       await opts.beforeLink?.();
       try {
-        linkSync(mine, file);
+        (opts.link ?? linkSync)(mine, file);
         return held(file, me, opts.touchMs ?? 5000);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "EPERM" || code === "ENOTSUP" || code === "ENOSYS" || code === "EOPNOTSUPP") {
+          // A file system without hard links (FAT, some network mounts): the lock is created
+          // exclusively with its pid in a single write. (A reader that meets it empty waits.)
+          try {
+            writeFileSync(file, String(me) + "\n", { flag: "wx", mode: 0o600 });
+            return held(file, me, opts.touchMs ?? 5000);
+          } catch (inner) {
+            if ((inner as NodeJS.ErrnoException).code !== "EEXIST") throw inner;
+          }
+        } else if (code !== "EEXIST") throw err;
       }
       const holder = readHolder(file);
       if (holder === me) {
@@ -156,9 +171,25 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
         continue;
       }
       if (holder === null || !isAgent(holder)) {
-        // Nobody holds it. The file is removed only if it still says what was just read, so two
-        // agents that find the same dead lock do not take each other's new one away.
-        if (readHolder(file) === holder) rmSync(file, { force: true });
+        // Nobody holds it. It is taken away by renaming it, and what was moved is looked at: if
+        // another agent has taken the dead lock over since it was judged, it is the live lock
+        // that was moved, and it is put back. (Reading and then removing could remove that one.)
+        await opts.beforeTakeover?.();
+        const stale = `${file}.stale.${randomBytes(4).toString("hex")}`;
+        try {
+          renameSync(file, stale);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw err;
+        }
+        if (readHolder(stale) !== holder) {
+          try {
+            linkSync(stale, file);
+          } catch {
+            // Taken again meanwhile: whoever holds it holds it.
+          }
+        }
+        rmSync(stale, { force: true });
         continue;
       }
       if (Date.now() >= until) return { held: false, holder };
@@ -166,6 +197,19 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
     }
   } finally {
     rmSync(mine, { force: true });
+  }
+}
+
+/** Files of attempts that were cut short (a crash between writing and linking) are not left for ever. */
+function sweepLeftovers(agentDir: string): void {
+  try {
+    for (const name of readdirSync(agentDir)) {
+      if (!/^agent\.lock\.(.*\.tmp|stale\.[0-9a-f]+)$/.test(name)) continue;
+      const file = join(agentDir, name);
+      if (!youngerThan(file, 60_000)) rmSync(file, { force: true });
+    }
+  } catch {
+    // Nothing to sweep.
   }
 }
 
