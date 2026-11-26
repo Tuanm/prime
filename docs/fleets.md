@@ -540,6 +540,35 @@ it, and so does everything that is not a fleet.
 | `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (15000 ms; the fleet's own lease can lower it); saved like the others |
 | a fleet nobody touches | cleaned up after a day |
 
+## Known limitations
+
+What is deliberately not done, so that nobody has to find it out:
+
+- **The roster is the trust anchor.** A gateway that lies about who the members are (adds a key of
+  its own) can author snapshots; only a fingerprint checked outside the gateway would close it. See
+  "What the gateway can still do".
+- **Rollback and split views are not detected.** A member cannot know about a newer head it was never
+  shown. Sizes in a manifest (`packBytes`) are not sealed: they steer the route, not the content.
+- **A snapshot from a member that has left may not be openable by a replica that never saw its key.** A
+  replica keeps the roster's keys it has seen; a publisher that left before this replica ever read the
+  roster is refused ("not any member's"), until a current member publishes again.
+- **Unsealed snapshots are taken until the first sealed one is seen.** And a fleet that has seen a
+  sealed one refuses an unsealed one that is newer, so an old member that is promoted stalls the new
+  replicas until it is upgraded.
+- **Objects can still be left in storage** when a publisher dies after uploading a checkpoint's change
+  pack and before the snapshot request, or when the gateway itself fails between storing and asking
+  the fleet object. A refused publish cleans up after itself.
+- **A work tree that git cannot write fails inside git**, with a plain error and not an errno: it is
+  retried with back-off, and is not recognised as "cannot be written" (which would stop the claim).
+- **Names that differ only in case** (`README` and `readme`) from a case-sensitive member arrive as one
+  file on a case-folding one; the member that takes over then publishes the other's deletion.
+- **Two agents can overlap** for up to one touch of the lock (five seconds) plus one round when a lock is
+  taken over at the same moment by two starters; the one that finds its lock gone stops.
+- **A systemd drop-in elsewhere than the user's unit directory** (`/etc/systemd/user`) is not read when
+  working out which configuration the service runs.
+- **Windows** has no service-manager restart and no process list for the agent lock: it falls back to
+  the lock's and state file's freshness.
+
 ## Where to read more
 
 - [Join](https://prime.tuanm.workers.dev/join) - the same story with a picture
