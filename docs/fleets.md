@@ -30,8 +30,9 @@ charge is packed, sealed, and carried to the others.
 At any moment exactly one space holds the lease. That one writes. The others are
 **replicas**: they keep a copy ready, and they never write.
 
-The lease is short - fifteen seconds - and the one holding it renews every five,
-so a space that goes quiet loses it quickly rather than locking the fleet.
+The lease is short - forty-five seconds - and the one holding it renews every fifteen
+(a third of it, so two renewals can be lost and it is still held), so a space that goes
+quiet loses it quickly rather than locking the fleet.
 
 ```mermaid
 sequenceDiagram
@@ -107,11 +108,16 @@ in the store, never behind it. `prime fleets agent status` shows what the agent 
 Fetching is cheap: a replica that is up to date asks nothing, a socket that says "the
 head moved" starts one fetch, and the route to the head is the cheapest the replica can
 find (see "A replica that fell behind"). A replica takes its place in the fleet when the
-agent starts, when the fleet says the lease is free, and as a safety about once a minute
-(every fifteen seconds without a socket) - not on every round, and it does not renew a
-lease it does not hold. Replicas that hear "the lease is free" wait a little before asking,
-the ones that are further ahead first, and the one that loses finds the lease held and
-stays a replica, having written nothing.
+agent starts, when the fleet says the lease is free, and as a safety: every fifteen seconds
+without a socket (the answer says where the head is, so it asks for nothing else), every five
+minutes with one. It does not renew a lease it does not hold.
+
+When the lease is free, replicas that are behind each need to write their work tree to take
+it, and only one can. The first to ask is told to catch up and holds a claim on doing so for
+thirty seconds (renewed whenever it asks again); the others are told to wait, write nothing,
+and ask again when the claim runs out - so if the first died half way, the next takes over
+at the cost of that wait. Who actually gets the lease is decided as ever: a member that has
+applied the head.
 
 ### What a replica keeps
 
@@ -173,11 +179,17 @@ change.
 
 A whole tree is also published when a member is added or comes back with a new key (a
 swap of one space for another counts), because a snapshot can only be opened by the
-members it was sealed for. A member that only left needs no whole tree: the next snapshot
-is not sealed for it, which is what keeps it out.
+members it was sealed for. Each wrapped key says which of the member's keys it is for, so a
+member that came back with a new key is routed round the snapshots sealed for its old one. A
+member that only left needs no whole tree: the next snapshot is not sealed for it, which is
+what keeps it out. A member that has just joined, with nothing yet sealed for it, is told so
+after one request and waits for the primary to notice.
 
-**The route a replica takes is the cheapest it can find**, in bytes: either all the
-changes since what it holds, or a whole tree at some checkpoint and the changes after it.
+**The route a replica takes is the cheapest it can find**: either all the changes since
+what it holds, or a whole tree at some checkpoint and the changes after it. Each step
+counts its pack's bytes and 24 KB more (two round trips, a manifest, two git processes), so
+forty changes of a few hundred bytes are not worth forty round trips when the whole tree is
+14 KB, while thirty-nine of 1.5 KB against 1.9 MB are.
 A checkpoint carries both - the whole tree, for a newcomer, and the change since the
 snapshot before it, sealed with the same key, for everyone who is up to date - so a
 replica that follows every snapshot never downloads a whole tree again. The gateway keeps
@@ -310,7 +322,7 @@ leases, per-member revocation, and a name to look at when something went wrong.
 
 ## The agent belongs in a service
 
-The agent renews this machine's place in the fleet every few seconds while it holds
+The agent renews this machine's place in the fleet every fifteen seconds while it holds
 the lease, and keeps a replica's copy fetched. It is what keeps the fleet alive: while
 it runs, the space holds the lease or has a copy ready to take it; while it does not,
 the place lapses and the fleet waits for someone else to take it.
@@ -347,11 +359,13 @@ seconds:
 | paused, agents that listen | 4 | 0 |
 
 A running fleet still sends the requests that are its work: the primary renews the
-lease and publishes, the others fetch what was published. An idle replica sends almost
-none: with a socket it looks at the head about every thirty seconds and takes its place
-about once a minute (about 4,000 requests a day, where it was about 11,500); without a
-socket, the head every second and a half and its place every fifteen seconds (about
-63,000, where it was about 132,000).
+lease (every fifteen seconds) and publishes, the others fetch what was published. An idle
+replica that does not mirror sends almost none: with a socket it asks for its place every
+five minutes and looks at the head every ten (about 400 requests a day, where it was about
+11,500); without a socket it asks for its place every fifteen seconds and the answer carries
+the head (about 5,700, where it was about 132,000). A replica that mirrors, and so wants a
+fresh work tree, looks at the head every round without a socket (about 63,000) and every
+thirty seconds with one (about 3,100).
 
 What a snapshot costs on the wire (2,000 files, 3.9 MB, one file edited per snapshot, a
 replica that follows every one):
@@ -362,7 +376,7 @@ replica that follows every one):
 | the checkpoint (every 32nd), up | 1.91 MB | 1.88 MB tree + 2 KB change |
 | the checkpoint, a replica that is up to date, down | 1.91 MB | 2.8 KB |
 | a snapshot while one member is far behind, up | 1.92 MB, each time | 2.0 KB |
-| a member 39 snapshots behind catches up, down | 1.92 MB | 58 KB |
+| a member 39 snapshots behind catches up, down | 1.92 MB, 4 requests | 62 KB, 81 requests |
 
 The gateway counts what it does - requests, how long each object was busy
 serving them, the objects stored and read - and prices them at Cloudflare's list prices with
@@ -380,7 +394,7 @@ it, and so does everything that is not a fleet.
 |---|---|
 | members per fleet | 32 |
 | invite lifetime | ten minutes by default, one hour at most |
-| lease | fifteen seconds, renewed every five |
+| lease | forty-five seconds, renewed every fifteen |
 | snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change |
 | snapshots kept | the last 64 |
 | a member's object store | collected when it passes 32 MB (about hourly) and whenever it is over `PRIME_FLEET_CACHE_MB` (512 by default); it keeps the snapshot the work tree holds, the newest fetched and what its indexes name |
