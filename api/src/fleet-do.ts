@@ -1225,8 +1225,12 @@ export class FleetDO implements DurableObject {
     // say so. Without this a member whose own report was lost (a timeout, a 503)
     // would be refused its next publish as "catch up first", with nothing it
     // could catch up to.
-    applied[caller.deviceId] = next.seq;
-    await this.state.storage.put("applied", applied);
+    // Read again, with no other I/O between that and the write: the write to R2
+    // above gave other requests (a member's report, in particular) room to run, and
+    // the map read before it would put their change back as it was.
+    const now_ = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+    now_[caller.deviceId] = Math.max(now_[caller.deviceId] ?? 0, next.seq);
+    await this.state.storage.put("applied", now_);
     // The members that listen pull now instead of at their next look; the one that
     // published already has it.
     this.broadcast({ type: "head", seq: next.seq, manifestKey }, caller.deviceId);

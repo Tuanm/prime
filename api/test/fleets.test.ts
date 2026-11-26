@@ -28,7 +28,9 @@ function fakeState() {
     data,
     storage: {
       async get<T>(key: string): Promise<T | undefined> {
-        return data.get(key) as T | undefined;
+        // a copy, as the real storage gives: a caller that holds one does not see another's writes
+        const value = data.get(key);
+        return (value === undefined ? undefined : structuredClone(value)) as T | undefined;
       },
       async put(key: string, value: unknown): Promise<void> {
         // round-trip through JSON, like a real SQLite-backed DO
@@ -905,6 +907,35 @@ describe("what a replica reports and what the index says", () => {
     expect(listed.length).toBe(RECENT_SNAPSHOTS);
     expect(listed[0]!.seq).toBe(5);
     expect(listed[listed.length - 1]!.seq).toBe(RECENT_SNAPSHOTS + 4);
+  });
+});
+
+describe("a report that arrives while the head is being written", () => {
+  test("is not lost when the publish records its own seq", async () => {
+    const bucket = fakeBucket();
+    let hold: Promise<void> | null = null;
+    const put = bucket.put.bind(bucket);
+    bucket.put = (async (key: string, body: string, opts?: never) => {
+      if (hold && key.endsWith("/head")) await hold; // the R2 write: other requests run meanwhile
+      return put(key, body, opts);
+    }) as typeof bucket.put;
+    const { doInstance, state } = makeDo(bucket);
+    await makeFleet(doInstance, "dev-one");
+    const inv = await call(doInstance, "/invite", { caller: "admin", device: "dev-one", body: { autoApprove: true } });
+    await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: inv.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-one" });
+    await call(doInstance, "/head/advance", { caller: "device", device: "dev-one", body: { expectedSeq: 0, manifestKey: "m1", manifestHash: "h1" } });
+
+    let release!: () => void;
+    hold = new Promise<void>((r) => (release = r));
+    const advancing = call(doInstance, "/head/advance", { caller: "device", device: "dev-one", body: { expectedSeq: 1, manifestKey: "m2", manifestHash: "h2" } });
+    await new Promise((r) => setTimeout(r, 10));
+    await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1 } });
+    release();
+    hold = null;
+    expect((await advancing).status).toBe(200);
+    expect(state.data.get("applied")).toEqual({ "dev-one": 2, "dev-two": 1 });
   });
 });
 
