@@ -758,6 +758,81 @@ describe("a snapshot's other packs", () => {
   });
 });
 
+describe("what a replica reports and what the index says", () => {
+  async function fleetWithTwo() {
+    const made = makeDo();
+    await makeFleet(made.doInstance, "dev-owner");
+    const inv = await call(made.doInstance, "/invite", { caller: "admin", device: "dev-owner", body: { autoApprove: true } });
+    await call(made.doInstance, "/join", { caller: "device", device: "dev-two", body: { code: inv.json.code } });
+    await call(made.doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    await call(made.doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    return made;
+  }
+  const advance = (d: FleetDO, seq: number, meta?: Record<string, unknown>) =>
+    call(d, "/head/advance", {
+      caller: "device",
+      device: "dev-owner",
+      body: { expectedSeq: seq - 1, manifestKey: "m" + seq, manifestHash: "h" + seq, ...(meta ? { meta } : {}) },
+    });
+
+  test("how far a replica has fetched is recorded apart from how far it has applied", async () => {
+    const { doInstance } = await fleetWithTwo();
+    await advance(doInstance, 1);
+    // An older client says only what it applied.
+    const old = await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1 } });
+    expect(old.json).toEqual({ ok: true, applied: 1 });
+    // A replica that fetches ahead says both. Applied still gates the lease.
+    const fetched = await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1, fetched: 5 } });
+    expect(fetched.json).toEqual({ ok: true, applied: 1, fetched: 5 });
+    // It never goes backwards.
+    expect((await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1, fetched: 3 } })).json.fetched).toBe(5);
+    const keys = await call(doInstance, "/keys", { caller: "device", device: "dev-owner", method: "GET" });
+    const two = (keys.json.members as Array<{ deviceId: string; applied: number; fetched?: number }>).find((m) => m.deviceId === "dev-two")!;
+    expect(two.applied).toBe(1);
+    expect(two.fetched).toBe(5);
+    const owner = (keys.json.members as Array<{ deviceId: string; fetched?: number }>).find((m) => m.deviceId === "dev-owner")!;
+    expect(owner.fetched).toBeUndefined();
+  });
+
+  test("the index lists the snapshots from a sequence on, with what a member needs to pick a route", async () => {
+    const { doInstance } = await fleetWithTwo();
+    await advance(doInstance, 1, { full: true, packBytes: 5000 });
+    await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq: 1 } });
+    await advance(doInstance, 2, { full: false, packBytes: 40 });
+    await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq: 2 } });
+    await advance(doInstance, 3, { full: true, packBytes: 5100, deltaBytes: 45 });
+    // An older publisher sends no sizes at all.
+    await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq: 3 } });
+    await advance(doInstance, 4, { junk: "x", packBytes: -4, deltaBytes: "big" });
+
+    const all = await call(doInstance, "/index", { caller: "device", device: "dev-two", method: "GET" });
+    expect(all.status).toBe(200);
+    expect(all.json.entries).toEqual([
+      { seq: 1, manifestKey: "m1", full: true, packBytes: 5000 },
+      { seq: 2, manifestKey: "m2", full: false, packBytes: 40 },
+      { seq: 3, manifestKey: "m3", full: true, packBytes: 5100, deltaBytes: 45 },
+      { seq: 4, manifestKey: "m4", full: false },
+    ]);
+    // Asked from a sequence on, it lists only what is newer.
+    const later = await call(doInstance, "/index?after=2", { caller: "device", device: "dev-two", method: "GET" });
+    expect((later.json.entries as Array<{ seq: number }>).map((e) => e.seq)).toEqual([3, 4]);
+  });
+
+  test("only a member may read the index, and it is bounded like the snapshots it describes", async () => {
+    const { doInstance } = await fleetWithTwo();
+    const stranger = await call(doInstance, "/index", { caller: "device", device: "dev-nobody", method: "GET" });
+    expect(stranger.status).toBe(403);
+    for (let seq = 1; seq <= RECENT_SNAPSHOTS + 4; seq++) {
+      expect((await advance(doInstance, seq, { full: false })).status).toBe(200);
+      await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq } });
+    }
+    const listed = (await call(doInstance, "/index", { caller: "device", device: "dev-two", method: "GET" })).json.entries as Array<{ seq: number }>;
+    expect(listed.length).toBe(RECENT_SNAPSHOTS);
+    expect(listed[0]!.seq).toBe(5);
+    expect(listed[listed.length - 1]!.seq).toBe(RECENT_SNAPSHOTS + 4);
+  });
+});
+
 describe("a fleet the registry has forgotten", () => {
   test("says who it is again when it is woken up", async () => {
     const registry = fakeRegistry();
@@ -947,7 +1022,8 @@ describe("what the fleet pushes to the members that listen", () => {
     await makeFleet(doInstance, "dev-owner");
     await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
     await call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "m1", manifestHash: "h1" } });
-    expect(two.events()).toEqual([{ type: "head", seq: 1 }]);
+    // The manifest comes with the news, so a member that is told need not ask for it.
+    expect(two.events()).toEqual([{ type: "head", seq: 1, manifestKey: "m1" }]);
     expect(owner.events()).toEqual([]);
   });
 
@@ -1122,3 +1198,72 @@ describe("the Worker answers for a paused fleet", () => {
   });
 });
 
+
+describe("the Worker publishes a snapshot", () => {
+  async function publishVia(manifest: Record<string, unknown>) {
+    const advances: Array<Record<string, any>> = [];
+    const stub = {
+      async fetch(input: Request | string, init?: RequestInit) {
+        const url = typeof input === "string" ? input : input.url;
+        if (url.endsWith("/role")) return Response.json({ member: true, primary: true, epoch: 1 });
+        if (url.endsWith("/head/advance")) {
+          advances.push(JSON.parse(String(init?.body ?? "{}")));
+          return Response.json({ ok: true, head: { seq: manifest.seq } });
+        }
+        return Response.json({ ok: true });
+      },
+    };
+    const puts: string[] = [];
+    const env = {
+      BUCKET: { put: async (key: string) => void puts.push(key) },
+      FLEET: { idFromName: (n: string) => n, get: () => stub },
+    } as never;
+    const manifestBytes = Buffer.from(JSON.stringify(manifest));
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(manifestBytes.length, 0);
+    const body = Buffer.concat([header, manifestBytes, Buffer.from("sealed pack bytes")]);
+    const url = new URL("https://gateway/fleets/acme/snapshot");
+    const request = new Request(url, { method: "POST", headers: { "x-prime-device": "dev-a", "x-device-token": "t" }, body });
+    const res = (await handleFleetRoutes({
+      request,
+      env,
+      url,
+      cfg: { gatewayToken: "op-secret" } as never,
+      authorizeDevice: async () => ({ ok: true as const }),
+      unauthorized: () => new Response(null, { status: 401 }),
+    }))!;
+    return { res, advances, puts };
+  }
+
+  test("the object is told what a member needs to choose a route, and the change pack that goes with it", async () => {
+    const delta = "fleets/acme/packs/" + "c".repeat(64);
+    const { res, advances } = await publishVia({ seq: 4, full: true, packBytes: 1234, delta: { packKey: delta, bytes: 56 } });
+    expect(res.status).toBe(200);
+    expect(advances[0]!.expectedSeq).toBe(3);
+    expect(advances[0]!.meta).toEqual({ full: true, packBytes: 1234, deltaBytes: 56 });
+    expect(advances[0]!.extraKeys).toEqual([delta]);
+  });
+
+  test("a publisher that predates sizes and the change pack publishes as it always did", async () => {
+    const { res, advances } = await publishVia({ seq: 2, full: false });
+    expect(res.status).toBe(200);
+    expect(advances[0]!.meta).toEqual({ full: false });
+    expect(advances[0]!.extraKeys).toEqual([]);
+  });
+
+  test("the index is asked of the object from the sequence the member names", async () => {
+    const fetched: string[] = [];
+    const stub = { async fetch(input: Request | string) { fetched.push(typeof input === "string" ? input : input.url); return Response.json({ entries: [] }); } };
+    const url = new URL("https://gateway/fleets/acme/index?after=7");
+    const res = (await handleFleetRoutes({
+      request: new Request(url, { method: "GET", headers: { "x-prime-device": "dev-a" } }),
+      env: { FLEET: { idFromName: (n: string) => n, get: () => stub } } as never,
+      url,
+      cfg: { gatewayToken: "op-secret" } as never,
+      authorizeDevice: async () => ({ ok: true as const }),
+      unauthorized: () => new Response(null, { status: 401 }),
+    }))!;
+    expect(res.status).toBe(200);
+    expect(fetched).toEqual(["https://fleet/index?after=7"]);
+  });
+});

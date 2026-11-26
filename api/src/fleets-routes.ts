@@ -44,9 +44,10 @@ const ALLOWED_ACTIONS = new Set([
   "packs",
   "manifests",
   "keys",
+  "index",
   "events",
 ]);
-const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys"]);
+const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys", "index"]);
 
 /**
  * The routes a paused fleet does not serve.
@@ -124,9 +125,16 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   const pack = body.subarray(4 + manifestLength);
   if (pack.length === 0) return Response.json({ error: "empty pack" }, { status: 400 });
 
-  let manifest: { seq?: number; packKey?: string; packHash?: string; delta?: { packKey?: unknown } };
+  let manifest: {
+    seq?: number;
+    packKey?: string;
+    packHash?: string;
+    full?: unknown;
+    packBytes?: unknown;
+    delta?: { packKey?: unknown; bytes?: unknown };
+  };
   try {
-    manifest = JSON.parse(manifestBytes.toString("utf8")) as { seq?: number; packKey?: string; packHash?: string; delta?: { packKey?: unknown } };
+    manifest = JSON.parse(manifestBytes.toString("utf8")) as typeof manifest;
   } catch {
     return Response.json({ error: "malformed manifest" }, { status: 400 });
   }
@@ -167,7 +175,19 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   const moved = await stub.fetch("https://fleet/head/advance", {
     method: "POST",
     headers,
-    body: JSON.stringify({ expectedSeq: seq - 1, manifestKey, manifestHash, packKey, extraKeys }),
+    body: JSON.stringify({
+      expectedSeq: seq - 1,
+      manifestKey,
+      manifestHash,
+      packKey,
+      extraKeys,
+      // What a member needs to choose its route without opening every manifest.
+      meta: {
+        full: manifest.full === true,
+        ...(typeof manifest.packBytes === "number" ? { packBytes: manifest.packBytes } : {}),
+        ...(typeof manifest.delta?.bytes === "number" ? { deltaBytes: manifest.delta.bytes } : {}),
+      },
+    }),
   });
   const result = (await moved.json().catch(() => ({}))) as { ok?: boolean; head?: unknown; error?: string };
   if (!moved.ok) return Response.json({ ok: false, error: result.error ?? "the head did not move" }, { status: moved.status });
@@ -494,6 +514,8 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   headers.set("x-prime-fleet", fleetId);
 
   const target = new URL("https://fleet" + (action ? "/" + action : "/create"));
+  // The index is asked from a sequence on.
+  if (action === "index") target.search = url.search;
   if (!action && request.method === "GET") {
     // GET /fleets/:id is the roster; forward as /members
     target.pathname = "/members";

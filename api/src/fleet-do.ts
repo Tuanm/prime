@@ -100,6 +100,15 @@ const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 }
  */
 const LEASE_TTL_MS = 45_000;
 
+/** One snapshot the fleet keeps, as the index lists it. */
+interface IndexEntry {
+  seq: number;
+  manifestKey: string;
+  full: boolean;
+  packBytes?: number;
+  deltaBytes?: number;
+}
+
 export class FleetDO implements DurableObject {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     // A member's agent keeps a socket open to hear about the fleet instead of asking
@@ -289,6 +298,8 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("lease");
     await this.state.storage.delete("epoch");
     await this.state.storage.delete("applied");
+    await this.state.storage.delete("fetched");
+    await this.state.storage.delete("index");
     await this.state.storage.delete("ownerSeenAt");
     try {
       await this.bucket().delete(this.headKey(fleetId));
@@ -378,6 +389,20 @@ export class FleetDO implements DurableObject {
     return Response.json({ head });
   }
 
+  // The snapshots the fleet keeps, newest last, from a sequence on: what a member
+  // needs to work out the cheapest way to catch up (which of them are whole trees,
+  // and how big the packs are) in one request instead of one per manifest. Only
+  // what was published since the object began to record it is listed; a member
+  // that finds a gap walks the manifests instead.
+  private async index(caller: Caller, request: Request): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    if (!members[caller.deviceId]) return this.deny();
+    const after = Math.max(0, Math.floor(Number(new URL(request.url).searchParams.get("after") ?? 0)) || 0);
+    const entries = ((await this.state.storage.get<IndexEntry[]>("index")) ?? []).filter((e) => e.seq > after);
+    return Response.json({ entries });
+  }
+
   // The members' public keys, for the member that publishes snapshots.
   //
   // Only the primary sees this in full. The roster itself keeps the device
@@ -392,6 +417,7 @@ export class FleetDO implements DurableObject {
       return Response.json({ error: "only the primary may read the members' keys" }, { status: 409 });
     }
     const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+    const fetched = (await this.state.storage.get<Record<string, number>>("fetched")) ?? {};
     return Response.json({
       members: Object.values(members).map((m) => ({
         deviceId: m.deviceId,
@@ -400,6 +426,8 @@ export class FleetDO implements DurableObject {
         // does not decide anything from it (a member that fell behind catches
         // up from the newest checkpoint).
         applied: applied[m.deviceId] ?? 0,
+        // How far it has fetched, for a replica that fetches ahead of applying.
+        ...(fetched[m.deviceId] !== undefined ? { fetched: fetched[m.deviceId] } : {}),
       })),
     });
   }
@@ -415,7 +443,17 @@ export class FleetDO implements DurableObject {
     const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
     if (seq > (applied[caller.deviceId] ?? 0)) applied[caller.deviceId] = seq;
     await this.state.storage.put("applied", applied);
-    return Response.json({ ok: true, applied: applied[caller.deviceId] ?? 0 });
+    // A replica that fetches ahead says how far it has fetched, which is not
+    // how far it has applied: only `applied` gates the lease. Members that do
+    // not say have nothing recorded.
+    let fetchedSeq: number | undefined;
+    if (typeof body.fetched === "number" && body.fetched >= 0) {
+      const fetched = (await this.state.storage.get<Record<string, number>>("fetched")) ?? {};
+      fetchedSeq = Math.max(fetched[caller.deviceId] ?? 0, Math.floor(body.fetched));
+      fetched[caller.deviceId] = fetchedSeq;
+      await this.state.storage.put("fetched", fetched);
+    }
+    return Response.json({ ok: true, applied: applied[caller.deviceId] ?? 0, ...(fetchedSeq !== undefined ? { fetched: fetchedSeq } : {}) });
   }
 
   /** Whether this object has told the registry it exists. */
@@ -526,6 +564,7 @@ export class FleetDO implements DurableObject {
       return this.advance(caller, body, request);
     }
     if (path === "/head" && request.method === "GET") return this.head(caller, request);
+    if (path === "/index" && request.method === "GET") return this.index(caller, request);
     if (path === "/applied" && request.method === "POST") {
       await this.touch();
       return this.applied(caller, body);
@@ -1077,6 +1116,14 @@ export class FleetDO implements DurableObject {
     const extraKeys = Array.isArray(body.extraKeys)
       ? body.extraKeys.filter((k): k is string => typeof k === "string" && k.startsWith(own) && /^[0-9a-f]{16,64}$/.test(k.slice(own.length))).slice(0, 4)
       : [];
+    // What a member needs to choose its route (see `index`). Only numbers and a flag.
+    const rawMeta = (body.meta ?? {}) as Record<string, unknown>;
+    const size = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
+    const meta = {
+      full: rawMeta.full === true,
+      ...(size(rawMeta.packBytes) !== undefined ? { packBytes: size(rawMeta.packBytes)! } : {}),
+      ...(size(rawMeta.deltaBytes) !== undefined ? { deltaBytes: size(rawMeta.deltaBytes)! } : {}),
+    };
     if (!manifestKey || !manifestHash) return Response.json({ error: "manifest required" }, { status: 400 });
 
     const held = await this.lease();
@@ -1114,7 +1161,7 @@ export class FleetDO implements DurableObject {
     await this.state.storage.put("epoch", next.epoch);
     // The members that listen pull now instead of at their next look; the one that
     // published already has it.
-    this.broadcast({ type: "head", seq: next.seq }, caller.deviceId);
+    this.broadcast({ type: "head", seq: next.seq, manifestKey }, caller.deviceId);
 
     // Keep a bounded number of snapshots: more than the newest whole tree and
     // the changes after it, which is all a member far behind needs. The old
@@ -1123,6 +1170,9 @@ export class FleetDO implements DurableObject {
     recent.push([manifestKey, packKey, ...extraKeys].filter(Boolean).join("\n"));
     const evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
     await this.state.storage.put("recent", recent);
+    const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    index.push({ seq: next.seq, manifestKey, ...meta });
+    await this.state.storage.put("index", index.slice(-RECENT_SNAPSHOTS));
     for (const entry of evicted) {
       for (const key of entry.split("\n")) {
         if (!key) continue;
