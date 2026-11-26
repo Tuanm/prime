@@ -354,7 +354,6 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
       paths,
       state.base ?? null,
       state.seq ?? 0,
-      state.manifest,
       state.memberCount ?? 0,
       state.roster,
     );

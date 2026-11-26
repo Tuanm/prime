@@ -101,8 +101,6 @@ export async function publish(
   base: string | null,
   /** The sequence this member has already applied. */
   appliedSeq = 0,
-  /** The manifest of the snapshot this one is built against. */
-  parentManifest?: string,
   /** How many members the last publish sealed for. */
   lastMemberCount = 0,
   /** Who the last publish sealed for (see `rosterOf`); tells a swap from no change. */
@@ -122,6 +120,9 @@ export async function publish(
     }
     await reportApplied(creds, fleet, caught.seq);
     appliedSeq = caught.seq;
+    // What this snapshot is built on is the state it has just caught up to,
+    // not the one the caller's state file remembered from before.
+    base = caught.commit;
   }
 
   const seq = (head?.seq ?? 0) + 1;
@@ -171,7 +172,10 @@ export async function publish(
     packKey: "",
     packHash: "",
     full: wantFull,
-    ...(parentManifest ? { parentManifest, parentSeq: head?.seq } : {}),
+    // The snapshot this one follows is the head's, whoever published it: the
+    // gateway only accepts a publish on top of the head, so this link is always
+    // the one a member that was away can walk back along.
+    ...(head ? { parentManifest: head.manifestKey, parentSeq: head.seq } : {}),
     senderPublicKey: sealed.senderPublicKey,
     wrapped: sealed.wrapped,
     epoch: head?.epoch ?? 0,

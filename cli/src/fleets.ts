@@ -593,7 +593,6 @@ export async function syncFleetSpace(
       paths,
       state.base ?? null,
       state.seq ?? 0,
-      state.manifest,
       state.memberCount ?? 0,
       state.roster,
     );

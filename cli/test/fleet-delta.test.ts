@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -164,7 +165,7 @@ describe("incremental snapshots", () => {
       gateway.seed("replica-device", replicaKeys.publicKey);
 
       // The first snapshot has no base, so it carries the whole tree.
-      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, undefined, 2);
+      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, 2);
       expect(first.seq).toBe(1);
       const firstBytes = first.bytes;
 
@@ -175,7 +176,7 @@ describe("incremental snapshots", () => {
 
       // A small change, published on top of the first snapshot.
       writeFileSync(join(primaryWork, "file-0.txt"), "changed content ".repeat(50));
-      const second = await publish(credsFor("primary-device"), "x", primaryPaths, first.commit, first.seq, undefined, 2);
+      const second = await publish(credsFor("primary-device"), "x", primaryPaths, first.commit, first.seq, 2);
       expect(second.seq).toBe(2);
       expect(second.bytes).toBeLessThan(firstBytes);
 
@@ -208,7 +209,7 @@ describe("incremental snapshots", () => {
       const keys = loadOrCreateKeyPair(primaryPaths.keyFile);
       gateway.seed("primary-device", keys.publicKey);
 
-      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, undefined, 1);
+      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, 1);
       expect(first.seq).toBe(1);
 
       // A second member joins: the membership changed, so the next publish
@@ -216,7 +217,7 @@ describe("incremental snapshots", () => {
       const replicaKeys = loadOrCreateKeyPair(replicaPaths.keyFile);
       gateway.seed("replica-device", replicaKeys.publicKey);
       writeFileSync(join(primaryWork, "a.txt"), "alpha changed".repeat(100));
-      const second = await publish(credsFor("primary-device"), "x", primaryPaths, first.commit, first.seq, undefined, 1);
+      const second = await publish(credsFor("primary-device"), "x", primaryPaths, first.commit, first.seq, 1);
       expect(second.seq).toBe(2);
 
       // The new member applies the whole tree and matches.
@@ -250,19 +251,17 @@ describe("incremental snapshots", () => {
       gateway.seed("replica-device", replicaKeys.publicKey);
 
       // The replica takes the first snapshot.
-      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, undefined, 2);
+      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, 2);
       await pull(credsFor("replica-device"), "x", replicaPaths, 0);
 
       // Three more snapshots are published while the replica is away.
       let base = first.commit;
       let baseSeq = first.seq;
-      let parentManifest = first.manifestKey;
-      for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < 3; i++) {
         writeFileSync(join(primaryWork, "a.txt"), "step " + i + " ".repeat(100));
-        const next = await publish(credsFor("primary-device"), "x", primaryPaths, base, baseSeq, parentManifest, 2);
+        const next = await publish(credsFor("primary-device"), "x", primaryPaths, base, baseSeq, 2);
         base = next.commit;
         baseSeq = next.seq;
-        parentManifest = next.manifestKey;
       }
 
       // The replica catches up over the chain, and the tree matches.
@@ -296,7 +295,7 @@ describe("incremental snapshots", () => {
       // Fewer snapshots are kept than were published: the replica's own is long gone.
       gateway.retain = FULL_PACK_WINDOW + 2;
 
-      let last = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, undefined, 2);
+      let last = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, 2);
       const first = last;
       const firstPull = await pull(credsFor("replica-device"), "x", replicaPaths, 0);
       expect(firstPull.applied).toBe(true);
@@ -310,7 +309,7 @@ describe("incremental snapshots", () => {
       let checkpointBytes = 0;
       for (let seq = 2; seq <= FULL_PACK_WINDOW + 3; seq++) {
         writeFileSync(join(primaryWork, "file-0.txt"), "edit " + seq + " ".repeat(10));
-        last = await publish(credsFor("primary-device"), "x", primaryPaths, last.commit, last.seq, last.manifestKey, 2, last.roster);
+        last = await publish(credsFor("primary-device"), "x", primaryPaths, last.commit, last.seq, 2, last.roster);
         expect(last.seq).toBe(seq);
         if (last.full) {
           publishedFull.push(seq);
@@ -355,7 +354,7 @@ describe("incremental snapshots", () => {
       useFakeGateway(gateway);
       gateway.seed("primary-device", loadOrCreateKeyPair(primaryPaths.keyFile).publicKey);
       gateway.seed("leaver-device", loadOrCreateKeyPair(join(root, "l.key")).publicKey);
-      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, undefined, 2);
+      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, 2);
 
       // One leaves, one joins: still two members.
       gateway.members.delete("leaver-device");
@@ -365,7 +364,7 @@ describe("incremental snapshots", () => {
       // The roster names who is in, so the swap is seen: the snapshot carries
       // the whole tree, sealed for the newcomer, who can open it.
       const second = await publish(
-        credsFor("primary-device"), "x", primaryPaths, first.commit, first.seq, first.manifestKey, first.members, first.roster,
+        credsFor("primary-device"), "x", primaryPaths, first.commit, first.seq, first.members, first.roster,
       );
       expect(second.full).toBe(true);
       const pulled = await pull(credsFor("newcomer-device"), "x", newcomerPaths, 0);
@@ -375,7 +374,7 @@ describe("incremental snapshots", () => {
       // Nothing changed in the roster since: the next publish is a delta again.
       writeFileSync(join(primaryWork, "a.txt"), "alpha changed again".repeat(100));
       const third = await publish(
-        credsFor("primary-device"), "x", primaryPaths, second.commit, second.seq, second.manifestKey, second.members, second.roster,
+        credsFor("primary-device"), "x", primaryPaths, second.commit, second.seq, second.members, second.roster,
       );
       expect(third.full).toBe(false);
     } finally {
@@ -383,4 +382,79 @@ describe("incremental snapshots", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("a member that was away across a takeover catches up from the new primary's chain", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    const gateway = new FakeGateway();
+    try {
+      const mk = (n: string): MemberPaths => {
+        mkdirSync(join(root, n), { recursive: true });
+        return { work: join(root, n), gitDir: join(root, n + "-meta"), keyFile: join(root, n + ".key") };
+      };
+      const A = mk("a"), B = mk("b"), C = mk("c");
+      useFakeGateway(gateway);
+      for (const [id, p] of [["A", A], ["B", B], ["C", C]] as const) gateway.seed(id, loadOrCreateKeyPair(p.keyFile).publicKey);
+      writeFileSync(join(A.work, "f.txt"), "v0".repeat(200));
+      let last = await publish(credsFor("A"), "x", A, null, 0, 3);
+      let b = await pull(credsFor("B"), "x", B, 0);
+      const c = await pull(credsFor("C"), "x", C, 0);
+      // C goes away at seq 1. A publishes 2..5 and B follows.
+      for (let i = 2; i <= 5; i++) {
+        writeFileSync(join(A.work, "f.txt"), "v" + i + "x".repeat(200));
+        last = await publish(credsFor("A"), "x", A, last.commit, last.seq, 3, last.roster);
+        b = await pull(credsFor("B"), "x", B, b.seq, b.commit);
+      }
+      // A dies and B takes over. A replica's state has no manifest of its own.
+      gateway.primary = "B";
+      writeFileSync(join(B.work, "g.txt"), "from B");
+      const published = await publish(credsFor("B"), "x", B, b.commit, b.seq, 3, last.roster);
+      expect(published.seq).toBe(6);
+      expect(published.full).toBe(false);
+
+      // C comes back at seq 1: the chain from the head reaches it.
+      const caught = await pull(credsFor("C"), "x", C, c.seq, c.commit);
+      expect(caught.seq).toBe(6);
+      expect(sameTree(fingerprint(B.work), fingerprint(C.work))).toBe(true);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("a new primary that was behind builds its first delta on the state it caught up to", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    const gateway = new FakeGateway();
+    try {
+      const mk = (n: string): MemberPaths => {
+        mkdirSync(join(root, n), { recursive: true });
+        return { work: join(root, n), gitDir: join(root, n + "-meta"), keyFile: join(root, n + ".key") };
+      };
+      const A = mk("a"), B = mk("b");
+      useFakeGateway(gateway);
+      for (const [id, p] of [["A", A], ["B", B]] as const) gateway.seed(id, loadOrCreateKeyPair(p.keyFile).publicKey);
+      writeFileSync(join(A.work, "f.txt"), "v0".repeat(200));
+      let last = await publish(credsFor("A"), "x", A, null, 0, 2);
+      const b1 = await pull(credsFor("B"), "x", B, 0);
+      writeFileSync(join(A.work, "f.txt"), "v1".repeat(200));
+      writeFileSync(join(A.work, "second.txt"), "added by A");
+      last = await publish(credsFor("A"), "x", A, last.commit, last.seq, 2, last.roster);
+
+      // B takes over one snapshot behind: publish catches it up first.
+      gateway.primary = "B";
+      writeFileSync(join(B.work, "g.txt"), "from B");
+      const published = await publish(credsFor("B"), "x", B, b1.commit, b1.seq, 2, last.roster);
+      expect(published.seq).toBe(3);
+      // Its snapshot follows the one it caught up to, not the one it held before.
+      const parent = execFileSync("git", ["--git-dir=" + B.gitDir, "rev-parse", published.commit + "^"], { encoding: "utf8" }).trim();
+      expect(parent).toBe(last.commit);
+      // The fleet has A's work and B's, and a replica that follows gets both.
+      const A2 = await pull(credsFor("A"), "x", A, last.seq, last.commit);
+      expect(A2.seq).toBe(3);
+      expect(readFileSync(join(A.work, "g.txt"), "utf8")).toBe("from B");
+      expect(readFileSync(join(A.work, "second.txt"), "utf8")).toBe("added by A");
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
