@@ -623,7 +623,8 @@ export function loopSleepMs(loop: SpaceLoop, pollMs: number, now: number = Date.
     // A replica that is waiting to take the lease and whose round failed backs off from the
     // poll's pace, not from the long wait of an idle replica with a socket: the lease is free,
     // and one failed request must not put the only replica to sleep for minutes.
-    if (failures > 0) return Math.max(200, loop.claimAt - now, Math.min(FAILING_MAX_MS, pollMs * 2 ** failures));
+    // A refusal that said when to ask again (429, 503 with retry-after) is waited for, not asked again in three seconds.
+    if (failures > 0) return Math.max(200, loop.claimAt - now, Math.min(FAILING_MAX_MS, Math.max(loop.refusedForMs ?? 0, pollMs * 2 ** failures)));
     return Math.min(sleepMs, Math.max(200, loop.claimAt - now));
   }
   return sleepMs;
@@ -694,6 +695,8 @@ export interface SpaceLoop {
   paused: boolean;
   /** How long the gateway asked to wait before looking at a paused fleet again. */
   retryAfterMs?: number;
+  /** How long the gateway asked to be left alone after it refused the last request for the place. */
+  refusedForMs?: number;
   /** The held connection that tells this space what happened. */
   events: FleetEvents;
   /** Rounds in a row that failed; the agent waits longer after each. */
@@ -1107,7 +1110,11 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
       loop.retryAfterMs = placed.retryAfterMs;
       return { primary: false, paused: true };
     }
-    if (!placed.ok) throw new PlaceRefused(placed.error ?? "refused", placed.retryAfterMs);
+    if (!placed.ok) {
+      loop.refusedForMs = placed.retryAfterMs;
+      throw new PlaceRefused(placed.error ?? "refused", placed.retryAfterMs);
+    }
+    loop.refusedForMs = undefined;
     loop.paused = false;
     loop.primary = placed.primary;
     // What the fleet says a place lasts. An agent that renews at its own pace

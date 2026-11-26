@@ -1434,6 +1434,26 @@ describe("a claim and the pace of the agent's rounds", () => {
     }
   });
 
+  test("a refusal that says when to ask again is waited for while a claim is pending", async () => {
+    const loopSleepMs = await two();
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: false });
+      s.loop.claim = true;
+      s.loop.claimAt = Date.now() - 1000;
+      s.loop.failures = 1;
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThan(10_000);
+      // The gateway answered 429 with retry-after: 90.
+      s.loop.refusedForMs = 90_000;
+      expect(loopSleepMs(s.loop, 1500)).toBeGreaterThanOrEqual(90_000);
+      // Not for ever: the round's own maximum still bounds it.
+      s.loop.refusedForMs = 3_600_000;
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThanOrEqual(5 * 60_000);
+    } finally {
+      finish(w);
+    }
+  });
+
   test("a member that can never catch up asks a few times and stops claiming, and a healthy replica takes over", async () => {
     const loopSleepMs = await two();
     const w = await world();
