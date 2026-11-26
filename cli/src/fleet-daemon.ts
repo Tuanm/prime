@@ -316,7 +316,7 @@ export function loopSleepMs(loop: SpaceLoop, pollMs: number, now: number = Date.
  * and `wake` rouses the round that will. A paused fleet takes no one in, and a
  * space whose rounds keep failing is retried by the round, on its longer wait.
  */
-export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number = Date.now()): Promise<void> {
+export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number = Date.now()): Promise<boolean> {
   const due =
     loop.primary ||
     placeDue({
@@ -328,9 +328,16 @@ export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number =
       eventsConnected: loop.events.connected,
       ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}),
     });
-  if (loop.paused || (loop.failures ?? 0) > 0 || !due) return;
-  await takePlace(loop);
+  if (loop.paused || (loop.failures ?? 0) > 0 || !due) return true;
+  try {
+    await takePlace(loop);
+  } catch {
+    // A renewal that did not get through is tried again soon: the place is held
+    // for three intervals, and waiting out one of them for the next try is a third of it.
+    return false;
+  }
   if (loop.claim) wake();
+  return true;
 }
 
 /** One space as the agent keeps it (exported so a round can be driven in a test). */
@@ -652,7 +659,9 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     // was renamed - or an identity another space took over - reads correctly
     // in the operator's list.
     body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(label ? { label } : {}) }),
-    signal: AbortSignal.timeout(creds.timeoutMs ?? 60_000),
+    // Asking for the place is how the lease is renewed: a request that hangs for
+    // a minute would outlast the lease, so it is cut short (and asked again).
+    signal: AbortSignal.timeout(Math.min(creds.timeoutMs ?? PLACE_TIMEOUT_MS, PLACE_TIMEOUT_MS)),
   });
   if (!res.ok) {
     // A paused fleet answers with a reason and how long to wait: that is not
@@ -689,6 +698,16 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
       ? { head: { seq: body.head.seq, ...(typeof body.head.manifestKey === "string" && body.head.manifestKey ? { manifestKey: body.head.manifestKey } : {}) } }
       : {}),
   };
+}
+
+/** The longest a request for the place may take: under a quarter of the lease. */
+export const PLACE_TIMEOUT_MS = 10_000;
+/** How soon after a renewal that failed the next is tried, rather than a whole interval later. */
+export const BEAT_RETRY_MS = 2_000;
+
+/** When the next beat is due: an interval after one that went through, soon after one that did not. */
+export function nextBeatDelayMs(ok: boolean, intervalMs: number): number {
+  return ok ? intervalMs : Math.min(intervalMs, BEAT_RETRY_MS);
 }
 
 /**
@@ -900,12 +919,15 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
     // that spends a minute pulling a large pack would otherwise let the place
     // lapse while it works, and another member would take the fleet.
     let beat: ReturnType<typeof setTimeout> | undefined;
+    let beatOk = true;
     const beatTick = (): void => {
+      const interval = heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs ?? heartbeatMs));
       beat = setTimeout(() => {
         void heartbeat(loop, () => wake(name, true))
-          .catch(() => {})
+          .then((ok) => void (beatOk = ok))
+          .catch(() => void (beatOk = false))
           .finally(beatTick);
-      }, heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs ?? heartbeatMs)));
+      }, nextBeatDelayMs(beatOk, interval));
     };
     beatTick();
     loop.events.start();

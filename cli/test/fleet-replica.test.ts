@@ -1351,3 +1351,39 @@ describe("a claim and the pace of the agent's rounds", () => {
     }
   }, 60_000);
 });
+
+describe("the heartbeat against the lease", () => {
+  test("a renewal that fails is tried again in two seconds, and one that hangs is cut off", async () => {
+    const { BEAT_RETRY_MS, PLACE_TIMEOUT_MS, heartbeat, heartbeatIntervalMs, nextBeatDelayMs } = await import("../src/fleet-daemon");
+    expect(nextBeatDelayMs(true, 15_000)).toBe(15_000);
+    expect(nextBeatDelayMs(false, 15_000)).toBe(BEAT_RETRY_MS);
+    expect(nextBeatDelayMs(false, 1_000)).toBe(1_000); // never later than an interval
+    // A request for the place is under a quarter of the lease.
+    expect(PLACE_TIMEOUT_MS * 4).toBeLessThanOrEqual(45_000);
+
+    // The worst case, with the numbers the agent has: a renewal an interval after the last that
+    // went through, then each failing as slowly as it may and tried again. Two failures still
+    // leave a third attempt that starts before the place is gone.
+    const lease = 45_000;
+    const interval = heartbeatIntervalMs(lease, 15_000);
+    const thirdStarts = interval + 2 * (PLACE_TIMEOUT_MS + BEAT_RETRY_MS);
+    expect(thirdStarts).toBeLessThan(lease);
+    expect(lease - thirdStarts).toBeGreaterThan(2_000); // and time to be answered
+
+    // And it says whether it went through.
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: false });
+      s.loop.lastBootstrap = 1;
+      s.loop.primary = true;
+      const ok = await heartbeat(s.loop as never, () => undefined, 10_000_000);
+      expect(ok).toBe(true);
+      w.gateway.members.delete("r1"); // the fleet refuses it now
+      s.loop.lastBootstrap = 1;
+      const bad = await heartbeat(s.loop as never, () => undefined, 20_000_000);
+      expect(bad).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
+});
