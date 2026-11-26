@@ -232,9 +232,25 @@ export class NestedRepoCache {
   }
 }
 
+// What the store's config looked like right after `ensureStore` set it up, per store:
+// as long as the file is the one it wrote (same inode, size and mtime) for the same
+// work tree, the three settings are still there and need not be written again.
+const configured = new Map<string, { work: string; stamp: string }>();
+
+function configStamp(gitDir: string): string | null {
+  try {
+    const st = statSync(join(gitDir, "config"));
+    return `${st.ino}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Make sure prime's object store exists and points at the work tree. */
 async function ensureStore(gitDir: string, work: string, env: Record<string, string>): Promise<void> {
   mkdirSync(gitDir, { recursive: true });
+  const known = configured.get(gitDir);
+  if (known && known.work === work && existsSync(join(gitDir, "HEAD")) && known.stamp === configStamp(gitDir)) return;
   if (!existsSync(join(gitDir, "HEAD"))) {
     await gitRun(gitDir, ["init", "-q", "--bare", gitDir], process.env as Record<string, string>);
   }
@@ -246,6 +262,11 @@ async function ensureStore(gitDir: string, work: string, env: Record<string, str
   // from the fleet's tree. The store follows the names on disk exactly instead (see
   // `reconcileCase` for the one thing that costs).
   await gitText(gitDir, ["config", "core.ignorecase", "false"], env);
+  // Commits need an author; the store's own, so the user's git config is not needed.
+  await gitText(gitDir, ["config", "user.email", "fleet@prime"], env);
+  await gitText(gitDir, ["config", "user.name", "prime fleet"], env);
+  const stamp = configStamp(gitDir);
+  if (stamp) configured.set(gitDir, { work, stamp });
 }
 
 const foldsCaseCache = new Map<string, boolean>();
@@ -369,8 +390,6 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   const indexFile = join(gitDir, "snapshot.index");
   const env = gitEnv(gitDir, work, indexFile);
   await ensureStore(gitDir, work, env);
-  await gitText(gitDir, ["config", "user.email", "fleet@prime"], env);
-  await gitText(gitDir, ["config", "user.name", "prime fleet"], env);
 
   // Nested repositories are excluded: the fleet does not mirror them.
   const stage = async (): Promise<void> => {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -803,6 +803,53 @@ describe("a case-only rename on the primary", () => {
       await applyPack(other, join(root, "other-meta"), second.commit, second.delta!, [], first.commit);
       expect(readdirSync(other).sort()).toEqual(["Docs", "NOTES.md", "keep.txt"]);
       expect(readFileSync(join(other, "NOTES.md"), "utf8")).toBe("notes v1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the object store's settings", () => {
+  const configFile = (gitDir: string) => join(gitDir, "config");
+  const setting = (gitDir: string, key: string) => execFileSync("git", ["--git-dir=" + gitDir, "config", "--get", key], { encoding: "utf8" }).trim();
+
+  test("are written when the store is made or its work tree moves, not on every snapshot", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      mkdirSync(work);
+      writeFileSync(join(work, "a.txt"), "a");
+      const first = await snapshot({ work, gitDir });
+      const written = statSync(configFile(gitDir));
+      writeFileSync(join(work, "a.txt"), "b");
+      await snapshot({ work, gitDir, base: first.commit, wantFull: false });
+      // git replaces the file whenever it sets a key, even to the value it has.
+      expect(statSync(configFile(gitDir)).ino).toBe(written.ino);
+      expect(statSync(configFile(gitDir)).mtimeMs).toBe(written.mtimeMs);
+
+      // The work tree moved: the store follows.
+      const moved = join(root, "moved");
+      renameSync(work, moved);
+      await snapshot({ work: moved, gitDir, base: first.commit, wantFull: false });
+      expect(setting(gitDir, "core.worktree")).toBe(moved);
+      expect(setting(gitDir, "core.ignorecase")).toBe("false");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("are put back when something else rewrote the config", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      mkdirSync(work);
+      writeFileSync(join(work, "a.txt"), "a");
+      const first = await snapshot({ work, gitDir });
+      execFileSync("git", ["--git-dir=" + gitDir, "config", "core.ignorecase", "true"]);
+      await snapshot({ work, gitDir, base: first.commit, wantFull: false });
+      expect(setting(gitDir, "core.ignorecase")).toBe("false");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
