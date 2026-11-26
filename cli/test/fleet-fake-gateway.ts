@@ -22,6 +22,8 @@ export class FakeGateway {
   indexEnabled = true;
   /** What the index lists; tests may cut holes in it. */
   indexEntries: Array<{ seq: number; manifestKey: string; full: boolean; packBytes?: number; deltaBytes?: number }> = [];
+  /** Publishers that predate the key fingerprint in wrapped keys. */
+  stripKeyIds = false;
   /** How many of the next /applied reports fail with a 503. */
   failApplied = 0;
   /** Like the real gateway now: a publish makes the publisher applied. */
@@ -103,6 +105,10 @@ export class FakeGateway {
       if (this.legacyManifests) {
         delete manifest.packBytes;
         delete manifest.delta;
+      }
+      // An older publisher does not say which key a snapshot was wrapped for.
+      if (this.stripKeyIds && Array.isArray(manifest.wrapped)) {
+        for (const w of manifest.wrapped as Array<{ keyId?: string }>) delete w.keyId;
       }
       const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
       const manifestKey = "fleets/x/manifests/" + hash(finalManifest);

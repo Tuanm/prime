@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chooseRoute } from "../src/fleet-agent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
@@ -732,5 +733,72 @@ describe("a report that did not get through", () => {
       restore();
       finish(w);
     }
+  });
+});
+
+describe("a member that came back with a new key", () => {
+  // The key file is lost and made again, and the fleet records the new key.
+  const rotate = (w: World, r: ReturnType<World["replica"]>) => {
+    rmSync(r.paths.keyFile);
+    w.gateway.members.get(r.id)!.pubkey = loadOrCreateKeyPair(r.paths.keyFile).publicKey;
+  };
+
+  async function stuck(w: World) {
+    const r = w.replica("r1");
+    await w.publishNext();
+    await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+    await w.publishNext();
+    await w.publishNext(); // sealed for the old key
+    rotate(w, r);
+    const whole = await w.publishNext(); // the roster gained a key: a whole tree, and the change, for the new one
+    expect(whole.full).toBe(true);
+    return r;
+  }
+
+  test("is not sent through snapshots that were sealed for the key it had", async () => {
+    const w = await world();
+    try {
+      const r = await stuck(w);
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(4);
+      const done = await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(done!.applied.seq).toBe(4);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("finds its way too when the snapshots do not say which key they were sealed for", async () => {
+    const w = await world();
+    try {
+      w.gateway.stripKeyIds = true; // a publisher from before the fingerprint
+      const r = await stuck(w);
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(4);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("the route only goes through what the member's own key opens", () => {
+    const m = (seq: number, keyId: string | undefined, over: Partial<Parameters<typeof chooseRoute>[0][number]> = {}) =>
+      ({
+        fleet: "x", seq, tipCommit: "c" + seq, tree: "t" + seq, packKey: "fleets/x/packs/p" + seq, packHash: "p", full: false,
+        packBytes: 10, senderPublicKey: "k", epoch: 1, createdAt: 0,
+        wrapped: [{ memberId: "me", wrapped: "w", ...(keyId ? { keyId } : {}) }], ...over,
+      }) as Parameters<typeof chooseRoute>[0][number];
+    const walked = [
+      m(4, "NEW", { full: true, packBytes: 900, delta: { packKey: "fleets/x/packs/d4", packHash: "d", bytes: 10 } }),
+      m(3, "OLD"),
+      m(2, "OLD"),
+    ];
+    // A member holding seq 1, with the new key: the old-key snapshots are no steps.
+    const route = chooseRoute(walked, 1, { memberId: "me", keyId: "NEW" })!;
+    expect(route.map((s) => [s.manifest.seq, s.whole])).toEqual([[4, true]]);
+    // With no fingerprint to compare (an older snapshot), the id decides.
+    expect(chooseRoute([m(3, undefined), m(2, undefined)], 1, { memberId: "me", keyId: "NEW" })!.length).toBe(2);
+    // Snapshots up to a failed step are out.
+    expect(chooseRoute([m(4, undefined, { full: true, packBytes: 900 }), m(3, undefined), m(2, undefined)], 1, { memberId: "me", skipThrough: 3 })!.map((s) => s.manifest.seq)).toEqual([4]);
   });
 });

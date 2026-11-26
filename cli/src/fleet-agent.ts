@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
-import { generateMemberKeyPair, openForMember, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
+import { generateMemberKeyPair, keyIdOf, openForMember, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
 import {
   type IndexEntry,
   fetchHead,
@@ -290,14 +290,27 @@ const WALK_LIMIT = 2 * FULL_PACK_WINDOW + 1;
 const UNKNOWN_WHOLE = 1e12;
 const UNKNOWN_CHANGE = 1;
 
-function openableBy(manifest: FleetManifest, memberId: string): boolean {
-  return manifest.wrapped.some((w) => w.memberId === memberId);
+/** Who is asking, so the route only goes through what this member can open. */
+export interface Asker {
+  memberId: string;
+  /** Its key's fingerprint (see `keyIdOf`): a snapshot wrapped for another key of its own is not openable. */
+  keyId?: string;
+  /** Snapshots up to this sequence are known not to open (a step that failed): leave them out. */
+  skipThrough?: number;
+}
+
+function openableBy(manifest: FleetManifest, who: Asker): boolean {
+  if (who.skipThrough !== undefined && manifest.seq <= who.skipThrough) return false;
+  const entry = manifest.wrapped.find((w) => w.memberId === who.memberId);
+  if (!entry) return false;
+  // A snapshot from an older publisher does not say which key: trust the id.
+  return entry.keyId === undefined || who.keyId === undefined || entry.keyId === who.keyId;
 }
 
 // The pack that brings a member that holds the snapshot before this one to this
 // snapshot, if there is one it can open.
-function changeOf(manifest: FleetManifest, memberId: string): RouteStep | null {
-  if (!openableBy(manifest, memberId)) return null;
+function changeOf(manifest: FleetManifest, who: Asker): RouteStep | null {
+  if (!openableBy(manifest, who)) return null;
   if (!manifest.full) {
     return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_CHANGE, whole: false };
   }
@@ -306,8 +319,8 @@ function changeOf(manifest: FleetManifest, memberId: string): RouteStep | null {
 }
 
 // The pack that brings a member that holds nothing of the fleet to this snapshot.
-function wholeOf(manifest: FleetManifest, memberId: string): RouteStep | null {
-  if (!manifest.full || !openableBy(manifest, memberId)) return null;
+function wholeOf(manifest: FleetManifest, who: Asker): RouteStep | null {
+  if (!manifest.full || !openableBy(manifest, who)) return null;
   return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_WHOLE, whole: true };
 }
 
@@ -321,7 +334,8 @@ function wholeOf(manifest: FleetManifest, memberId: string): RouteStep | null {
  * cannot open (sealed before it joined, or for another key) is not a step.
  * Returns null when there is no route.
  */
-export function chooseRoute(walked: FleetManifest[], lastSeq: number, memberId: string): RouteStep[] | null {
+export function chooseRoute(walked: FleetManifest[], lastSeq: number, asker: Asker | string): RouteStep[] | null {
+  const who: Asker = typeof asker === "string" ? { memberId: asker } : asker;
   if (walked.length === 0) return [];
   const byRow = [...walked].reverse(); // oldest first
   const head = byRow[byRow.length - 1]!.seq;
@@ -332,7 +346,7 @@ export function chooseRoute(walked: FleetManifest[], lastSeq: number, memberId: 
     const steps: RouteStep[] = [];
     for (let seq = first; seq <= head; seq++) {
       const m = at(seq);
-      const step = m ? changeOf(m, memberId) : null;
+      const step = m ? changeOf(m, who) : null;
       if (!step) return null;
       steps.push(step);
     }
@@ -350,7 +364,7 @@ export function chooseRoute(walked: FleetManifest[], lastSeq: number, memberId: 
   // A whole tree at k, then the changes after it.
   for (let k = Math.max(lowest, lastSeq + 1); k <= head; k++) {
     const m = at(k);
-    const whole = m ? wholeOf(m, memberId) : null;
+    const whole = m ? wholeOf(m, who) : null;
     if (!whole) continue;
     const rest = k === head ? [] : changesFrom(k + 1);
     if (rest) consider([whole, ...rest]);
@@ -382,21 +396,24 @@ export async function planCatchUp(
   lastSeq: number,
   /** What the socket said the head is, if it did. */
   hint?: HeadHint,
+  /** The key the member holds, and snapshots known not to open with it. */
+  asker?: Omit<Asker, "memberId">,
 ): Promise<CatchUpPlan> {
+  const who: Asker = { memberId: creds.deviceId, ...asker };
   const known = hint && hint.seq > lastSeq && hint.manifestKey;
   const head: FleetHead = known
     ? { seq: hint.seq, manifestKey: hint.manifestKey!, manifestHash: "", epoch: 0 }
     : await fetchHead(creds, fleet);
   if (head.seq <= lastSeq) return { head, chain: [] };
 
-  const indexed = await planFromIndex(creds, fleet, lastSeq, head);
+  const indexed = await planFromIndex(creds, fleet, lastSeq, head, who);
   if (indexed) return indexed;
-  return planByWalking(creds, fleet, lastSeq, head);
+  return planByWalking(creds, fleet, lastSeq, head, who);
 }
 
 // Choose the route from the index, then fetch the manifests it names. Returns
 // null whenever the index does not settle it, so the caller walks.
-async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead): Promise<CatchUpPlan | null> {
+async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead, who: Asker): Promise<CatchUpPlan | null> {
   const entries = await fetchIndex(creds, fleet, lastSeq).catch(() => null);
   if (!entries || entries.length === 0) return null;
   // Consecutive, and reaching the head: otherwise the index is behind or has a hole.
@@ -417,11 +434,13 @@ async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: nu
     ...(e.deltaBytes !== undefined ? { delta: { packKey: "", packHash: "", bytes: e.deltaBytes } } : {}),
     full: e.full,
     senderPublicKey: "",
-    wrapped: [{ memberId: creds.deviceId, wrapped: "" }],
+    // Unknown who it is sealed for: assumed this member, and checked on the
+    // manifest of every snapshot the route turns out to use.
+    wrapped: [{ memberId: who.memberId, wrapped: "", ...(who.keyId ? { keyId: who.keyId } : {}) }],
     epoch: 0,
     createdAt: 0,
   });
-  const route = chooseRoute([...entries].reverse().map(skeleton), lastSeq, creds.deviceId);
+  const route = chooseRoute([...entries].reverse().map(skeleton), lastSeq, who);
   if (route === null) return null;
 
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
@@ -429,7 +448,7 @@ async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: nu
   const chain: RouteStep[] = [];
   for (const [i, step] of route.entries()) {
     const m = real[i]!;
-    const chosen = step.whole ? wholeOf(m, creds.deviceId) : changeOf(m, creds.deviceId);
+    const chosen = step.whole ? wholeOf(m, who) : changeOf(m, who);
     // The manifest says otherwise (not sealed for this member, or not what the
     // index claimed): do not trust the index for this one.
     if (!chosen || m.seq !== step.manifest.seq) return null;
@@ -452,7 +471,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return out;
 }
 
-async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead): Promise<CatchUpPlan> {
+async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead, who: Asker): Promise<CatchUpPlan> {
   // Each snapshot names the one it was built against, so the chain is walked
   // backwards until it reaches what is already here.
   const walked: FleetManifest[] = [];
@@ -468,7 +487,7 @@ async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: nu
   }
   if (walked.length === 0) return { head, chain: [] };
 
-  const chain = chooseRoute(walked, lastSeq, creds.deviceId);
+  const chain = chooseRoute(walked, lastSeq, who);
   if (chain === null) {
     const oldest = walked[walked.length - 1]!;
     throw new Error(
@@ -493,12 +512,17 @@ export async function openStep(
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
   const plain = openForMember(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey);
-  if (!plain) {
-    throw new Error(
-      "this snapshot was not sealed for this member: it was published before this device joined, so the primary has to publish again now that it has",
+  if (!plain) throw new NotSealedError(m.seq);
+  return plain;
+}
+
+/** A snapshot this member cannot open: sealed before it joined, or for a key it no longer has. */
+export class NotSealedError extends Error {
+  constructor(readonly seq: number) {
+    super(
+      "snapshot " + seq + " was not sealed for this member: it was published before this device joined, or for another key of its own, so the primary has to publish again now that it has",
     );
   }
-  return plain;
 }
 
 /** A snapshot that has been applied to the work tree. */
@@ -537,10 +561,55 @@ export async function fetchAhead(
   /** What the socket said the head is, so the gateway need not be asked. */
   hint?: HeadHint,
 ): Promise<{ head: FleetHead; fetched: Position; steps: number }> {
-  const plan = await planCatchUp(creds, fleet, from.seq, hint);
-  if (plan.chain.length === 0) return { head: plan.head, fetched: from, steps: 0 };
   const keys = loadOrCreateKeyPair(paths.keyFile);
+  const keyId = keyIdOf(keys.publicKey);
+  // A route can run through a snapshot that cannot be opened (the index does not
+  // say who a snapshot is sealed for, and a manifest only turns up the problem
+  // when it is read). Then the route is planned again without it, so a member is
+  // never stuck on a step it can never take while a whole tree it can open waits
+  // at the head.
+  let skipThrough: number | undefined;
+  let position = from;
+  let steps = 0;
+  for (let attempt = 0; ; attempt++) {
+    const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(skipThrough !== undefined ? { skipThrough } : {}) });
+    if (plan.chain.length === 0) return { head: plan.head, fetched: position, steps };
+    try {
+      const got = await ingestRoute(creds, fleet, paths, keys, plan, position, onFetched);
+      return { head: plan.head, fetched: got, steps: steps + plan.chain.length };
+    } catch (err) {
+      if (!(err instanceof NotSealedError) || attempt >= 2) throw err;
+      skipThrough = Math.max(skipThrough ?? 0, err.seq);
+      // What was kept before the step that failed stays kept.
+      const kept = keptBefore(plan, err.seq, position);
+      steps += kept.steps;
+      position = kept.position;
+    }
+  }
+}
 
+// The newest position the route kept before it failed at `failedSeq`.
+function keptBefore(plan: CatchUpPlan, failedSeq: number, from: Position): { position: Position; steps: number } {
+  let position = from;
+  let steps = 0;
+  for (const step of plan.chain) {
+    if (step.manifest.seq >= failedSeq) break;
+    position = { seq: step.manifest.seq, commit: step.manifest.tipCommit, tree: step.manifest.tree };
+    steps++;
+  }
+  return { position, steps };
+}
+
+// Download the route a few packs at a time and take them in, in order.
+async function ingestRoute(
+  creds: FleetCredentials,
+  fleet: string,
+  paths: MemberPaths,
+  keys: MemberKeyPair,
+  plan: CatchUpPlan,
+  from: Position,
+  onFetched?: (fetched: Position) => void | Promise<void>,
+): Promise<Position> {
   const downloads: Array<Promise<Buffer> | undefined> = [];
   const start = (i: number): void => {
     if (i < plan.chain.length && downloads[i] === undefined) {
@@ -567,7 +636,7 @@ export async function fetchAhead(
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree };
     await onFetched?.(fetched);
   }
-  return { head: plan.head, fetched, steps: plan.chain.length };
+  return fetched;
 }
 
 /**

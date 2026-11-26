@@ -15,7 +15,7 @@
 // secret to a new member means re-encrypting the history for it. With a
 // key per member, removal is immediate and joining costs nothing.
 
-import { createCipheriv, createDecipheriv, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, createPublicKey, createPrivateKey } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, createPublicKey, createPrivateKey } from "node:crypto";
 
 export interface MemberKeyPair {
   /** base64 of the raw 32 byte public key. */
@@ -60,8 +60,19 @@ function sharedSecret(privateKeyPem: string, peerPublicKeyB64: string): Buffer {
 export interface WrappedKey {
   /** The member this key is for. */
   memberId: string;
+  /**
+   * Which of the member's keys it was wrapped for: a short fingerprint. A member
+   * that came back with a new key has the same id and cannot open what was
+   * wrapped for the old one. Absent in snapshots from older publishers.
+   */
+  keyId?: string;
   /** base64 of the sealed snapshot key. */
   wrapped: string;
+}
+
+/** A short fingerprint of a member's public key (base64), to tell its keys apart. */
+export function keyIdOf(publicKeyB64: string): string {
+  return createHash("sha256").update(Buffer.from(publicKeyB64, "base64")).digest().subarray(0, 8).toString("base64");
 }
 
 export interface SealedForMembers {
@@ -111,6 +122,7 @@ export function sealManyForMembers(
     const sealed = Buffer.concat([wrapper.update(snapshotKey), wrapper.final()]);
     wrapped.push({
       memberId: member.memberId,
+      keyId: keyIdOf(member.publicKey),
       wrapped: Buffer.concat([wrapIv, sealed, wrapper.getAuthTag()]).toString("base64"),
     });
   }

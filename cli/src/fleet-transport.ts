@@ -55,7 +55,7 @@ export interface FleetManifest {
   /** The sender's public key, so a receiver can derive the shared secret. */
   senderPublicKey: string;
   /** The snapshot key, wrapped for each member. */
-  wrapped: Array<{ memberId: string; wrapped: string }>;
+  wrapped: Array<{ memberId: string; wrapped: string; keyId?: string }>;
   /** Which epoch published this, for the fencing check. */
   epoch: number;
   createdAt: number;
