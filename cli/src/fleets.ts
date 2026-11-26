@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
+import { FleetTrust } from "./fleet-trust.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -548,6 +549,36 @@ export async function fleetsRevoke(ctx: Ctx): Promise<void> {
     return;
   }
   ctx.out(green("revoked") + " " + res.json.revoked + " invite(s)");
+}
+
+/**
+ * `prime fleets trust reset <fleet> --space <name>`: take again a snapshot that carries no seal.
+ *
+ * A member that has taken in sealed snapshots refuses an unsealed one that follows them (see
+ * fleet-trust.ts). When the member that published it was an old build that is now gone, and
+ * nobody else can publish, that refusal is all there is between the fleet and a primary. The
+ * operator who knows the snapshot is the fleet's own says so here: this member forgets that it
+ * has seen seals, takes the snapshot, and its next publish is a whole tree, sealed again.
+ */
+export async function fleetsTrust(ctx: Ctx): Promise<void> {
+  const what = ctx.parsed.positionals[2] ?? "";
+  if (what !== "reset") throw new UsageError("unknown trust command \"" + what + "\"", "Usage: prime fleets trust reset <fleet-id> --space <name>");
+  const fleetId = requireFleetId(ctx.parsed.positionals[3] ?? "");
+  const spaceName = spaceArg(ctx);
+  if (!spaceName) throw new UsageError("missing --space", "Name the space that belongs to the fleet.");
+  const space = ctx.config.spaces[spaceName];
+  if (!space) throw new UsageError("unknown space \"" + spaceName + "\"", "Run 'prime spaces list' to see the spaces.");
+  if (space.fleet !== fleetId) throw new UsageError("the space \"" + spaceName + "\" is not in the fleet " + fleetId);
+  const was = FleetTrust.reset(fleetKeyFile(ctx.configPath, fleetId, spaceName));
+  if (ctx.json) {
+    printJson({ fleet: fleetId, space: spaceName, reset: true, ...(was !== undefined ? { sealedFrom: was } : {}) });
+    return;
+  }
+  ctx.out(
+    was === undefined
+      ? dim("this member had not seen a sealed snapshot of " + fleetId + ": nothing to forget")
+      : green("this member will take a snapshot without a seal again") + dim(" (it had seen seals from snapshot " + was + "); the next sealed one it takes in turns the check back on"),
+  );
 }
 
 export async function fleetsStatus(ctx: Ctx): Promise<void> {

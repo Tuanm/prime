@@ -44,6 +44,7 @@ import {
   fleetsDelete,
   fleetsStatus,
   fleetsSync,
+  fleetsTrust,
 } from "./fleets.ts";
 import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 
@@ -371,6 +372,8 @@ async function main(argv: string[]): Promise<void> {
           return fleetsDelete(ctx);
         case "agent":
           return fleetsAgent(ctx);
+        case "trust":
+          return fleetsTrust(ctx);
         case "reap":
           return fleetsReap(ctx);
         default:

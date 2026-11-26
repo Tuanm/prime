@@ -202,7 +202,7 @@ describe("snapshots from publishers that predate the seal", () => {
     const got = await w.pullReplica(0);
     expect(got.seq).toBe(2);
     expect(sameTree(fingerprint(w.work), fingerprint(w.replica.work))).toBe(true);
-    expect(FleetTrust.beside(w.replica.keyFile).boundSeq).toBeUndefined();
+    expect(FleetTrust.beside(w.replica.keyFile).sealedFrom).toBeUndefined();
   });
 
   test("a sealed snapshot after them is applied, and the fleet remembers it has seen a seal", async () => {
@@ -214,7 +214,7 @@ describe("snapshots from publishers that predate the seal", () => {
     await w.next("two\n");
     const got = await w.pullReplica(1);
     expect(got.seq).toBe(2);
-    expect(FleetTrust.beside(w.replica.keyFile).boundSeq).toBe(2);
+    expect(FleetTrust.beside(w.replica.keyFile).sealedFrom).toBe(2);
   });
 
   test("an unsealed snapshot with a higher sequence is refused once a sealed one has been seen", async () => {
@@ -242,7 +242,106 @@ describe("snapshots from publishers that predate the seal", () => {
   test("the primary that published a seal does not take an unsealed successor", async () => {
     const w = await world();
     await w.next("one\n");
-    expect(FleetTrust.beside(w.primary.keyFile).boundSeq).toBe(1);
+    expect(FleetTrust.beside(w.primary.keyFile).sealedFrom).toBe(1);
+  });
+});
+
+describe("a fleet that is upgraded one member at a time", () => {
+  const trustOf = (w: World): { sealedFrom?: number; boundSeq?: number } => {
+    const file = w.replica.keyFile + ".trust.json";
+    return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+  };
+  const read = (w: World): string => readFileSync(join(w.replica.work, "file.txt"), "utf8");
+
+  test("a publisher that finds an unsealed head publishes a whole tree", async () => {
+    const w = await world();
+    await w.next("one\n");
+    w.gateway.unsealed = true; // an old member was promoted
+    await w.next("two\n");
+    w.gateway.unsealed = false; // and the primary is back, upgraded
+    const three = await w.next("three\n");
+    expect(w.manifest(three.manifestKey).full).toBe(true);
+    // Once the head is sealed, the next one is a change again.
+    const four = await w.next("four\n");
+    expect(w.manifest(four.manifestKey).full).toBe(false);
+  });
+
+  test("a replica that refused the unsealed snapshot goes around it, by the whole tree after it", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    w.gateway.unsealed = true;
+    await w.next("two\n");
+    w.gateway.unsealed = false;
+    await w.next("three\n");
+    await w.next("four\n");
+    const got = await w.pullReplica(1);
+    expect(got.seq).toBe(4);
+    expect(read(w)).toBe("four\n");
+  });
+
+  test("a member whose catch-up is refused only because the head is unsealed can be told to take it", async () => {
+    const w = await world();
+    await w.next("one\n");
+    const got = await w.pullReplica(0);
+    w.gateway.unsealed = true;
+    await w.next("two\n"); // the old member, and then it is gone
+    w.gateway.primary = "replica-device";
+    const take = (): ReturnType<typeof publish> => publish(credsFor("replica-device"), "x", w.replica, got.commit, got.seq, 2);
+    // The refusal says what to do about it.
+    await expect(take()).rejects.toThrow(/prime fleets trust reset/);
+    expect(FleetTrust.reset(w.replica.keyFile)).toBe(1);
+    w.gateway.unsealed = false;
+    const out = await take();
+    expect(out.seq).toBe(3);
+    expect(out.full).toBe(true); // the snapshot is sealed again, whole
+    expect(read(w)).toBe("two\n");
+    expect(FleetTrust.beside(w.replica.keyFile).sealedFrom).toBe(3);
+  });
+
+  test("a snapshot downloaded ahead of the one before it does not raise the guard", async () => {
+    const w = await world();
+    w.gateway.unsealed = true;
+    await w.next("one\n");
+    await w.next("two\n");
+    await w.pullReplica(0);
+    w.gateway.unsealed = false;
+    const three = await w.next("three\n");
+    await w.next("four\n");
+    // The packs of 3 are not served; those of 4 are, and are checked while 3 is being waited for.
+    const m3 = w.manifest(three.manifestKey);
+    const lost = [m3.packKey, m3.delta?.packKey].filter((k): k is string => k !== undefined).map(manifestIdOf);
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async (url: string, init: unknown) => {
+      if (lost.some((id) => String(url).includes("/packs/" + id))) {
+        await new Promise((r) => setTimeout(r, 150));
+        return new Response("{}", { status: 503 });
+      }
+      return real(url, init as never);
+    };
+    try {
+      await expect(w.pullReplica(2)).rejects.toThrow();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    expect(trustOf(w).sealedFrom ?? trustOf(w).boundSeq).toBeUndefined();
+  });
+
+  test("an unsealed snapshot at or above the lowest sealed one taken in is refused, though below the highest", async () => {
+    const w = await world();
+    w.gateway.unsealed = true;
+    const one = await w.next("one\n");
+    const two = await w.next("two\n");
+    w.gateway.unsealed = false;
+    await w.next("three\n");
+    await w.next("four\n");
+    await w.pullReplica(0);
+    // The gateway shows snapshot 1 (unsealed) as snapshot 3, which is below the newest sealed one.
+    w.forge({ ...w.manifest(one.manifestKey), seq: 3, parentSeq: 2, parentManifest: two.manifestKey });
+    await expect(w.pullReplica(2)).rejects.toThrow(/carries no seal/);
+    expect(read(w)).toBe("four\n");
+    expect(FleetTrust.beside(w.replica.keyFile).sealedFrom).toBe(3);
   });
 });
 

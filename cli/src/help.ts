@@ -431,6 +431,7 @@ USAGE
   prime fleets agent status|start|stop|reset    The agent that keeps the fleet in step (reset forgets its saved settings)
   prime fleets agent install                    Run the agent as a login service (it starts at login)
   prime fleets status <fleet-id>                 Show this device's standing in the fleet
+  prime fleets trust reset <fleet-id> --space <name>  Take a snapshot that has no seal again (see docs/fleets.md)
 
 The agent holds the fleet's lease while it runs, so it belongs in a service:
 'prime fleets agent install' is what keeps a member a member across a reboot.

@@ -251,8 +251,12 @@ checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
    from a key that is not in it). Otherwise the gateway could make a key pair of its own,
    wrap a snapshot key of its own for each member and seal its forgery itself.
 3. **No going back.** Publishers older than this have no seal, and their snapshots are
-   still accepted - but once a member has opened one snapshot with a seal in a fleet
-   (the same file records the highest), an unsealed one with a higher sequence is refused.
+   still accepted - but once a member has taken in a snapshot with a seal (in order, and only
+   once it is taken in: not one that was merely downloaded ahead), an unsealed one at or above the
+   lowest sealed sequence it has taken in is refused. The lowest is kept in the same file
+   (`sealedFrom`). A snapshot that is refused this way is gone around, not waited for: the
+   replica plans its route again from the next whole tree, and a publisher that finds an
+   unsealed head publishes a whole tree for that reason.
 
 Whose word this rests on: **the roster**. The operator admits the members, and the
 roster says which key each has. The checks hold against anyone who can read and write what
@@ -274,7 +278,13 @@ What the gateway can still do, whatever a member checks:
   sealed snapshot takes unsealed ones, so an unsealed old snapshot of an old publisher can be
   shown as a new one to a member that never saw a sealed one. And once one is seen, an old
   member that is promoted and publishes without a seal is refused by the new replicas
-  ("it carries no seal ... upgrade it"): upgrade every member, then expect no more of that.
+  ("it carries no seal ..."). They stay on the snapshot before it until an upgraded member
+  publishes: that snapshot is a whole tree, which they go to. If the old member is gone and no
+  upgraded member can take over (the catch-up to the unsealed head is what is refused), the
+  operator of that member runs `prime fleets trust reset <fleet> --space <name>`: it takes the
+  unsealed snapshot, and its own next publish is a whole tree, sealed. That is a decision to
+  trust that snapshot, and it is the operator's to make: the member cannot tell it from an old
+  snapshot the gateway made up.
   Older replicas read sealed snapshots as they did before (the packs are unchanged; the tag is
   an added manifest field), so mixed fleets keep working in that direction.
 - **Know who is in the fleet, how big the work tree is, and when it changes.**
@@ -552,9 +562,11 @@ What is deliberately not done, so that nobody has to find it out:
 - **A snapshot from a member that has left may not be openable by a replica that never saw its key.** A
   replica keeps the roster's keys it has seen; a publisher that left before this replica ever read the
   roster is refused ("not any member's"), until a current member publishes again.
-- **Unsealed snapshots are taken until the first sealed one is seen.** And a fleet that has seen a
-  sealed one refuses an unsealed one that is newer, so an old member that is promoted stalls the new
-  replicas until it is upgraded.
+- **Unsealed snapshots are taken until the first sealed one is seen.** And a replica that has seen a
+  sealed one refuses an unsealed one at or above it, so an old member that is promoted stalls the new
+  replicas on the snapshot before it, until an upgraded member publishes (a whole tree) or the
+  operator runs `prime fleets trust reset`. The trust file (`<space>.key.trust.json`) is not
+  tamper-evident: deleting it, or the reset, opens the same window again.
 - **Objects can still be left in storage** when a publisher dies after uploading a checkpoint's change
   pack and before the snapshot request, or when the gateway itself fails between storing and asking
   the fleet object. A refused publish cleans up after itself.

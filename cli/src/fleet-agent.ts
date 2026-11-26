@@ -173,7 +173,19 @@ export async function publish(
   // has an anchor and cannot grow for ever.
   const checkpoint = seq % FULL_PACK_WINDOW === 0;
   const noBase = base === null;
-  const wantFull = noBase || membershipChanged || checkpoint;
+  // A snapshot built on one that has no seal (an old member took over, or this fleet
+  // is mid-upgrade) is a whole tree: a replica that has seen seals refuses the
+  // unsealed one, and a whole tree is the way around it - the replica starts from this
+  // one and never needs the snapshot it refused. A head whose manifest cannot be read
+  // is taken as unsealed: the whole tree is the safe side of not knowing.
+  const headUnsealed =
+    head !== null && !(noBase || membershipChanged || checkpoint)
+      ? await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey)).then(
+          (m) => m.seal === undefined,
+          () => true,
+        )
+      : false;
+  const wantFull = noBase || membershipChanged || checkpoint || headUnsealed;
 
   // The snapshot builds the packs that will travel: the whole tree when a member
   // needs one, only the change otherwise. A whole tree built on a snapshot of
@@ -265,7 +277,7 @@ export async function publish(
   await reportApplied(creds, fleet, seq).catch(() => undefined);
   // This fleet has a snapshot with a seal now: from here an unsealed one that is newer is refused.
   const trust = FleetTrust.beside(paths.keyFile);
-  trust.noteBound(seq);
+  trust.noteSealed(seq);
   try {
     trust.save();
   } catch {
@@ -557,7 +569,7 @@ async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: nu
   const chain = chooseRoute(walked, lastSeq, who);
   if (chain === null) {
     const oldest = walked[walked.length - 1]!;
-    throw new Error(
+    throw new NoRouteError(
       "this member is " + (oldest.seq - lastSeq) + " snapshots behind and the fleet no longer has a whole tree to start from; it gets one at the next checkpoint (every " + FULL_PACK_WINDOW + " snapshots) or when a member joins",
     );
   }
@@ -577,6 +589,18 @@ export async function openStep(
   /** What this member trusts (see fleet-trust.ts); without it only the seal is checked. */
   trust?: FleetTrust,
 ): Promise<Buffer> {
+  return (await downloadStep(creds, fleet, keys, step, trust)).plain;
+}
+
+// `openStep`, with the pack it opened as one piece: checking that the snapshot may be taken in
+// after the ones before it is left to the caller, which takes them in in order.
+async function downloadStep(
+  creds: FleetCredentials,
+  fleet: string,
+  keys: MemberKeyPair,
+  step: RouteStep,
+  trust?: FleetTrust,
+): Promise<{ plain: Buffer }> {
   const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
@@ -593,8 +617,11 @@ export async function openStep(
   // Opening proves the pack came from a holder of the snapshot key; it does not say
   // that the manifest is the one that holder made.
   await verifySnapshot(creds, fleet, m, sealed, m.delta !== undefined && step.packKey === m.delta.packKey, opened, trust);
-  return opened.plain;
+  return { plain: opened.plain };
 }
+
+/** The fleet has no route from what a member holds to its head (no whole tree to start from). */
+export class NoRouteError extends Error {}
 
 /**
  * The newest snapshot is not sealed for this member: it joined, or came back with
@@ -666,6 +693,8 @@ export async function fetchAhead(
   // never stuck on a step it can never take while a whole tree it can open waits
   // at the head.
   let skipThrough: number | undefined;
+  // The snapshot that was refused, and could be routed around: if nothing can, it is what to tell.
+  let refused: TamperedSnapshotError | undefined;
   let position = from;
   let steps = 0;
   // How often a snapshot the route needed was let go by the gateway before it was
@@ -673,7 +702,10 @@ export async function fetchAhead(
   // that publishes fast outruns a member that downloads a big tree slowly.
   let evicted = 0;
   for (let attempt = 0; ; attempt++) {
-    const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(skipThrough !== undefined ? { skipThrough } : {}) });
+    const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(skipThrough !== undefined ? { skipThrough } : {}) }).catch((err: unknown) => {
+      // Going around a refused snapshot found no route: say why it was refused, not what the planner missed.
+      throw refused && (err instanceof NotSealedYetError || err instanceof NoRouteError) ? refused : err;
+    });
     if (plan.chain.length === 0) return { head: plan.head, fetched: position, steps, evicted };
     const progress: Position[] = [];
     try {
@@ -698,7 +730,12 @@ export async function fetchAhead(
           "the snapshots this catch-up needs were let go by the gateway while it ran " + (evicted + 1) + " times: the fleet publishes faster than this member can fetch",
         );
       }
-      if (!(err instanceof NotSealedError) || attempt >= 2) throw err;
+      // A snapshot that cannot be opened, or one that is refused for a reason that a later whole
+      // tree does away with (an unsealed one after sealed ones; one sealed by a member that has
+      // left), is routed around: the route is planned again without it.
+      const skippable = err instanceof NotSealedError || (err instanceof TamperedSnapshotError && err.skippable);
+      if (!skippable || attempt >= 3) throw err;
+      if (err instanceof TamperedSnapshotError) refused = err;
       skipThrough = Math.max(skipThrough ?? 0, err.seq);
       // What was kept before the step that failed stays kept.
       const kept = keptBefore(plan, err.seq, position);
@@ -735,11 +772,11 @@ async function ingestRoute(
   from: Position,
   onFetched?: (fetched: Position) => void | Promise<void>,
 ): Promise<Position> {
-  const downloads: Array<Promise<Buffer> | undefined> = [];
+  const downloads: Array<Promise<{ plain: Buffer }> | undefined> = [];
   const trust = FleetTrust.beside(paths.keyFile);
   const start = (i: number): void => {
     if (i < plan.chain.length && downloads[i] === undefined) {
-      const p = openStep(creds, fleet, keys, plan.chain[i]!, trust);
+      const p = downloadStep(creds, fleet, keys, plan.chain[i]!, trust);
       // A failure is reported where it is awaited, in order.
       p.catch(() => undefined);
       downloads[i] = p;
@@ -749,16 +786,22 @@ async function ingestRoute(
 
   let fetched = from;
   for (const [i, step] of plan.chain.entries()) {
-    const pack = await downloads[i]!;
+    const { plain: pack } = await downloads[i]!;
     downloads[i] = undefined; // let the bytes go
     start(i + DOWNLOADS_AT_ONCE);
     const m = step.manifest;
+    // Whether this one may be taken in is asked here, in order, and what it shows is
+    // remembered once it has been: a snapshot downloaded ahead of the ones before it
+    // says nothing yet about what the fleet has shown.
+    trust.checkNotDowngrade(m);
     // Only the newest one is named by a ref: it is what the member goes on from,
     // and one ref (one more git process) per step is cost for nothing.
     await ingestPack(paths.work, paths.gitDir, m.tipCommit, pack, {
       tree: m.tree,
       ...(i === plan.chain.length - 1 ? { seq: m.seq } : {}),
     });
+    trust.noteTakenIn(m);
+    trust.save();
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);
   }
