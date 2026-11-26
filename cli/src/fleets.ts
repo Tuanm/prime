@@ -17,7 +17,7 @@ import type { Config, SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
@@ -813,10 +813,103 @@ export function readFleetState(configPath: string, fleetId: string, spaceName: s
   }
 }
 
-export function writeFleetState(configPath: string, fleetId: string, spaceName: string, state: FleetMemberState): void {
-  const file = join(fleetStateDir(configPath, fleetId, spaceName), "state.json");
+/**
+ * The state two writers meant, as one that never goes back.
+ *
+ * The agent and `prime fleets sync` both read the state, work for a while (a publish, a
+ * download) and write it back, so a writer's copy may be older than what the other has
+ * recorded since. Both positions only ever move forward: the work tree's (`seq`, `base`, `tree`
+ * and what goes with them) and what the store holds (`fetched*`), so each group of `next` that is
+ * behind what is on disk is replaced by the one on disk.
+ */
+export function mergeFleetState(disk: FleetMemberState, next: FleetMemberState): FleetMemberState {
+  const out: FleetMemberState = { ...next };
+  if ((disk.seq ?? 0) > (next.seq ?? 0)) {
+    for (const key of ["seq", "base", "tree", "roster", "manifest", "memberCount"] as const) {
+      if (disk[key] === undefined) delete out[key];
+      else (out as Record<string, unknown>)[key] = disk[key];
+    }
+  }
+  const floor = Math.max(out.fetchedSeq ?? 0, out.seq ?? 0);
+  if ((disk.fetchedSeq ?? 0) > floor) {
+    for (const key of ["fetchedSeq", "fetchedCommit", "fetchedTree", "fetchedRoster"] as const) {
+      if (disk[key] === undefined) delete out[key];
+      else (out as Record<string, unknown>)[key] = disk[key];
+    }
+  }
+  return out;
+}
+
+// Take the lock on a state directory for the length of one read-and-write (a few milliseconds).
+// A lock is a directory, which can only be made once; one older than ten seconds belongs to a
+// writer that died. Waiting longer than two seconds goes on without it: the merge above still
+// keeps the positions from going back, and the window is the span between two syscalls.
+function withStateLock<T>(dir: string, fn: () => T): T {
+  const lock = join(dir, "state.lock");
+  const until = Date.now() + 2000;
+  let held = false;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      held = true;
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") break;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) {
+          rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() > until) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (held) rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Change part of a member's state: read it, apply `patch` and write it, under the lock, so a
+ * change made by the other writer in between is not lost. The positions do not go back
+ * (see `mergeFleetState`) unless `rewind` says that this is what is meant: a store that
+ * lost what the state says it fetched has to start again from what it has.
+ */
+export function updateFleetState(
+  configPath: string,
+  fleetId: string,
+  spaceName: string,
+  patch: Partial<FleetMemberState>,
+  opts: { rewind?: boolean } = {},
+): FleetMemberState {
+  const dir = fleetStateDir(configPath, fleetId, spaceName);
+  return withStateLock(dir, () => {
+    const disk = readFleetState(configPath, fleetId, spaceName);
+    const wanted = { ...disk, ...patch };
+    const next = opts.rewind ? wanted : mergeFleetState(disk, wanted);
+    writeFileAtomic(join(dir, "state.json"), JSON.stringify(next, null, 2));
+    return next;
+  });
+}
+
+/**
+ * Record a member's state. What is written never puts a position behind the one on disk
+ * (see `mergeFleetState`), unless `replace` says the state is a new start (a space that
+ * has just joined).
+ */
+export function writeFleetState(configPath: string, fleetId: string, spaceName: string, state: FleetMemberState, opts: { replace?: boolean } = {}): void {
+  const dir = fleetStateDir(configPath, fleetId, spaceName);
+  const file = join(dir, "state.json");
   // Written beside it and moved into place: the agent and `prime fleets sync` can
   // both write this file, and a reader that met a half-written one would take it
   // for no state at all (and apply the fleet again from nothing).
-  writeFileAtomic(file, JSON.stringify(state, null, 2));
+  withStateLock(dir, () => {
+    const next = opts.replace ? state : mergeFleetState(readFleetState(configPath, fleetId, spaceName), state);
+    writeFileAtomic(file, JSON.stringify(next, null, 2));
+  });
 }

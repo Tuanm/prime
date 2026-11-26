@@ -51,7 +51,7 @@ import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
-import { fleetKeyFile, fleetStateDir, readFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
+import { fleetKeyFile, fleetStateDir, readFleetState, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
 export interface FleetAgentState {
   pid: number;
@@ -949,8 +949,8 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // PRIME_FLEET_REPLICA=mirror to have every snapshot written as it arrives.
   loop.primary = false;
   const mode = replicaMode();
-  const keep = (patch: Partial<FleetMemberState>): void => {
-    writeFleetState(loop.configPath, fleet, loop.name, { ...readFleetState(loop.configPath, fleet, loop.name), ...patch });
+  const keep = (patch: Partial<FleetMemberState>, opts?: { rewind?: boolean }): void => {
+    updateFleetState(loop.configPath, fleet, loop.name, patch, opts);
   };
 
   // The lease was freed (or this member could have had it): try to take it.

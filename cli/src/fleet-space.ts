@@ -157,7 +157,7 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
       manifest: published.manifestKey,
       memberCount: published.members,
       roster: published.roster,
-    });
+    }, { replace: true });
     return {
       deviceId: opts.deviceId,
       deviceToken: opts.deviceToken,
@@ -204,7 +204,7 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
       base: pulled.commit,
       ...(pulled.tree ? { tree: pulled.tree } : {}),
       roster: pulled.roster ?? "",
-    });
+    }, { replace: true });
   }
   return {
     deviceId: opts.deviceId,

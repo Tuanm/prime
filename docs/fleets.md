@@ -115,7 +115,7 @@ passed to the agent and written down in its directory (`fleet-agent/settings.jso
 started by the login service, or restarted after a crash, has it; `prime fleets agent status` says
 which mode it is in. See "The agent's settings" below for how they are set, changed and cleared.
 
-The member's state file records both positions: `seq`, `base` and `tree` are what the
+The member's state file records both positions (the agent and `prime fleets sync` both write it, under a lock, and neither position is ever written back to an earlier snapshot than the file already holds): `seq`, `base` and `tree` are what the
 work tree holds, and `fetchedSeq`, `fetchedCommit` and `fetchedTree` the newest snapshot
 in the store, never behind it. `prime fleets agent status` shows what the agent last did
 ("fetched 41", "applied 41", "took over at 41").

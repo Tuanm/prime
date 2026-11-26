@@ -72,7 +72,7 @@ export async function prefetch(
   fleet: string,
   paths: MemberPaths,
   state: ReplicaState,
-  save: (patch: Partial<ReplicaState>) => void,
+  save: (patch: Partial<ReplicaState>, opts?: { rewind?: boolean }) => void,
   /** What the socket said the head is: with it, the gateway is not asked for the head. */
   hint?: HeadHint,
 ): Promise<{ head: FleetHead; fetched: Position; steps: number; evicted: number }> {
@@ -84,7 +84,7 @@ export async function prefetch(
   if (fetched.commit !== null && !(await hasCommit(paths.gitDir, fetched.commit))) {
     const { applied } = positions({ ...state, fetchedSeq: 0 });
     fetched = (await hasCommit(paths.gitDir, applied.commit)) ? applied : { seq: 0, commit: null };
-    save({ fetchedSeq: fetched.seq, ...(fetched.commit ? { fetchedCommit: fetched.commit } : {}) });
+    save({ fetchedSeq: fetched.seq, ...(fetched.commit ? { fetchedCommit: fetched.commit } : {}) }, { rewind: true });
   }
   return fetchAhead(
     creds,
@@ -138,7 +138,7 @@ export async function applyReady(
   fleet: string,
   paths: MemberPaths,
   state: ReplicaState,
-  save: (patch: Partial<ReplicaState>) => void,
+  save: (patch: Partial<ReplicaState>, opts?: { rewind?: boolean }) => void,
   /**
    * With `report`, say where the work tree is even when there is nothing to
    * apply. A member that is taking over needs the fleet to know it is current,
