@@ -428,12 +428,19 @@ export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number =
       eventsConnected: loop.events.connected,
       ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}),
     });
-  if (loop.paused || (loop.failures ?? 0) > 0 || !due) return true;
+  // A space whose rounds keep failing leaves asking to the round and its longer wait - unless it holds
+  // the place: the lease is what is at stake, and renewing it is one cheap request.
+  if (loop.paused || (!loop.primary && (loop.failures ?? 0) > 0) || !due) return true;
   try {
-    await takePlace(loop);
-  } catch {
-    // A renewal that did not get through is tried again soon: the place is held
-    // for three intervals, and waiting out one of them for the next try is a third of it.
+    const answer = await takePlace(loop);
+    // A renewal that is already on its way (the round's) is not this one's: look again soon.
+    if (answer.busy) {
+      loop.beatRetryMs = BEAT_RETRY_MS;
+      return false;
+    }
+  } catch (err) {
+    // Tried again soon: the place is held for three intervals, and waiting out one of them is a third of it.
+    loop.beatRetryMs = renewalRetryMs(err, loop.leaseMs);
     return false;
   }
   if (loop.claim) wake();
@@ -473,6 +480,8 @@ export interface SpaceLoop {
   claim: boolean;
   /** What the fleet said the last time the member asked for its place. */
   lastAnswer?: PlaceAnswer;
+  /** How soon the next beat is due after one that failed (see `renewalRetryMs`). */
+  beatRetryMs?: number;
   /** The member is in the middle of trying to take the lease: takePlace leaves the claim to it. */
   promoting?: boolean;
   claimAt: number;
@@ -731,8 +740,17 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
 }
 
 
+/** The gateway answered the request for the place with a refusal (a 5xx, a 429, a 402): it did not get lost. */
+export class PlaceRefused extends Error {
+  constructor(message: string, readonly retryAfterMs?: number) {
+    super(message);
+  }
+}
+
 interface BootstrapResult {
   ok: boolean;
+  /** The gateway answered (with a refusal), rather than the request failing on the way. */
+  answered?: boolean;
   primary: boolean;
   error?: string;
   /** The fleet is paused: it will not take anyone in until it is resumed. */
@@ -777,7 +795,15 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
             : undefined;
       return { ok: false, primary: false, paused: true, error: "the fleet is paused", ...(asked ? { retryAfterMs: asked } : {}) };
     }
-    return { ok: false, primary: false, error: "status " + res.status };
+    // The gateway answered, and may have said when to ask again.
+    const after = Number(res.headers.get("retry-after"));
+    return {
+      ok: false,
+      primary: false,
+      error: "status " + res.status,
+      ...(Number.isFinite(after) && after > 0 ? { retryAfterMs: after * 1000 } : {}),
+      answered: true,
+    };
   }
   const body = (await res.json()) as {
     role?: string;
@@ -806,8 +832,21 @@ export const PLACE_TIMEOUT_MS = 10_000;
 export const BEAT_RETRY_MS = 2_000;
 
 /** When the next beat is due: an interval after one that went through, soon after one that did not. */
-export function nextBeatDelayMs(ok: boolean, intervalMs: number): number {
-  return ok ? intervalMs : Math.min(intervalMs, BEAT_RETRY_MS);
+export function nextBeatDelayMs(ok: boolean, intervalMs: number, retryMs: number = BEAT_RETRY_MS): number {
+  return ok ? intervalMs : Math.min(intervalMs, retryMs);
+}
+
+/**
+ * When to try a renewal again after one that failed.
+ *
+ * A request that got lost on the way is tried again at once (two seconds): the gateway never
+ * saw it. A request the gateway answered with a refusal is not hammered: it is asked again
+ * when it said to (retry-after), or in a few seconds, and never later than a third of the
+ * lease - the place is at stake, and the gateway is struggling, not gone.
+ */
+export function renewalRetryMs(err: unknown, leaseMs: number = 45_000): number {
+  if (!(err instanceof PlaceRefused)) return BEAT_RETRY_MS;
+  return Math.min(Math.floor(leaseMs / 3), Math.max(BEAT_RETRY_MS, err.retryAfterMs ?? 5_000));
 }
 
 /**
@@ -846,7 +885,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
       loop.retryAfterMs = placed.retryAfterMs;
       return { primary: false, paused: true };
     }
-    if (!placed.ok) throw new Error(placed.error);
+    if (!placed.ok) throw new PlaceRefused(placed.error ?? "refused", placed.retryAfterMs);
     loop.paused = false;
     loop.primary = placed.primary;
     // What the fleet says a place lasts. An agent that renews at its own pace
@@ -1030,7 +1069,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
           .then((ok) => void (beatOk = ok))
           .catch(() => void (beatOk = false))
           .finally(beatTick);
-      }, nextBeatDelayMs(beatOk, interval));
+      }, nextBeatDelayMs(beatOk, interval, loop.beatRetryMs));
     };
     beatTick();
     loop.events.start();

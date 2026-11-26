@@ -1588,3 +1588,62 @@ describe("an agent killed while it writes the work tree", () => {
     }
   }, 120_000);
 });
+
+describe("the primary's renewal and the rounds", () => {
+  test("a primary renews on its beat whatever its rounds are doing", async () => {
+    const { heartbeat } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      s.loop.primary = true;
+      s.loop.failures = 4; // its snapshots keep failing
+      s.loop.lastBootstrap = 1;
+      const before = w.gateway.bootstraps;
+      expect(await heartbeat(s.loop as never, () => undefined, 10_000_000)).toBe(true);
+      expect(w.gateway.bootstraps).toBe(before + 1);
+      // A replica whose rounds keep failing leaves asking to the round.
+      s.loop.primary = false;
+      s.loop.lastBootstrap = 1;
+      await heartbeat(s.loop as never, () => undefined, 20_000_000);
+      expect(w.gateway.bootstraps).toBe(before + 1);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a beat that finds the round's renewal in flight looks again soon", async () => {
+    const { heartbeat, BEAT_RETRY_MS } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      s.loop.primary = true;
+      s.loop.lastBootstrap = 1;
+      s.loop.placing = true; // the round is asking
+      expect(await heartbeat(s.loop as never, () => undefined, 10_000_000)).toBe(false);
+      expect(s.loop.beatRetryMs).toBe(BEAT_RETRY_MS);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a renewal the gateway refused is asked again as it said, not every two seconds", async () => {
+    const { heartbeat, renewalRetryMs, PlaceRefused, BEAT_RETRY_MS } = await import("../src/fleet-daemon");
+    expect(renewalRetryMs(new Error("socket hang up"))).toBe(BEAT_RETRY_MS); // lost on the way: at once
+    expect(renewalRetryMs(new PlaceRefused("status 503"))).toBe(5_000);
+    expect(renewalRetryMs(new PlaceRefused("status 429", 60_000), 45_000)).toBe(15_000); // never past a third of the lease
+    expect(renewalRetryMs(new PlaceRefused("status 429", 8_000), 45_000)).toBe(8_000);
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      s.loop.primary = true;
+      s.loop.lastBootstrap = 1;
+      const handle = w.gateway.handle.bind(w.gateway);
+      w.gateway.handle = async (creds, method, path, body, search) =>
+        path.endsWith("/bootstrap") ? new Response("{}", { status: 429, headers: { "retry-after": "9" } }) : handle(creds, method, path, body, search);
+      expect(await heartbeat(s.loop as never, () => undefined, 10_000_000)).toBe(false);
+      expect(s.loop.beatRetryMs).toBe(9_000);
+    } finally {
+      finish(w);
+    }
+  });
+});
