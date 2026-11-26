@@ -381,16 +381,24 @@ with the same.
   Commands that only need an agent running, like `prime spaces create`, neither save what their
   shell exports nor restart it *for that*; they do restart it when the saved settings differ from
   the running agent's (for example right after `agent install` saved new ones).
-- With the login service installed (macOS, Linux), the service manager is the only thing that
-  starts the agent: `agent start`, `spaces create` and a settings change ask it to start or
-  restart it, and never spawn one beside it. An agent that was started by hand and is running
-  when the service is installed (or found beside it later) is stopped first. `agent install`
-  does the same: it stops a running agent, waits for it to exit, then starts the service.
+- There is one login service per machine, and it runs the one configuration it was installed
+  with (`--config`, shown by `agent status`). For that configuration (macOS, Linux) the service
+  manager is what starts the agent: `agent start`, `spaces create` and a settings change ask it to
+  start or restart it, and no agent is spawned beside it. An agent that was started by hand and is
+  running when the service is installed (or is found beside it later) is stopped first, and
+  `agent install` does the same, except for the service's own agent, which the manager replaces.
+  If the manager cannot be reached (no login session on a headless machine, a service file left by
+  an install that failed), the agent is started directly, and the lock below keeps that safe.
+  For any other configuration (`--config`, `PRIME_CONFIG`) the service does not exist: its agent is
+  started, stopped and restarted directly. `agent install` for a configuration while the service
+  runs another is refused: `prime fleets agent uninstall` first, then install again.
 - One agent runs per configuration: a second one that is started exits, saying who holds the
   lock (`fleet-agent/agent.lock`, which the running agent touches every few seconds). A stopping
-  agent is given ten seconds to let go. Agents of builds from before the lock do not take part, so
-  upgrade by stopping the old agent (`prime fleets agent stop`) before starting the new one;
-  `agent install` does that for you.
+  agent is given ten seconds to let go. The lock names its holder, and where the process list
+  cannot say what a pid is (Windows, containers without `ps`), a fresh lock that names the pid, or
+  for an agent of a build from before the lock a fresh `state.json` that names it, is what counts.
+  So the upgrade is: `prime fleets agent stop` (it stops an old agent too), then start the new one;
+  `agent install` does the stop for you.
 
 A member holds its place only while the gateway can see its device tunnel: a holder whose
 device is not connected is taken out of the running the next time anyone asks. Spaces always
