@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
+import { memberRows, readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
 import type { Config } from "../src/config";
 
 function config(over: Partial<Config> = {}): Config {
@@ -128,5 +128,16 @@ describe("the member's state, written by the agent and by `prime fleets sync`", 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the roster as printed", () => {
+  test("shows a fingerprint of each member's key, which changes when the key is swapped", () => {
+    const at = Date.UTC(2025, 0, 1);
+    const a = memberRows([{ deviceId: "d1", role: "owner", addedAt: at, pubkey: Buffer.alloc(32, 1).toString("base64") }]);
+    const b = memberRows([{ deviceId: "d1", role: "owner", addedAt: at, pubkey: Buffer.alloc(32, 2).toString("base64") }]);
+    expect(a[0]![2]).toMatch(/^[A-Za-z0-9+/]{11}=$/);
+    expect(a[0]![2]).not.toBe(b[0]![2]);
+    expect(memberRows([{ deviceId: "d2", role: "member", addedAt: at }])[0]![2]).toBe("-");
   });
 });

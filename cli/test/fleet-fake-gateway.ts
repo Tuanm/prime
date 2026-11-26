@@ -28,6 +28,8 @@ export class FakeGateway {
   stripRoster = false;
   /** Publishers that predate the seal over the manifest. */
   unsealed = false;
+  /** The next snapshots come from a publisher that seals but does not tag each entry (an earlier build). */
+  noMacs = false;
   /** Publishers that predate the key fingerprint in wrapped keys. */
   stripKeyIds = false;
   /** How many of the next /applied reports fail with a 503. */
@@ -135,6 +137,10 @@ export class FakeGateway {
       // Each of these is a publisher that predates something the manifest is sealed over,
       // so what it published has no seal either.
       if (this.legacyManifests || this.stripRoster || this.unsealed) delete manifest.seal;
+      // A publisher that predates the per-member tags does not put them on its entries.
+      if ((this.legacyManifests || this.stripRoster || this.unsealed || this.noMacs) && Array.isArray(manifest.wrapped)) {
+        for (const w of manifest.wrapped as Array<{ mac?: string }>) delete w.mac;
+      }
       if (this.legacyManifests) {
         delete manifest.packBytes;
         delete manifest.delta;

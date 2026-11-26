@@ -179,15 +179,15 @@ export async function publish(
   // has an anchor and cannot grow for ever.
   const checkpoint = seq % FULL_PACK_WINDOW === 0;
   const noBase = base === null;
-  // A snapshot built on one that has no seal (an old member took over, or this fleet
-  // is mid-upgrade) is a whole tree: a replica that has seen seals refuses the
-  // unsealed one, and a whole tree is the way around it - the replica starts from this
-  // one and never needs the snapshot it refused. A head whose manifest cannot be read
-  // is taken as unsealed: the whole tree is the safe side of not knowing.
+  // A snapshot built on one that has no seal, or none of the tags a sender makes for its members
+  // (an old member took over, or this fleet is mid-upgrade), is a whole tree: a replica that
+  // has seen them refuses that one, and a whole tree is the way around it - the replica starts
+  // from this one and never needs the snapshot it refused. A head whose manifest cannot be read
+  // is taken as one of those: the whole tree is the safe side of not knowing.
   const headUnsealed =
     head !== null && !(noBase || membershipChanged || checkpoint)
       ? await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey)).then(
-          (m) => m.seal === undefined,
+          (m) => m.seal === undefined || !m.wrapped.some((w) => w.mac !== undefined),
           () => true,
         )
       : false;
@@ -284,6 +284,7 @@ export async function publish(
   // This fleet has a snapshot with a seal now: from here an unsealed one that is newer is refused.
   const trust = FleetTrust.beside(paths.keyFile);
   trust.noteSealed(seq);
+  if (sealed.wrapped.length > 0) trust.noteMac(seq);
   try {
     trust.save();
   } catch {
@@ -780,6 +781,8 @@ async function ingestRoute(
 ): Promise<Position> {
   const downloads: Array<Promise<{ plain: Buffer }> | undefined> = [];
   const trust = FleetTrust.beside(paths.keyFile);
+  // A roster read while this route is taken stands for every snapshot on it.
+  trust.horizon = plan.chain[plan.chain.length - 1]?.manifest.seq;
   const start = (i: number): void => {
     if (i < plan.chain.length && downloads[i] === undefined) {
       const p = downloadStep(creds, fleet, keys, plan.chain[i]!, trust);
@@ -799,14 +802,14 @@ async function ingestRoute(
     // Whether this one may be taken in is asked here, in order, and what it shows is
     // remembered once it has been: a snapshot downloaded ahead of the ones before it
     // says nothing yet about what the fleet has shown.
-    trust.checkNotDowngrade(m);
+    trust.checkNotDowngrade(m, creds.deviceId);
     // Only the newest one is named by a ref: it is what the member goes on from,
     // and one ref (one more git process) per step is cost for nothing.
     await ingestPack(paths.work, paths.gitDir, m.tipCommit, pack, {
       tree: m.tree,
       ...(i === plan.chain.length - 1 ? { seq: m.seq } : {}),
     });
-    trust.noteTakenIn(m);
+    trust.noteTakenIn(m, creds.deviceId);
     trust.save();
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);

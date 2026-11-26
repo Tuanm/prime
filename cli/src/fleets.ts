@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths, type Position } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
+import { keyIdOf } from "./fleet-crypto.ts";
 import { FleetTrust } from "./fleet-trust.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -79,6 +80,18 @@ export interface FleetMember {
   role: "owner" | "member";
   addedAt: number;
   addedBy?: string;
+  /** The key snapshots are sealed for, as the member offered it. */
+  pubkey?: string;
+}
+
+/**
+ * The roster as `prime fleets members` prints it. The KEY column is a fingerprint of the member's
+ * public key: a gateway that swaps a member's key for its own keeps the device and changes only
+ * this, so it is the one place the swap shows. Compare it with what the member itself reports
+ * (`prime fleets members` on that device) by another way than through the gateway.
+ */
+export function memberRows(members: FleetMember[]): string[][] {
+  return members.map((m) => [m.deviceId, m.role, m.pubkey ? keyIdOf(m.pubkey) : "-", new Date(m.addedAt).toISOString()]);
 }
 
 export interface FleetInvite {
@@ -390,9 +403,7 @@ export async function fleetsMembers(ctx: Ctx): Promise<void> {
     printJson({ fleet: fleetId, members });
     return;
   }
-  ctx.out(table(["DEVICE", "ROLE", "ADDED"], [
-    ...members.map((m) => [m.deviceId, m.role, new Date(m.addedAt).toISOString()]),
-  ]));
+  ctx.out(table(["DEVICE", "ROLE", "KEY", "ADDED"], memberRows(members)));
 }
 
 export async function fleetsRemove(ctx: Ctx): Promise<void> {

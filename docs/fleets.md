@@ -245,26 +245,40 @@ checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
    of another snapshot, a snapshot of another fleet: none match, and the snapshot is refused
    before anything is written. (Sizes are not sealed: they only choose the route.) A manifest
    is also read by the hash it is stored under, so the one that comes back is the one that was named.
-2. **The sender.** A snapshot's key is wrapped with a key pair its publisher names in the
-   manifest. That key has to be one the roster lists (read once, kept in
-   `<space>.key.trust.json` beside the key file, and read again only when a snapshot arrives
-   from a key that is not in it). Otherwise the gateway could make a key pair of its own,
-   wrap a snapshot key of its own for each member and seal its forgery itself.
-3. **No going back.** Publishers older than this have no seal, and their snapshots are
-   still accepted - but once a member has taken in a snapshot with a seal (in order, and only
-   once it is taken in: not one that was merely downloaded ahead), an unsealed one at or above the
-   lowest sealed sequence it has taken in is refused. The lowest is kept in the same file
-   (`sealedFrom`). A snapshot that is refused this way is gone around, not waited for: the
+2. **The sender.** The seal proves "someone who holds this snapshot's key", and every member that
+   ever held it - one that has since been removed too - can make it. So each member's entry of
+   `wrapped` also carries a tag (`mac`) over the same fields, made with the secret that only the
+   sender and that member can derive (the Diffie-Hellman of their two keys). A replica checks it
+   against the key the manifest names as the sender's: a removed member that kept an old snapshot
+   key cannot put a current member's name on a snapshot, because it cannot make the tag for any
+   other member. (It is an added manifest field: older replicas ignore it.)
+   And the key the snapshot was made with has to be one the roster lists. The roster is read once for
+   a catch-up and kept in `<space>.key.trust.json` beside the key file, each key with the highest
+   sequence it was read for; a snapshot above that sequence makes the roster be read again. So a key
+   that has left the roster is accepted for the snapshots it made while it was on it, and for no
+   later one: a removed member cannot publish with its own key. Otherwise the gateway could make a
+   key pair of its own, wrap a snapshot key of its own for each member and seal its forgery itself.
+3. **No going back.** Publishers older than this have no seal (or, for the tag above, no tag), and
+   their snapshots are still accepted - but once a member has taken in a snapshot with a seal (in
+   order, and only once it is taken in: not one that was merely downloaded ahead), an unsealed one at
+   or above the lowest sealed sequence it has taken in is refused, and likewise for a snapshot that has
+   a seal and no tag for this member. The lowest of each is kept in the same file (`sealedFrom`,
+   `macFrom`). A snapshot that is refused this way is gone around, not waited for: the
    replica plans its route again from the next whole tree, and a publisher that finds an
    unsealed head publishes a whole tree for that reason.
 
 Whose word this rests on: **the roster**. The operator admits the members, and the
 roster says which key each has. The checks hold against anyone who can read and write what
-the gateway stores - a bucket, a backup, a replay of old storage, a bug - and against a
-gateway that edits or reorders manifests. They do not hold against a gateway that also
-lies about the roster: one that adds a key of its own to the list it serves can then
-author snapshots. That is visible (`prime fleets members` and the admin page list who is
-in), and closing it takes a fingerprint the operator checks outside the gateway.
+the gateway stores - a bucket, a backup, a replay of old storage, a bug - against a gateway
+that edits or reorders manifests, and against a removed member that is helped by the gateway
+to serve what it makes. They do not hold against a gateway that also lies about the roster:
+one that adds a key of its own to the list it serves, or swaps a member's key for its own, can then
+author snapshots (for the members that read that roster). That is visible only to someone who compares:
+`prime fleets members` prints a fingerprint of each member's key (the KEY column), and a swapped key
+keeps the device and changes only that. The fingerprint has to be checked outside the gateway
+(against what the member's own `prime fleets members` shows) to mean anything; the admin page
+lists who is in, and does not show it. A member that was removed and that the gateway
+helps can still read what it was sent before it was removed, as it always could.
 
 What the gateway can still do, whatever a member checks:
 
@@ -555,13 +569,15 @@ it, and so does everything that is not a fleet.
 What is deliberately not done, so that nobody has to find it out:
 
 - **The roster is the trust anchor.** A gateway that lies about who the members are (adds a key of
-  its own) can author snapshots; only a fingerprint checked outside the gateway would close it. See
-  "What the gateway can still do".
+  its own, or swaps a member's) can author snapshots; only a fingerprint checked outside the gateway
+  (`prime fleets members` shows it) would close it. See "What the gateway can still do".
 - **Rollback and split views are not detected.** A member cannot know about a newer head it was never
   shown. Sizes in a manifest (`packBytes`) are not sealed: they steer the route, not the content.
-- **A snapshot from a member that has left may not be openable by a replica that never saw its key.** A
-  replica keeps the roster's keys it has seen; a publisher that left before this replica ever read the
-  roster is refused ("not any member's"), until a current member publishes again.
+- **A snapshot from a member that has left is refused by a replica that had not taken it in.** A replica
+  accepts a key for the sequences a roster that listed it was read for; a snapshot a member published
+  and then left before this replica read the roster is refused ("not any member's"). The replica goes
+  around it, by the next whole tree, when there is one: a current member publishing a whole tree (every
+  32nd snapshot, or when a member joins) ends it.
 - **Unsealed snapshots are taken until the first sealed one is seen.** And a replica that has seen a
   sealed one refuses an unsealed one at or above it, so an old member that is promoted stalls the new
   replicas on the snapshot before it, until an upgraded member publishes (a whole tree) or the

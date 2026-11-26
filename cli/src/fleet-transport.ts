@@ -55,7 +55,7 @@ export interface FleetManifest {
   /** The sender's public key, so a receiver can derive the shared secret. */
   senderPublicKey: string;
   /** The snapshot key, wrapped for each member. */
-  wrapped: Array<{ memberId: string; wrapped: string; keyId?: string }>;
+  wrapped: Array<{ memberId: string; wrapped: string; keyId?: string; mac?: string }>;
   /**
    * Who this snapshot was sealed for, and with which keys (see `rosterOf`). A
    * member that applies it knows the roster it stands on, so when it takes over it

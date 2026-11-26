@@ -4,11 +4,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, createPrivateKey, createPublicKey, diffieHellman, hkdfSync, randomBytes } from "node:crypto";
 
 import { loadOrCreateKeyPair, manifestIdOf, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import { generateMemberKeyPair, openForMember, sealManyForMembers } from "../src/fleet-crypto";
 import { FleetTrust, TamperedSnapshotError, sealFieldsOf } from "../src/fleet-trust";
+import { snapshot } from "../src/fleet-sync";
 import { FleetTransportError, payloadHash, fetchManifest, type FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
@@ -180,7 +181,7 @@ describe("a snapshot the gateway made up", () => {
     await expect(w.pullReplica(0)).rejects.toThrow(/not any member's/);
   });
 
-  test("the roster is read when a key is new, and not for every snapshot after", async () => {
+  test("the roster is read once for a catch-up, not once for every snapshot on it", async () => {
     const w = await world();
     await w.next("1\n");
     await w.pullReplica(0);
@@ -188,8 +189,10 @@ describe("a snapshot the gateway made up", () => {
     expect(first).toBe(1);
     await w.next("2\n");
     await w.next("3\n");
+    await w.next("4\n");
+    // Three snapshots, newer than any the roster was read for: one read stands for all of them.
     await w.pullReplica(1);
-    expect(w.gateway.requests.get("GET members") ?? 0).toBe(first);
+    expect(w.gateway.requests.get("GET members") ?? 0).toBe(first + 1);
   });
 });
 
@@ -342,6 +345,119 @@ describe("a fleet that is upgraded one member at a time", () => {
     await expect(w.pullReplica(2)).rejects.toThrow(/carries no seal/);
     expect(read(w)).toBe("four\n");
     expect(FleetTrust.beside(w.replica.keyFile).sealedFrom).toBe(3);
+  });
+});
+
+describe("a member that was removed", () => {
+  // Three members: the primary, the replica and one that is then removed.
+  async function withExMember(): Promise<{ w: World; ex: MemberPaths; one: { seq: number; manifestKey: string }; two: { seq: number; manifestKey: string } }> {
+    const w = await world();
+    const ex: MemberPaths = { work: join(w.root, "ex"), gitDir: join(w.root, "ex-meta"), keyFile: join(w.root, "ex.key") };
+    mkdirSync(ex.work, { recursive: true });
+    w.gateway.seed("ex-device", loadOrCreateKeyPair(ex.keyFile).publicKey);
+    const one = await w.next("price = 100\n");
+    await w.pullReplica(0); // the replica reads the roster: all three
+    w.gateway.members.delete("ex-device"); // the operator removes it
+    const two = await w.next("price = 101\n");
+    await w.pullReplica(1);
+    return { w, ex, one, two };
+  }
+
+  test("cannot publish with its own key: the roster no longer lists it", async () => {
+    const { w, ex } = await withExMember();
+    writeFileSync(join(ex.work, "file.txt"), "price = 0 (forged by the removed member)\n");
+    w.gateway.primary = "ex-device";
+    w.gateway.applied.set("ex-device", 2);
+    await publish(credsFor("ex-device"), "x", ex, null, 2, 2);
+    w.gateway.primary = "primary-device";
+    await expect(w.pullReplica(2)).rejects.toThrow(/not any member's/);
+    expect(readFileSync(join(w.replica.work, "file.txt"), "utf8")).toBe("price = 101\n");
+  });
+
+  test("cannot publish under a current member's name with a snapshot key it was once given", async () => {
+    const { w, ex, one } = await withExMember();
+    const pk = (b64: string) => createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from(b64, "base64")]), format: "der", type: "spki" });
+    const shared = (privPem: string, pubB64: string) =>
+      Buffer.from(hkdfSync("sha256", diffieHellman({ privateKey: createPrivateKey(privPem), publicKey: pk(pubB64) }), Buffer.alloc(32), Buffer.from("prime-fleet-content-v1"), 32));
+    const m1 = w.manifest(one.manifestKey);
+    const exKeys = loadOrCreateKeyPair(ex.keyFile);
+    // The removed member opens the snapshot key of snapshot 1, which was wrapped for it.
+    const mine = Buffer.from(m1.wrapped.find((e) => e.memberId === "ex-device")!.wrapped, "base64");
+    const un = createDecipheriv("aes-256-gcm", shared(exKeys.privateKey, m1.senderPublicKey), mine.subarray(0, 12));
+    un.setAuthTag(mine.subarray(mine.length - 16));
+    const K1 = Buffer.concat([un.update(mine.subarray(12, mine.length - 16)), un.final()]);
+
+    writeFileSync(join(ex.work, "file.txt"), "price = -1 (forged under the primary's name)\n");
+    const snap = await snapshot({ work: ex.work, gitDir: ex.gitDir, base: null, seq: 4, wantFull: true });
+    const iv = randomBytes(12);
+    const c = createCipheriv("aes-256-gcm", K1, iv);
+    const pack = Buffer.concat([iv, c.update(snap.pack), c.final(), c.getAuthTag()]);
+    const head = w.gateway.head!;
+    const forged: FleetManifest = {
+      fleet: "x",
+      seq: head.seq + 1,
+      tipCommit: snap.commit,
+      tree: snap.tree,
+      packKey: "fleets/x/packs/" + payloadHash(pack),
+      packHash: payloadHash(pack),
+      packBytes: pack.length,
+      full: true,
+      parentManifest: head.manifestKey,
+      parentSeq: head.seq,
+      // Everything is the primary's: its key as sender, the entries it wrapped for snapshot 1.
+      senderPublicKey: m1.senderPublicKey,
+      wrapped: m1.wrapped.filter((e) => e.memberId !== "ex-device").map(({ mac: _mac, ...rest }) => rest),
+      ...(m1.roster !== undefined ? { roster: m1.roster } : {}),
+      epoch: 1,
+      createdAt: Date.now(),
+    };
+    // The seal is an HMAC under a key derived from the snapshot key: whoever held it can make it.
+    const f = sealFieldsOf(forged, forged.packHash, null);
+    const sealKey = Buffer.from(hkdfSync("sha256", K1, Buffer.alloc(32), Buffer.from("prime-fleet-seal-v1"), 32));
+    forged.seal =
+      "v1:" +
+      createHmac("sha256", sealKey)
+        .update(JSON.stringify(["prime-fleet-seal-v1", f.fleet, f.seq, f.parentSeq, f.parentManifest, f.tipCommit, f.tree, f.full, f.packHash, f.deltaHash, f.senderPublicKey, f.roster]))
+        .digest("base64");
+    w.gateway.payloads.set(forged.packKey, pack);
+    w.forge(forged);
+    await expect(w.pullReplica(2)).rejects.toThrow(/tag its sender made|carries no tag from its sender/);
+    expect(readFileSync(join(w.replica.work, "file.txt"), "utf8")).toBe("price = 101\n");
+  });
+
+  test("a tag that does not match is refused, and so is a snapshot without one after snapshots that had them", async () => {
+    const w = await world();
+    const one = await w.next("one\n");
+    await w.pullReplica(0);
+    expect(FleetTrust.beside(w.replica.keyFile).macFrom).toBe(1);
+    const two = await w.next("two\n");
+    const m2 = w.manifest(two.manifestKey);
+    // A tag of another snapshot's (it is the sender's, but not over these fields).
+    const mac1 = w.manifest(one.manifestKey).wrapped.find((e) => e.memberId === "replica-device")!.mac!;
+    w.forge({ ...m2, wrapped: m2.wrapped.map((e) => (e.memberId === "replica-device" ? { ...e, mac: mac1 } : e)) });
+    await expect(w.pullReplica(1)).rejects.toThrow(/tag its sender made/);
+  });
+
+  test("a publisher that seals but does not tag each member's entry is refused once tags have been seen", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    w.gateway.noMacs = true; // an earlier build
+    await w.next("two\n");
+    await expect(w.pullReplica(1)).rejects.toThrow(/no tag from its sender/);
+    expect(FleetTrust.reset(w.replica.keyFile)).toBe(1);
+    expect((await w.pullReplica(1)).seq).toBe(2);
+  });
+
+  test("a publisher that finds a head without those tags publishes a whole tree", async () => {
+    const w = await world();
+    w.gateway.noMacs = true;
+    await w.next("one\n");
+    w.gateway.noMacs = false;
+    const two = await w.next("two\n");
+    expect(w.manifest(two.manifestKey).full).toBe(true);
+    const three = await w.next("three\n");
+    expect(w.manifest(three.manifestKey).full).toBe(false);
   });
 });
 

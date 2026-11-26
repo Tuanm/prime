@@ -68,6 +68,13 @@ export interface WrappedKey {
   keyId?: string;
   /** base64 of the sealed snapshot key. */
   wrapped: string;
+  /**
+   * A tag over the manifest's seal fields made with a key only the sender and this member can
+   * derive (their Diffie-Hellman secret): what the seal cannot say, which is that the sender
+   * is the one that made it. Every member that ever held the snapshot key can make the seal; only
+   * this one and the sender can make this. Absent from snapshots of older publishers.
+   */
+  mac?: string;
 }
 
 /** A short fingerprint of a member's public key (base64), to tell its keys apart. */
@@ -91,7 +98,9 @@ export interface SealedManyForMembers {
   senderPublicKey: string;
   /**
    * The seal of a manifest: a tag only a holder of this snapshot key can make
-   * (see `SealFields`). It travels in the manifest.
+   * (see `SealFields`). It travels in the manifest. Sealing also puts each member's own
+   * tag (`WrappedKey.mac`) on its entry of `wrapped`, which is why it is called once the
+   * fields are known and before the manifest is stored.
    */
   seal(fields: SealFields): string;
 }
@@ -125,6 +134,7 @@ export interface SealFields {
 }
 
 const SEAL_INFO = Buffer.from("prime-fleet-seal-v1");
+const MAC_INFO = Buffer.from("prime-fleet-seal-v2");
 export const SEAL_PREFIX = "v1:";
 
 // The key that seals manifests is derived from the snapshot key, not the snapshot
@@ -145,6 +155,23 @@ function tagOf(sealKey: Buffer, fields: SealFields): string {
   return SEAL_PREFIX + createHmac("sha256", sealKey).update(sealBytes(fields)).digest("base64");
 }
 
+// What the sender and one member tag the seal fields with, from the secret the two of them share.
+// (The wrap key is already that secret run through HKDF; this is a key of its own from it.)
+function macKeyOf(wrapKey: Buffer): Buffer {
+  return Buffer.from(hkdfSync("sha256", wrapKey, Buffer.alloc(32), MAC_INFO, 32));
+}
+
+function macOf(macKey: Buffer, memberId: string, fields: SealFields): string {
+  const digest = createHash("sha256").update(sealBytes(fields)).digest();
+  return createHmac("sha256", macKey).update(MAC_INFO).update(Buffer.from(JSON.stringify(memberId), "utf8")).update(digest).digest("base64");
+}
+
+function sameBase64(expected: string, got: string): boolean {
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(got, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 function tagMatches(sealKey: Buffer, fields: SealFields, tag: string): boolean {
   const expected = Buffer.from(tagOf(sealKey, fields), "utf8");
   const got = Buffer.from(tag, "utf8");
@@ -156,6 +183,11 @@ export interface OpenedPayload {
   plain: Buffer;
   /** Whether `tag` is the seal of exactly these fields, made by a holder of the snapshot key. */
   sealMatches(fields: SealFields, tag: string): boolean;
+  /**
+   * Whether this member's entry carries the tag only the sender could make for it over exactly
+   * these fields: true or false, or null when the entry has none (a publisher that predates it).
+   */
+  macMatches(fields: SealFields): boolean | null;
 }
 
 /**
@@ -181,20 +213,31 @@ export function sealManyForMembers(
   });
 
   const wrapped: WrappedKey[] = [];
+  const macKeys: Array<{ entry: WrappedKey; key: Buffer }> = [];
   for (const member of members) {
     if (!member.publicKey) continue;
     const wrapKey = sharedSecret(senderPrivateKeyPem, member.publicKey);
     const wrapIv = randomBytes(12);
     const wrapper = createCipheriv("aes-256-gcm", wrapKey, wrapIv);
     const sealed = Buffer.concat([wrapper.update(snapshotKey), wrapper.final()]);
-    wrapped.push({
+    const entry: WrappedKey = {
       memberId: member.memberId,
       keyId: keyIdOf(member.publicKey),
       wrapped: Buffer.concat([wrapIv, sealed, wrapper.getAuthTag()]).toString("base64"),
-    });
+    };
+    wrapped.push(entry);
+    macKeys.push({ entry, key: macKeyOf(wrapKey) });
   }
   const sealKey = sealKeyOf(snapshotKey);
-  return { ciphertexts, wrapped, senderPublicKey: senderPublicKeyB64, seal: (fields) => tagOf(sealKey, fields) };
+  return {
+    ciphertexts,
+    wrapped,
+    senderPublicKey: senderPublicKeyB64,
+    seal: (fields) => {
+      for (const { entry, key } of macKeys) entry.mac = macOf(key, entry.memberId, fields);
+      return tagOf(sealKey, fields);
+    },
+  };
 }
 
 /**
@@ -265,7 +308,12 @@ export function openPayload(
     decipher.setAuthTag(tag);
     const plain = Buffer.concat([decipher.update(body), decipher.final()]);
     const sealKey = sealKeyOf(snapshotKey);
-    return { plain, sealMatches: (fields, tag) => tagMatches(sealKey, fields, tag) };
+    const macKey = macKeyOf(wrapKey);
+    return {
+      plain,
+      sealMatches: (fields, tag) => tagMatches(sealKey, fields, tag),
+      macMatches: (fields) => (typeof entry.mac === "string" ? sameBase64(macOf(macKey, entry.memberId, fields), entry.mac) : null),
+    };
   } catch {
     return null;
   }
