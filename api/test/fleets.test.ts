@@ -1453,7 +1453,7 @@ describe("the Worker answers for a paused fleet", () => {
 
 
 describe("the Worker publishes a snapshot", () => {
-  async function publishVia(manifest: Record<string, unknown>, opts: { refuse?: boolean; retained?: string[] } = {}) {
+  async function publishVia(manifest: Record<string, unknown>, opts: { refuse?: boolean; refuseWith?: string; retained?: string[] } = {}) {
     const advances: Array<Record<string, any>> = [];
     const asked: string[][] = [];
     const stub = {
@@ -1462,7 +1462,7 @@ describe("the Worker publishes a snapshot", () => {
         if (url.endsWith("/role")) return Response.json({ member: true, primary: true, epoch: 1 });
         if (url.endsWith("/head/advance")) {
           advances.push(JSON.parse(String(init?.body ?? "{}")));
-          if (opts.refuse) return Response.json({ error: "stale sequence" }, { status: 409 });
+          if (opts.refuse) return Response.json({ error: opts.refuseWith ?? "stale sequence" }, { status: 409 });
           return Response.json({ ok: true, head: { seq: manifest.seq } });
         }
         if (url.endsWith("/unreferenced")) {
@@ -1519,6 +1519,15 @@ describe("the Worker publishes a snapshot", () => {
     expect(puts).toHaveLength(2);
     expect(asked).toHaveLength(1);
     expect(deleted.sort()).toEqual([...puts, delta].sort());
+  });
+
+  test("a publish refused with \"catch up first\" keeps the change pack: the member sends the manifest again, and it names it", async () => {
+    const delta = "fleets/acme/packs/" + "c".repeat(64);
+    const { res, puts, deleted } = await publishVia({ seq: 4, full: true, delta: { packKey: delta, bytes: 56 } }, { refuse: true, refuseWith: "catch up first" });
+    expect(res.status).toBe(409);
+    // The pack and manifest are in the request that is sent again; the change pack is not.
+    expect(deleted.sort()).toEqual([...puts].sort());
+    expect(deleted).not.toContain(delta);
   });
 
   test("what a snapshot the fleet keeps names is not deleted, though the same bytes were sent again", async () => {
