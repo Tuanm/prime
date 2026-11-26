@@ -10,7 +10,9 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+
+import { samePath } from "./fleet-paths.ts";
 
 /** The lock lives in the agent's own directory (`fleetAgentDir`). */
 export function agentLockPath(agentDir: string): string {
@@ -77,13 +79,32 @@ export function isFleetAgentProcess(pid: number, agentDir?: string, probe: Proce
   if (!pidAlive(pid)) return false;
   if (process.platform !== "win32") {
     const answer = probe(pid);
-    if (answer && answer.status === 0 && answer.stdout.trim() !== "") return answer.stdout.includes("__fleet-agent");
+    if (answer && answer.status === 0 && answer.stdout.trim() !== "") return answer.stdout.includes("__fleet-agent") && runsHere(answer.stdout, agentDir);
   }
   if (agentDir === undefined) return true;
   const lock = agentLockPath(agentDir);
   if (existsSync(lock)) return readHolder(lock) === pid && freshFile(lock);
   const state = join(agentDir, "state.json");
   return statePid(state) === pid && freshFile(state);
+}
+
+/** The configuration an agent's command line names (`--config <path>` or `--config=<path>`). */
+export function configOfCommand(command: string): string | undefined {
+  const found = /--config(?:=|\s+)(.*?)(?=\s--\S|\s*$)/.exec(command);
+  return found?.[1]?.trim() || undefined;
+}
+
+/**
+ * Whether an agent's command line is for the agent directory being asked about. Another
+ * configuration's agent has a different `--config`, and a pid in a stale lock that was reused by
+ * it is not this one's holder (the agent directory is beside the configuration). A command line
+ * that names no absolute `--config` cannot say, and is taken as a yes.
+ */
+function runsHere(command: string, agentDir: string | undefined): boolean {
+  if (agentDir === undefined) return true;
+  const config = configOfCommand(command);
+  if (config === undefined || !isAbsolute(config)) return true;
+  return samePath(dirname(config), dirname(agentDir));
 }
 
 function statePid(file: string): number | null {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, procProbeWith } from "../src/fleet-agent-lock";
@@ -291,7 +291,7 @@ describe("one fleet agent per configuration", () => {
   test("/proc says what a pid is where it can: a command line is an answer, and anything else is not", () => {
     const dir = scratch();
     const files: Record<string, string> = {
-      "/proc/10/cmdline": "/usr/bin/bun\0/opt/prime/cli.ts\0__fleet-agent\0--config\0/h/c.yaml\0",
+      "/proc/10/cmdline": "/usr/bin/bun\0/opt/prime/cli.ts\0__fleet-agent\0--config\0c.yaml\0",
       "/proc/20/cmdline": "vim\0notes.md\0",
       "/proc/30/cmdline": "",
     };
@@ -300,7 +300,7 @@ describe("one fleet agent per configuration", () => {
       if (text === undefined) throw new Error("ENOENT");
       return text;
     });
-    expect(probe(10)).toEqual({ status: 0, stdout: "/usr/bin/bun /opt/prime/cli.ts __fleet-agent --config /h/c.yaml" });
+    expect(probe(10)).toEqual({ status: 0, stdout: "/usr/bin/bun /opt/prime/cli.ts __fleet-agent --config c.yaml" });
     expect(probe(20)?.stdout).toBe("vim notes.md");
     // A kernel thread (empty) and a pid that is not there say nothing.
     expect(probe(30)).toBeNull();
@@ -797,5 +797,58 @@ describe("switching the replica mode of a running agent", () => {
     expect(state.replica).toBe("lazy");
     expect(() => process.kill(old.pid, 0)).toThrow();
     expect(managerCalls).toBe(0);
+  });
+});
+
+describe("a pid that another configuration's agent now has", () => {
+  test("is not this configuration's agent, however fresh the lock; the same configuration's is", () => {
+    const root = scratch();
+    const mine = join(root, "mine");
+    const other = join(root, "other");
+    mkdirSync(join(mine, "fleet-agent"), { recursive: true });
+    mkdirSync(join(other, "fleet-agent"), { recursive: true });
+    const dir = join(mine, "fleet-agent");
+    writeFileSync(agentLockPath(dir), process.pid + "\n");
+    const says = (config: string) => () => ({ status: 0, stdout: "bun /x/index.ts __fleet-agent --config " + config + "\n" });
+    expect(isFleetAgentProcess(process.pid, dir, says(join(other, "config.yaml")))).toBe(false);
+    expect(isFleetAgentProcess(process.pid, dir, says(join(mine, "config.yaml")))).toBe(true);
+    // `--config=`, a path with spaces, and flags after it.
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "bun i.ts __fleet-agent --config=" + join(other, "c.yaml") + "\n" }))).toBe(false);
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "bun i.ts __fleet-agent --config " + join(mine, "my config.yaml") + " --verbose\n" }))).toBe(true);
+    // A command line that names no configuration, or a relative one, cannot say: it counts.
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "bun i.ts __fleet-agent\n" }))).toBe(true);
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "bun i.ts __fleet-agent --config rel.yaml\n" }))).toBe(true);
+  });
+
+  test("a stale lock that names it is taken over", async () => {
+    const root = scratch();
+    const dir = join(root, "mine", "fleet-agent");
+    mkdirSync(dir, { recursive: true });
+    const other = plainAgent(); // a live "agent", whose command line has no --config here
+    writeFileSync(agentLockPath(dir), other.pid + "\n");
+    const probe = () => ({ status: 0, stdout: "bun i.ts __fleet-agent --config " + join(root, "other", "config.yaml") + "\n" });
+    const got = await acquireAgentLock(dir, { isAgent: (pid) => isFleetAgentProcess(pid, dir, probe) });
+    expect(got.held).toBe(true);
+    if (got.held) got.release();
+  });
+});
+
+describe("two spellings of one configuration", () => {
+  test("a path that differs only in case is the same file where the file system folds case", () => {
+    // Under /tmp, which is a symlink on macOS: realpath leaves the case of a directory after it as it was typed.
+    // Made by another process, and asked in a fresh one (a guard: realpath already settles this).
+    const base = "/tmp/FleetCase-" + process.pid + "-" + Date.now();
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }));
+    const dir = join(base, "CaseDir");
+    Bun.spawnSync(["sh", "-c", 'mkdir -p "$1" && : > "$1/Config.yaml"', "sh", dir]);
+    const swapped = join(base.toLowerCase(), "casedir", "config.yaml");
+    if (!existsSync(swapped)) return; // a case-sensitive file system: these are two files, and not the same
+    // In a process of its own: realpath remembers the spellings it has been given.
+    const ask = (a: string, b: string): string =>
+      Bun.spawnSync([process.execPath, "-e", 'import { sameConfig } from "' + join(import.meta.dir, "../src/fleet-service.ts") + '"; console.log(sameConfig(process.argv[1], process.argv[2]));', a, b], {
+        env: process.env,
+      }).stdout.toString().trim();
+    expect(ask(swapped, join(dir, "Config.yaml"))).toBe("true");
+    expect(ask(join(base.toLowerCase(), "casedir", "other.yaml"), join(dir, "Config.yaml"))).toBe("false");
   });
 });

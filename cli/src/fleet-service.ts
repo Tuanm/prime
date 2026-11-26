@@ -6,11 +6,11 @@
 // exactly what happened. Installing it is 'prime fleets agent install'.
 
 import { homedir } from "node:os";
-import { realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { defaultConfigPath } from "./config.ts";
+import { samePath } from "./fleet-paths.ts";
 import {
   installService,
   readServiceDefinition,
@@ -75,27 +75,13 @@ export function fleetAgentServiceConfig(
   return definition.config ?? join(homedir(), ".prime", "config.yaml");
 }
 
-/** A path as the file system knows it: symlinks followed where the file (or its directory) exists. */
-function canonical(path: string): string {
-  const full = resolve(path);
-  try {
-    return realpathSync.native(full);
-  } catch {
-    try {
-      return join(realpathSync.native(dirname(full)), basename(full));
-    } catch {
-      return full;
-    }
-  }
-}
-
 /**
  * Whether the configuration a service definition names is this one. The definition's path is read
  * the way the manager runs it: relative to the home it starts in (`WorkingDirectory`), not to
  * wherever this command was typed; and both sides are compared as the file system names them.
  */
 export function sameConfig(runs: string, configPath: string, home: string = homedir()): boolean {
-  return canonical(resolve(home, runs)) === canonical(configPath);
+  return samePath(resolve(home, runs), configPath);
 }
 
 /** A status as seen from one configuration: a service that runs another is not this one's. */
