@@ -1,16 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
 import { effectiveCodeMcpArgv, serviceEnv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
-import { FLEET_AGENT_LABEL, FLEET_AGENT_NAME, bindServiceStatus, fleetAgentSpec } from "../src/fleet-service.ts";
-import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
+import { FLEET_AGENT_LABEL, FLEET_AGENT_NAME, bindServiceStatus, fleetAgentServiceConfig, fleetAgentSpec, sameConfig } from "../src/fleet-service.ts";
+import { defaultConfigPath, emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
 import { rememberAnonymous } from "../src/connect.ts";
 import {
   captureNetworkEnv,
   definedServiceConfig,
+  readServiceDefinition,
   loadServiceEnv,
   loadOverrides,
   parseLaunchdConfig,
@@ -242,5 +243,64 @@ describe("which configuration a service runs", () => {
 
   test("the service is installed with an absolute path", () => {
     expect(fleetAgentSpec("rel/config.yaml").command.at(-1)).toBe(join(process.cwd(), "rel/config.yaml"));
+  });
+
+  test("numeric XML entities and the --config=path spelling are read", () => {
+    const plist = "<plist><dict><key>ProgramArguments</key><array><string>/bin/prime</string><string>--config=/a&#38;b/&#x63;.yaml</string></array></dict></plist>";
+    expect(parseLaunchdConfig(plist)).toBe("/a&b/c.yaml");
+    expect(parseSystemdConfig('ExecStart="/bin/prime" "--config=/etc/c.yaml"\n')).toBe("/etc/c.yaml");
+  });
+
+  test("a relative path in an old definition is the one the manager runs: from the home, not from where the command is typed", () => {
+    const home = mkdtempSync(join(tmpdir(), "svc-bind-"));
+    try {
+      mkdirSync(join(home, "cfg"), { recursive: true });
+      writeFileSync(join(home, "cfg", "config.yaml"), "");
+      const status = { installed: true, running: true, where: "w", pid: 7 };
+      // The same file named absolutely, from anywhere: bound.
+      expect(bindServiceStatus(status, "cfg/config.yaml", join(home, "cfg", "config.yaml"), home).installed).toBe(true);
+      // Another configuration that happens to be spelled the same way relative to wherever it is typed: not.
+      const elsewhere = join(home, "work", "cfg", "config.yaml");
+      expect(bindServiceStatus(status, "cfg/config.yaml", elsewhere, home).installed).toBe(false);
+      expect(sameConfig("cfg/config.yaml", "cfg/config.yaml", home)).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("two spellings of one file (a symlink) are one configuration", () => {
+    const root = mkdtempSync(join(tmpdir(), "svc-link-"));
+    try {
+      mkdirSync(join(root, "real"), { recursive: true });
+      writeFileSync(join(root, "real", "config.yaml"), "");
+      symlinkSync(join(root, "real"), join(root, "alias"));
+      expect(sameConfig(join(root, "real", "config.yaml"), join(root, "alias", "config.yaml"), root)).toBe(true);
+      expect(sameConfig(join(root, "real", "config.yaml"), join(root, "alias", "other.yaml"), root)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a definition that does not say is the default configuration's, and binds no other", () => {
+    expect(fleetAgentServiceConfig(null)).toBeUndefined();
+    expect(fleetAgentServiceConfig({ config: "/cfg/x.yaml" })).toBe("/cfg/x.yaml");
+    const runs = fleetAgentServiceConfig({ config: undefined })!;
+    expect(runs).toBe(defaultConfigPath());
+    const status = { installed: true, running: true, where: "w" };
+    expect(bindServiceStatus(status, runs, defaultConfigPath()).installed).toBe(true);
+    expect(bindServiceStatus(status, runs, "/some/other/config.yaml").installed).toBe(false);
+  });
+
+  test("a definition that exists and does not say is told apart from none", () => {
+    const home = mkdtempSync(join(tmpdir(), "svc-def-"));
+    try {
+      const identity = { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL };
+      expect(readServiceDefinition("darwin", identity, home, {})).toBeUndefined();
+      mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+      writeFileSync(join(home, "Library", "LaunchAgents", FLEET_AGENT_LABEL + ".plist"), Buffer.from("bplist00\u0001\u0002", "latin1"));
+      expect(readServiceDefinition("darwin", identity, home, {})).toEqual({ config: undefined });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

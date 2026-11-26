@@ -22,7 +22,7 @@
 // already holds, and the agent inherits only the environment it needs.
 
 import { mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
@@ -44,7 +44,7 @@ import {
   type PlaceAnswer,
   type ReplicaMode,
 } from "./fleet-replica.ts";
-import { fleetAgentServiceConfig, fleetAgentServiceStatus, installFleetAgentService, restartFleetAgentService } from "./fleet-service.ts";
+import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService } from "./fleet-service.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -488,7 +488,7 @@ export async function installFleetAgent(
   // There is one service per machine, and it runs one configuration: installing for another
   // would move it, and the first would have no agent.
   const bound = (deps.boundTo ?? fleetAgentServiceConfig)();
-  if (bound !== undefined && resolve(bound) !== resolve(configPath)) {
+  if (bound !== undefined && !sameConfig(bound, configPath)) {
     throw new CliError(
       "the fleet agent service is installed for " + bound + " (there is one per machine)",
       "run 'prime fleets agent uninstall' first if it should run " + configPath + " instead",

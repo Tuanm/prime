@@ -6,13 +6,14 @@
 // exactly what happened. Installing it is 'prime fleets agent install'.
 
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { defaultConfigPath } from "./config.ts";
 import {
-  definedServiceConfig,
   installService,
+  readServiceDefinition,
   restartService,
   serviceStatus,
   uninstallService,
@@ -61,15 +62,52 @@ export function uninstallFleetAgentService(configPath: string = defaultConfigPat
   return uninstallService(process.platform as Platform, configPath, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
 }
 
-/** The configuration the installed service runs, from its definition (the manager is not asked). */
-export function fleetAgentServiceConfig(): string | undefined {
-  return definedServiceConfig(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+/**
+ * The configuration the installed service runs, from its definition (the manager is not asked).
+ * A definition that does not say which (a binary plist, a hand-edited ExecStart) is taken for the
+ * default configuration's, which is what every install made.
+ */
+export function fleetAgentServiceConfig(
+  definition: { config: string | undefined } | null = readServiceDefinition(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL }) ?? null,
+): string | undefined {
+  if (definition === null) return undefined;
+  return definition.config ?? defaultConfigPath();
+}
+
+/** A path as the file system knows it: symlinks followed where the file (or its directory) exists. */
+function canonical(path: string): string {
+  const full = resolve(path);
+  try {
+    return realpathSync.native(full);
+  } catch {
+    try {
+      return join(realpathSync.native(dirname(full)), basename(full));
+    } catch {
+      return full;
+    }
+  }
+}
+
+/**
+ * Whether the configuration a service definition names is this one. The definition's path is read
+ * the way the manager runs it: relative to the home it starts in (`WorkingDirectory`), not to
+ * wherever this command was typed; and both sides are compared as the file system names them.
+ */
+export function sameConfig(runs: string, configPath: string, home: string = homedir()): boolean {
+  return canonical(resolve(home, runs)) === canonical(configPath);
 }
 
 /** A status as seen from one configuration: a service that runs another is not this one's. */
-export function bindServiceStatus(status: ServiceStatus, runs: string | undefined, configPath: string): ServiceStatus & { config?: string } {
-  if (runs === undefined || resolve(runs) === resolve(configPath)) return { ...status, ...(runs !== undefined ? { config: runs } : {}) };
-  return { installed: false, running: false, where: status.where, detail: "installed for " + runs, config: runs };
+export function bindServiceStatus(
+  status: ServiceStatus,
+  runs: string | undefined,
+  configPath: string,
+  home: string = homedir(),
+): ServiceStatus & { config?: string } {
+  if (runs === undefined) return status;
+  const config = resolve(home, runs);
+  if (sameConfig(runs, configPath, home)) return { ...status, config };
+  return { installed: false, running: false, where: status.where, detail: "installed for " + config, config };
 }
 
 /**

@@ -178,12 +178,27 @@ export function systemdEnvQuote(assignment: string): string {
 
 /** The `--config` a launchd definition runs its program with. */
 export function parseLaunchdConfig(plist: string): string | undefined {
-  const unescape = (t: string) => t.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
+  const unescape = (t: string) =>
+    t
+      .replace(/&#x([0-9a-fA-F]+);/g, (_m, h: string) => String.fromCodePoint(Number.parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (_m, d: string) => String.fromCodePoint(Number.parseInt(d, 10)))
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&gt;/g, ">")
+      .replace(/&lt;/g, "<")
+      .replace(/&amp;/g, "&");
   const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1];
   if (args === undefined) return undefined;
   const list = [...args.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unescape(m[1]!));
+  return configOf(list);
+}
+
+/** The value of `--config <path>` or `--config=<path>` in an argument list. */
+function configOf(list: string[]): string | undefined {
   const at = list.indexOf("--config");
-  return at >= 0 ? list[at + 1] : undefined;
+  if (at >= 0) return list[at + 1];
+  const joined = list.find((a) => a.startsWith("--config="));
+  return joined === undefined ? undefined : joined.slice("--config=".length);
 }
 
 /** The `--config` a systemd unit's ExecStart runs its program with (see `systemdQuote`). */
@@ -191,27 +206,41 @@ export function parseSystemdConfig(unit: string): string | undefined {
   const line = /^ExecStart=(.*)$/m.exec(unit)?.[1];
   if (line === undefined) return undefined;
   const list = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$"));
-  const at = list.indexOf("--config");
-  return at >= 0 ? list[at + 1] : undefined;
+  return configOf(list);
 }
 
 /**
- * The configuration an installed service runs, read from its definition (no call to the
- * manager). undefined when none is installed or the definition does not say.
+ * What an installed service's definition says (read from its file, the manager is not asked):
+ * undefined when there is no definition, and `config` undefined when there is one that does not
+ * say which configuration it runs (unreadable: a binary plist, a hand-edited ExecStart).
  */
+export function readServiceDefinition(
+  platform: Platform,
+  identity: { name?: string; label?: string } = {},
+  home = homedir(),
+  env: Record<string, string | undefined> = process.env,
+): { config: string | undefined } | undefined {
+  try {
+    if (platform === "linux") {
+      return { config: parseSystemdConfig(readFileSync(systemdUnitPath(env, home, identity.name ?? SERVICE_NAME), "utf8")) };
+    }
+    if (platform === "darwin") {
+      return { config: parseLaunchdConfig(readFileSync(launchdPlistPath(home, identity.label ?? LAUNCHD_LABEL), "utf8")) };
+    }
+  } catch {
+    // Not installed.
+  }
+  return undefined;
+}
+
+/** The configuration an installed service runs, as its definition says; undefined when none is installed or it does not say. */
 export function definedServiceConfig(
   platform: Platform,
   identity: { name?: string; label?: string } = {},
   home = homedir(),
   env: Record<string, string | undefined> = process.env,
 ): string | undefined {
-  try {
-    if (platform === "linux") return parseSystemdConfig(readFileSync(systemdUnitPath(env, home, identity.name ?? SERVICE_NAME), "utf8"));
-    if (platform === "darwin") return parseLaunchdConfig(readFileSync(launchdPlistPath(home, identity.label ?? LAUNCHD_LABEL), "utf8"));
-  } catch {
-    // Not installed.
-  }
-  return undefined;
+  return readServiceDefinition(platform, identity, home, env)?.config;
 }
 
 export function renderSystemdUnit(spec: ServiceSpec): string {
