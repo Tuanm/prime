@@ -457,4 +457,84 @@ describe("incremental snapshots", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  test("a chain that cannot be downloaded whole leaves the work tree as it was", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    const gateway = new FakeGateway();
+    try {
+      const primaryWork = join(root, "primary");
+      const replicaWork = join(root, "replica");
+      mkdirSync(primaryWork, { recursive: true });
+      mkdirSync(replicaWork, { recursive: true });
+      writeFileSync(join(primaryWork, "a.txt"), "one".repeat(100));
+      const primaryPaths: MemberPaths = { work: primaryWork, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+      const replicaPaths: MemberPaths = { work: replicaWork, gitDir: join(root, "r-meta"), keyFile: join(root, "r.key") };
+      useFakeGateway(gateway);
+      gateway.seed("primary-device", loadOrCreateKeyPair(primaryPaths.keyFile).publicKey);
+      gateway.seed("replica-device", loadOrCreateKeyPair(replicaPaths.keyFile).publicKey);
+
+      let last = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, 2);
+      const first = await pull(credsFor("replica-device"), "x", replicaPaths, 0);
+      for (let i = 2; i <= 4; i++) {
+        writeFileSync(join(primaryWork, "a.txt"), "step " + i + " ".repeat(100));
+        writeFileSync(join(primaryWork, "f" + i + ".txt"), "file " + i);
+        last = await publish(credsFor("primary-device"), "x", primaryPaths, last.commit, last.seq, 2, last.roster);
+      }
+      const before = fingerprint(replicaWork);
+
+      // The last pack in the chain is gone from the gateway.
+      for (const key of [...gateway.payloads.keys()]) if (key.includes("/packs/") && key === lastPackKey(gateway)) gateway.payloads.delete(key);
+      let failed = false;
+      const steps: number[] = [];
+      try {
+        await pull(credsFor("replica-device"), "x", replicaPaths, first.seq, first.commit, (step) => void steps.push(step.seq));
+      } catch {
+        failed = true;
+      }
+      expect(failed).toBe(true);
+      // Nothing was applied, so the state the member recorded still describes its tree.
+      expect(steps).toEqual([]);
+      expect(sameTree(fingerprint(replicaWork), before)).toBe(true);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("every step of a catch-up is reported as it is applied", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    const gateway = new FakeGateway();
+    try {
+      const primaryWork = join(root, "primary");
+      const replicaWork = join(root, "replica");
+      mkdirSync(primaryWork, { recursive: true });
+      mkdirSync(replicaWork, { recursive: true });
+      writeFileSync(join(primaryWork, "a.txt"), "one".repeat(100));
+      const primaryPaths: MemberPaths = { work: primaryWork, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+      const replicaPaths: MemberPaths = { work: replicaWork, gitDir: join(root, "r-meta"), keyFile: join(root, "r.key") };
+      useFakeGateway(gateway);
+      gateway.seed("primary-device", loadOrCreateKeyPair(primaryPaths.keyFile).publicKey);
+      gateway.seed("replica-device", loadOrCreateKeyPair(replicaPaths.keyFile).publicKey);
+      let last = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, 2);
+      const first = await pull(credsFor("replica-device"), "x", replicaPaths, 0);
+      for (let i = 2; i <= 4; i++) {
+        writeFileSync(join(primaryWork, "a.txt"), "step " + i + " ".repeat(100));
+        last = await publish(credsFor("primary-device"), "x", primaryPaths, last.commit, last.seq, 2, last.roster);
+      }
+      const seen: Array<{ seq: number; commit: string; tree: string }> = [];
+      const done = await pull(credsFor("replica-device"), "x", replicaPaths, first.seq, first.commit, (step) => void seen.push(step));
+      expect(seen.map((s) => s.seq)).toEqual([2, 3, 4]);
+      expect(seen[2]!.commit).toBe(done.commit);
+      expect(seen[2]!.tree).toBe(done.tree!);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
+
+/** The key of the pack the head's manifest names. */
+function lastPackKey(gateway: FakeGateway): string {
+  const manifest = JSON.parse(gateway.payloads.get(gateway.head!.manifestKey)!.toString("utf8")) as { packKey: string };
+  return manifest.packKey;
+}

@@ -617,15 +617,12 @@ export async function syncFleetSpace(
       await preserveLocalChange(work, paths.gitDir, state.tree);
     }
   }
-  const pulled = await pull(creds, fleetId, paths, state.seq ?? 0, state.base ?? null);
+  // Recorded after every step, so a failure part-way leaves a state that still
+  // describes the work tree.
+  const pulled = await pull(creds, fleetId, paths, state.seq ?? 0, state.base ?? null, (step) => {
+    writeFleetState(configPath, fleetId, spaceName, { ...state, seq: step.seq, base: step.commit, tree: step.tree });
+  });
   if (pulled.applied) {
-    writeFleetState(configPath, fleetId, spaceName, {
-      ...state,
-      seq: pulled.seq,
-      base: pulled.commit,
-      // What it now holds, so the next look can tell a local edit from this state.
-      ...(pulled.tree ? { tree: pulled.tree } : {}),
-    });
     return "applied " + pulled.seq;
   }
   return "up to date";

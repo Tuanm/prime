@@ -400,19 +400,14 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   }
 
   const pullBegan = Date.now();
-  const pulled = await pull(creds, fleet, paths, state.seq ?? 0, state.base ?? null);
+  // The tree it now holds is remembered after every step, so the next round
+  // can tell a change made here from the state it already had - also when a
+  // later step fails.
+  const pulled = await pull(creds, fleet, paths, state.seq ?? 0, state.base ?? null, (step) => {
+    writeFleetState(loop.configPath, fleet, loop.name, { ...state, seq: step.seq, base: step.commit, tree: step.tree });
+  });
   loop.timing.pull = Date.now() - pullBegan;
-  if (pulled.applied) {
-    // The tree it now holds is remembered, so the next round can tell a
-    // change made here from the state it already had.
-    writeFleetState(loop.configPath, fleet, loop.name, {
-      ...state,
-      seq: pulled.seq,
-      base: pulled.commit,
-      ...(pulled.tree ? { tree: pulled.tree } : {}),
-    });
-    report("applied " + pulled.seq);
-  }
+  if (pulled.applied) report("applied " + pulled.seq);
 }
 
 

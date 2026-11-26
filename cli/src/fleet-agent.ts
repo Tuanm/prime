@@ -277,6 +277,13 @@ export async function openStep(
   return plain;
 }
 
+/** A snapshot that has been applied to the work tree. */
+export interface AppliedStep {
+  seq: number;
+  commit: string;
+  tree: string;
+}
+
 /**
  *  Fetch the fleet's current state and apply it to this member's work tree.
  *
@@ -287,6 +294,12 @@ export async function openStep(
  *  file records). It tells the apply what the fleet itself wrote, so that only
  *  what the fleet dropped is removed; with none, nothing is removed.
  *
+ *  The whole chain is downloaded and opened before the first step is applied,
+ *  so a chain that cannot be fetched or opened touches nothing. Each step is
+ *  reported to `onStep` as soon as it is applied: the caller records it then,
+ *  so a failure part-way leaves a state that still describes the work tree
+ *  (otherwise the next round would take the applied files for local edits).
+ *
  */
 export async function pull(
   creds: FleetCredentials,
@@ -294,10 +307,16 @@ export async function pull(
   paths: MemberPaths,
   lastSeq: number,
   lastCommit?: string | null,
+  onStep?: (step: AppliedStep) => void | Promise<void>,
 ): Promise<PullResult> {
   const plan = await planCatchUp(creds, fleet, lastSeq);
   if (plan.chain.length === 0) return { seq: plan.head.seq, commit: "", applied: false, upToDate: true };
   const keys = loadOrCreateKeyPair(paths.keyFile);
+
+  // Everything is fetched and opened first. Memory holds the chain: a whole
+  // tree at most, and up to 31 deltas after it.
+  const packs: Buffer[] = [];
+  for (const step of plan.chain) packs.push(await openStep(creds, fleet, keys, step));
 
   // Directories the fleet leaves alone are not mirrored, so they must survive
   // the apply untouched.
@@ -307,13 +326,19 @@ export async function pull(
   let lastCommitApplied = "";
   let lastTree: string | undefined;
   let previous: string | null = lastCommit ?? null;
-  for (const step of plan.chain) {
-    const plain = await openStep(creds, fleet, keys, step);
-    await applyPack(paths.work, paths.gitDir, step.tipCommit, plain, exclude, previous);
-    previous = step.tipCommit;
-    lastSeqApplied = step.seq;
-    lastCommitApplied = step.tipCommit;
-    lastTree = step.tree;
+  try {
+    for (const [i, step] of plan.chain.entries()) {
+      await applyPack(paths.work, paths.gitDir, step.tipCommit, packs[i]!, exclude, previous);
+      previous = step.tipCommit;
+      lastSeqApplied = step.seq;
+      lastCommitApplied = step.tipCommit;
+      lastTree = step.tree;
+      await onStep?.({ seq: step.seq, commit: step.tipCommit, tree: step.tree });
+    }
+  } catch (err) {
+    // What was applied is real; say so before failing, so the fleet knows.
+    if (lastSeqApplied > lastSeq) await reportApplied(creds, fleet, lastSeqApplied).catch(() => false);
+    throw err;
   }
   await reportApplied(creds, fleet, lastSeqApplied);
   return { seq: lastSeqApplied, commit: lastCommitApplied, applied: true, upToDate: false, ...(lastTree ? { tree: lastTree } : {}) };
