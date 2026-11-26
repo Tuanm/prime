@@ -544,6 +544,41 @@ describe("the agent's round for a replica", () => {
     }
   };
 
+  test("a store that holds only what is in use and is still over the cap is not collected again and again", async () => {
+    const { maybeCollect, collectPolicy } = await import("../src/fleet-daemon");
+    const w = await world();
+    const saved = process.env.PRIME_FLEET_CACHE_MB;
+    const policy = { ...collectPolicy };
+    process.env.PRIME_FLEET_CACHE_MB = "0.001"; // always over
+    collectPolicy.growthBytes = 20_000;
+    try {
+      const s = await baseline(w, "r1");
+      const said: string[] = [];
+      const check = async (minute: number): Promise<void> => maybeCollect(s.loop as never, (m) => void said.push(m), minute * 60_000);
+      await check(11);
+      await check(22);
+      await check(33);
+      await check(44);
+      // Nothing was published in between: one collection, and the cap said once.
+      expect(said.filter((m) => m.startsWith("collected")).length).toBe(1);
+      expect(said.filter((m) => m.includes("over the cap")).length).toBe(1);
+
+      // It grows by more than the policy asks: collected again.
+      for (let i = 0; i < 30; i++) {
+        await w.publishNext();
+        s.loop.headDirty = true;
+        await s.round();
+      }
+      await check(55);
+      expect(said.filter((m) => m.startsWith("collected")).length).toBe(2);
+    } finally {
+      Object.assign(collectPolicy, policy);
+      if (saved === undefined) delete process.env.PRIME_FLEET_CACHE_MB;
+      else process.env.PRIME_FLEET_CACHE_MB = saved;
+      finish(w);
+    }
+  }, 60_000);
+
   test("without a socket a lazy replica asks for its place about every fifteen seconds and for nothing else", async () => {
     const w = await world();
     try {
