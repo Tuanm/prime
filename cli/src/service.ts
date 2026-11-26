@@ -375,6 +375,26 @@ export function serviceStatus(
   throw new CliError("'prime service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
 }
 
+/**
+ * Restart an installed service through its manager, so that the manager (which restarts
+ * what dies) and the person are never fighting over the process. Returns whether the
+ * manager took the request; Windows has no equivalent and says no.
+ */
+export function restartService(
+  platform: Platform = process.platform as Platform,
+  identity: { name?: string; label?: string } = {},
+): boolean {
+  if (platform === "linux") {
+    if (!Bun.which("systemctl")) return false;
+    return run(["systemctl", "--user", "restart", (identity.name ?? SERVICE_NAME) + ".service"]).code === 0;
+  }
+  if (platform === "darwin") {
+    // -k: kill the running instance first; it is started again at once.
+    return run(["launchctl", "kickstart", "-k", "gui/" + uid() + "/" + (identity.label ?? LAUNCHD_LABEL)]).code === 0;
+  }
+  return false;
+}
+
 /** The spec for this machine: the running prime, its config, the current PATH. */
 export function serviceSpecFor(platform: Platform, configPath: string): ServiceSpec {
   const logPath = defaultLogPath(platform, configPath);

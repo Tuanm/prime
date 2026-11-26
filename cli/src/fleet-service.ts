@@ -12,6 +12,7 @@ import { selfCommand } from "./code-mcp-host.ts";
 import { defaultConfigPath } from "./config.ts";
 import {
   installService,
+  restartService,
   serviceStatus,
   uninstallService,
   type Platform,
@@ -62,4 +63,9 @@ export function uninstallFleetAgentService(configPath: string = defaultConfigPat
 /** Whether it is installed, and whether it is running. */
 export function fleetAgentServiceStatus(configPath: string = defaultConfigPath()): ServiceStatus {
   return serviceStatus(process.platform as Platform, configPath, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+}
+
+/** Restart the installed service through its manager. Returns whether the manager did. */
+export function restartFleetAgentService(): boolean {
+  return restartService(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
 }
