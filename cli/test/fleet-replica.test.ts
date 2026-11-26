@@ -1,0 +1,491 @@
+import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
+import {
+  applyReady,
+  placeDue,
+  positions,
+  prefetch,
+  promote,
+  promotionDelayMs,
+  replicaMode,
+  type PlaceAnswer,
+  type ReplicaState,
+} from "../src/fleet-replica";
+import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
+
+interface World {
+  root: string;
+  gateway: FakeGateway;
+  primary: MemberPaths;
+  primaryWork: string;
+  /** A replica, with its own state kept the way the agent keeps it. */
+  replica(name: string): { paths: MemberPaths; id: string; state: ReplicaState; save: (patch: Partial<ReplicaState>) => void };
+  publishNext(content?: string): Promise<{ seq: number; commit: string; roster: string; full: boolean; bytes: number }>;
+}
+
+async function world(files = 12): Promise<World> {
+  const root = mkdtempSync(join(tmpdir(), "fleet-replica-"));
+  const gateway = new FakeGateway();
+  const primaryWork = join(root, "primary");
+  mkdirSync(primaryWork, { recursive: true });
+  let seed = 3;
+  const noise = (): string => {
+    let out = "";
+    for (let i = 0; i < 2000; i++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      out += (seed % 36).toString(36);
+    }
+    return out;
+  };
+  for (let i = 0; i < files; i++) writeFileSync(join(primaryWork, "f" + i + ".txt"), noise());
+  writeFileSync(join(primaryWork, ".gitignore"), "*.log\n");
+  const primary: MemberPaths = { work: primaryWork, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+  useFakeGateway(gateway);
+  gateway.seed("primary-device", loadOrCreateKeyPair(primary.keyFile).publicKey);
+  let last: { seq: number; commit: string; roster: string; full: boolean; bytes: number } | null = null;
+  let members = 1;
+  const w: World = {
+    root,
+    gateway,
+    primary,
+    primaryWork,
+    replica(name) {
+      const dir = join(root, name);
+      mkdirSync(dir, { recursive: true });
+      const paths: MemberPaths = { work: dir, gitDir: join(root, name + "-meta"), keyFile: join(root, name + ".key") };
+      gateway.seed(name, loadOrCreateKeyPair(paths.keyFile).publicKey);
+      members++;
+      const holder = { paths, id: name, state: {} as ReplicaState, save: (_: Partial<ReplicaState>) => {} };
+      holder.save = (patch) => {
+        holder.state = { ...holder.state, ...patch };
+      };
+      return holder;
+    },
+    async publishNext(content) {
+      if (last) writeFileSync(join(primaryWork, "f" + (last.seq % files) + ".txt"), content ?? noise());
+      last = await publish(credsFor("primary-device"), "x", primary, last?.commit ?? null, last?.seq ?? 0, members, last?.roster);
+      return last;
+    },
+  };
+  return w;
+}
+
+const finish = (w: World): void => {
+  (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+  rmSync(w.root, { recursive: true, force: true });
+};
+
+describe("fetching ahead", () => {
+  test("snapshots come into the store and the work tree is not touched", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      // The replica has the first snapshot, applied.
+      const first = await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      expect(first.applied).toBe(true);
+      const before = fingerprint(r.paths.work);
+
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.steps).toBe(3);
+      expect(got.fetched.seq).toBe(4);
+      // Fetched is recorded after every snapshot kept; applied has not moved.
+      expect(r.state.fetchedSeq).toBe(4);
+      expect(r.state.seq).toBe(1);
+      expect(sameTree(fingerprint(r.paths.work), before)).toBe(true);
+      expect(positions(r.state).applied.seq).toBe(1);
+      expect(positions(r.state).fetched.seq).toBe(4);
+      // Nothing more to fetch: no pack is downloaded.
+      w.gateway.packReads.length = 0;
+      expect((await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save)).steps).toBe(0);
+      expect(w.gateway.packReads).toEqual([]);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a restart in the middle loses nothing that was already kept", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 4; i++) await w.publishNext();
+      // The gateway loses the newest pack halfway: the others were kept and recorded.
+      const head = JSON.parse(w.gateway.payloads.get(w.gateway.head!.manifestKey)!.toString("utf8")) as { packKey: string };
+      const lost = w.gateway.payloads.get(head.packKey)!;
+      w.gateway.payloads.delete(head.packKey);
+      await expect(prefetch(credsFor("r1"), "x", r.paths, r.state, r.save)).rejects.toThrow();
+      expect(r.state.fetchedSeq).toBe(4);
+      w.gateway.payloads.set(head.packKey, lost);
+      w.gateway.packReads.length = 0;
+      const again = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(again.fetched.seq).toBe(5);
+      expect(w.gateway.packReads.length).toBe(1); // only the one that was missing
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("writing it out when it matters", () => {
+  test("one apply covers the lag, reports it, and only the replica's own edit is moved aside", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 5; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      writeFileSync(join(r.paths.work, "f1.txt"), "edited on the replica");
+      writeFileSync(join(r.paths.work, "debug.log"), "ignored, and the replica's own");
+
+      const done = await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(done!.applied.seq).toBe(6);
+      expect(done!.kept?.moved).toBe(1);
+      expect(readFileSync(join(done!.kept!.to, "f1.txt"), "utf8")).toBe("edited on the replica");
+      expect(sameTree(fingerprint(w.primaryWork), (() => { const m = fingerprint(r.paths.work); m.delete("debug.log"); return m; })())).toBe(true);
+      expect(readFileSync(join(r.paths.work, "debug.log"), "utf8")).toBe("ignored, and the replica's own");
+      expect(r.state.seq).toBe(6);
+      expect(r.state.fetchedSeq).toBe(6);
+      expect(w.gateway.applied.get("r1")).toBe(6);
+      rmSync(done!.kept!.to, { recursive: true, force: true });
+      // Nothing newer: nothing to do.
+      expect(await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save)).toBeNull();
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a catch-up on request uses what was fetched and downloads nothing again", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      w.gateway.packReads.length = 0;
+      const { fetched } = positions(r.state);
+      const pulled = await pull(credsFor("r1"), "x", r.paths, r.state.seq!, r.state.base!, undefined, fetched);
+      expect(pulled.seq).toBe(4);
+      expect(w.gateway.packReads).toEqual([]);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("taking the lease", () => {
+  const ask = (_w: World, id: string) => async (): Promise<PlaceAnswer> => {
+    const res = await fetch("http://fake/fleets/x/bootstrap", { method: "POST", headers: { "x-prime-device": id }, body: "{}" } as RequestInit);
+    const body = (await res.json()) as { role?: string; reason?: string; catchUpTo?: number };
+    return { primary: body.role === "primary", ...(body.reason ? { reason: body.reason } : {}), ...(body.catchUpTo !== undefined ? { catchUpTo: body.catchUpTo } : {}) };
+  };
+
+  test("a replica that only fetched applies, then takes over and publishes on top of what it holds", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 4; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      const stale = fingerprint(r.paths.work);
+      expect(sameTree(stale, fingerprint(w.primaryWork))).toBe(false); // a lazy replica is behind
+
+      // The primary goes away.
+      w.gateway.primary = "";
+      const outcome = await promote({
+        takePlace: ask(w, "r1"),
+        catchUp: async () => {
+          await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+          await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+        },
+      });
+      expect(outcome).toBe("primary");
+      expect(w.gateway.primary).toBe("r1");
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+
+      // It publishes on the state it applied: the fleet does not fork.
+      writeFileSync(join(r.paths.work, "new.txt"), "from the new primary");
+      const next = await publish(credsFor("r1"), "x", r.paths, r.state.base!, r.state.seq!, 2);
+      expect(next.seq).toBe(6);
+      expect(next.full).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("two replicas race for a free lease: one wins, the other stays a replica", async () => {
+    const w = await world();
+    try {
+      const a = w.replica("ra");
+      const b = w.replica("rb");
+      await w.publishNext();
+      for (const r of [a, b]) {
+        await pull(credsFor(r.id), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      }
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      for (const r of [a, b]) await prefetch(credsFor(r.id), "x", r.paths, r.state, r.save);
+      w.gateway.primary = "";
+
+      const attempt = (r: typeof a) =>
+        promote({
+          takePlace: ask(w, r.id),
+          catchUp: async () => {
+            await applyReady(credsFor(r.id), "x", r.paths, r.state, r.save);
+          },
+        });
+      const results = await Promise.all([attempt(a), attempt(b)]);
+      expect(results.filter((o) => o === "primary").length).toBe(1);
+      expect(results.filter((o) => o === "lease-held").length).toBe(1);
+      expect(["ra", "rb"]).toContain(w.gateway.primary);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a replica that finds the lease held does nothing at all", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      const before = fingerprint(r.paths.work);
+      let caughtUp = false;
+      const outcome = await promote({ takePlace: ask(w, "r1"), catchUp: async () => void (caughtUp = true) });
+      expect(outcome).toBe("lease-held");
+      expect(caughtUp).toBe(false);
+      expect(sameTree(fingerprint(r.paths.work), before)).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a head that keeps moving under a member that is catching up ends, and says so", async () => {
+    let calls = 0;
+    const outcome = await promote({
+      takePlace: async () => ({ primary: false, reason: "not-caught-up", catchUpTo: ++calls }),
+      catchUp: async () => undefined,
+      attempts: 3,
+    });
+    expect(outcome).toBe("gave-up");
+    expect(calls).toBe(3);
+    expect(await promote({ takePlace: async () => ({ primary: false, paused: true }), catchUp: async () => undefined })).toBe("paused");
+  });
+});
+
+describe("when a replica asks the fleet anything", () => {
+  const base = { primary: false, lastBootstrap: 1_000_000, heartbeatMs: 5_000, wanted: false, leaseMs: 45_000 };
+
+  test("with the socket up it asks about once a minute; without, about as often as the lease is renewed", () => {
+    expect(placeDue({ ...base, now: 1_000_000 + 10_000, eventsConnected: true })).toBe(false);
+    expect(placeDue({ ...base, now: 1_000_000 + 59_000, eventsConnected: true })).toBe(false);
+    expect(placeDue({ ...base, now: 1_000_000 + 61_000, eventsConnected: true })).toBe(true);
+    expect(placeDue({ ...base, now: 1_000_000 + 4_000, eventsConnected: false })).toBe(false);
+    expect(placeDue({ ...base, now: 1_000_000 + 16_000, eventsConnected: false })).toBe(true);
+  });
+
+  test("it asks when the first look has not happened yet, and when it was told the lease is free", () => {
+    expect(placeDue({ ...base, lastBootstrap: 0, now: 5, eventsConnected: true })).toBe(true);
+    expect(placeDue({ ...base, wanted: true, now: 1_000_001, eventsConnected: true })).toBe(true);
+  });
+
+  test("a primary renews on its heartbeat, as it always did", () => {
+    expect(placeDue({ ...base, primary: true, now: 1_000_000 + 4_000, eventsConnected: true })).toBe(false);
+    expect(placeDue({ ...base, primary: true, now: 1_000_000 + 6_000, eventsConnected: true })).toBe(true);
+  });
+
+  test("the wait before asking is shorter for a member that is ahead and differs between members", () => {
+    const fixed = () => 0;
+    expect(promotionDelayMs("dev-a", false, fixed)).toBeLessThan(promotionDelayMs("dev-a", true, fixed));
+    const delays = new Set(["dev-a", "dev-b", "dev-c", "dev-d", "dev-e"].map((d) => promotionDelayMs(d, false, fixed)));
+    expect(delays.size).toBeGreaterThan(1);
+    for (const d of delays) expect(d).toBeLessThan(2000);
+  });
+
+  test("a replica is lazy unless told to mirror", () => {
+    expect(replicaMode({})).toBe("lazy");
+    expect(replicaMode({ PRIME_FLEET_REPLICA: "mirror" })).toBe("mirror");
+    expect(replicaMode({ PRIME_FLEET_REPLICA: "anything" })).toBe("lazy");
+  });
+
+  test("positions never put fetched behind applied", () => {
+    expect(positions({ seq: 5, base: "a", fetchedSeq: 3, fetchedCommit: "b" }).fetched.seq).toBe(5);
+    expect(positions({ seq: 5, base: "a", fetchedSeq: 9, fetchedCommit: "c" }).fetched).toEqual({ seq: 9, commit: "c" });
+    expect(positions({}).fetched).toEqual({ seq: 0, commit: null });
+  });
+});
+
+
+describe("the agent's round for a replica", () => {
+  // A space the way the agent keeps it, with the socket reported as up.
+  async function space(w: World, name: string, opts: { connected?: boolean } = {}) {
+    const { round } = await import("../src/fleet-daemon");
+    const { fleetKeyFile, fleetStateDir, readFleetState } = await import("../src/fleets");
+    const { NestedRepoCache } = await import("../src/fleet-sync");
+    const configPath = join(w.root, "cfg-" + name, "config.json");
+    const work = join(w.root, name);
+    mkdirSync(work, { recursive: true });
+    const gitDir = fleetStateDir(configPath, "x", name);
+    mkdirSync(gitDir, { recursive: true });
+    const paths: MemberPaths = { work, gitDir, keyFile: fleetKeyFile(configPath, "x", name), nested: new NestedRepoCache(work) };
+    w.gateway.seed(name, loadOrCreateKeyPair(paths.keyFile).publicKey);
+    const said: string[] = [];
+    const loop = {
+      configPath,
+      name,
+      space: {} as never,
+      fleet: "x",
+      creds: credsFor(name),
+      paths,
+      dirty: false,
+      claim: false,
+      claimAt: 0,
+      headDirty: false,
+      lastHeadCheck: 0,
+      lastPublish: 0,
+      lastCheck: 0,
+      primary: false,
+      lastBootstrap: 0,
+      timing: {},
+      paused: false,
+      events: { connected: opts.connected ?? true } as never,
+    };
+    return {
+      loop,
+      paths,
+      said,
+      state: () => readFleetState(configPath, "x", name),
+      round: () => round(loop, { heartbeatMs: 5000 }, (what) => void said.push(what)),
+    };
+  }
+
+  const baseline = async (w: World, name: string) => {
+    const s = await space(w, name);
+    await w.publishNext();
+    await s.round(); // the first look: no baseline yet, so it is given one
+    return s;
+  };
+  const total = (w: World): number => [...w.gateway.requests.values()].reduce((a, b) => a + b, 0);
+
+  test("with a socket, a replica asks nothing while nothing happens, and fetches without writing when the head moves", async () => {
+    const w = await world();
+    try {
+      w.gateway.seed("primary-device", loadOrCreateKeyPair(w.primary.keyFile).publicKey);
+      const s = await baseline(w, "r1");
+      expect(s.state().seq).toBe(1);
+      expect(s.loop.primary).toBe(false);
+      const before = fingerprint(s.paths.work);
+
+      // Nothing happened: not a single request.
+      const asked = total(w);
+      await s.round();
+      await s.round();
+      expect(total(w)).toBe(asked);
+
+      // The socket says the head moved: it fetches, and does not take a place again.
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      const bootstraps = w.gateway.bootstraps;
+      s.loop.headDirty = true;
+      await s.round();
+      expect(w.gateway.bootstraps).toBe(bootstraps);
+      expect(s.state().fetchedSeq).toBe(4);
+      expect(s.state().seq).toBe(1);
+      expect(sameTree(fingerprint(s.paths.work), before)).toBe(true);
+      expect(s.said).toContain("fetched 4");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("when the lease is freed, a replica that only fetched writes its work tree and takes over", async () => {
+    const w = await world();
+    try {
+      const s = await baseline(w, "r1");
+      for (let i = 0; i < 4; i++) await w.publishNext();
+      s.loop.headDirty = true;
+      await s.round();
+      expect(s.state().seq).toBe(1);
+
+      w.gateway.primary = ""; // the lease-free event
+      s.loop.claim = true;
+      await s.round();
+      expect(s.loop.primary).toBe(true);
+      expect(w.gateway.primary).toBe("r1");
+      expect(s.state().seq).toBe(5);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(s.paths.work))).toBe(true);
+      expect(s.said.some((m) => m.startsWith("took over at 5"))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a replica that loses the race stays a replica and writes nothing it did not have to", async () => {
+    const w = await world();
+    try {
+      const a = await baseline(w, "ra");
+      const b = await space(w, "rb");
+      await w.publishNext(); // the member that joined is sealed for from here on
+      await a.round();
+      await b.round();
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      for (const s of [a, b]) {
+        s.loop.headDirty = true;
+        await s.round();
+      }
+      w.gateway.primary = "";
+      a.loop.claim = true;
+      b.loop.claim = true;
+      await a.round(); // a is first
+      await b.round();
+      expect(a.loop.primary).toBe(true);
+      expect(b.loop.primary).toBe(false);
+      expect(b.loop.claim).toBe(false);
+      expect(w.gateway.primary).toBe("ra");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("PRIME_FLEET_REPLICA=mirror writes every snapshot as it arrives", async () => {
+    const w = await world();
+    const saved = process.env.PRIME_FLEET_REPLICA;
+    process.env.PRIME_FLEET_REPLICA = "mirror";
+    try {
+      const s = await baseline(w, "r1");
+      for (let i = 0; i < 2; i++) await w.publishNext();
+      s.loop.headDirty = true;
+      await s.round();
+      expect(s.state().seq).toBe(3);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(s.paths.work))).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.PRIME_FLEET_REPLICA;
+      else process.env.PRIME_FLEET_REPLICA = saved;
+      finish(w);
+    }
+  });
+
+  test("without a socket a replica looks at the head every round but takes no place again", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: false });
+      await w.publishNext();
+      await s.round();
+      const bootstraps = w.gateway.bootstraps;
+      for (let i = 0; i < 5; i++) await s.round();
+      expect(w.gateway.bootstraps).toBe(bootstraps);
+      expect(w.gateway.requests.get("GET head") ?? 0).toBeGreaterThanOrEqual(5);
+    } finally {
+      finish(w);
+    }
+  });
+});

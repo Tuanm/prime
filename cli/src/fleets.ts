@@ -20,6 +20,7 @@ import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { positions } from "./fleet-replica.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
@@ -619,11 +620,28 @@ export async function syncFleetSpace(
       await preserveLocalChange(work, paths.gitDir, state.tree);
     }
   }
-  // Recorded after every step, so a failure part-way leaves a state that still
-  // describes the work tree.
-  const pulled = await pull(creds, fleetId, paths, state.seq ?? 0, state.base ?? null, (step) => {
-    writeFleetState(configPath, fleetId, spaceName, { ...state, seq: step.seq, base: step.commit, tree: step.tree });
-  });
+  // What a lazy agent has already fetched is used, not downloaded again. The
+  // state is recorded when the work tree has the newest snapshot, so a failure
+  // leaves a state that still describes it.
+  const pulled = await pull(
+    creds,
+    fleetId,
+    paths,
+    state.seq ?? 0,
+    state.base ?? null,
+    (step) => {
+      writeFleetState(configPath, fleetId, spaceName, {
+        ...state,
+        seq: step.seq,
+        base: step.commit,
+        tree: step.tree,
+        fetchedSeq: step.seq,
+        fetchedCommit: step.commit,
+        fetchedTree: step.tree,
+      });
+    },
+    positions(state).fetched,
+  );
   if (pulled.applied) {
     return "applied " + pulled.seq;
   }
@@ -746,6 +764,13 @@ export interface FleetMemberState {
   roster?: string;
   /** The tree of the last publish, so an unchanged workspace is not published again. */
   tree?: string;
+  /**
+   * A replica that fetches ahead keeps what it has downloaded but not written out:
+   * the newest snapshot in its store. Never behind `seq`; see fleet-replica.ts.
+   */
+  fetchedSeq?: number;
+  fetchedCommit?: string;
+  fetchedTree?: string;
 }
 
 /** The member's own record of how far it has got. */

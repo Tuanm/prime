@@ -1,0 +1,171 @@
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+import { type FleetCredentials } from "../src/fleet-transport";
+
+/**
+ * A gateway that stores bytes and never reads them.
+ *
+ * It behaves like the real one in the ways that matter: the head only moves
+ * when the expected sequence matches, a payload can only be written by the
+ * primary, and a member may only publish once it has caught up.
+ */
+export class FakeGateway {
+  payloads = new Map<string, Buffer>();
+  head: { seq: number; manifestKey: string; manifestHash: string; epoch: number } | null = null;
+  members = new Map<string, { deviceId: string; role: string; pubkey?: string }>();
+  applied = new Map<string, number>();
+  primary = "";
+  /** How many snapshots are kept; older packs and manifests are deleted, as the real gateway does. */
+  retain = Infinity;
+  /** How many times a member asked for its place. */
+  bootstraps = 0;
+  /** Requests of each kind, by route. */
+  requests = new Map<string, number>();
+  /** Pack downloads, by the pack's key. */
+  packReads: string[] = [];
+  /** Bytes served for pack downloads. */
+  packBytesServed = 0;
+  /** Behave like a gateway whose publisher predates pack sizes and the checkpoint's change pack. */
+  legacyManifests = false;
+  private kept: string[][] = [];
+
+  seed(deviceId: string, pubkey: string): void {
+    this.members.set(deviceId, { deviceId, role: "member", pubkey });
+    if (!this.primary) this.primary = deviceId;
+  }
+
+  async handle(creds: FleetCredentials, method: string, path: string, body?: Buffer | string): Promise<Response> {
+    const parts = path.split("/").filter(Boolean);
+    const kind = parts[2];
+    this.requests.set(method + " " + kind, (this.requests.get(method + " " + kind) ?? 0) + 1);
+    if (kind === "head" && method === "GET") {
+      if (!this.head) return new Response("{}", { status: 404 });
+      return Response.json({ head: this.head });
+    }
+    if (kind === "bootstrap" && method === "POST") {
+      this.bootstraps++;
+      if (!this.members.has(creds.deviceId)) return Response.json({ error: "forbidden" }, { status: 403 });
+      // Whoever holds the lease keeps it; the others are told so.
+      if (this.primary && this.primary !== creds.deviceId) {
+        return Response.json({ ok: true, role: "replica", reason: "lease-held", holder: this.primary });
+      }
+      const current = this.head?.seq ?? 0;
+      if (current > 0 && (this.applied.get(creds.deviceId) ?? 0) < current) {
+        return Response.json({ ok: true, role: "replica", reason: "not-caught-up", catchUpTo: current });
+      }
+      this.primary = creds.deviceId;
+      return Response.json({ ok: true, role: "primary", ttlMs: 45_000, ...(current > 0 ? { catchUpTo: current } : {}) });
+    }
+    if (kind === "role" && method === "GET") {
+      return Response.json({ member: this.members.has(creds.deviceId), primary: creds.deviceId === this.primary, epoch: 1 });
+    }
+    if (kind === "members" && method === "GET") {
+      return Response.json({ members: [...this.members.values()] });
+    }
+    if (kind === "keys" && method === "GET") {
+      if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
+      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, applied: this.applied.get(m.deviceId) ?? 0 })) });
+    }
+    if (kind === "applied" && method === "POST") {
+      const parsed = JSON.parse(String(body ?? "{}")) as { seq: number };
+      this.applied.set(creds.deviceId, Math.max(this.applied.get(creds.deviceId) ?? 0, parsed.seq ?? 0));
+      return Response.json({ ok: true, applied: this.applied.get(creds.deviceId) });
+    }
+    if (kind === "snapshot" && method === "POST") {
+      if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
+      const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
+      const manifestLength = bytes.readUInt32BE(0);
+      const manifestBytes = bytes.subarray(4, 4 + manifestLength);
+      const pack = bytes.subarray(4 + manifestLength);
+      const hash = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+      const packKey = "fleets/x/packs/" + hash(pack);
+      const manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
+      manifest.packKey = packKey;
+      manifest.packHash = hash(pack);
+      if (this.legacyManifests) {
+        delete manifest.packBytes;
+        delete manifest.delta;
+      }
+      const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
+      const manifestKey = "fleets/x/manifests/" + hash(finalManifest);
+      this.payloads.set(packKey, pack);
+      this.payloads.set(manifestKey, finalManifest);
+      this.kept.push([packKey, manifestKey]);
+      while (this.kept.length > this.retain) for (const key of this.kept.shift()!) this.payloads.delete(key);
+      const current = this.head?.seq ?? 0;
+      if ((this.applied.get(creds.deviceId) ?? 0) < current) {
+        return Response.json({ error: "catch up first", required: current }, { status: 409 });
+      }
+      const seq = typeof manifest.seq === "number" ? manifest.seq : current + 1;
+      this.head = { seq, manifestKey, manifestHash: hash(finalManifest), epoch: 1 };
+      return Response.json({ ok: true, seq, manifestKey });
+    }
+    if ((kind === "packs" || kind === "manifests") && method === "POST") {
+      if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
+      const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
+      const hash = createHash("sha256").update(bytes).digest("hex");
+      const key = "fleets/x/" + kind + "/" + hash;
+      this.payloads.set(key, bytes);
+      return Response.json({ ok: true, key, hash, size: bytes.length });
+    }
+    if ((kind === "packs" || kind === "manifests") && method === "GET") {
+      const id = parts[3] ?? "";
+      const found = [...this.payloads.entries()].find(([k]) => k.endsWith("/" + id));
+      if (!found) return Response.json({ error: "no such payload" }, { status: 404 });
+      if (kind === "packs") {
+        this.packReads.push(found[0]);
+        this.packBytesServed += found[1].length;
+      }
+      return new Response(found[1]);
+    }
+    if (kind === "head" && parts[3] === "advance") {
+      const parsed = JSON.parse(String(body ?? "{}")) as { expectedSeq: number; manifestKey: string; manifestHash: string };
+      const current = this.head?.seq ?? 0;
+      if (parsed.expectedSeq !== current) return Response.json({ error: "stale head" }, { status: 409 });
+      if ((this.applied.get(creds.deviceId) ?? 0) < current) {
+        return Response.json({ error: "catch up first", required: current }, { status: 409 });
+      }
+      this.head = { seq: current + 1, manifestKey: parsed.manifestKey, manifestHash: parsed.manifestHash, epoch: 1 };
+      return Response.json({ ok: true, seq: this.head.seq });
+    }
+    return Response.json({ error: "no route" }, { status: 404 });
+  }
+}
+
+export function credsFor(deviceId: string): FleetCredentials {
+  return { gateway: "http://fake", deviceId, deviceToken: "token", timeoutMs: 5000 };
+}
+
+export function useFakeGateway(gateway: FakeGateway): void {
+  const original = globalThis.fetch;
+  (globalThis as { fetch: unknown }).fetch = (async (url: string, init: { method: string; headers: Record<string, string>; body?: Buffer | string }) => {
+    const path = new URL(url).pathname;
+    const deviceId = init.headers["x-prime-device"] ?? "";
+    return gateway.handle(credsFor(deviceId), init.method, path, init.body);
+  }) as unknown as typeof fetch;
+  (globalThis as { __restoreFetch?: () => void }).__restoreFetch = () => {
+    (globalThis as { fetch: unknown }).fetch = original;
+  };
+}
+
+/** Every file under a directory, with its contents hashed. */
+export function fingerprint(dir: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const walk = (d: string): void => {
+    for (const name of readdirSync(d)) {
+      const full = join(d, name);
+      if (statSync(full).isDirectory()) { walk(full); continue; }
+      out.set(relative(dir, full), String(statSync(full).size) + ":" + readFileSync(full).toString("base64").slice(0, 64));
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+export function sameTree(a: Map<string, string>, b: Map<string, string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  return true;
+}
+

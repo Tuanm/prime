@@ -28,11 +28,12 @@ import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { loadOrCreateKeyPair, publish, pull, rosterOf, type MemberPaths } from "./fleet-agent.ts";
-import { NestedRepoCache, preserveLocalChange, settle, snapshot } from "./fleet-sync.ts";
-import { fetchHead, fetchMemberKeys, releaseLease, type FleetCredentials } from "./fleet-transport.ts";
+import { loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { applyReady, placeDue, positions, prefetch, promote, promotionDelayMs, replicaMode, type PlaceAnswer } from "./fleet-replica.ts";
+import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
+import { fetchMemberKeys, releaseLease, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
-import { fleetKeyFile, fleetStateDir, readFleetState, writeFleetState } from "./fleets.ts";
+import { fleetKeyFile, fleetStateDir, readFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
 export interface FleetAgentState {
   pid: number;
@@ -224,7 +225,8 @@ export interface RoundTiming {
   total?: number;
 }
 
-interface SpaceLoop {
+/** One space as the agent keeps it (exported so a round can be driven in a test). */
+export interface SpaceLoop {
   configPath: string;
   name: string;
   space: SpaceEntry;
@@ -252,6 +254,17 @@ interface SpaceLoop {
   events: FleetEvents;
   /** Rounds in a row that failed; the agent waits longer after each. */
   failures?: number;
+  /** A replica should try to become the primary once `claimAt` has passed. */
+  claim: boolean;
+  /** What the fleet said when the member last asked and was not given the place. */
+  claimAnswer?: PlaceAnswer;
+  claimAt: number;
+  /** The socket said the head moved, so there is something to fetch. */
+  headDirty: boolean;
+  /** The newest head sequence the socket has mentioned. */
+  knownHeadSeq?: number;
+  /** When the head was last looked at; a replica that is told does not ask. */
+  lastHeadCheck: number;
 }
 
 /**
@@ -271,7 +284,7 @@ function nestedOpt(paths: MemberPaths): { nested?: NestedRepoCache } {
 }
 
 /** One round for one space: take a place, then publish or pull. */
-async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what: string) => void): Promise<void> {
+export async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what: string) => void): Promise<void> {
   const { creds, fleet, paths } = loop;
   const state = readFleetState(loop.configPath, fleet, loop.name);
 
@@ -307,11 +320,32 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
       report("the fleet is paused");
       return;
     }
-  } else if (Date.now() - loop.lastBootstrap > heartbeatCeiling(loop, options.heartbeatMs!) || !loop.primary) {
-    await takePlace(loop);
+  } else if (
+    placeDue({
+      primary: loop.primary,
+      now: Date.now(),
+      lastBootstrap: loop.lastBootstrap,
+      heartbeatMs: heartbeatCeiling(loop, options.heartbeatMs!),
+      // A replica is only told to look when there is a reason: it asks for the
+      // place when the lease is freed or when the first look said it could have it.
+      wanted: loop.claim && Date.now() >= loop.claimAt,
+      eventsConnected: loop.events.connected,
+      ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}),
+    })
+  ) {
+    const answer = await takePlace(loop);
     if (loop.paused) {
       report("the fleet is paused");
       return;
+    }
+    // The lease is free and this member could have it, but it has not applied
+    // the head: it is eligible, and goes on to catch up below.
+    if (!loop.primary && answer.reason === "not-caught-up") {
+      loop.claim = true;
+      loop.claimAt = Math.min(loop.claimAt || Date.now(), Date.now());
+      loop.claimAnswer = answer;
+    } else if (!loop.primary && answer.reason === "lease-held") {
+      loop.claim = false;
     }
   }
 
@@ -373,39 +407,60 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
     return;
   }
 
-  // A replica: it looks at the head often, and pulls only when the head moved.
+  // A replica. It does not mirror: it keeps what the fleet publishes in its own
+  // object store, and writes it over the work tree only when it has to. A person
+  // who wants the mirror current asks (`prime fleets sync`), or sets
+  // PRIME_FLEET_REPLICA=mirror to have every snapshot written as it arrives.
   loop.primary = false;
-  const head = await fetchHead(creds, fleet);
-  if (head.seq <= (state.seq ?? 0)) return;
+  const mode = replicaMode();
+  const keep = (patch: Partial<FleetMemberState>): void => {
+    writeFleetState(loop.configPath, fleet, loop.name, { ...readFleetState(loop.configPath, fleet, loop.name), ...patch });
+  };
 
-  // A replica mirrors the primary. If its workspace was changed locally, the
-  // pull would throw that work away - but refusing forever is worse than the
-  // edit it protects: the replica never catches up, and a fleet whose members
-  // are all behind has nobody it may promote. So the change is moved aside
-  // (nothing deleted) and the mirror is brought up to date.
-  if (state.tree !== undefined) {
-    const local = await snapshot({
-      work: paths.work,
-      gitDir: paths.gitDir,
-      base: state.base ?? null,
-      treeOnly: true,
-      ...nestedOpt(paths),
+  // The lease was freed (or this member could have had it): try to take it.
+  // The fleet gives it to a member that has applied the head, so a replica that
+  // has only fetched writes the work tree first - and one that loses the race
+  // stays what it was, having done nothing the fleet has to know about.
+  if (loop.claim && Date.now() >= loop.claimAt) {
+    loop.claim = false;
+    const began = Date.now();
+    const outcome = await promote({
+      takePlace: () => takePlace(loop),
+      catchUp: async () => {
+        const now = readFleetState(loop.configPath, fleet, loop.name);
+        await prefetch(creds, fleet, paths, now, keep);
+        const done = await applyReady(creds, fleet, paths, readFleetState(loop.configPath, fleet, loop.name), keep);
+        if (done?.kept) report("kept " + done.kept.moved + " locally changed path(s) aside in " + done.kept.to);
+      },
     });
-    if (local.tree !== state.tree) {
-      const kept = await preserveLocalChange(paths.work, paths.gitDir, state.tree, nestedOpt(paths));
-      report("kept " + kept.moved + " locally changed path(s) aside in " + kept.to + ", then caught up");
+    loop.timing.pull = Date.now() - began;
+    if (outcome === "primary") {
+      report("took over at " + positions(readFleetState(loop.configPath, fleet, loop.name)).applied.seq);
+      return;
     }
   }
 
+  // Look at the head when the fleet said it moved, now and then in case a
+  // message was lost, and always when there is no socket to say.
+  const now = Date.now();
+  if (!loop.headDirty && loop.events.connected && now - loop.lastHeadCheck < 30_000 && loop.lastHeadCheck !== 0) return;
+  loop.headDirty = false;
+  loop.lastHeadCheck = now;
+
   const pullBegan = Date.now();
-  // The tree it now holds is remembered after every step, so the next round
-  // can tell a change made here from the state it already had - also when a
-  // later step fails.
-  const pulled = await pull(creds, fleet, paths, state.seq ?? 0, state.base ?? null, (step) => {
-    writeFleetState(loop.configPath, fleet, loop.name, { ...state, seq: step.seq, base: step.commit, tree: step.tree });
-  });
+  const fetchedState = readFleetState(loop.configPath, fleet, loop.name);
+  const got = await prefetch(creds, fleet, paths, fetchedState, keep);
   loop.timing.pull = Date.now() - pullBegan;
-  if (pulled.applied) report("applied " + pulled.seq);
+  if (got.steps > 0) report("fetched " + got.fetched.seq);
+  // A member that has never applied anything has no baseline: whatever else it
+  // is set to, it is given one, once.
+  if (mode === "mirror" || fetchedState.base === undefined) {
+    const done = await applyReady(creds, fleet, paths, readFleetState(loop.configPath, fleet, loop.name), keep);
+    if (done) {
+      if (done.kept) report("kept " + done.kept.moved + " locally changed path(s) aside in " + done.kept.to + ", then caught up");
+      report("applied " + done.applied.seq);
+    }
+  }
 }
 
 
@@ -419,6 +474,10 @@ interface BootstrapResult {
   retryAfterMs?: number;
   /** How long the fleet says a place lasts; the heartbeat is derived from it. */
   ttlMs?: number;
+  /** Why a replica was not given the lease (`lease-held`, `not-caught-up`). */
+  reason?: string;
+  /** For `not-caught-up`: the sequence to have applied first. */
+  catchUpTo?: number;
 }
 
 /** Take a place in the fleet, without the CLI's machinery. */
@@ -449,11 +508,13 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     }
     return { ok: false, primary: false, error: "status " + res.status };
   }
-  const body = (await res.json()) as { role?: string; ttlMs?: number };
+  const body = (await res.json()) as { role?: string; ttlMs?: number; reason?: string; catchUpTo?: number };
   return {
     ok: true,
     primary: body.role === "primary",
     ...(typeof body.ttlMs === "number" && body.ttlMs > 0 ? { ttlMs: body.ttlMs } : {}),
+    ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
+    ...(typeof body.catchUpTo === "number" ? { catchUpTo: body.catchUpTo } : {}),
   };
 }
 
@@ -470,8 +531,8 @@ function heartbeatFor(loop: SpaceLoop, ceilingMs: number): number {
  * is on a timer of its own, so the lease is renewed while the work is still
  * arriving.
  */
-async function takePlace(loop: SpaceLoop): Promise<void> {
-  if (loop.placing) return;
+async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
+  if (loop.placing) return { primary: loop.primary };
   loop.placing = true;
   try {
     const keys = loadOrCreateKeyPair(loop.paths.keyFile);
@@ -481,7 +542,7 @@ async function takePlace(loop: SpaceLoop): Promise<void> {
       loop.paused = true;
       loop.primary = false;
       loop.retryAfterMs = placed.retryAfterMs;
-      return;
+      return { primary: false, paused: true };
     }
     if (!placed.ok) throw new Error(placed.error);
     loop.paused = false;
@@ -489,6 +550,11 @@ async function takePlace(loop: SpaceLoop): Promise<void> {
     // What the fleet says a place lasts. An agent that renews at its own pace
     // against a lease it never asked about is how a live primary loses it.
     if (placed.ttlMs) loop.leaseMs = placed.ttlMs;
+    return {
+      primary: placed.primary,
+      ...(placed.reason ? { reason: placed.reason } : {}),
+      ...(placed.catchUpTo !== undefined ? { catchUpTo: placed.catchUpTo } : {}),
+    };
   } finally {
     loop.placing = false;
   }
@@ -588,6 +654,10 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         nested: new NestedRepoCache(work),
       },
       dirty: false,
+      claim: false,
+      claimAt: 0,
+      headDirty: false,
+      lastHeadCheck: 0,
       lastPublish: 0,
       lastCheck: 0,
       primary: false,
@@ -619,7 +689,20 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         // A paused fleet takes no one in, so there is nothing to renew. A space
         // whose rounds keep failing is retried by the round, on its longer wait,
         // not here every few seconds as well.
-        const renew = loop.paused || (loop.failures ?? 0) > 0 ? Promise.resolve() : takePlace(loop);
+        // A primary renews on every beat. A replica has nothing to renew: it
+        // looks now and then (see placeDue), not on a clock of its own.
+        const due =
+          loop.primary ||
+          placeDue({
+            primary: false,
+            now: Date.now(),
+            lastBootstrap: loop.lastBootstrap,
+            heartbeatMs: 0,
+            wanted: false,
+            eventsConnected: loop.events.connected,
+            ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}),
+          });
+        const renew = loop.paused || (loop.failures ?? 0) > 0 || !due ? Promise.resolve() : takePlace(loop).then(() => undefined);
         void renew.catch(() => {}).finally(beatTick);
       }, heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs ?? heartbeatMs)));
     };
@@ -676,6 +759,14 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
 
   // What the fleet told a space. The socket only says that something happened;
   // the loop does the work, so each case just changes what the next round does.
+  const claimNow = (loop: SpaceLoop): void => {
+    const here = positions(readFleetState(loop.configPath, loop.fleet, loop.name)).fetched.seq;
+    loop.claim = true;
+    loop.claimAt = Date.now() + promotionDelayMs(loop.creds.deviceId, here < (loop.knownHeadSeq ?? 0));
+    // The round sleeps until something wakes it: this is that something.
+    setTimeout(() => wake(loop.name, true), Math.max(0, loop.claimAt - Date.now()) + 5).unref?.();
+  };
+
   const onEvent = (loop: SpaceLoop, event: FleetEvent): void => {
     switch (event.type) {
       case "hello":
@@ -683,6 +774,9 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         // The lease length is what the heartbeat is derived from; take it if
         // no place has been taken yet to tell it.
         if (event.leaseMs > 0 && !loop.leaseMs) loop.leaseMs = event.leaseMs;
+        // Nobody holds the place: a replica may as well try for it.
+        if (event.leaseHolder === null && !loop.primary) claimNow(loop);
+        loop.headDirty = true;
         wake(loop.name, true);
         break;
       case "paused":
@@ -695,11 +789,16 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         wake(loop.name, true);
         break;
       case "head":
+        loop.knownHeadSeq = Math.max(loop.knownHeadSeq ?? 0, event.seq);
+        loop.headDirty = true;
         wake(loop.name, true);
         break;
       case "lease-free":
-        // Whoever held the place has let go: ask for it.
+        // Whoever held the place has let go: ask for it - after a wait that
+        // is shorter for the members that are further ahead, so they do not
+        // all write their work tree for the same lease.
         loop.primary = false;
+        claimNow(loop);
         wake(loop.name, true);
         break;
       default:
