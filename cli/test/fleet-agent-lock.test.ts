@@ -138,6 +138,64 @@ describe("one fleet agent per configuration", () => {
     if (a?.held) a.release();
   });
 
+  test("a holder whose lock names another agent stops: two holders last one touch, not for ever", async () => {
+    const dir = scratch();
+    let lost = 0;
+    const a = await acquireAgentLock(dir, { pid: 1111, isAgent: () => true, touchMs: 30, onLost: () => void lost++ });
+    expect(a.held).toBe(true);
+    // A third starter links its own into the gap a slow taker left.
+    writeFileSync(agentLockPath(dir), "3333\n");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(lost).toBe(1);
+    // And it only says so once.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(lost).toBe(1);
+    if (a.held) a.release();
+    // Its lock is not removed from under the one that holds it.
+    expect(readFileSync(agentLockPath(dir), "utf8").trim()).toBe("3333");
+  });
+
+  test("a lock that is gone for a moment (a takeover putting a live one back) is not a loss, one that stays gone is", async () => {
+    const dir = scratch();
+    let lost = 0;
+    const a = await acquireAgentLock(dir, { pid: 1111, isAgent: () => true, touchMs: 40, onLost: () => void lost++ });
+    const file = agentLockPath(dir);
+    rmSync(file);
+    await new Promise((r) => setTimeout(r, 55));
+    writeFileSync(file, "1111\n");
+    await new Promise((r) => setTimeout(r, 150));
+    expect(lost).toBe(0);
+    rmSync(file);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(lost).toBe(1);
+    if (a.held) a.release();
+  });
+
+  test("where there are no hard links a live lock moved aside by a slow taker is written back, not deleted", async () => {
+    const dir = scratch();
+    writeFileSync(agentLockPath(dir), "999999\n");
+    const alive = (pid: number) => pid !== 999999;
+    const noLinks = (): void => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    };
+    let a: Awaited<ReturnType<typeof acquireAgentLock>> | undefined;
+    let once = false;
+    const b = await acquireAgentLock(dir, {
+      pid: 2222,
+      isAgent: alive,
+      link: noLinks,
+      beforeTakeover: async () => {
+        if (once) return;
+        once = true;
+        a = await acquireAgentLock(dir, { pid: 1111, isAgent: alive, link: noLinks });
+      },
+    });
+    expect(a?.held).toBe(true);
+    expect(b).toEqual({ held: false, holder: 1111 });
+    expect(readFileSync(agentLockPath(dir), "utf8").trim()).toBe("1111");
+    if (a?.held) a.release();
+  });
+
   test("the leftovers of attempts that were cut short are swept once they are old, not while they might be in use", async () => {
     const dir = scratch();
     const old = new Date(Date.now() - 3_600_000);

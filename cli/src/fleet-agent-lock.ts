@@ -106,6 +106,12 @@ export interface AgentLockOptions {
   beforeTakeover?: () => Promise<void> | void;
   /** How the lock is put in place (a hard link); replaced in tests. */
   link?: (from: string, to: string) => void;
+  /**
+   * Called (once) when the holder finds that the lock is no longer its own: it names another
+   * pid, or the file has been gone for two touches. Two agents may then be running (a rival took
+   * a dead lock at the same moment): this one is the one to stop.
+   */
+  onLost?: () => void;
 }
 
 export type AgentLock = { held: true; release: () => void } | { held: false; holder: number };
@@ -145,7 +151,7 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
       await opts.beforeLink?.();
       try {
         (opts.link ?? linkSync)(mine, file);
-        return held(file, me, opts.touchMs ?? 5000);
+        return held(file, me, opts.touchMs ?? 5000, opts.onLost);
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === "EPERM" || code === "ENOTSUP" || code === "ENOSYS" || code === "EOPNOTSUPP") {
@@ -153,7 +159,7 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
           // exclusively with its pid in a single write. (A reader that meets it empty waits.)
           try {
             writeFileSync(file, String(me) + "\n", { flag: "wx", mode: 0o600 });
-            return held(file, me, opts.touchMs ?? 5000);
+            return held(file, me, opts.touchMs ?? 5000, opts.onLost);
           } catch (inner) {
             if ((inner as NodeJS.ErrnoException).code !== "EEXIST") throw inner;
           }
@@ -162,7 +168,7 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
       const holder = readHolder(file);
       if (holder === me) {
         // Left by an earlier run of this very pid: the lock is ours.
-        return held(file, me, opts.touchMs ?? 5000);
+        return held(file, me, opts.touchMs ?? 5000, opts.onLost);
       }
       if (holder === null && youngerThan(file, WRITING_MS)) {
         // Somebody is writing it (an agent of an older build creates it empty).
@@ -183,10 +189,24 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
           throw err;
         }
         if (readHolder(stale) !== holder) {
+          let content = "";
           try {
-            linkSync(stale, file);
+            content = readFileSync(stale, "utf8");
           } catch {
-            // Taken again meanwhile: whoever holds it holds it.
+            // Gone with the sweep: nothing to put back.
+          }
+          try {
+            (opts.link ?? linkSync)(stale, file);
+          } catch (err) {
+            // Taken again meanwhile (EEXIST): whoever holds it holds it. Where there are no hard
+            // links the live lock is written back, exclusively, as it was.
+            if ((err as NodeJS.ErrnoException).code !== "EEXIST" && content !== "") {
+              try {
+                writeFileSync(file, content, { flag: "wx", mode: 0o600 });
+              } catch {
+                // Taken meanwhile.
+              }
+            }
           }
         }
         rmSync(stale, { force: true });
@@ -221,18 +241,31 @@ function youngerThan(file: string, ms: number): boolean {
   }
 }
 
-function held(file: string, me: number, touchMs: number): AgentLock {
+function held(file: string, me: number, touchMs: number, onLost?: () => void): AgentLock {
   // A live agent's lock is never old: where the process list cannot say what a pid is, how
   // recently the lock was written does, and an agent that is finishing a long round while it
   // stops writes nothing else.
+  let missing = 0;
+  let lost = false;
   const timer = setInterval(() => {
     try {
-      if (readHolder(file) === me) {
+      const holder = readHolder(file);
+      if (holder === me) {
+        missing = 0;
         const now = new Date();
         utimesSync(file, now, now);
+        return;
+      }
+      // A lock that names another agent, or that has been gone for two touches (one is a takeover
+      // putting a live lock back), is not ours any more: whatever took it runs beside this one.
+      if (holder !== null || !existsSync(file)) missing += holder !== null ? 2 : 1;
+      if (missing >= 2 && !lost) {
+        lost = true;
+        clearInterval(timer);
+        onLost?.();
       }
     } catch {
-      // The lock is gone: nothing to keep fresh.
+      // Unreadable now: judged at the next touch.
     }
   }, touchMs);
   timer.unref();

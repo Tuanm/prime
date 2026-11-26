@@ -1209,7 +1209,16 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
 export async function runFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<void> {
   // Two agents for the same spaces would both act as the primary. A restart finds the old
   // one still finishing its round, so it is given a moment to let go.
-  const lock = await acquireAgentLock(fleetAgentDir(configPath), { waitMs: options.lockWaitMs ?? 10_000 });
+  const lock = await acquireAgentLock(fleetAgentDir(configPath), {
+    waitMs: options.lockWaitMs ?? 10_000,
+    // Another agent has the lock: two took a dead one at the same moment. This one stops, and its
+    // manager (or the next command) starts it again behind the lock.
+    onLost: () => {
+      process.stderr.write("the fleet agent's lock was taken by another agent; this one stops\n");
+      process.exitCode = 1;
+      process.kill(process.pid, "SIGTERM");
+    },
+  });
   if (!lock.held) {
     process.stderr.write("another fleet agent is already running" + (lock.holder > 0 ? " (pid " + lock.holder + ")" : "") + "; this one exits\n");
     process.exitCode = 1;
