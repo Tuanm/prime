@@ -533,30 +533,22 @@ async function alignApplyIndex(
   }
 }
 
-// Apply a pack to a work tree.
-//
-// The objects go into prime's own store, and the tree is written over the
-// work tree. A replica must end up with the primary's tree for the paths the
-// fleet owns: those the new snapshot has are written, and those the previous
-// snapshot had and the new one does not are removed. Everything else in the
-// work tree belongs to the member and is left alone.
-//
-// What is removed is decided by the diff between the previous tree and the new
-// one (`removedBetween`) and carried out by `removeTracked`, before anything is
-// written: it is the one place that knows about symlinks, case folding and the
-// directories the fleet leaves alone. The apply index is aligned to the
-// previous tree first, so git's own deletion in read-tree can only ever name
-// the same set; it is a safety net for a crash, not a second opinion.
-//
-export async function applyPack(
+/**
+ * Take a pack into this member's object store, and touch nothing else.
+ *
+ * The work tree is not read or written, so a member can do this ahead of
+ * time: the snapshot is verified and kept, and applied only when it is needed.
+ * It is safe to repeat. `tree` is what the manifest says the snapshot's tree is;
+ * a pack whose commit names another tree is refused (a pack that does not match
+ * its manifest, not an authentication of either). `seq` keeps the objects
+ * reachable under a ref until a garbage collection has a say.
+ */
+export async function ingestPack(
   work: string,
   gitDir: string,
   commit: string,
   pack: Buffer,
-  /** Directories the fleet leaves alone; their contents are not mirrored. */
-  exclude?: string[],
-  /** The commit (or tree) this member held before, so what the fleet dropped can be removed. */
-  previous?: string | null,
+  opts: { tree?: string; seq?: number } = {},
 ): Promise<void> {
   mkdirSync(gitDir, { recursive: true });
   const env = gitEnv(gitDir, work, join(gitDir, "apply.index"));
@@ -565,6 +557,42 @@ export async function applyPack(
   // those live in the replica's own store from the snapshot before it.
   // Without this the pack cannot be resolved and git refuses it.
   await gitRun(gitDir, ["index-pack", "--stdin", "--fix-thin"], env, pack);
+  if (opts.tree !== undefined) {
+    const actual = await gitText(gitDir, ["rev-parse", commit + "^{tree}"], env);
+    if (actual !== opts.tree) {
+      throw new Error("the snapshot's pack does not match its manifest: the tree is " + actual + ", expected " + opts.tree);
+    }
+  }
+  if (opts.seq !== undefined) {
+    await gitText(gitDir, ["update-ref", "refs/prime/fetched/" + opts.seq, commit], env);
+  }
+}
+
+/**
+ * Write a snapshot that is already in the store over the work tree.
+ *
+ * What is removed is decided by the diff between the previous tree and the new
+ * one (`removedBetween`) and carried out by `removeTracked`, before anything is
+ * written: it is the one place that knows about symlinks, case folding and the
+ * directories the fleet leaves alone. The apply index is aligned to the
+ * previous tree first, so git's own deletion in read-tree can only ever name
+ * the same set; it is a safety net for a crash, not a second opinion.
+ *
+ * One call covers any number of snapshots: the work tree only ever sees the
+ * difference between `previous` and `commit`.
+ */
+export async function applyCommit(
+  work: string,
+  gitDir: string,
+  commit: string,
+  /** Directories the fleet leaves alone; their contents are not mirrored. */
+  exclude?: string[],
+  /** The commit (or tree) this member held before, so what the fleet dropped can be removed. */
+  previous?: string | null,
+): Promise<void> {
+  mkdirSync(gitDir, { recursive: true });
+  const env = gitEnv(gitDir, work, join(gitDir, "apply.index"));
+  await ensureStore(gitDir, work, env);
   const keep = (exclude ?? []).map((p) => p.replace(/\/$/, ""));
   await alignApplyIndex(gitDir, env, previous, keep);
   // What goes is worked out from the two trees, and goes first: git's own
@@ -580,6 +608,28 @@ export async function applyPack(
   rmSync(join(gitDir, "apply.commit"), { force: true });
   await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
   writeFileSync(join(gitDir, "apply.commit"), commit + "\n");
+}
+
+// Apply a pack to a work tree: take it into the store, then write it out.
+//
+// The objects go into prime's own store, and the tree is written over the
+// work tree. A replica must end up with the primary's tree for the paths the
+// fleet owns: those the new snapshot has are written, and those the previous
+// snapshot had and the new one does not are removed. Everything else in the
+// work tree belongs to the member and is left alone.
+//
+export async function applyPack(
+  work: string,
+  gitDir: string,
+  commit: string,
+  pack: Buffer,
+  /** Directories the fleet leaves alone; their contents are not mirrored. */
+  exclude?: string[],
+  /** The commit (or tree) this member held before, so what the fleet dropped can be removed. */
+  previous?: string | null,
+): Promise<void> {
+  await ingestPack(work, gitDir, commit, pack);
+  await applyCommit(work, gitDir, commit, exclude, previous);
 }
 
 /** Wait until the work tree stops changing, so a half-written file is not captured. */

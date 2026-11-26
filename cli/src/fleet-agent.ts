@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyPack, findNestedRepos, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
+import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, openForMember, sealForMembers, type MemberKeyPair } from "./fleet-crypto";
 import {
   fetchHead,
@@ -327,7 +327,8 @@ export async function pull(
   let previous: string | null = lastCommit ?? null;
   try {
     for (const [i, step] of plan.chain.entries()) {
-      await applyPack(paths.work, paths.gitDir, step.tipCommit, packs[i]!, exclude, previous);
+      await ingestPack(paths.work, paths.gitDir, step.tipCommit, packs[i]!, { tree: step.tree, seq: step.seq });
+      await applyCommit(paths.work, paths.gitDir, step.tipCommit, exclude, previous);
       previous = step.tipCommit;
       lastSeqApplied = step.seq;
       lastCommitApplied = step.tipCommit;

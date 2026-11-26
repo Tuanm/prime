@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   EMPTY_TREE,
+  applyCommit,
   applyPack,
+  ingestPack,
   findNestedRepos,
   hasFiles,
   localChanges,
@@ -496,6 +498,73 @@ describe("what leaves the work tree is decided by the two trees", () => {
       await applyPack(r.other, r.otherGit, second.commit, second.pack, [], null);
       expect(existsSync(join(r.other, "old.txt"))).toBe(true);
       expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("a");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("taking a snapshot in and writing it out are two steps", () => {
+  test("ingesting leaves the work tree exactly as it was; applying the commit then writes it", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "gone.txt": "bye", "sub/b.txt": "beta" });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "alpha 2");
+      rmSync(join(r.work, "gone.txt"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      const before = readdirSync(r.other).sort();
+
+      await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree, seq: 2 });
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha");
+      expect(existsSync(join(r.other, "gone.txt"))).toBe(true);
+      expect(readdirSync(r.other).sort()).toEqual(before);
+      const ref = execFileSync("git", ["--git-dir=" + r.otherGit, "rev-parse", "refs/prime/fetched/2"], { encoding: "utf8" }).trim();
+      expect(ref).toBe(second.commit);
+      // Repeating it is harmless.
+      await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree });
+
+      await applyCommit(r.other, r.otherGit, second.commit, [], r.first.commit);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha 2");
+      expect(existsSync(join(r.other, "gone.txt"))).toBe(false);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("one apply covers several snapshots that were only ingested", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "b.txt": "beta" });
+    try {
+      let base = r.first.commit;
+      let last = r.first;
+      for (let i = 0; i < 4; i++) {
+        writeFileSync(join(r.work, "a.txt"), "alpha " + i);
+        if (i === 2) rmSync(join(r.work, "b.txt"));
+        last = await snapshot({ work: r.work, gitDir: r.gitDir, base, wantFull: false });
+        if (i < 3) await ingestPack(r.other, r.otherGit, last.commit, last.delta!, { tree: last.tree });
+        base = last.commit;
+      }
+      await ingestPack(r.other, r.otherGit, last.commit, last.delta!, { tree: last.tree });
+      await applyCommit(r.other, r.otherGit, last.commit, [], r.first.commit);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha 3");
+      expect(existsSync(join(r.other, "b.txt"))).toBe(false);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pack whose commit names another tree than its manifest is refused", async () => {
+    const r = await replicaOf({ "a.txt": "alpha" });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "alpha 2");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      let message = "";
+      try {
+        await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: r.first.tree, seq: 2 });
+      } catch (err) {
+        message = String(err);
+      }
+      expect(message).toContain("does not match its manifest");
+      // It is not kept as fetched.
+      expect(() => execFileSync("git", ["--git-dir=" + r.otherGit, "rev-parse", "--verify", "-q", "refs/prime/fetched/2"], { stdio: "pipe" })).toThrow();
     } finally {
       rmSync(r.root, { recursive: true, force: true });
     }
