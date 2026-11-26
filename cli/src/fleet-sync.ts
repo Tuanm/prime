@@ -91,9 +91,12 @@ function gitRun(
   args: string[],
   env: Record<string, string>,
   input?: string | Buffer,
+  /** Told the pid of the git process as soon as it exists. */
+  onSpawn?: (pid: number) => void,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", ["--git-dir=" + gitDir].concat(args), { env, stdio: ["pipe", "pipe", "pipe"] });
+    if (child.pid !== undefined) onSpawn?.(child.pid);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on("data", (c: Buffer) => out.push(c));
@@ -108,8 +111,8 @@ function gitRun(
   });
 }
 
-async function gitText(gitDir: string, args: string[], env: Record<string, string>): Promise<string> {
-  return (await gitRun(gitDir, args, env)).toString("utf8").trim();
+async function gitText(gitDir: string, args: string[], env: Record<string, string>, onSpawn?: (pid: number) => void): Promise<string> {
+  return (await gitRun(gitDir, args, env, undefined, onSpawn)).toString("utf8").trim();
 }
 
 // Directories inside the work tree that are themselves git repositories.
@@ -298,20 +301,32 @@ export function foldsCase(dir: string): boolean {
   return folds;
 }
 
+// The probe is made beside the directory (same file system, and not in a tree that `git add -A` of
+// another process - `prime fleets sync` - may be listing at that moment); only a parent that cannot
+// be written to makes it go inside.
 function foldsCaseInside(dir: string): boolean {
-  const probe = join(dir, ".prime-Case-probe-" + process.pid + "-" + Date.now());
+  const name = ".prime-Case-probe-" + process.pid + "-" + Date.now();
   try {
-    writeFileSync(probe, "");
-    const slash = probe.lastIndexOf("/") + 1;
-    const lower = probe.slice(0, slash) + probe.slice(slash).toLowerCase();
-    const a = statSync(probe);
-    const b = statSync(lower);
-    return a.ino === b.ino && a.dev === b.dev;
+    if (!statSync(dir).isDirectory()) return false;
   } catch {
-    return false;
-  } finally {
-    rmSync(probe, { force: true });
+    return false; // not there: it cannot be asked about
   }
+  for (const where of [join(dir, ".."), dir]) {
+    const probe = join(where, name);
+    try {
+      writeFileSync(probe, "");
+      const slash = probe.lastIndexOf("/") + 1;
+      const lower = probe.slice(0, slash) + probe.slice(slash).toLowerCase();
+      const a = statSync(probe);
+      const b = statSync(lower);
+      return a.ino === b.ino && a.dev === b.dev;
+    } catch {
+      // Could not be made here (or looked at): try the next place.
+    } finally {
+      rmSync(probe, { force: true });
+    }
+  }
+  return false;
 }
 
 // On a file system that folds case, `git add -A` after a case-only rename finds the old
@@ -769,7 +784,14 @@ export async function applyCommit(
   // The sidecar goes while the index is in between; it comes back when the
   // apply is whole, so an apply that dies half way is rebuilt next time.
   rmSync(join(gitDir, "apply.commit"), { force: true });
-  await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
+  // The git that writes the work tree outlives an agent that is killed: its pid is written down so
+  // that the next apply can tell a git that is still writing from a lock that nothing holds.
+  const pidFile = join(gitDir, "apply.index.lock.pid");
+  try {
+    await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env, (pid) => writeFileSync(pidFile, String(pid)));
+  } finally {
+    rmSync(pidFile, { force: true });
+  }
   // What the work tree holds, and what it was brought from: see `finishedApply`.
   writeFileSync(join(gitDir, "apply.commit"), commit + "\nfrom " + (previous ?? "none") + "\n");
   rmSync(join(gitDir, "apply.target"), { force: true });
@@ -813,28 +835,59 @@ export function withApplyLock<T>(gitDir: string, fn: () => Promise<T> | T): Prom
   return withDirLock(join(gitDir, "apply.lock"), fn, { waitMs: 5 * 60_000, staleMs: 60 * 60_000 });
 }
 
-/** A lock this old is a git that died: nothing writes an index for ten minutes. */
+/** A lock this old, with no note of which git holds it, is a git that died: nothing writes an index for ten minutes. */
 const STALE_LOCK_MS = 10 * 60_000;
+
+function pidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 /**
  * Wait until a lock file is gone (a git that was left running by an agent that was
  * killed lets go of it when it finishes). A lock that is still there when the wait is over
  * may belong to a git that is still writing the work tree - taking it away would let two
  * `read-tree -u` write one index - so the apply fails (and is tried again at the next
- * round) unless the lock is so old that nothing can be holding it.
+ * round).
+ *
+ * Whether a git still holds it is what the apply that started it wrote down (`<lock>.pid`, the pid
+ * of the git): a lock of a git that is not running is removed at once, and one of a git that is
+ * running is waited for however old it is (a huge checkout, or a git suspended with the machine,
+ * is older than any time that could be guessed). Only a lock with no such note (an earlier build's)
+ * falls back to its age.
  */
 export async function waitForIndexLock(lock: string, waitMs = 15_000, staleMs = STALE_LOCK_MS): Promise<void> {
   const until = Date.now() + waitMs;
+  const pidFile = lock + ".pid";
   while (existsSync(lock)) {
-    let age = 0;
+    let holder: number | undefined;
     try {
-      age = Date.now() - statSync(lock).mtimeMs;
+      const n = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
+      if (Number.isInteger(n) && n > 0) holder = n;
     } catch {
-      return;
+      holder = undefined;
     }
-    if (age > staleMs) {
-      rmSync(lock, { force: true });
-      return;
+    if (holder !== undefined) {
+      if (!pidRunning(holder)) {
+        rmSync(lock, { force: true });
+        rmSync(pidFile, { force: true });
+        return;
+      }
+    } else {
+      let age = 0;
+      try {
+        age = Date.now() - statSync(lock).mtimeMs;
+      } catch {
+        return;
+      }
+      if (age > staleMs) {
+        rmSync(lock, { force: true });
+        return;
+      }
     }
     if (Date.now() > until) {
       throw new Error("another git is still writing this work tree (" + lock + " is held); the apply is tried again shortly");

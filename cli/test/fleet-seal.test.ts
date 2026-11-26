@@ -461,6 +461,31 @@ describe("a member that was removed", () => {
   });
 });
 
+describe("the change pack that travels beside a whole tree", () => {
+  test("is sealed under the hash computed here, and a gateway that reports another is not believed", async () => {
+    const w = await world();
+    await w.next("one\n");
+    // A member joins: the next snapshot is a whole tree with a change pack beside it.
+    w.gateway.seed("third-device", generateMemberKeyPair().publicKey);
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async (url: string, init: { method?: string } & Record<string, unknown>) => {
+      const res = await real(url, init as never);
+      if (init.method === "POST" && String(url).endsWith("/fleets/x/packs")) {
+        const body = (await res.json()) as Record<string, unknown>;
+        return Response.json({ ...body, hash: "0".repeat(64) });
+      }
+      return res;
+    };
+    try {
+      await expect(w.next("two\n")).rejects.toThrow(/another hash/);
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+    // The head did not move: the refused publish left nothing to be applied.
+    expect(w.gateway.head?.seq).toBe(1);
+  });
+});
+
 describe("old readers and new publishers", () => {
   test("a reader that knows nothing of seals opens what a sealing publisher stored", async () => {
     const w = await world();

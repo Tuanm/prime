@@ -22,7 +22,7 @@
 // already holds, and the agent inherits only the environment it needs.
 
 import { mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
@@ -403,6 +403,25 @@ export function agentServiceFor(
 const STOP_WAIT_MS = 15_000;
 
 /**
+ * The command that starts the agent for a configuration.
+ *
+ * selfCommand, not process.execPath: when the CLI runs from source the executable is bun, and
+ * bun would look for a file named __fleet-agent. The configuration is an absolute path: whoever
+ * finds the agent's lock tells whose agent it is by that path, and a relative one (from another
+ * directory, or after a chdir) cannot be told, which a service's definition never has.
+ */
+export function agentCommand(configPath: string): string[] {
+  return [...selfCommand(), "__fleet-agent", "--config", resolve(configPath)];
+}
+
+/**
+ * The agent is running, and the settings asked for are saved but cannot be given to it from here
+ * (its service's manager cannot be reached, or would not restart it). Not a failure to start it:
+ * the agent is up, with its old settings.
+ */
+export class SettingsPendingError extends CliError {}
+
+/**
  * Ensure the agent is running; returns its metadata.
  *
  * The agent is started the same way the vault broker is: a detached child
@@ -438,7 +457,7 @@ export async function ensureFleetAgent(
     // Stopping it and spawning another would have the manager's restarts collide with that one
     // ("another fleet agent is already running") until a command that reaches it runs.
     if (!managed && service.unreachable?.()) {
-      throw new CliError(
+      throw new SettingsPendingError(
         "the fleet agent (pid " + existing.pid + ") runs as a login service whose manager cannot be reached from here, so it cannot be restarted with the new settings",
         "they are saved and apply the next time the service restarts; or run this from a login session (or stop the service) to apply them now",
       );
@@ -462,7 +481,7 @@ export async function ensureFleetAgent(
   if (managed && existing) {
     // The manager answered, and then would not restart the agent that is running: it keeps the
     // settings it has. Its state is not deleted and nothing is spawned for it to refuse.
-    throw new CliError(
+    throw new SettingsPendingError(
       "the service manager would not restart the running fleet agent (pid " + existing.pid + "), which keeps its old settings",
       "try again, or run 'prime fleets agent install' to set the service up again",
     );
@@ -477,9 +496,7 @@ export async function ensureFleetAgent(
   if (service.spawnAgent) service.spawnAgent(agentEnv);
   else {
     const child = Bun.spawn({
-      // selfCommand, not process.execPath: when the CLI runs from source the
-      // executable is bun, and bun would look for a file named __fleet-agent.
-      cmd: [...selfCommand(), "__fleet-agent", "--config", configPath],
+      cmd: agentCommand(configPath),
       env: agentEnv,
       stdin: "ignore",
       stdout: "ignore",

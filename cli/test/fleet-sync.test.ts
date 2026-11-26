@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync, utimesSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -1322,6 +1322,43 @@ describe("whether the work directory's file system folds case", () => {
     expect(readdirSync(digits)).toEqual([]);
     // A directory that is not there cannot be probed: taken as case-sensitive.
     expect(foldsCase(join(root, "2025"))).toBe(false);
+  });
+
+  test("the probe is made beside the directory, so a directory that cannot be written to is still probed", () => {
+    const root = scratch();
+    const letters = join(root, "Abc");
+    mkdirSync(letters);
+    const folding = existsSync(join(root, "abc"));
+    const digits = join(root, "2026");
+    mkdirSync(digits);
+    chmodSync(digits, 0o555);
+    try {
+      expect(foldsCase(digits)).toBe(folding);
+    } finally {
+      chmodSync(digits, 0o755);
+    }
+    expect(readdirSync(root).filter((n) => n.startsWith(".prime-Case-probe"))).toEqual([]);
+  });
+});
+
+describe("the lock on the apply index, when the apply that took it wrote down which git holds it", () => {
+  test("a lock older than any guess is still waited for while that git runs, and removed as soon as it is gone", async () => {
+    const root = scratch();
+    const lock = join(root, "apply.index.lock");
+    writeFileSync(lock, "");
+    const old = new Date(Date.now() - 3 * 60 * 60_000);
+    utimesSync(lock, old, old);
+    // A git (here, any process) that is running: three hours old is not stale.
+    writeFileSync(lock + ".pid", String(process.pid));
+    await expect(waitForIndexLock(lock, 250)).rejects.toThrow(/still writing/);
+    expect(existsSync(lock)).toBe(true);
+    // Its pid is gone: the lock is nobody's, and is removed without waiting for it to age.
+    writeFileSync(lock + ".pid", String(2 ** 22 + 4242));
+    const fresh = new Date();
+    utimesSync(lock, fresh, fresh);
+    await waitForIndexLock(lock, 250);
+    expect(existsSync(lock)).toBe(false);
+    expect(existsSync(lock + ".pid")).toBe(false);
   });
 });
 

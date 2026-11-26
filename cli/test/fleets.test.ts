@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { memberRows, readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
+import { LockBusyError } from "../src/dir-lock";
+import { fleetStateDir, memberRows, readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
 import type { Config } from "../src/config";
 
 function config(over: Partial<Config> = {}): Config {
@@ -139,5 +140,43 @@ describe("the roster as printed", () => {
     expect(a[0]![2]).toMatch(/^[A-Za-z0-9+/]{11}=$/);
     expect(a[0]![2]).not.toBe(b[0]![2]);
     expect(memberRows([{ deviceId: "d2", role: "member", addedAt: at }])[0]![2]).toBe("-");
+  });
+});
+
+describe("the lock on a member's state file", () => {
+  function stateDir(): { cfg: string; dir: string; done: () => void } {
+    const root = mkdtempSync(join(tmpdir(), "fleet-state-lock-"));
+    const cfg = join(root, "config.yaml");
+    return { cfg, dir: fleetStateDir(cfg, "x", "s"), done: () => rmSync(root, { recursive: true, force: true }) };
+  }
+
+  test("a lock whose holder is gone is broken at once, not waited out", () => {
+    const { cfg, dir, done } = stateDir();
+    try {
+      mkdirSync(join(dir, "state.lock"));
+      writeFileSync(join(dir, "state.lock", "owner"), JSON.stringify({ pid: 2 ** 22 + 777, token: "dead" }));
+      const started = Date.now();
+      updateFleetState(cfg, "x", "s", { seq: 4 });
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(readFleetState(cfg, "x", "s").seq).toBe(4);
+      expect(existsSync(join(dir, "state.lock"))).toBe(false);
+    } finally {
+      done();
+    }
+  });
+
+  test("a lock that a running process holds is not written around: the writer fails and leaves the state as it was", () => {
+    const { cfg, dir, done } = stateDir();
+    try {
+      writeFleetState(cfg, "x", "s", { seq: 1 }, { replace: true });
+      mkdirSync(join(dir, "state.lock"));
+      writeFileSync(join(dir, "state.lock", "owner"), JSON.stringify({ pid: process.pid, token: "somebody else" }));
+      expect(() => updateFleetState(cfg, "x", "s", { seq: 9 })).toThrow(LockBusyError);
+      expect(readFleetState(cfg, "x", "s").seq).toBe(1);
+      // And the other's lock is still there: it was not this writer's to remove.
+      expect(existsSync(join(dir, "state.lock"))).toBe(true);
+    } finally {
+      done();
+    }
   });
 });

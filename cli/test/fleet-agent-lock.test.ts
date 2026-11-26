@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, procProbeWith } from "../src/fleet-agent-lock";
 import { bindServiceStatus } from "../src/fleet-service";
 import {
+  SettingsPendingError,
+  agentCommand,
   agentServiceFor,
   agentSettingsPath,
   ensureFleetAgent,
@@ -599,12 +601,20 @@ describe("switching the replica mode of a running agent", () => {
       error = err;
     }
     expect(String((error as Error)?.message)).toMatch(/manager cannot be reached/);
+    // Not a failure to start the agent: callers say "settings pending", not "did not start".
+    expect(error).toBeInstanceOf(SettingsPendingError);
     // Nothing was stopped or spawned, and the state of the agent that runs is still there.
     expect(spawned).toBe(0);
     expect(() => process.kill(mine.pid, 0)).not.toThrow();
     expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
     // What was asked for is saved for the service's next restart.
     expect(readAgentSettings(configPath).replica).toBe("mirror");
+  });
+
+  test("the agent is started with the absolute path of its configuration, so a relative one is not skipped by the pid-reuse check", () => {
+    const cmd = agentCommand("rel/config.yaml");
+    expect(cmd.slice(-3)).toEqual(["__fleet-agent", "--config", resolve("rel/config.yaml")]);
+    expect(isAbsolute(cmd[cmd.length - 1]!)).toBe(true);
   });
 
   test("a manager that answers and then will not restart the running agent leaves it and its state alone, and says so", async () => {
@@ -627,6 +637,7 @@ describe("switching the replica mode of a running agent", () => {
       error = err;
     }
     expect(String(error)).toContain("would not restart the running fleet agent");
+    expect(error).toBeInstanceOf(SettingsPendingError);
     expect(spawned).toBe(0);
     expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
     expect(() => process.kill(own.pid, 0)).not.toThrow();

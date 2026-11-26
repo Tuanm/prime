@@ -20,7 +20,7 @@ import { bold, cyan, dim, green, printJson, red, table, yellow } from "./output.
 import { formatBytes } from "./files.ts";
 import { connectUrlFor, probeCredential, registerAnonymous, type AnonymousDevice } from "./connect.ts";
 import { fleetWorkDir, setupFleetSpace } from "./fleet-space.ts";
-import { ensureFleetAgent } from "./fleet-daemon.ts";
+import { SettingsPendingError, ensureFleetAgent } from "./fleet-daemon.ts";
 import { ENV, resolveGateway } from "./target.ts";
 import { allVaultCompanies, brokerScopeFor } from "./vaults.ts";
 import { type BrokerScope, ensureBroker, registerBrokerScope, unregisterBrokerScope } from "./vault-broker.ts";
@@ -1236,7 +1236,8 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     try {
       await ensureFleetAgent(ctx.configPath);
     } catch (err) {
-      ctx.note(yellow("  the fleet agent did not start: " + (err instanceof Error ? err.message : String(err))));
+      // A refusal to change the settings of an agent that is running is not a failure to start it.
+      ctx.note(yellow(err instanceof SettingsPendingError ? "  the fleet agent is running; settings pending: " + err.message : "  the fleet agent did not start: " + (err instanceof Error ? err.message : String(err))));
     }
   }
   if (ctx.json) {
@@ -1444,7 +1445,8 @@ async function startSpace(ctx: Ctx, name: string): Promise<void> {
     try {
       await ensureFleetAgent(ctx.configPath);
     } catch (err) {
-      ctx.note(yellow("  the fleet agent did not start: " + (err instanceof Error ? err.message : String(err))));
+      // A refusal to change the settings of an agent that is running is not a failure to start it.
+      ctx.note(yellow(err instanceof SettingsPendingError ? "  the fleet agent is running; settings pending: " + err.message : "  the fleet agent did not start: " + (err instanceof Error ? err.message : String(err))));
     }
   }
   if (ctx.json) {

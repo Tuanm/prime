@@ -157,6 +157,28 @@ describe("a lock between processes", () => {
     await held;
   });
 
+  test("several that find a stale lock at once break it once, and go one at a time after", async () => {
+    const lock = join(scratch(), "l");
+    mkdirSync(lock);
+    writeFileSync(join(lock, "owner"), JSON.stringify({ pid: 2 ** 22 + 99, token: "dead" }));
+    let inside = 0;
+    let most = 0;
+    let ran = 0;
+    await Promise.all(
+      Array.from({ length: 8 }, () =>
+        withDirLock(lock, async () => {
+          inside++;
+          ran++;
+          most = Math.max(most, inside);
+          await new Promise((r) => setTimeout(r, 10));
+          inside--;
+        }),
+      ),
+    );
+    expect(ran).toBe(8);
+    expect(most).toBe(1);
+  });
+
   test("a holder does not remove a lock that was taken from it", async () => {
     const lock = join(scratch(), "l");
     await withDirLock(lock, () => {

@@ -236,7 +236,13 @@ export async function publish(
       throw new Error("the fleet head moved while publishing: another member won");
     }
     const stored = await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
-    delta = { packKey: stored.key, packHash: stored.hash, bytes: sealed.ciphertexts[1].length };
+    // The hash the seal binds is the one computed here, of the bytes that were sealed: what the
+    // gateway says it stored them under is only believed if it is the same.
+    const deltaHash = payloadHash(sealed.ciphertexts[1]);
+    if (stored.hash !== deltaHash) {
+      throw new Error("the gateway stored the change pack under another hash than the one it was sent with (" + stored.hash + ", not " + deltaHash + ")");
+    }
+    delta = { packKey: stored.key, packHash: deltaHash, bytes: sealed.ciphertexts[1].length };
   }
 
   const manifest: FleetManifest = {

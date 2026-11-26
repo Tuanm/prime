@@ -17,7 +17,7 @@ import type { Config, SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths, type Position } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
@@ -26,6 +26,7 @@ import { FleetTrust } from "./fleet-trust.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
+import { withDirLockSync } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgent, uninstallFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
@@ -894,38 +895,12 @@ export function mergeFleetState(disk: FleetMemberState, next: FleetMemberState):
   return out;
 }
 
-// Take the lock on a state directory for the length of one read-and-write (a few milliseconds).
-// A lock is a directory, which can only be made once; one older than ten seconds belongs to a
-// writer that died. Waiting longer than two seconds goes on without it: the merge above still
-// keeps the positions from going back, and the window is the span between two syscalls.
+// Take the lock on a state directory for the length of one read-and-write (a few milliseconds). The
+// lock says whose it is (see dir-lock.ts): one whose holder is gone is broken at once, one older than
+// ten seconds is a holder that hung, and a holder only ever releases its own. A writer that cannot
+// get it in two seconds fails (and is tried again at the next round) rather than writing without it.
 function withStateLock<T>(dir: string, fn: () => T): T {
-  const lock = join(dir, "state.lock");
-  const until = Date.now() + 2000;
-  let held = false;
-  for (;;) {
-    try {
-      mkdirSync(lock);
-      held = true;
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") break;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > 10_000) {
-          rmSync(lock, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() > until) break;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-    }
-  }
-  try {
-    return fn();
-  } finally {
-    if (held) rmSync(lock, { recursive: true, force: true });
-  }
+  return withDirLockSync(join(dir, "state.lock"), fn, { waitMs: 2000, staleMs: 10_000 });
 }
 
 /**

@@ -96,35 +96,65 @@ function breakLock(lock: string, judged: { token: string | null }, opts: DirLock
   rmSync(aside, { recursive: true, force: true });
 }
 
+// One try at taking the lock: true when it is held now, false when somebody holds it (a stale lock is
+// broken, and taken at once if that frees it).
+function tryTake(lock: string, token: string, opts: DirLockOptions): boolean {
+  for (;;) {
+    try {
+      mkdirSync(lock);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const stale = staleOwner(lock, opts);
+      if (!stale) return false;
+      breakLock(lock, stale, opts);
+      continue;
+    }
+    try {
+      writeFileSync(join(lock, "owner"), JSON.stringify({ pid: process.pid, token }));
+    } catch (err) {
+      rmSync(lock, { recursive: true, force: true });
+      throw err;
+    }
+    return true;
+  }
+}
+
+// Only a lock that is still this one's: one that was broken and taken by another is theirs.
+function release(lock: string, token: string): void {
+  if (readOwner(lock)?.token === token) rmSync(lock, { recursive: true, force: true });
+}
+
 /** Run `fn` holding the lock `lock` (a path that does not exist yet). Never holds it past `fn`. */
 export async function withDirLock<T>(lock: string, fn: () => Promise<T> | T, opts: DirLockOptions = {}): Promise<T> {
   const until = Date.now() + (opts.waitMs ?? 5000);
   const token = randomBytes(8).toString("hex");
-  for (;;) {
-    try {
-      mkdirSync(lock);
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    }
-    const stale = staleOwner(lock, opts);
-    if (stale) {
-      breakLock(lock, stale, opts);
-      continue;
-    }
+  while (!tryTake(lock, token, opts)) {
     if (Date.now() > until) throw new LockBusyError(lock);
     await new Promise((r) => setTimeout(r, 10 + Math.floor(Math.random() * 20)));
   }
   try {
-    writeFileSync(join(lock, "owner"), JSON.stringify({ pid: process.pid, token }));
-  } catch (err) {
-    rmSync(lock, { recursive: true, force: true });
-    throw err;
-  }
-  try {
     return await fn();
   } finally {
-    // Only a lock that is still this one's: one that was broken and taken by another is theirs.
-    if (readOwner(lock)?.token === token) rmSync(lock, { recursive: true, force: true });
+    release(lock, token);
+  }
+}
+
+/**
+ * `withDirLock` for a critical section of a few milliseconds that has to be synchronous (a read and a
+ * write of a small file). It waits by blocking, so only the holder of a lock that is being let go of
+ * is waited for: a lock of a process that is gone is broken at once, not waited out.
+ */
+export function withDirLockSync<T>(lock: string, fn: () => T, opts: DirLockOptions = {}): T {
+  const until = Date.now() + (opts.waitMs ?? 2000);
+  const token = randomBytes(8).toString("hex");
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  while (!tryTake(lock, token, opts)) {
+    if (Date.now() > until) throw new LockBusyError(lock);
+    Atomics.wait(nap, 0, 0, 5);
+  }
+  try {
+    return fn();
+  } finally {
+    release(lock, token);
   }
 }
