@@ -22,7 +22,7 @@
 // already holds, and the agent inherits only the environment it needs.
 
 import { mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
@@ -44,7 +44,7 @@ import {
   type PlaceAnswer,
   type ReplicaMode,
 } from "./fleet-replica.ts";
-import { fleetAgentServiceStatus, installFleetAgentService, restartFleetAgentService } from "./fleet-service.ts";
+import { fleetAgentServiceConfig, fleetAgentServiceStatus, installFleetAgentService, restartFleetAgentService } from "./fleet-service.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -326,27 +326,40 @@ export interface AgentServiceHooks {
   restart(): boolean;
   /** How long a running agent is given to stop when it is replaced, or to come back (tests make it short). */
   stopWaitMs?: number;
+  /** Start a detached agent with this environment; replaced in tests. */
+  spawnAgent?: (env: Record<string, string | undefined>) => void;
 }
 
-const systemService: AgentServiceHooks = {
-  installed: () => {
-    // Only where the manager can be asked to restart it: elsewhere the agent is started as it always was.
-    if (process.platform !== "darwin" && process.platform !== "linux") return false;
-    try {
-      return fleetAgentServiceStatus().installed;
-    } catch {
-      return false;
-    }
-  },
-  pid: () => {
-    try {
-      return fleetAgentServiceStatus().pid;
-    } catch {
-      return undefined;
-    }
-  },
-  restart: () => restartFleetAgentService(),
-};
+/**
+ * The login service as one configuration sees it. There is one service per machine and it runs
+ * one configuration: for any other the service is not there, and nothing is asked of it.
+ * The manager is only reached through `status` and `restart` (replaced in tests).
+ */
+export function agentServiceFor(
+  configPath: string,
+  status: () => { installed: boolean; pid?: number } = () => fleetAgentServiceStatus(configPath),
+  restart: () => boolean = restartFleetAgentService,
+): AgentServiceHooks {
+  return {
+    installed: () => {
+      // Only where the manager can be asked to restart it: elsewhere the agent is started as it always was.
+      if (process.platform !== "darwin" && process.platform !== "linux") return false;
+      try {
+        return status().installed;
+      } catch {
+        return false;
+      }
+    },
+    pid: () => {
+      try {
+        return status().pid;
+      } catch {
+        return undefined;
+      }
+    },
+    restart,
+  };
+}
 
 /** How long a running agent is given to stop when it has to be replaced (it may be finishing a round). */
 const STOP_WAIT_MS = 15_000;
@@ -366,7 +379,7 @@ const STOP_WAIT_MS = 15_000;
 export async function ensureFleetAgent(
   configPath: string,
   options: FleetAgentOptions = {},
-  service: AgentServiceHooks = systemService,
+  service: AgentServiceHooks = agentServiceFor(configPath),
 ): Promise<FleetAgentState> {
   const shell = options.fromShell === true;
   const settings = shell ? persistAgentSettings(configPath, process.env, options) : readAgentSettings(configPath);
@@ -387,15 +400,9 @@ export async function ensureFleetAgent(
       existing = undefined;
     }
   }
-  if (managed) {
+  if (managed && service.restart()) {
     // The service manager starts it (or restarts it, to take the new settings): nothing is
     // spawned beside the service's own agent.
-    if (!service.restart()) {
-      throw new CliError(
-        "the fleet agent's service would not start it",
-        "run 'prime fleets agent install' to set the service up again",
-      );
-    }
     const deadline = Date.now() + waitMs;
     for (;;) {
       const state = runningAgent(configPath);
@@ -404,19 +411,25 @@ export async function ensureFleetAgent(
       await Bun.sleep(100);
     }
   }
+  // No service, or its manager cannot be reached (a service file is there, and nothing to run it:
+  // a headless login, an install that stopped half way): the agent is started directly. If the
+  // manager did start one meanwhile, the lock makes this one exit and that one's state is returned.
   rmSync(fleetAgentStatePath(configPath), { force: true });
   mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
   const agentEnv = buildAgentEnv(configPath, options, process.env, shell);
-  const child = Bun.spawn({
-    // selfCommand, not process.execPath: when the CLI runs from source the
-    // executable is bun, and bun would look for a file named __fleet-agent.
-    cmd: [...selfCommand(), "__fleet-agent", "--config", configPath],
-    env: agentEnv,
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  (child as unknown as { unref?: () => void }).unref?.();
+  if (service.spawnAgent) service.spawnAgent(agentEnv);
+  else {
+    const child = Bun.spawn({
+      // selfCommand, not process.execPath: when the CLI runs from source the
+      // executable is bun, and bun would look for a file named __fleet-agent.
+      cmd: [...selfCommand(), "__fleet-agent", "--config", configPath],
+      env: agentEnv,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    (child as unknown as { unref?: () => void }).unref?.();
+  }
   const deadline = Date.now() + 5000;
   for (;;) {
     const state = runningAgent(configPath);
@@ -452,12 +465,31 @@ async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: n
  */
 export async function installFleetAgent(
   configPath: string,
-  deps: { install: () => string; stopWaitMs?: number } = { install: () => installFleetAgentService(configPath) },
+  deps: {
+    install: () => string;
+    stopWaitMs?: number;
+    /** The configuration the installed service runs, if one is installed. */
+    boundTo?: () => string | undefined;
+    /** The pid the service manager runs the agent as. */
+    servicePid?: () => number | undefined;
+  } = { install: () => installFleetAgentService(configPath) },
 ): Promise<string> {
+  // There is one service per machine, and it runs one configuration: installing for another
+  // would move it, and the first would have no agent.
+  const bound = (deps.boundTo ?? fleetAgentServiceConfig)();
+  if (bound !== undefined && resolve(bound) !== resolve(configPath)) {
+    throw new CliError(
+      "the fleet agent service is installed for " + bound + " (there is one per machine)",
+      "run 'prime fleets agent uninstall' first if it should run " + configPath + " instead",
+    );
+  }
   // The service starts without this shell's environment: what was set here is written down for it.
   persistAgentSettings(configPath);
   const running = runningAgent(configPath);
-  if (running) await stopAndWait(configPath, running, deps.stopWaitMs ?? STOP_WAIT_MS);
+  // The service's own agent is replaced by the manager (bootout / restart stop it themselves);
+  // any other is stopped here, so the one the service starts is the only one.
+  const own = running !== undefined && (deps.servicePid ?? (() => fleetAgentServiceStatus(configPath).pid))() === running.pid;
+  if (running && !own) await stopAndWait(configPath, running, deps.stopWaitMs ?? STOP_WAIT_MS);
   return deps.install();
 }
 

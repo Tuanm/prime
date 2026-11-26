@@ -1,17 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
 import { effectiveCodeMcpArgv, serviceEnv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
-import { FLEET_AGENT_LABEL, FLEET_AGENT_NAME, fleetAgentSpec } from "../src/fleet-service.ts";
+import { FLEET_AGENT_LABEL, FLEET_AGENT_NAME, bindServiceStatus, fleetAgentSpec } from "../src/fleet-service.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
 import { rememberAnonymous } from "../src/connect.ts";
 import {
   captureNetworkEnv,
+  definedServiceConfig,
   loadServiceEnv,
   loadOverrides,
+  parseLaunchdConfig,
+  parseSystemdConfig,
   renderLaunchdPlist,
   renderSystemdUnit,
   renderWindowsInstallScript,
@@ -195,5 +198,49 @@ describe("service definitions", () => {
     // The watchdog trigger that actually restarts a crashed service.
     expect(script).toContain("-RepetitionInterval (New-TimeSpan -Minutes 1)");
     expect(script).toContain("-MultipleInstances IgnoreNew");
+  });
+});
+
+describe("which configuration a service runs", () => {
+  // There is one service per machine and it runs one --config; everything else has to be able to tell.
+  const awkward = "/home/a b/\"q\" & 100%/$x/config.yaml";
+  const spec = (configPath: string) => ({ ...fleetAgentSpec(configPath), command: ["/usr/bin/prime", "__fleet-agent", "--config", configPath] });
+
+  test("is read back from the definition, whatever the path holds", () => {
+    expect(parseLaunchdConfig(renderLaunchdPlist(spec(awkward)))).toBe(awkward);
+    expect(parseSystemdConfig(renderSystemdUnit(spec(awkward)))).toBe(awkward);
+    expect(parseLaunchdConfig("<plist></plist>")).toBeUndefined();
+    expect(parseSystemdConfig("[Service]\nExecStart=\"/bin/x\"\n")).toBeUndefined();
+  });
+
+  test("is found from the files of a home, without asking the manager", () => {
+    const home = mkdtempSync(join(tmpdir(), "svc-home-"));
+    try {
+      const identity = { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL };
+      expect(definedServiceConfig("darwin", identity, home, {})).toBeUndefined();
+      mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+      writeFileSync(join(home, "Library", "LaunchAgents", FLEET_AGENT_LABEL + ".plist"), renderLaunchdPlist(spec("/cfg/a.yaml")));
+      expect(definedServiceConfig("darwin", identity, home, {})).toBe("/cfg/a.yaml");
+      mkdirSync(join(home, ".config", "systemd", "user"), { recursive: true });
+      writeFileSync(join(home, ".config", "systemd", "user", FLEET_AGENT_NAME + ".service"), renderSystemdUnit(spec("/cfg/b.yaml")));
+      expect(definedServiceConfig("linux", identity, home, {})).toBe("/cfg/b.yaml");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a service that runs another configuration is not installed for this one", () => {
+    const status = { installed: true, running: true, where: "w", pid: 42 };
+    expect(bindServiceStatus(status, "/cfg/default.yaml", "/cfg/default.yaml")).toMatchObject({ installed: true, pid: 42 });
+    const other = bindServiceStatus(status, "/cfg/default.yaml", "/cfg/other.yaml");
+    expect(other.installed).toBe(false);
+    expect(other.running).toBe(false);
+    expect(other.pid).toBeUndefined();
+    // A definition that does not say is taken as it is (an older install).
+    expect(bindServiceStatus(status, undefined, "/cfg/other.yaml").installed).toBe(true);
+  });
+
+  test("the service is installed with an absolute path", () => {
+    expect(fleetAgentSpec("rel/config.yaml").command.at(-1)).toBe(join(process.cwd(), "rel/config.yaml"));
   });
 });

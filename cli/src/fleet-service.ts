@@ -6,11 +6,12 @@
 // exactly what happened. Installing it is 'prime fleets agent install'.
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { defaultConfigPath } from "./config.ts";
 import {
+  definedServiceConfig,
   installService,
   restartService,
   serviceStatus,
@@ -37,7 +38,7 @@ export function fleetAgentSpec(configPath: string, platform: Platform = process.
       ? join(home, "Library", "Logs", "prime", "fleet-agent.log")
       : join(home, ".prime", "fleet-agent.log");
   return {
-    command: [...selfCommand(), "__fleet-agent", "--config", configPath],
+    command: [...selfCommand(), "__fleet-agent", "--config", resolve(configPath)],
     configPath,
     logPath,
     pathEnv: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -60,9 +61,24 @@ export function uninstallFleetAgentService(configPath: string = defaultConfigPat
   return uninstallService(process.platform as Platform, configPath, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
 }
 
-/** Whether it is installed, and whether it is running. */
-export function fleetAgentServiceStatus(configPath: string = defaultConfigPath()): ServiceStatus {
-  return serviceStatus(process.platform as Platform, configPath, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+/** The configuration the installed service runs, from its definition (the manager is not asked). */
+export function fleetAgentServiceConfig(): string | undefined {
+  return definedServiceConfig(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+}
+
+/** A status as seen from one configuration: a service that runs another is not this one's. */
+export function bindServiceStatus(status: ServiceStatus, runs: string | undefined, configPath: string): ServiceStatus & { config?: string } {
+  if (runs === undefined || resolve(runs) === resolve(configPath)) return { ...status, ...(runs !== undefined ? { config: runs } : {}) };
+  return { installed: false, running: false, where: status.where, detail: "installed for " + runs, config: runs };
+}
+
+/**
+ * Whether it is installed for this configuration, and whether it is running. There is one
+ * service per machine, and it runs one configuration: for any other it is not installed.
+ */
+export function fleetAgentServiceStatus(configPath: string = defaultConfigPath()): ServiceStatus & { config?: string } {
+  const status = serviceStatus(process.platform as Platform, configPath, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+  return bindServiceStatus(status, fleetAgentServiceConfig(), configPath);
 }
 
 /** Restart the installed service through its manager. Returns whether the manager did. */

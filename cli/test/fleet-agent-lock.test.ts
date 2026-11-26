@@ -3,7 +3,9 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, u
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess } from "../src/fleet-agent-lock";
+import { bindServiceStatus } from "../src/fleet-service";
 import {
+  agentServiceFor,
   agentSettingsPath,
   ensureFleetAgent,
   fleetAgentDir,
@@ -320,16 +322,91 @@ describe("switching the replica mode of a running agent", () => {
     const state = await ensureFleetAgent(configPath, {}, hooks(restarts, configPath, "lazy"));
     expect(restarts.n).toBe(1);
     expect(isFleetAgentProcess(state.pid, fleetAgentDir(configPath))).toBe(true);
-    // And a manager that will not is an error, not a reason to start one by hand.
-    const other = join(scratch(), "config.json");
+  });
+
+  test("a service file whose manager cannot be reached does not leave a machine with no agent: it is started directly", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    let spawned = 0;
+    const state = await ensureFleetAgent(configPath, {}, {
+      installed: () => true,
+      pid: () => undefined,
+      restart: () => false,
+      spawnAgent: () => {
+        spawned++;
+        running(configPath, plainAgent().pid, "lazy");
+      },
+    });
+    expect(spawned).toBe(1);
+    expect(isFleetAgentProcess(state.pid, fleetAgentDir(configPath))).toBe(true);
+  });
+
+  test("the service of another configuration is not this one's: its agent is left alone and the manager is never asked", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    // The one service on the machine runs /somewhere/else.yaml, as the default configuration's agent.
+    let asked = 0;
+    const service = agentServiceFor(
+      configPath,
+      () => bindServiceStatus({ installed: true, running: true, where: "w", pid: 4242 }, "/somewhere/else.yaml", configPath),
+      () => {
+        asked++;
+        return true;
+      },
+    );
+    // Nothing differs: the running agent is returned as it is.
+    expect((await ensureFleetAgent(configPath, {}, service)).pid).toBe(mine.pid);
+    // A settings change restarts it directly (this configuration has no service), not through the manager.
+    withMode("mirror");
+    let envSeen: Record<string, string | undefined> = {};
+    const state = await ensureFleetAgent(configPath, { fromShell: true }, {
+      ...service,
+      stopWaitMs: 3000,
+      spawnAgent: (env) => {
+        envSeen = env;
+        running(configPath, plainAgent().pid, "mirror");
+      },
+    });
+    expect(asked).toBe(0);
+    expect(isFleetAgentProcess(mine.pid, fleetAgentDir(configPath))).toBe(false);
+    expect(envSeen.PRIME_FLEET_REPLICA).toBe("mirror");
+    expect(state.pid).not.toBe(mine.pid);
+  });
+
+  test("installing for a configuration while the one service runs another is refused, and nothing is stopped", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    running(configPath, old.pid, "lazy");
+    let installed = false;
     let error: unknown;
     try {
-      await ensureFleetAgent(other, {}, { installed: () => true, pid: () => undefined, restart: () => false, stopWaitMs: 300 });
+      await installFleetAgent(configPath, { install: () => ((installed = true), "x"), boundTo: () => "/somewhere/else.yaml", servicePid: () => undefined });
     } catch (err) {
       error = err;
     }
-    expect(String(error)).toContain("would not start it");
-    expect(existsSync(fleetAgentStatePath(other))).toBe(false);
+    expect(String(error)).toContain("installed for /somewhere/else.yaml");
+    expect(installed).toBe(false);
+    expect(isFleetAgentProcess(old.pid, fleetAgentDir(configPath))).toBe(true);
+  });
+
+  test("a reinstall leaves the service's own agent to the manager, which stops it itself", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const own = await fakeAgent();
+    running(configPath, own.pid, "lazy");
+    let aliveAtInstall: boolean | undefined;
+    await installFleetAgent(configPath, {
+      boundTo: () => configPath,
+      servicePid: () => own.pid,
+      install: () => {
+        aliveAtInstall = isFleetAgentProcess(own.pid, fleetAgentDir(configPath));
+        return "x";
+      },
+    });
+    expect(aliveAtInstall).toBe(true);
   });
 
   test("installing the service stops a running agent first, and waits for it", async () => {
@@ -341,6 +418,8 @@ describe("switching the replica mode of a running agent", () => {
     let aliveAtInstall: boolean | undefined;
     const where = await installFleetAgent(configPath, {
       stopWaitMs: 3000,
+      boundTo: () => undefined,
+      servicePid: () => undefined,
       install: () => {
         aliveAtInstall = isFleetAgentProcess(old.pid, fleetAgentDir(configPath));
         return "the unit";
@@ -357,7 +436,7 @@ describe("switching the replica mode of a running agent", () => {
     let installed = false;
     let error: unknown;
     try {
-      await installFleetAgent(other, { stopWaitMs: 300, install: () => ((installed = true), "x") });
+      await installFleetAgent(other, { stopWaitMs: 300, boundTo: () => undefined, servicePid: () => undefined, install: () => ((installed = true), "x") });
     } catch (err) {
       error = err;
     }

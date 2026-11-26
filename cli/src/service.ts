@@ -170,6 +170,44 @@ export function systemdEnvQuote(assignment: string): string {
   return '"' + assignment.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%") + '"';
 }
 
+/** The `--config` a launchd definition runs its program with. */
+export function parseLaunchdConfig(plist: string): string | undefined {
+  const unescape = (t: string) => t.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
+  const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1];
+  if (args === undefined) return undefined;
+  const list = [...args.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unescape(m[1]!));
+  const at = list.indexOf("--config");
+  return at >= 0 ? list[at + 1] : undefined;
+}
+
+/** The `--config` a systemd unit's ExecStart runs its program with (see `systemdQuote`). */
+export function parseSystemdConfig(unit: string): string | undefined {
+  const line = /^ExecStart=(.*)$/m.exec(unit)?.[1];
+  if (line === undefined) return undefined;
+  const list = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$"));
+  const at = list.indexOf("--config");
+  return at >= 0 ? list[at + 1] : undefined;
+}
+
+/**
+ * The configuration an installed service runs, read from its definition (no call to the
+ * manager). undefined when none is installed or the definition does not say.
+ */
+export function definedServiceConfig(
+  platform: Platform,
+  identity: { name?: string; label?: string } = {},
+  home = homedir(),
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  try {
+    if (platform === "linux") return parseSystemdConfig(readFileSync(systemdUnitPath(env, home, identity.name ?? SERVICE_NAME), "utf8"));
+    if (platform === "darwin") return parseLaunchdConfig(readFileSync(launchdPlistPath(home, identity.label ?? LAUNCHD_LABEL), "utf8"));
+  } catch {
+    // Not installed.
+  }
+  return undefined;
+}
+
 export function renderSystemdUnit(spec: ServiceSpec): string {
   const envLine = (k: string, v: string) => "Environment=" + systemdEnvQuote(k + "=" + v);
   return [
@@ -359,7 +397,8 @@ export function serviceStatus(
     const where = systemdUnitPath(process.env, homedir(), name);
     if (!Bun.which("systemctl")) return { installed: existsSync(where), running: false, where, detail: "systemctl not found" };
     const active = run(["systemctl", "--user", "is-active", name + ".service"]).out.trim();
-    const main = Number.parseInt(run(["systemctl", "--user", "show", "-p", "MainPID", "--value", name + ".service"]).out.trim(), 10);
+    // `show -p` prints MainPID=123 on every systemd; `--value` only exists from 230.
+    const main = Number.parseInt(/MainPID=(\d+)/.exec(run(["systemctl", "--user", "show", "-p", "MainPID", name + ".service"]).out)?.[1] ?? "", 10);
     return { installed: existsSync(where), running: active === "active", where, detail: active || undefined, ...(main > 0 ? { pid: main } : {}) };
   }
   if (platform === "darwin") {
