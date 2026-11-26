@@ -457,6 +457,9 @@ with the same.
   unless `--force` is given (remove the service from the configuration it runs, or force it).
   A definition that does not say (a hand-edited unit, a binary plist) is taken for the default
   configuration's.
+  A systemd drop-in (`~/.config/systemd/user/prime-fleet-agent.service.d/*.conf`) that sets
+  `ExecStart=` is read the way systemd merges it, so `systemctl --user edit` is followed; a drop-in
+  anywhere else (`/etc/systemd/user`) is not.
 - One agent runs per configuration: a second one that is started exits, saying who holds the
   lock (`fleet-agent/agent.lock`, which the running agent touches every few seconds). A stopping
   agent is given ten seconds to let go. The lock names its holder, and where the process list

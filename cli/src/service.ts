@@ -11,7 +11,7 @@
 // credential is ever written into the service definition or onto a command
 // line where ps would show it.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { selfCommand } from "./code-mcp-host.ts";
@@ -203,7 +203,13 @@ function configOf(list: string[]): string | undefined {
 
 /** The `--config` a systemd unit's ExecStart runs its program with (see `systemdQuote`). */
 export function parseSystemdConfig(unit: string): string | undefined {
-  const line = /^ExecStart=(.*)$/m.exec(unit)?.[1];
+  // As systemd reads it: `ExecStart=` with nothing after it clears what came before, and
+  // the last command given is the one that runs (a drop-in's, after the unit's own).
+  let line: string | undefined;
+  for (const found of unit.matchAll(/^ExecStart=(.*)$/gm)) {
+    const value = found[1]!.trim();
+    line = value === "" ? undefined : value;
+  }
   if (line === undefined) return undefined;
   const list = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$"));
   return configOf(list);
@@ -222,7 +228,18 @@ export function readServiceDefinition(
 ): { config: string | undefined } | undefined {
   try {
     if (platform === "linux") {
-      return { config: parseSystemdConfig(readFileSync(systemdUnitPath(env, home, identity.name ?? SERVICE_NAME), "utf8")) };
+      const unit = systemdUnitPath(env, home, identity.name ?? SERVICE_NAME);
+      // The unit's own text, then its drop-ins (`<unit>.d/*.conf`, in name order) as systemd merges them:
+      // `systemctl --user edit` writes the ones that override ExecStart there.
+      let text = readFileSync(unit, "utf8");
+      try {
+        for (const name of readdirSync(unit + ".d").filter((n) => n.endsWith(".conf")).sort()) {
+          text += "\n" + readFileSync(join(unit + ".d", name), "utf8");
+        }
+      } catch {
+        // No drop-ins.
+      }
+      return { config: parseSystemdConfig(text) };
     }
     if (platform === "darwin") {
       return { config: parseLaunchdConfig(readFileSync(launchdPlistPath(home, identity.label ?? LAUNCHD_LABEL), "utf8")) };

@@ -300,6 +300,30 @@ describe("which configuration a service runs", () => {
     }
   });
 
+  test("a systemd drop-in that overrides ExecStart decides which configuration the service runs", () => {
+    const unit = renderSystemdUnit(fleetAgentSpec("/cfg/a.yaml", "linux"));
+    expect(parseSystemdConfig(unit)).toBe("/cfg/a.yaml");
+    // `ExecStart=` clears the unit's, the next one is the command; with no reset the last one still wins (as systemd's, for a simple service).
+    expect(parseSystemdConfig(unit + '\n[Service]\nExecStart=\nExecStart="/bin/prime" "__fleet-agent" "--config" "/cfg/b.yaml"\n')).toBe("/cfg/b.yaml");
+    expect(parseSystemdConfig(unit + '\n[Service]\nExecStart="/bin/prime" "--config" "/cfg/c.yaml"\n')).toBe("/cfg/c.yaml");
+    // Cleared and not replaced: nothing runs, so it does not say.
+    expect(parseSystemdConfig(unit + "\n[Service]\nExecStart=\n")).toBeUndefined();
+
+    const home = mkdtempSync(join(tmpdir(), "svc-dropin-"));
+    try {
+      const identity = { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL };
+      const dir = join(home, ".config", "systemd", "user");
+      mkdirSync(join(dir, FLEET_AGENT_NAME + ".service.d"), { recursive: true });
+      writeFileSync(join(dir, FLEET_AGENT_NAME + ".service"), unit);
+      expect(readServiceDefinition("linux", identity, home, {})).toEqual({ config: "/cfg/a.yaml" });
+      writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", "override.conf"), '[Service]\nExecStart=\nExecStart="/bin/prime" "__fleet-agent" "--config" "/cfg/b.yaml"\n');
+      writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", "notes.txt"), '[Service]\nExecStart="/bin/x" "--config" "/ignored.yaml"\n');
+      expect(readServiceDefinition("linux", identity, home, {})).toEqual({ config: "/cfg/b.yaml" });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("a definition that exists and does not say is told apart from none", () => {
     const home = mkdtempSync(join(tmpdir(), "svc-def-"));
     try {
