@@ -343,56 +343,59 @@ describe("when a replica asks the fleet anything", () => {
 });
 
 
-describe("the agent's round for a replica", () => {
-  // A space the way the agent keeps it, with the socket reported as up.
-  async function space(w: World, name: string, opts: { connected?: boolean } = {}) {
-    const { round } = await import("../src/fleet-daemon");
-    const { fleetKeyFile, fleetStateDir, readFleetState } = await import("../src/fleets");
-    const { NestedRepoCache } = await import("../src/fleet-sync");
-    const configPath = join(w.root, "cfg-" + name, "config.json");
-    const work = join(w.root, name);
-    mkdirSync(work, { recursive: true });
-    const gitDir = fleetStateDir(configPath, "x", name);
-    mkdirSync(gitDir, { recursive: true });
-    const paths: MemberPaths = { work, gitDir, keyFile: fleetKeyFile(configPath, "x", name), nested: new NestedRepoCache(work) };
-    w.gateway.seed(name, loadOrCreateKeyPair(paths.keyFile).publicKey);
-    const said: string[] = [];
-    const loop = {
-      configPath,
-      name,
-      space: {} as never,
-      fleet: "x",
-      creds: credsFor(name),
-      paths,
-      dirty: false,
-      claim: false,
-      claimAt: 0,
-      headDirty: false,
-      lastHeadCheck: 0,
-      lastPublish: 0,
-      lastCheck: 0,
-      primary: false,
-      lastBootstrap: 0,
-      timing: {},
-      paused: false,
-      events: { connected: opts.connected ?? true } as never,
-    };
-    return {
-      loop,
-      paths,
-      said,
-      state: () => readFleetState(configPath, "x", name),
-      round: () => round(loop, { heartbeatMs: 5000 }, (what) => void said.push(what)),
-    };
-  }
-
-  const baseline = async (w: World, name: string) => {
-    const s = await space(w, name);
-    await w.publishNext();
-    await s.round(); // the first look: no baseline yet, so it is given one
-    return s;
+// A space the way the agent keeps it, with the socket reported as up.
+async function space(w: World, name: string, opts: { connected?: boolean } = {}) {
+  const { round } = await import("../src/fleet-daemon");
+  const { fleetKeyFile, fleetStateDir, readFleetState } = await import("../src/fleets");
+  const { NestedRepoCache } = await import("../src/fleet-sync");
+  const configPath = join(w.root, "cfg-" + name, "config.json");
+  const work = join(w.root, name);
+  mkdirSync(work, { recursive: true });
+  const gitDir = fleetStateDir(configPath, "x", name);
+  mkdirSync(gitDir, { recursive: true });
+  const paths: MemberPaths = { work, gitDir, keyFile: fleetKeyFile(configPath, "x", name), nested: new NestedRepoCache(work) };
+  w.gateway.seed(name, loadOrCreateKeyPair(paths.keyFile).publicKey);
+  const said: string[] = [];
+  // The agent's own type is not exported whole; a test only sets what a round reads.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const loop: any = {
+    configPath,
+    name,
+    space: {} as never,
+    fleet: "x",
+    creds: credsFor(name),
+    paths,
+    dirty: false,
+    claim: false,
+    claimAt: 0,
+    headDirty: false,
+    lastHeadCheck: 0,
+    lastPublish: 0,
+    lastCheck: 0,
+    primary: false,
+    lastBootstrap: 0,
+    timing: {},
+    paused: false,
+    events: { connected: opts.connected ?? true } as never,
   };
-  const total = (w: World): number => [...w.gateway.requests.values()].reduce((a, b) => a + b, 0);
+  return {
+    loop,
+    paths,
+    said,
+    state: () => readFleetState(configPath, "x", name),
+    round: () => round(loop, { heartbeatMs: 5000 }, (what) => void said.push(what)),
+  };
+}
+
+const baseline = async (w: World, name: string) => {
+  const s = await space(w, name);
+  await w.publishNext();
+  await s.round(); // the first look: no baseline yet, so it is given one
+  return s;
+};
+const total = (w: World): number => [...w.gateway.requests.values()].reduce((a, b) => a + b, 0);
+
+describe("the agent's round for a replica", () => {
 
   test("with a socket, a replica asks nothing while nothing happens, and fetches without writing when the head moves", async () => {
     const w = await world();
@@ -508,7 +511,7 @@ describe("the agent's round for a replica", () => {
       expect(b.loop.claimAt).toBeGreaterThan(Date.now() + 20_000);
 
       // a never finishes (it died): the claim runs out and b takes over.
-      w.gateway.claim = { device: "ra", until: Date.now() - 1 };
+      w.gateway.claim = { device: "ra", since: Date.now() - 31_000, until: Date.now() - 1 };
       b.loop.claimAt = 0;
       await b.round();
       expect(b.loop.primary).toBe(true);
@@ -1226,4 +1229,125 @@ describe("the member's state file", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+// Drives the rounds of several spaces the way the agent does, on a clock that is ours:
+// each round, then the sleep the daemon would sleep, then the next.
+async function runRounds(
+  spaces: Array<{ loop: any; round: () => Promise<void> }>,
+  loopSleepMs: (loop: any, pollMs: number, now?: number) => number,
+  minutes: number,
+  start = 5_000_000,
+): Promise<{ rounds: number[]; failedRounds: number[] }> {
+  const real = Date.now;
+  let clock = start;
+  Date.now = () => clock;
+  const rounds = spaces.map(() => 0);
+  const failedRounds = spaces.map(() => 0);
+  const next = spaces.map(() => start);
+  try {
+    while (clock < start + minutes * 60_000) {
+      const i = next.indexOf(Math.min(...next));
+      clock = Math.max(clock, next[i]!);
+      if (clock >= start + minutes * 60_000) break;
+      const sp = spaces[i]!;
+      rounds[i]!++;
+      try {
+        await sp.round();
+        sp.loop.failures = 0;
+      } catch {
+        failedRounds[i]!++;
+        sp.loop.failures = (sp.loop.failures ?? 0) + 1;
+      }
+      next[i] = clock + loopSleepMs(sp.loop, 1500, clock);
+    }
+  } finally {
+    Date.now = real;
+  }
+  return { rounds, failedRounds };
+}
+
+describe("a claim and the pace of the agent's rounds", () => {
+  async function two() {
+    const { loopSleepMs } = await import("../src/fleet-daemon");
+    return loopSleepMs;
+  }
+
+  test("a primary that was current when the lease was freed does not keep claiming: its rounds go at the poll's pace", async () => {
+    const loopSleepMs = await two();
+    const w = await world();
+    try {
+      const s = await baseline(w, "r1"); // applied == head
+      w.gateway.primary = "";
+      s.loop.claim = true; // what a lease-free sets
+      await s.round();
+      expect(s.loop.primary).toBe(true);
+      expect(s.loop.claim).toBe(false);
+      expect(loopSleepMs(s.loop, 1500)).toBe(s.loop.events.connected ? 30_000 : 1500);
+      s.loop.events = { connected: false } as never;
+      expect(loopSleepMs(s.loop, 1500)).toBe(1500);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a stopped or paused space does not wake its round for a claim", async () => {
+    const loopSleepMs = await two();
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: false });
+      s.loop.claim = true;
+      s.loop.claimAt = Date.now() - 1000;
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThanOrEqual(1500);
+      s.loop.paused = true;
+      expect(loopSleepMs(s.loop, 1500)).toBeGreaterThanOrEqual(60_000);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a failing round waits as the back-off says, claim pending or not", async () => {
+    const loopSleepMs = await two();
+    const { roundSleepMs } = await import("../src/fleet-events");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: false });
+      s.loop.claim = true;
+      s.loop.claimAt = Date.now() - 1000; // due since a while
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThanOrEqual(15_000);
+      s.loop.failures = 4;
+      const waits = loopSleepMs(s.loop, 1500);
+      expect(waits).toBeGreaterThanOrEqual(roundSleepMs({ paused: false, connected: false, pollMs: 15_000, failures: 4 }));
+      expect(waits).toBeGreaterThanOrEqual(24_000);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a member that can never catch up asks a few times and stops claiming, and a healthy replica takes over", async () => {
+    const loopSleepMs = await two();
+    const w = await world();
+    try {
+      const healthy = await baseline(w, "r1");
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      healthy.loop.headDirty = true;
+      await healthy.round(); // fetched, not applied
+      // A member that is admitted while no primary is up: nothing is sealed for it.
+      const stuck = await space(w, "newcomer", { connected: false });
+      w.gateway.primary = ""; // the primary is gone
+      healthy.loop.claim = true;
+      stuck.loop.claim = true;
+
+      w.gateway.requests.clear();
+      const spaces = [stuck, healthy];
+      const { rounds } = await runRounds(spaces, loopSleepMs, 10);
+      expect(healthy.loop.primary).toBe(true);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(healthy.paths.work))).toBe(true);
+      // It asked for its place as a replica does (every fifteen seconds), not every round of a claim.
+      expect(rounds[0]!).toBeLessThan(200);
+      expect(w.gateway.bootstraps).toBeLessThan(120);
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
 });

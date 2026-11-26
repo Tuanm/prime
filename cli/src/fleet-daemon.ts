@@ -28,7 +28,7 @@ import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { NotSealedError, NotSealedYetError, loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import {
   FETCHED_REPORT_MS,
   SOCKET_HEAD_SAFETY_MS,
@@ -274,6 +274,39 @@ export async function maybeCollect(loop: SpaceLoop, report: (what: string) => vo
   }
 }
 
+// An error from the file system that says the work tree cannot be written to.
+function cannotWrite(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" && ["EACCES", "EPERM", "ENOSPC", "EROFS", "EDQUOT", "EMFILE"].includes(code);
+}
+
+/**
+ * How long a space's loop sleeps before its next round.
+ *
+ * A replica that does not mirror sleeps long (see `replicaSleepMs`); the primary
+ * keeps the pace it had. A claim that is waiting for its time wakes the round then,
+ * but only for a replica that is running and well: one whose rounds are failing
+ * waits as `roundSleepMs` says (a gateway that is down, over its budget or asking
+ * for time must not be asked five times a second), and a member that holds the
+ * place has no claim to wait for.
+ */
+export function loopSleepMs(loop: SpaceLoop, pollMs: number, now: number = Date.now()): number {
+  const idle = loop.primary
+    ? { pollMs, idleMs: undefined }
+    : replicaSleepMs({ mode: replicaMode(), connected: loop.events.connected, pollMs, ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}) });
+  const sleepMs = roundSleepMs({
+    paused: loop.paused,
+    connected: loop.events.connected,
+    supported: loop.events.supported,
+    retryAfterMs: loop.retryAfterMs,
+    pollMs: idle.pollMs,
+    ...(idle.idleMs !== undefined ? { idleMs: idle.idleMs } : {}),
+    failures: loop.failures,
+  });
+  const waiting = loop.claim && !loop.primary && !loop.paused && (loop.failures ?? 0) === 0;
+  return waiting ? Math.min(sleepMs, Math.max(200, loop.claimAt - now)) : sleepMs;
+}
+
 /**
  * One beat of the clock a space keeps for its place, apart from its round.
  *
@@ -383,6 +416,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       report("the space is not running; the lease was given up");
     }
     loop.primary = false;
+    loop.claim = false;
     return;
   }
 
@@ -516,7 +550,11 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     } catch (err) {
       // It could not catch up (the network, a failed apply): the member is still
       // eligible, and tries again once the round has backed off.
-      loop.claim = true;
+      // Eligible again once the round has backed off - unless nothing it can do
+      // will change the answer: a snapshot sealed for it that does not exist yet (and
+      // there is no primary to publish one), a key it no longer has, a work tree it
+      // cannot write. Asking again would only keep the claim from a replica that can.
+      loop.claim = !(err instanceof NotSealedYetError || err instanceof NotSealedError || cannotWrite(err));
       loop.claimAt = Date.now();
       throw err;
     } finally {
@@ -716,6 +754,9 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     // Whoever asked - the round, the heartbeat, a promotion - the answer sets what
     // the member does next. While it is already trying to take the lease that is
     // the promotion's own business.
+    // A member that has the place has nothing to claim, and a claim left set would
+    // keep its round at the pace of a replica that is waiting for its turn.
+    if (placed.primary) loop.claim = false;
     if (!placed.primary && !loop.promoting) {
       if (answer.reason === "not-caught-up") {
         // The lease is free and this member could have it once it has applied the head.
@@ -896,27 +937,12 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       write(spacesSeen);
       // Sleep until the next turn, or until something happens.
       if (pending.delete(name)) continue;
-      // A replica that does not mirror has nothing to do between messages; it
-      // sleeps long (see replicaSleepMs). The primary keeps the pace it had.
-      const idle = loop.primary
-        ? { pollMs, idleMs: undefined }
-        : replicaSleepMs({ mode: replicaMode(), connected: loop.events.connected, pollMs, ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}) });
-      const sleepMs = roundSleepMs({
-        paused: loop.paused,
-        connected: loop.events.connected,
-        supported: loop.events.supported,
-        retryAfterMs: loop.retryAfterMs,
-        pollMs: idle.pollMs,
-        ...(idle.idleMs !== undefined ? { idleMs: idle.idleMs } : {}),
-        failures: loop.failures,
-      });
-      // A claim that is waiting for its time wakes the round then.
-      const until = loop.claim ? Math.max(200, loop.claimAt - Date.now()) : sleepMs;
+      const sleepMs = loopSleepMs(loop, pollMs);
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           wakeups.delete(name);
           resolve();
-        }, Math.min(sleepMs, until));
+        }, sleepMs);
         wakeups.set(name, () => {
           clearTimeout(timer);
           resolve();
