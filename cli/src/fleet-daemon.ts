@@ -30,6 +30,7 @@ import { CliError } from "./errors.ts";
 import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { applyReady, placeDue, positions, prefetch, promote, promotionDelayMs, replicaMode, type PlaceAnswer } from "./fleet-replica.ts";
+import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
@@ -225,6 +226,33 @@ export interface RoundTiming {
   total?: number;
 }
 
+/** The size at which the object store starts to be collected now and then, in bytes. */
+const COLLECT_FROM_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Let go of what the object store no longer needs, when it has grown.
+ *
+ * It is looked at every ten minutes, once a round is over (so nothing of this
+ * space is in flight). Past 32 MB it is collected about once an hour, and
+ * whenever it is over PRIME_FLEET_CACHE_MB (512 by default). What is kept is the
+ * snapshot the work tree holds, the newest one fetched, and what the indexes
+ * name; the cap cannot go below that, so a store still over it is said so.
+ */
+export async function maybeCollect(loop: SpaceLoop, report: (what: string) => void, now: number = Date.now()): Promise<void> {
+  if (now - (loop.lastStoreCheck ?? 0) < 10 * 60_000) return;
+  loop.lastStoreCheck = now;
+  const size = storeBytes(loop.paths.gitDir);
+  const cap = cacheLimitMb() * 1024 * 1024;
+  const due = size > cap || (size > COLLECT_FROM_BYTES && now - (loop.lastCollect ?? 0) > 60 * 60_000);
+  if (!due) return;
+  const state = readFleetState(loop.configPath, loop.fleet, loop.name);
+  const done = await collectStore(loop.paths.gitDir, [state.base, state.fetchedCommit]);
+  loop.lastCollect = now;
+  if (!done) return;
+  report("collected the object store: " + Math.round(done.before / 1048576) + " MB to " + Math.round(done.after / 1048576) + " MB");
+  if (done.after > cap) report("the object store is " + Math.round(done.after / 1048576) + " MB, over the cap of " + Math.round(cap / 1048576) + " MB: it holds only what is in use");
+}
+
 /** One space as the agent keeps it (exported so a round can be driven in a test). */
 export interface SpaceLoop {
   configPath: string;
@@ -267,6 +295,9 @@ export interface SpaceLoop {
   knownHeadManifest?: string;
   /** When the replica last told the fleet how far it has fetched. */
   lastFetchedReport?: number;
+  /** When the object store was last looked at, and when it was last collected. */
+  lastStoreCheck?: number;
+  lastCollect?: number;
   /** When the head was last looked at; a replica that is told does not ask. */
   lastHeadCheck: number;
 }
@@ -735,10 +766,12 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
 
     while (!stopping) {
       try {
-        await round(loop, options, (what) => {
+        const say = (what: string): void => {
           lastAction = name + ": " + what;
           lastError = undefined;
-        });
+        };
+        await round(loop, options, say);
+        await maybeCollect(loop, say).catch(() => undefined);
         loop.failures = 0;
         timing = loop.timing;
       } catch (err) {

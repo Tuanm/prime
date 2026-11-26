@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
@@ -14,6 +14,7 @@ import {
   type PlaceAnswer,
   type ReplicaState,
 } from "../src/fleet-replica";
+import { COLLECT_GRACE_MS, storeBytes } from "../src/fleet-store";
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
 
 interface World {
@@ -470,6 +471,54 @@ describe("the agent's round for a replica", () => {
     } finally {
       if (saved === undefined) delete process.env.PRIME_FLEET_REPLICA;
       else process.env.PRIME_FLEET_REPLICA = saved;
+      finish(w);
+    }
+  });
+
+  test("an object store over its cap is collected once a round is over, at most every ten minutes, and the replica still works", async () => {
+    const { maybeCollect } = await import("../src/fleet-daemon");
+    const w = await world();
+    const saved = process.env.PRIME_FLEET_CACHE_MB;
+    process.env.PRIME_FLEET_CACHE_MB = "0.001";
+    try {
+      const s = await baseline(w, "r1");
+      for (let i = 0; i < 12; i++) {
+        await w.publishNext();
+        s.loop.headDirty = true;
+        await s.round();
+      }
+      expect(s.state().fetchedSeq).toBe(13);
+      const long = new Date(Date.now() - 2 * COLLECT_GRACE_MS);
+      const walk = (dir: string): void => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          if (e.isDirectory()) walk(join(dir, e.name));
+          else utimesSync(join(dir, e.name), long, long);
+        }
+      };
+      walk(join(s.paths.gitDir, "objects"));
+      const before = storeBytes(s.paths.gitDir);
+
+      const said: string[] = [];
+      await maybeCollect(s.loop as never, (m) => void said.push(m), 1_000_000);
+      expect(storeBytes(s.paths.gitDir)).toBeLessThan(before);
+      expect(said.some((m) => m.startsWith("collected the object store"))).toBe(true);
+      // Looked at again within ten minutes: nothing.
+      const again: string[] = [];
+      await maybeCollect(s.loop as never, (m) => void again.push(m), 1_000_000 + 60_000);
+      expect(again).toEqual([]);
+
+      // It still takes the next change, and writes it out when it has to.
+      await w.publishNext();
+      s.loop.headDirty = true;
+      await s.round();
+      w.gateway.primary = "";
+      s.loop.claim = true;
+      await s.round();
+      expect(s.loop.primary).toBe(true);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(s.paths.work))).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.PRIME_FLEET_CACHE_MB;
+      else process.env.PRIME_FLEET_CACHE_MB = saved;
       finish(w);
     }
   });
