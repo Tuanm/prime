@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
-import { fetchMemberKeys, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
+import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, stopFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
@@ -645,6 +645,9 @@ export async function syncFleetSpace(
   if (pulled.applied) {
     return "applied " + pulled.seq;
   }
+  // Nothing to apply, but the fleet may not know that: an earlier report may have
+  // been lost, and a member the fleet thinks is behind cannot take the lease.
+  if ((state.seq ?? 0) > 0) await reportApplied(creds, fleetId, state.seq ?? 0).catch(() => false);
   return "up to date";
 }
 

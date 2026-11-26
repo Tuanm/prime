@@ -169,17 +169,32 @@ export async function advanceHead(
  * Tell the fleet how far this member has got.
  *
  * The fleet uses this to fence a member that took over: it may not publish
- * until it has applied the state it is about to replace.
+ * until it has applied the state it is about to replace. It is safe to repeat
+ * (the fleet keeps the highest), so it is retried, and it throws when it cannot
+ * get through.
  */
-export async function reportApplied(creds: FleetCredentials, fleet: string, seq: number, fetched?: number): Promise<boolean> {
-  const res = await request(
-    creds,
-    "POST",
-    "/fleets/" + encodeURIComponent(fleet) + "/applied",
-    JSON.stringify({ seq, ...(fetched !== undefined ? { fetched } : {}) }),
-  );
-  return res.ok;
+export async function reportApplied(creds: FleetCredentials, fleet: string, seq: number, fetched?: number): Promise<true> {
+  const body = JSON.stringify({ seq, ...(fetched !== undefined ? { fetched } : {}) });
+  let last = "";
+  for (let attempt = 0; attempt <= reportBackoff.delays.length; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, reportBackoff.delays[attempt - 1]));
+    try {
+      const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/applied", body);
+      if (res.ok) return true;
+      last = "status " + res.status;
+      // A refusal that asking again will not change (not a member, no such fleet).
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) break;
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+  }
+  // The report is what lets the fleet give this member the lease. Saying nothing
+  // about a failure would leave a member that is in fact current waiting for ever.
+  throw new FleetTransportError("could not tell the fleet how far this member has got: " + last);
 }
+
+/** How long to wait before asking again when a report did not get through. */
+export const reportBackoff = { delays: [150, 450] as number[] };
 
 /** One snapshot the gateway keeps, as its index lists it. */
 export interface IndexEntry {

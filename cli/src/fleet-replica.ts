@@ -99,9 +99,19 @@ export async function applyReady(
   paths: MemberPaths,
   state: ReplicaState,
   save: (patch: Partial<ReplicaState>) => void,
+  /**
+   * With `report`, say where the work tree is even when there is nothing to
+   * apply. A member that is taking over needs the fleet to know it is current,
+   * and an earlier report may not have got through: the fleet keeps the highest,
+   * so saying it again costs one request and loses nothing.
+   */
+  opts: { report?: boolean } = {},
 ): Promise<ApplyReport | null> {
   const { applied, fetched } = positions(state);
-  if (fetched.seq <= applied.seq || fetched.commit === null) return null;
+  if (fetched.seq <= applied.seq || fetched.commit === null) {
+    if (opts.report && applied.seq > 0) await reportApplied(creds, fleet, applied.seq);
+    return null;
+  }
 
   let kept: ApplyReport["kept"];
   if (state.tree !== undefined) {

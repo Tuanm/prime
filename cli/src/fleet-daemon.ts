@@ -464,7 +464,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       catchUp: async () => {
         const now = readFleetState(loop.configPath, fleet, loop.name);
         await prefetch(creds, fleet, paths, now, keep);
-        const done = await applyReady(creds, fleet, paths, readFleetState(loop.configPath, fleet, loop.name), keep);
+        const done = await applyReady(creds, fleet, paths, readFleetState(loop.configPath, fleet, loop.name), keep, { report: true });
         if (done?.kept) report("kept " + done.kept.moved + " locally changed path(s) aside in " + done.kept.to);
       },
     });

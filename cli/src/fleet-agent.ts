@@ -229,11 +229,20 @@ export async function publish(
   };
   // The pack and the manifest travel together, and the gateway moves the head
   // in the same call. One round trip instead of six.
-  const moved = await putSnapshot(creds, fleet, manifest, main);
+  let moved = await putSnapshot(creds, fleet, manifest, main);
+  if (!moved.ok && /catch up first/.test(moved.error ?? "") && (head?.seq ?? 0) <= appliedSeq) {
+    // The fleet says this member has not applied the head, which it holds: the
+    // report that said so was lost. Say it again, and publish once more.
+    await reportApplied(creds, fleet, appliedSeq);
+    moved = await putSnapshot(creds, fleet, manifest, main);
+  }
   if (!moved.ok) {
     throw new Error("the fleet head moved while publishing: " + (moved.error ?? "another member won"));
   }
-  await reportApplied(creds, fleet, seq);
+  // A fleet that records the publisher as applied at once needs no report; an
+  // older one does, and a report that cannot get through is made good the next
+  // time the fleet says "catch up first" (see above), so it is not an error here.
+  await reportApplied(creds, fleet, seq).catch(() => undefined);
   return {
     seq,
     commit: snap.commit,

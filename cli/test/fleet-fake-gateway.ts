@@ -22,6 +22,10 @@ export class FakeGateway {
   indexEnabled = true;
   /** What the index lists; tests may cut holes in it. */
   indexEntries: Array<{ seq: number; manifestKey: string; full: boolean; packBytes?: number; deltaBytes?: number }> = [];
+  /** How many of the next /applied reports fail with a 503. */
+  failApplied = 0;
+  /** Like the real gateway now: a publish makes the publisher applied. */
+  advanceMarksApplied = false;
   /** How many times a member asked for its place. */
   bootstraps = 0;
   /** Requests of each kind, by route. */
@@ -76,6 +80,10 @@ export class FakeGateway {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
       return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, applied: this.applied.get(m.deviceId) ?? 0 })) });
     }
+    if (kind === "applied" && method === "POST" && this.failApplied > 0) {
+      this.failApplied--;
+      return new Response("{}", { status: 503 });
+    }
     if (kind === "applied" && method === "POST") {
       const parsed = JSON.parse(String(body ?? "{}")) as { seq: number };
       this.applied.set(creds.deviceId, Math.max(this.applied.get(creds.deviceId) ?? 0, parsed.seq ?? 0));
@@ -116,6 +124,7 @@ export class FakeGateway {
       }
       const seq = typeof manifest.seq === "number" ? manifest.seq : current + 1;
       this.head = { seq, manifestKey, manifestHash: hash(finalManifest), epoch: 1 };
+      if (this.advanceMarksApplied) this.applied.set(creds.deviceId, seq);
       return Response.json({ ok: true, seq, manifestKey });
     }
     if ((kind === "packs" || kind === "manifests") && method === "POST") {

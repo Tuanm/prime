@@ -15,6 +15,7 @@ import {
   type ReplicaState,
 } from "../src/fleet-replica";
 import { COLLECT_GRACE_MS, storeBytes } from "../src/fleet-store";
+import { reportApplied, reportBackoff } from "../src/fleet-transport";
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
 
 interface World {
@@ -651,5 +652,85 @@ describe("what the socket says", () => {
       manifestKey: "fleets/x/manifests/abc",
     });
     expect(parseFleetEvent('{"type":"head","seq":4,"manifestKey":7}')).toEqual({ type: "head", seq: 4 });
+  });
+});
+
+describe("a report that did not get through", () => {
+  const quick = (): (() => void) => {
+    const saved = [...reportBackoff.delays];
+    reportBackoff.delays = [0, 0];
+    return () => void (reportBackoff.delays = saved);
+  };
+
+  test("a replica whose report was lost says it again at its next try, and takes the lease", async () => {
+    const restore = quick();
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      w.gateway.primary = ""; // the primary is gone for good; the head will not move again
+
+      const ask = async (): Promise<PlaceAnswer> => {
+        const res = await fetch("http://fake/fleets/x/bootstrap", { method: "POST", headers: { "x-prime-device": "r1" }, body: "{}" } as RequestInit);
+        const b = (await res.json()) as { role?: string; reason?: string; catchUpTo?: number };
+        return { primary: b.role === "primary", ...(b.reason ? { reason: b.reason } : {}), ...(b.catchUpTo ? { catchUpTo: b.catchUpTo } : {}) };
+      };
+      const catchUp = async (): Promise<void> => {
+        await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+        await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save, { report: true });
+      };
+      // The first report is lost, every attempt of it.
+      w.gateway.failApplied = 3;
+      await expect(promote({ takePlace: ask, catchUp })).rejects.toThrow("could not tell the fleet");
+      expect(r.state.seq).toBe(4); // the work tree is written and recorded
+      expect(w.gateway.applied.get("r1")).toBe(1);
+      // The next try finds nothing to apply, and still says where it is.
+      expect(await promote({ takePlace: ask, catchUp })).toBe("primary");
+      expect(w.gateway.applied.get("r1")).toBe(4);
+    } finally {
+      restore();
+      finish(w);
+    }
+  });
+
+  test("a primary whose report of its own publish was lost can publish again", async () => {
+    const restore = quick();
+    const w = await world();
+    try {
+      await w.publishNext();
+      w.gateway.failApplied = 3; // the report after the next publish never arrives
+      const second = await w.publishNext();
+      expect(second.seq).toBe(2);
+      expect(w.gateway.applied.get("primary-device")).toBe(1);
+      // An older gateway refuses "catch up first"; the member says where it is and publishes.
+      const third = await w.publishNext();
+      expect(third.seq).toBe(3);
+      expect(w.gateway.applied.get("primary-device")).toBe(3);
+    } finally {
+      restore();
+      finish(w);
+    }
+  });
+
+  test("a report is retried, and says so when it cannot get through", async () => {
+    const restore = quick();
+    const w = await world();
+    try {
+      w.gateway.failApplied = 2;
+      expect(await reportApplied(credsFor("primary-device"), "x", 1)).toBe(true);
+      expect(w.gateway.applied.get("primary-device")).toBe(1);
+      w.gateway.failApplied = 5;
+      await expect(reportApplied(credsFor("primary-device"), "x", 2)).rejects.toThrow("status 503");
+      w.gateway.failApplied = 0;
+      // A refusal that asking again cannot change is not repeated.
+      const before = w.gateway.requests.get("POST applied") ?? 0;
+      await expect(reportApplied(credsFor("stranger"), "x", 1)).resolves.toBe(true); // the fake accepts anyone
+      expect((w.gateway.requests.get("POST applied") ?? 0) - before).toBe(1);
+    } finally {
+      restore();
+      finish(w);
+    }
   });
 });
