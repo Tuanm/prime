@@ -31,8 +31,12 @@ At any moment exactly one space holds the lease. That one writes. The others are
 **replicas**: they keep a copy ready, and they never write.
 
 The lease is short - forty-five seconds - and the one holding it renews every fifteen
-(a third of it, so two renewals can be lost and it is still held), so a space that goes
-quiet loses it quickly rather than locking the fleet.
+(a third of it). A renewal that fails is tried again two seconds later, and a request for
+the place is cut off after ten seconds, so even two failures - each as slow as it may be -
+leave a third attempt before the place is gone. A space that goes quiet loses the lease
+quickly rather than locking the fleet: when it runs out the fleet tells every member over
+its socket, and takeover is the rest of the lease plus a few seconds (a minute at the most
+from the holder's last renewal).
 
 ```mermaid
 sequenceDiagram
@@ -98,7 +102,10 @@ it is behind - only when it has to be:
 What it holds is always a snapshot the fleet really had (the last one applied), never
 a half-written mix. If something reads a replica's directory and must see the
 newest state, run `prime fleets sync`, or set `PRIME_FLEET_REPLICA=mirror` for the
-agent: it then writes every snapshot as it is fetched, as replicas did before.
+agent: it then writes every snapshot as it is fetched, as replicas did before. The setting is
+passed to the agent and written down in its directory (`fleet-agent/settings.json`), so an agent
+started by the login service, or restarted after a crash, has it; starting the agent again with
+another value restarts it, and `prime fleets agent status` says which mode it is in.
 
 The member's state file records both positions: `seq`, `base` and `tree` are what the
 work tree holds, and `fetchedSeq`, `fetchedCommit` and `fetchedTree` the newest snapshot
@@ -114,10 +121,14 @@ minutes with one. It does not renew a lease it does not hold.
 
 When the lease is free, replicas that are behind each need to write their work tree to take
 it, and only one can. The first to ask is told to catch up and holds a claim on doing so for
-thirty seconds (renewed whenever it asks again); the others are told to wait, write nothing,
-and ask again when the claim runs out - so if the first died half way, the next takes over
-at the cost of that wait. Who actually gets the lease is decided as ever: a member that has
-applied the head.
+thirty seconds (renewed whenever it asks again, but a claim lasts sixty seconds in all); the
+others are told to wait, write nothing, and ask again when the claim runs out. A claimant that
+died half way costs the others that wait. One that is alive and cannot catch up - nothing is
+sealed for it yet, it has lost its key, its work tree cannot be written - loses the claim at
+sixty seconds and may not take the next for thirty, and such a replica stops asking for the
+lease until something changes; so a replica that can catch up takes over within about two
+minutes of the lease being free, however many are stuck. Who actually gets the lease is
+decided as ever: a member that has applied the head.
 
 ### What a replica keeps
 
@@ -301,13 +312,13 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | Situation | What the fleet does |
 |---|---|
 | the space in charge stops | it gives up the lease at once; the next member that asks takes over |
-| its tunnel goes away | the next ask finds the holder not connected, takes it out of the running, and the waiting member takes over in a second or two |
+| its tunnel goes away | the next ask finds the holder not connected and takes it out of the running; a waiting member asks every fifteen seconds without a socket, every five minutes with one, so it is the lease running out (and the socket telling everyone) that usually decides - within a minute |
 | the operator switches a space off | the same, at once; it stays a member until it is removed |
 | the operator pauses the fleet | nothing joins, nobody takes a place, nothing is published; members stay, the lease runs out. The agents are told over their socket and stop asking, so a paused fleet costs the gateway nothing until it is resumed |
 | the operator resumes it | the agents are told at once and a primary is back in about a second |
 | the agent's socket drops, or the gateway has none | the agent falls back to asking, as it always did; it looks for the socket again by itself |
 | no member holds the lease | the next member whose agent asks takes it; a call in that gap is refused with "no primary right now" |
-| the holder's agent stops | its place lapses when the lease runs out; five seconds later another member's agent asks and takes it |
+| the holder's agent stops | its place lapses when the lease runs out (forty-five seconds after its last renewal); the fleet tells the members over their socket, and one takes it a few seconds later |
 | the holder's machine reboots | the same, and the reason the agent belongs in a service: `prime fleets agent install` |
 | a fleet has no token | no client can reach it; members still sync |
 | the invite expired or was used | the request is refused, and the code is gone |
@@ -335,8 +346,14 @@ prime fleets agent status       # rounds, the last thing it did, and whether it 
 ```
 
 The lease and the heartbeat are two numbers that have to agree. The heartbeat is
-a third of the lease the fleet reports, so two renewals can be lost before the
-place is gone - and a fleet keeps answering its clients meanwhile.
+a third of the lease the fleet reports, and a failed renewal is tried again after two
+seconds, so more than one can fail before the place is gone - and a fleet keeps
+answering its clients meanwhile.
+
+A member holds its place only while the gateway can see its device tunnel: a holder whose
+device is not connected is taken out of the running the next time anyone asks. Spaces always
+have a tunnel (`prime code-mcp --gateway ...`); an agent started on its own, without one, will
+find the lease moving between members every few seconds. Run it beside a tunnel, or not at all.
 
 ## What it costs
 
@@ -361,7 +378,7 @@ seconds:
 A running fleet still sends the requests that are its work: the primary renews the
 lease (every fifteen seconds) and publishes, the others fetch what was published. An idle
 replica that does not mirror sends almost none: with a socket it asks for its place every
-five minutes and looks at the head every ten (about 400 requests a day, where it was about
+five minutes and looks at the head every ten (about 430 requests a day, where it was about
 11,500); without a socket it asks for its place every fifteen seconds and the answer carries
 the head (about 5,700, where it was about 132,000). A replica that mirrors, and so wants a
 fresh work tree, looks at the head every round without a socket (about 63,000) and every
@@ -397,7 +414,7 @@ it, and so does everything that is not a fleet.
 | lease | forty-five seconds, renewed every fifteen |
 | snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change |
 | snapshots kept | the last 64 |
-| a member's object store | collected when it passes 32 MB (about hourly) and whenever it is over `PRIME_FLEET_CACHE_MB` (512 by default); it keeps the snapshot the work tree holds, the newest fetched and what its indexes name |
+| a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
 | a fleet nobody touches | cleaned up after a day |
 
