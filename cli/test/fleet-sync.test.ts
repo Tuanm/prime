@@ -1362,6 +1362,35 @@ describe("the lock on the apply index, when the apply that took it wrote down wh
   });
 });
 
+describe("two gits at work in one store", () => {
+  test("snapshots taken at the same moment all succeed, whatever lock files they meet", async () => {
+    const root = scratch();
+    const work = join(root, "w");
+    const gitDir = join(root, "store");
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "a.txt"), "a\n");
+    const first = await snapshot({ work, gitDir });
+    const taken = await Promise.all(Array.from({ length: 8 }, () => snapshot({ work, gitDir, base: first.commit, treeOnly: true })));
+    for (const t of taken) expect(t.tree).toBe(first.tree);
+  });
+
+  test("a lock another git holds for a moment is waited for, and the snapshot is taken when it is let go", async () => {
+    const root = scratch();
+    const work = join(root, "w");
+    const gitDir = join(root, "store");
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "a.txt"), "a\n");
+    await snapshot({ work, gitDir });
+    // What a git of the same store that is writing its index leaves while it does.
+    const lock = join(gitDir, "snapshot.index.lock");
+    writeFileSync(lock, "");
+    setTimeout(() => rmSync(lock, { force: true }), 400);
+    const snap = await snapshot({ work, gitDir, treeOnly: true });
+    expect(snap.tree).toMatch(/^[0-9a-f]{40}$/);
+    expect(existsSync(lock)).toBe(false);
+  });
+});
+
 describe("the lock on the apply index", () => {
   test("a lock that is still there when the wait is over is not taken away: the apply fails instead", async () => {
     const root = scratch();

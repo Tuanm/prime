@@ -584,7 +584,16 @@ async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: nu
     if (manifest.full && !manifest.delta) break;
     if (manifest.parentManifest === undefined || walked.length >= WALK_LIMIT) break;
     const parent: FleetManifest | null = await fetchManifest(creds, fleet, manifestIdOf(manifest.parentManifest)).catch(() => null);
-    if (parent === null || parent.seq !== manifest.seq - 1) break;
+    if (parent === null) break; // let go by the gateway (or not readable): the walk ends here, as it always did
+    // A snapshot follows the head it was published on, whose sequence is one below its own: a chain
+    // that says otherwise was rearranged (a snapshot shown under a sequence that is not its own), and
+    // that is what is reported, not that no whole tree is left to start from.
+    if (parent.seq !== manifest.seq - 1 || (manifest.parentSeq !== undefined && manifest.parentSeq !== parent.seq)) {
+      throw new TamperedSnapshotError(
+        manifest.seq,
+        "the snapshot it says it follows is snapshot " + parent.seq + ", not " + (manifest.seq - 1) + ": the chain of snapshots was rearranged, as when an older snapshot is shown under a newer sequence",
+      );
+    }
     manifest = parent;
   }
   if (walked.length === 0) return { head, chain: [] };

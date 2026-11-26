@@ -86,12 +86,36 @@ function gitEnv(gitDir: string, work: string, indexFile: string): Record<string,
 // execFile cannot write to a child's stdin, and git pack-objects needs it:
 // the revisions to pack are passed that way.
 //
-function gitRun(
+// A git that could not take one of its own lock files (another git of this store holds it: the
+// agent and `prime fleets sync`, or two syncs, work in one store) has done nothing yet, so it is run
+// again after a short wait, for as long as a lock is plausibly held. Only that failure is retried.
+const LOCK_RETRY_MS = 15_000;
+const LOCK_CONFLICT = /could not lock config file|Unable to create '[^']*\.lock': File exists|Another git process seems to be running|cannot lock ref/;
+
+async function gitRun(
   gitDir: string,
   args: string[],
   env: Record<string, string>,
   input?: string | Buffer,
   /** Told the pid of the git process as soon as it exists. */
+  onSpawn?: (pid: number) => void,
+): Promise<Buffer> {
+  const until = Date.now() + LOCK_RETRY_MS;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await gitRunOnce(gitDir, args, env, input, onSpawn);
+    } catch (err) {
+      if (!(err instanceof Error) || !LOCK_CONFLICT.test(err.message) || Date.now() > until) throw err;
+      await new Promise((r) => setTimeout(r, 30 + Math.floor(Math.random() * 90) + Math.min(attempt, 10) * 20));
+    }
+  }
+}
+
+function gitRunOnce(
+  gitDir: string,
+  args: string[],
+  env: Record<string, string>,
+  input?: string | Buffer,
   onSpawn?: (pid: number) => void,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {

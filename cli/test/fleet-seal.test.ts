@@ -90,6 +90,21 @@ describe("a manifest the gateway rewrote", () => {
     expect(sameTree(fingerprint(w.replica.work), before)).toBe(true);
   });
 
+  test("a relabelled snapshot whose chain does not add up is refused for that, not for want of a whole tree", async () => {
+    const w = await world();
+    await w.next("one\n");
+    const two = await w.next("two\n");
+    const three = await w.next("three\n");
+    await w.pullReplica(0);
+    const four = await w.next("four\n");
+    // Snapshot 3 shown as 5, built on 2 (skipping 3 and 4): every reference it has is rewritten to match.
+    w.gateway.indexEnabled = false;
+    w.forge({ ...w.manifest(three.manifestKey), seq: 5, parentSeq: 4, parentManifest: two.manifestKey });
+    expect(four.seq).toBe(4);
+    await expect(w.pullReplica(3)).rejects.toThrow(/chain of snapshots was rearranged/);
+    await expect(w.pullReplica(3)).rejects.toBeInstanceOf(TamperedSnapshotError);
+  });
+
   test("a relabel by a fresh member is refused too", async () => {
     const w = await world();
     const one = await w.next("a\n");
