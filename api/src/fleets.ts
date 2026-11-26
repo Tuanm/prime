@@ -196,16 +196,24 @@ export interface FleetAuth {
 export async function onlineNow(
   deviceId: string,
   cached: () => Promise<Set<string>>,
-  fresh: () => Promise<Set<string>>,
+  /** A snapshot of who is online that was read no earlier than `notBefore` (a time), when that is given. */
+  fresh: (notBefore?: number) => Promise<Set<string>>,
   /** When each device was last found offline by a fresh read; the caller keeps it between calls. */
   offlineAt: Map<string, number> = new Map(),
   negativeTtlMs = 2_000,
   now: () => number = Date.now,
+  /**
+   * When the device took the place the answer is about (its lease). A tunnel that opened after the
+   * last verdict is what a device that has just taken its place has, so an offline verdict from before
+   * it - cached or read - says nothing about it: it is looked for again, for the first `negativeTtlMs`.
+   */
+  since?: number,
 ): Promise<boolean> {
   if ((await cached()).has(deviceId)) return true;
   const known = offlineAt.get(deviceId);
-  if (known !== undefined && now() - known < negativeTtlMs) return false;
-  const online = (await fresh()).has(deviceId);
+  const young = since !== undefined && now() - since < negativeTtlMs;
+  if (known !== undefined && now() - known < negativeTtlMs && !(young && known <= since!)) return false;
+  const online = (await fresh(young ? since : undefined)).has(deviceId);
   if (online) offlineAt.delete(deviceId);
   else {
     if (offlineAt.size >= 256) offlineAt.clear(); // devices come and go: the map is a cache, not a record

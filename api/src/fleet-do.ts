@@ -84,14 +84,23 @@ interface Lease {
   holder: string;
   epoch: number;
   expiresAt: number;
+  /** When the lease was granted (a renewal keeps it). Absent on one stored before it was recorded. */
+  since?: number;
 }
 
 /** A key that has left the fleet, and the sequence the head was at when it did. */
 interface LeftKey {
   pubkey: string;
   until: number;
+  /** The device the key was a member's under, so a publish that was in flight when it left can raise `until`. Not served. */
+  device?: string;
 }
-const LEFT_KEYS_KEPT = 16;
+/**
+ * The most keys that are kept as left. They are also dropped once the snapshots they could have made
+ * are out of the retained index (`2 * RECENT_SNAPSHOTS` behind the tip), so this is only reached by a
+ * fleet that has had this many members come and go within that: far more than `MAX_MEMBERS`.
+ */
+const LEFT_KEYS_KEPT = 256;
 const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 };
 
 /**
@@ -419,6 +428,7 @@ export class FleetDO implements DurableObject {
         member: true,
         primary: held ? held.holder : null,
         epoch: held ? held.epoch : 0,
+        ...(held?.since !== undefined ? { since: held.since } : {}),
       });
     }
     if (caller.kind !== "device") return this.deny();
@@ -428,6 +438,7 @@ export class FleetDO implements DurableObject {
       member: true,
       primary: held ? held.holder : null,
       epoch: held ? held.epoch : 0,
+      ...(held?.since !== undefined ? { since: held.since } : {}),
     });
   }
 
@@ -593,7 +604,7 @@ export class FleetDO implements DurableObject {
     if (path === "/invite-check" && request.method === "POST") return this.inviteCheck(body);
     if (path === "/join" && request.method === "POST") {
       await this.touch();
-      return this.join(caller, body);
+      return this.join(caller, body, request);
     }
     if (path === "/approve" && request.method === "POST") return this.approve(caller, body);
     if (path === "/remove" && request.method === "POST") return this.remove(caller, body, request);
@@ -754,7 +765,7 @@ export class FleetDO implements DurableObject {
     return Response.json({ ok: true, expiresAt: invite.expiresAt });
   }
 
-  private async join(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+  private async join(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
     const code = typeof body.code === "string" ? body.code : "";
     if (!inviteShape(code)) return Response.json({ error: "invalid invite code" }, { status: 400 });
@@ -774,6 +785,8 @@ export class FleetDO implements DurableObject {
         // A member that comes back with a new key takes the new key: it is
         // proving itself, and the snapshots it cannot open are its own.
         if (pubkey && existing.pubkey !== pubkey) {
+          // The old key made snapshots a replica may not have taken in yet: it is a member's key up to there.
+          if (existing.pubkey) await this.recordLeft(existing.pubkey, request.headers.get("x-prime-fleet") ?? "", caller.deviceId);
           existing.pubkey = pubkey;
           members[caller.deviceId] = existing;
           await this.state.storage.put("members", members);
@@ -915,7 +928,7 @@ export class FleetDO implements DurableObject {
       wasMember = true;
       // What the fleet's snapshots were when this member's key stopped being a member's: it made the
       // ones up to there, and a member that was away has still to take them in.
-      if (member.pubkey) await this.recordLeft(member.pubkey, request.headers.get("x-prime-fleet") ?? "");
+      if (member.pubkey) await this.recordLeft(member.pubkey, request.headers.get("x-prime-fleet") ?? "", deviceId);
       // A member that leaves gives up the lease, so the fleet is not held by
       // somebody who is no longer there.
       const held = await this.lease();
@@ -1032,6 +1045,7 @@ export class FleetDO implements DurableObject {
     // corrected the next time the space takes its place.
     let membersChanged = false;
     if (pubkey && members[caller.deviceId]!.pubkey !== pubkey) {
+      if (members[caller.deviceId]!.pubkey) await this.recordLeft(members[caller.deviceId]!.pubkey!, fleetId, caller.deviceId);
       members[caller.deviceId]!.pubkey = pubkey;
       membersChanged = true;
     }
@@ -1056,6 +1070,7 @@ export class FleetDO implements DurableObject {
           role: "replica",
           reason: "lease-held",
           holder: held.holder,
+          ...(held.since !== undefined ? { holderSince: held.since } : {}),
           head,
           epoch: head.epoch,
         });
@@ -1064,6 +1079,11 @@ export class FleetDO implements DurableObject {
       // A member that published without a seal on a fleet whose snapshots are sealed is not given the
       // lease back for a while: an upgraded member has it (see `advance`). It carries on as a replica.
       const bar = (await this.state.storage.get<Record<string, number>>("unsealedBar")) ?? {};
+      // A build that says it seals has been upgraded since: the bar was for the build that refused.
+      if (body.seals === true && bar[caller.deviceId] !== undefined) {
+        delete bar[caller.deviceId];
+        await this.state.storage.put("unsealedBar", bar);
+      }
       if ((bar[caller.deviceId] ?? 0) > now) {
         out = Response.json({
           ok: true,
@@ -1165,8 +1185,11 @@ export class FleetDO implements DurableObject {
       // without the state would fork the fleet. It is told what it has to
       // catch up to, and the Durable Object refuses to let it publish until
       // it says it has.
-      const epoch = head.epoch + 1;
-      const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs };
+      // One more than the last grant, not than the last publish: a holder that published nothing
+      // would hand its epoch to the next one, and the epoch would stop saying who held the lease.
+      // (The head's epoch is the floor, so a fleet whose object storage was lost does not go back.)
+      const epoch = Math.max((await this.state.storage.get<number>("epoch")) ?? 0, head.epoch) + 1;
+      const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs, since: now };
       await this.state.storage.put("lease", lease);
       await this.state.storage.put("epoch", epoch);
       await this.state.storage.delete("claim");
@@ -1287,7 +1310,12 @@ export class FleetDO implements DurableObject {
       await this.state.storage.put("unsealedBar", bar);
       this.broadcast({ type: "lease-free" }, caller.deviceId);
       return Response.json(
-        { error: "this fleet's snapshots are sealed: upgrade prime on this member (it stays a replica until then)", upgrade: true },
+        {
+          // An old client prints this after "the fleet head moved while publishing: " and shows nothing else of the reply.
+          error:
+            "no, it did not: this publish was refused because this fleet's snapshots are sealed and this prime is too old to seal them. Upgrade prime on this member (it carries on as a replica)",
+          upgrade: true,
+        },
         { status: 409 },
       );
     }
@@ -1312,6 +1340,21 @@ export class FleetDO implements DurableObject {
     // A failed conditional write returns null rather than throwing: that is the
     // CAS losing the race, not an error.
     if (!written) return Response.json({ error: "head changed" }, { status: 409 });
+    // The write above gave other requests room to run, and one of them may have removed this member. Its
+    // key is recorded as left up to the head as that request saw it, which does not have this snapshot;
+    // it is a member's up to this one, which the member made while it was one.
+    const rostered = await this.members();
+    if (!rostered[caller.deviceId]) {
+      const left = (await this.state.storage.get<LeftKey[]>("left")) ?? [];
+      let raised = false;
+      for (const k of left) {
+        if (k.device === caller.deviceId && k.until < next.seq) {
+          k.until = next.seq;
+          raised = true;
+        }
+      }
+      if (raised) await this.state.storage.put("left", left);
+    }
     await this.state.storage.put("epoch", next.epoch);
     // The publisher holds the state it has just published: it needs no report to
     // say so. Without this a member whose own report was lost (a timeout, a 503)
@@ -1370,16 +1413,17 @@ export class FleetDO implements DurableObject {
   // that was asleep while the primary published and then left (a machine that is retired for another)
   // still has those snapshots to take in, and they are made with a key that is no longer on the roster:
   // it is a member's for the snapshots up to there, and for none after.
-  private async recordLeft(pubkey: string, fleetId: string): Promise<void> {
+  private async recordLeft(pubkey: string, fleetId: string, device: string): Promise<void> {
     const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
-    const tip = index.length > 0 ? index[index.length - 1]!.seq : (await this.readHead(fleetId)).seq;
+    // The index is pushed after the head is written (see `advance`), so the head can be ahead of it.
+    const tip = Math.max(index.length > 0 ? index[index.length - 1]!.seq : 0, (await this.readHead(fleetId)).seq);
     const left = ((await this.state.storage.get<LeftKey[]>("left")) ?? []).filter((k) => k.pubkey !== pubkey && k.until >= tip - 2 * RECENT_SNAPSHOTS);
-    left.push({ pubkey, until: tip });
+    left.push({ pubkey, until: tip, device });
     await this.state.storage.put("left", left.slice(-LEFT_KEYS_KEPT));
   }
 
-  private async leftKeys(): Promise<LeftKey[]> {
-    return (await this.state.storage.get<LeftKey[]>("left")) ?? [];
+  private async leftKeys(): Promise<{ pubkey: string; until: number }[]> {
+    return ((await this.state.storage.get<LeftKey[]>("left")) ?? []).map(({ pubkey, until }) => ({ pubkey, until }));
   }
 
   // Which fleet this is, as opposed to another that was made under the same name after this one was
@@ -1409,6 +1453,8 @@ export class FleetDO implements DurableObject {
       epoch: held ? held.epoch : 0,
       role: member.role,
       incarnation: await this.incarnation(),
+      // This object does not move the head from a sealed snapshot to one that is not (see `advance`).
+      sealGate: true,
     });
   }
 

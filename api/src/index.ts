@@ -348,13 +348,13 @@ async function relayToFleet(
     headers: asBuddy ? adminHeaders(headers) : headers,
   });
   if (!info.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
-  const body = (await info.json()) as { member?: boolean; primary?: string | null };
+  const body = (await info.json()) as { member?: boolean; primary?: string | null; since?: number };
   if (!asBuddy && !body.member) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
   // The lease outlives the space that holds it by design, so a primary whose
   // tunnel is gone would be the answer for a while yet. It is taken out of the
   // running here, and the fleet is asked again: the member that is waiting in
   // the wings takes over on its next round, a second or two away.
-  if (body.primary && (await vacateSilentPrimary(env, fleetId, body.primary))) {
+  if (body.primary && (await vacateSilentPrimary(env, fleetId, body.primary, typeof body.since === "number" ? body.since : undefined))) {
     const again = await stub.fetch("https://fleet/primary", {
       method: "GET",
       headers: asBuddy ? adminHeaders(headers) : headers,
@@ -496,19 +496,21 @@ async function vacateInFleets(env: Env, deviceId: string): Promise<string[]> {
  * can reach, and the fleet should not wait the rest of its lease to say so.
  */
 const offlineAt = new Map<string, number>();
-async function deviceOnline(env: Env, deviceId: string): Promise<boolean> {
+async function deviceOnline(env: Env, deviceId: string, since?: number): Promise<boolean> {
   return onlineNow(
     deviceId,
     async () => (await effectiveSnapshot(env)).online,
-    async () => {
-      // A snapshot read a moment ago is as fresh as one read now.
-      if (mapCache && Date.now() - mapCache.at < 250) return mapCache.snap.online;
+    async (notBefore) => {
+      // A snapshot read a moment ago is as fresh as one read now (unless the device took its place after it).
+      if (mapCache && Date.now() - mapCache.at < 250 && (notBefore === undefined || mapCache.at >= notBefore)) return mapCache.snap.online;
       const snap = await freshSnapshot(env);
       mapCache = { at: Date.now(), snap };
       return snap.online;
     },
     offlineAt,
     MAP_CACHE_TTL_MS,
+    Date.now,
+    since,
   );
 }
 
@@ -520,9 +522,9 @@ async function deviceOnline(env: Env, deviceId: string): Promise<boolean> {
  * sleep still holds it until it runs out. This turns that wait into one round:
  * the space comes back in a second or two instead of in fifteen.
  */
-async function vacateSilentPrimary(env: Env, fleetId: string, holder: string | null | undefined): Promise<string | null> {
+async function vacateSilentPrimary(env: Env, fleetId: string, holder: string | null | undefined, since?: number): Promise<string | null> {
   if (!env.FLEET || !holder) return null;
-  if (await deviceOnline(env, holder)) return null;
+  if (await deviceOnline(env, holder, since)) return null;
   const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
   const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId });
   await stub
@@ -992,7 +994,7 @@ export default {
           const auth = await authorizeDevice(deviceId, request, url, cfg, env);
           return auth.denied ? { ok: false as const, response: auth.denied } : { ok: true as const };
         },
-        deviceOnline: (deviceId: string) => deviceOnline(env, deviceId),
+        deviceOnline: (deviceId: string, since?: number) => deviceOnline(env, deviceId, since),
         fleetPaused: async (fleetId: string) => (await effectiveSnapshot(env)).paused.has(fleetId),
       });
       if (fleetResponse) return fleetResponse;

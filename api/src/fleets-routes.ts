@@ -354,7 +354,7 @@ export interface FleetDeps {
   /** prove a device credential; returns the deviceId or null. */
   authorizeDevice: (deviceId: string) => Promise<{ ok: true } | { ok: false; response: Response }>;
   /** whether a device holds a tunnel right now, as the registry sees it. */
-  deviceOnline?: (deviceId: string) => Promise<boolean>;
+  deviceOnline?: (deviceId: string, since?: number) => Promise<boolean>;
   /** whether the operator has paused this fleet, from the registry's copy. */
   fleetPaused?: (fleetId: string) => Promise<boolean>;
   unauthorized: () => Response;
@@ -567,8 +567,8 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   // fleet should not wait it out: the holder is taken out of the running and
   // the ask is repeated, so the takeover costs a round instead of a lease.
   if (action === "bootstrap" && response.ok && deps.deviceOnline) {
-    const ask = (await response.clone().json().catch(() => ({}))) as { reason?: string; holder?: string };
-    if (ask.reason === "lease-held" && ask.holder && !(await deps.deviceOnline(ask.holder))) {
+    const ask = (await response.clone().json().catch(() => ({}))) as { reason?: string; holder?: string; holderSince?: number };
+    if (ask.reason === "lease-held" && ask.holder && !(await deps.deviceOnline(ask.holder, typeof ask.holderSince === "number" ? ask.holderSince : undefined))) {
       const vacateHeaders = new Headers(headers);
       vacateHeaders.set("x-prime-caller", "admin");
       await stub

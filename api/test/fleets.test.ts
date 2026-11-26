@@ -509,6 +509,34 @@ describe("whether a primary is taken to be gone", () => {
     expect(offlineAt.has("dev-primary")).toBe(false);
   });
 
+  test("a device that took its place after the verdict is looked for again, whatever the verdict said", async () => {
+    let tunnel = false;
+    let clock = 10_000;
+    const at = () => clock;
+    const offlineAt = new Map<string, number>();
+    const snap = async () => new Set<string>(); // the registry snapshot predates the tunnel
+    const fresh = async () => new Set<string>(tunnel ? ["p"] : []);
+    expect(await onlineNow("p", snap, fresh, offlineAt, 2_000, at)).toBe(false);
+    clock += 300;
+    tunnel = true;
+    const tookPlace = clock; // its tunnel opened, and it took the lease
+    clock += 700;
+    // Without the lease's age, the call a second later would vacate it on the verdict from before.
+    expect(await onlineNow("p", snap, fresh, offlineAt, 2_000, at, tookPlace)).toBe(true);
+  });
+
+  test("and a lease that is not young is judged by the verdict, which is read once", async () => {
+    let reads = 0;
+    const offlineAt = new Map<string, number>();
+    const fresh = async () => {
+      reads++;
+      return new Set<string>();
+    };
+    let clock = 10_000;
+    for (let i = 0; i < 20; i++) expect(await onlineNow("p", async () => new Set<string>(), fresh, offlineAt, 2_000, () => clock, 1_000)).toBe(false);
+    expect(reads).toBe(1);
+  });
+
   test("one the snapshot lists is not asked about again, and one nobody lists is gone", async () => {
     let fresh = 0;
     const now = async () => {
@@ -551,6 +579,143 @@ describe("the keys of members that have left", () => {
     expect((await roster(doInstance, "dev-owner")).json.left).toEqual([{ pubkey: PUB_B, until: 5 }]);
     await call(doInstance, "/delete", { caller: "admin", device: "operator", body: {} });
     expect(state.data.get("left")).toBeUndefined();
+  });
+});
+
+describe("a member that goes while its publish is in flight, or is re-keyed", () => {
+  const PUB_B = "B".repeat(43) + "=";
+  const roster = (d: FleetDO, device: string) => call(d, "/members", { caller: "device", device, method: "GET" });
+  async function fleetOfTwo(bucket = fakeBucket()) {
+    const made = makeDo(bucket);
+    await makeFleet(made.doInstance, "dev-owner");
+    const inv = await call(made.doInstance, "/invite", { caller: "device", device: "dev-owner", body: { autoApprove: true } });
+    await call(made.doInstance, "/join", { caller: "device", device: "dev-two", body: { code: inv.json.code, pubkey: PUB_B } });
+    await call(made.doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    await call(made.doInstance, "/bootstrap", { caller: "device", device: "dev-owner" });
+    return made;
+  }
+  const publish = (d: FleetDO, device: string, expectedSeq: number) =>
+    call(d, "/head/advance", { caller: "device", device, body: { expectedSeq, manifestKey: "m/" + (expectedSeq + 1), manifestHash: "h" + (expectedSeq + 1), meta: { full: true } } });
+
+  test("is a member's key for the snapshot it was publishing, not only for the ones before", async () => {
+    const bucket = fakeBucket();
+    const { doInstance } = await fleetOfTwo(bucket);
+    expect((await publish(doInstance, "dev-owner", 0)).status).toBe(200);
+    // The head write is slow: the operator removes the member while it is in flight.
+    const realPut = bucket.put;
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const arrived = new Promise<void>((r) => (reached = r));
+    bucket.put = async (...args: Parameters<typeof realPut>) => {
+      reached();
+      await gate;
+      return realPut.apply(bucket, args);
+    };
+    const inflight = publish(doInstance, "dev-owner", 1);
+    await arrived;
+    const gone = await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "dev-owner" } });
+    expect(gone.status).toBe(200);
+    release();
+    const done = await inflight;
+    expect(done.status).toBe(200);
+    // The snapshot it made is the head now: its key is a member's for it.
+    expect((await roster(doInstance, "dev-two")).json.left).toEqual([{ pubkey: TEST_PUBKEY, until: 2 }]);
+  });
+
+  test("a key that left is credited up to the head in storage, which can be ahead of the index", async () => {
+    const bucket = fakeBucket();
+    const { doInstance, state } = await fleetOfTwo(bucket);
+    await publish(doInstance, "dev-owner", 0);
+    // The head was written and the object went away before it pushed the index.
+    bucket.objects.set("fleets/acme/head", { body: JSON.stringify({ seq: 3, manifestKey: "m/3", manifestHash: "h3", epoch: 1 }), etag: "x" });
+    expect((state.data.get("index") as Array<{ seq: number }>).at(-1)!.seq).toBe(1);
+    await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "dev-owner" } });
+    expect((await roster(doInstance, "dev-two")).json.left).toEqual([{ pubkey: TEST_PUBKEY, until: 3 }]);
+  });
+
+  test("a key a member replaces, when it joins again or takes its place, is recorded as left", async () => {
+    const { doInstance } = await fleetOfTwo();
+    await publish(doInstance, "dev-owner", 0);
+    const code = (await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} })).json.code;
+    const C = "C".repeat(43) + "=";
+    const D = "D".repeat(43) + "=";
+    await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code, pubkey: C } });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two", body: { pubkey: D } });
+    const left = (await roster(doInstance, "dev-owner")).json.left as Array<{ pubkey: string; until: number }>;
+    expect(left).toEqual([{ pubkey: PUB_B, until: 1 }, { pubkey: C, until: 1 }]);
+  });
+
+  test("the keys that left are kept for a fleet that has had many members, and go with the snapshots they could have made", async () => {
+    const { doInstance, state } = await fleetOfTwo();
+    const keys = Array.from({ length: 100 }, (_, i) => ({ pubkey: String(i).padStart(43, "X") + "=", until: 5 }));
+    state.data.set("left", keys);
+    state.data.set("index", [{ seq: 5, manifestKey: "m5", full: true }]);
+    await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    expect(((await roster(doInstance, "dev-owner")).json.left as unknown[]).length).toBe(101);
+  });
+});
+
+describe("the lease's epoch", () => {
+  test("two holders in a row, neither of which published, are not given the same epoch", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-a");
+    const inv = await call(doInstance, "/invite", { caller: "device", device: "dev-a", body: { autoApprove: true } });
+    await call(doInstance, "/join", { caller: "device", device: "dev-b", body: { code: inv.json.code, pubkey: "B".repeat(43) + "=" } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-b" } });
+    const first = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-a" });
+    await call(doInstance, "/lease/release", { caller: "device", device: "dev-a" });
+    const second = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-b" });
+    await call(doInstance, "/lease/release", { caller: "device", device: "dev-b" });
+    const third = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-a" });
+    expect([first.json.epoch, second.json.epoch, third.json.epoch]).toEqual([1, 2, 3]);
+  });
+});
+
+describe("a member that is barred for publishing without a seal", () => {
+  async function barred() {
+    const made = makeDo();
+    await makeFleet(made.doInstance, "dev-old");
+    const inv = await call(made.doInstance, "/invite", { caller: "admin", device: "dev-old", body: {} });
+    await call(made.doInstance, "/join", { caller: "device", device: "dev-new", body: { code: inv.json.code } });
+    await call(made.doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-new" } });
+    await call(made.doInstance, "/bootstrap", { caller: "device", device: "dev-old" });
+    await call(made.doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1", meta: { full: true, sealed: true } } });
+    const refused = await call(made.doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2", meta: { full: false } } });
+    expect(refused.status).toBe(409);
+    return made;
+  }
+
+  test("is told to upgrade for as long as it asks as the build that was refused", async () => {
+    const { doInstance } = await barred();
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "dev-old" })).json.reason).toBe("upgrade-required");
+  });
+
+  test("has the bar lifted as soon as it says it seals", async () => {
+    const { doInstance } = await barred();
+    const asked = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-old", body: { seals: true } });
+    expect(asked.json.role).toBe("primary");
+  });
+
+  test("the gateway says it has the gate", async () => {
+    const { doInstance } = await barred();
+    const role = await call(doInstance, "/role", { caller: "device", device: "dev-old", method: "GET" });
+    expect(role.json.sealGate).toBe(true);
+  });
+});
+
+describe("the holder of a lease, as the Worker asks about it", () => {
+  test("says since when it has held it, and a renewal does not move that", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-a");
+    const before = Date.now();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-a" });
+    const first = (await call(doInstance, "/primary", { caller: "device", device: "dev-a", method: "GET" })).json;
+    expect(first.since).toBeGreaterThanOrEqual(before);
+    await new Promise((r) => setTimeout(r, 5));
+    await call(doInstance, "/lease/renew", { caller: "device", device: "dev-a", body: {} });
+    const again = (await call(doInstance, "/primary", { caller: "device", device: "dev-a", method: "GET" })).json;
+    expect(again.since).toBe(first.since);
   });
 });
 
@@ -691,7 +856,9 @@ describe("a fleet whose snapshots are sealed", () => {
     const { doInstance } = await sealedFleet();
     const refused = await call(doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2", meta: { full: false } } });
     expect(refused.status).toBe(409);
-    expect(refused.json.error).toMatch(/upgrade prime/);
+    expect(refused.json.error).toMatch(/Upgrade prime/);
+    // An old client prints it after "the fleet head moved while publishing: ", and shows nothing else of the reply.
+    expect("the fleet head moved while publishing: " + refused.json.error).toMatch(/^the fleet head moved while publishing: no, it did not: this publish was refused because/);
     // Its lease is handed on: the upgraded member that has applied the head takes it, and the old one cannot take it back.
     await call(doInstance, "/applied", { caller: "device", device: "dev-new", body: { seq: 1 } });
     const old = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-old" });
@@ -743,6 +910,38 @@ describe("a fleet whose snapshots are sealed", () => {
     }
     expect(advances[0]!.meta.sealed).toBe(true);
     expect(advances[1]!.meta.sealed).toBeUndefined();
+  });
+});
+
+describe("the Worker, asked for a place that another holds", () => {
+  test("tells the check of whether the holder is connected since when the holder has held it, and vacates a holder that is not", async () => {
+    const seen: Array<[string, number | undefined]> = [];
+    const calls: string[] = [];
+    const stub = {
+      async fetch(input: Request | string) {
+        const url = typeof input === "string" ? input : input.url;
+        calls.push(url.replace("https://fleet", ""));
+        if (url.endsWith("/role")) return Response.json({ member: true });
+        if (url.endsWith("/bootstrap")) return Response.json({ ok: true, role: "replica", reason: "lease-held", holder: "dev-p", holderSince: 4242 });
+        return Response.json({ ok: true });
+      },
+    };
+    const env = { FLEET: { idFromName: (n: string) => n, get: () => stub } } as never;
+    const url = new URL("https://gateway/fleets/acme/bootstrap");
+    await handleFleetRoutes({
+      request: new Request(url, { method: "POST", headers: { "x-prime-device": "dev-q", "x-device-token": "t" }, body: "{}" }),
+      env,
+      url,
+      cfg: { gatewayToken: "op-secret" } as never,
+      authorizeDevice: async () => ({ ok: true as const }),
+      unauthorized: () => new Response(null, { status: 401 }),
+      deviceOnline: async (device: string, since?: number) => {
+        seen.push([device, since]);
+        return false;
+      },
+    } as never);
+    expect(seen).toEqual([["dev-p", 4242]]);
+    expect(calls.filter((c) => c === "/vacate").length).toBe(1);
   });
 });
 
