@@ -17,12 +17,13 @@ import type { Config, SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgent, uninstallFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
@@ -817,7 +818,5 @@ export function writeFleetState(configPath: string, fleetId: string, spaceName: 
   // Written beside it and moved into place: the agent and `prime fleets sync` can
   // both write this file, and a reader that met a half-written one would take it
   // for no state at all (and apply the fleet again from nothing).
-  const scratch = file + "." + process.pid + ".tmp";
-  writeFileSync(scratch, JSON.stringify(state, null, 2), { mode: 0o600 });
-  renameSync(scratch, file);
+  writeFileAtomic(file, JSON.stringify(state, null, 2));
 }

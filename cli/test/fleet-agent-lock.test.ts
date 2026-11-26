@@ -311,6 +311,28 @@ describe("one fleet agent per configuration", () => {
     expect(isFleetAgentProcess(process.pid, dir, () => probe(20))).toBe(false);
   });
 
+  test("racing `agent start`s: concurrent writers of settings and state never trip over each other's temp file", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const daemon = join(import.meta.dir, "../src/fleet-daemon.ts");
+    const code = `
+      const d = await import(${JSON.stringify(daemon)});
+      const cfg = ${JSON.stringify(configPath)};
+      for (let i = 0; i < 60; i++) {
+        d.persistAgentSettings(cfg, { PRIME_FLEET_REPLICA: (i + process.pid) % 2 ? "mirror" : "lazy" });
+        d.writeAgentState(cfg, { pid: process.pid, started_at: "x", config_path: cfg, rounds: i });
+      }
+    `;
+    mkdirp(fleetAgentDir(configPath));
+    const children = Array.from({ length: 8 }, () => Bun.spawn([process.execPath, "-e", code], { stdin: "ignore", stdout: "ignore", stderr: "pipe" }));
+    const results = await Promise.all(children.map(async (c) => ({ code: await c.exited, err: await new Response(c.stderr).text() })));
+    expect(results.filter((r) => r.code !== 0).map((r) => r.err.slice(0, 200))).toEqual([]);
+    // What is left is whole, and no temp file is.
+    expect(["lazy", "mirror"]).toContain(readAgentSettings(configPath).replica!);
+    expect(JSON.parse(readFileSync(fleetAgentStatePath(configPath), "utf8")).rounds).toBeGreaterThanOrEqual(0);
+    expect(readdirSync(fleetAgentDir(configPath)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
   test("the state file is an agent's own to write or remove only if it names that agent or nobody alive", async () => {
     const root = scratch();
     const configPath = join(root, "config.json");
@@ -716,5 +738,64 @@ describe("switching the replica mode of a running agent", () => {
     expect(other.killed).toBe(false);
     expect(other.exitCode).toBeNull();
     expect(existsSync(fleetAgentStatePath(configPath))).toBe(false);
+  });
+
+  test("an agent that a command starts is told not to wait for a lock that is held, and leaves at once when it lost the race", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    let seen: Record<string, string | undefined> = {};
+    const winner = plainAgent();
+    const state = await ensureFleetAgent(configPath, {}, {
+      installed: () => false,
+      pid: () => undefined,
+      restart: () => false,
+      spawnAgent: (env) => {
+        seen = env;
+        // Another start won: the state that appears is the winner's.
+        running(configPath, winner.pid, "lazy");
+      },
+    });
+    expect(seen.PRIME_FLEET_LOCK_WAIT_MS).toBe("0");
+    expect(state.pid).toBe(winner.pid);
+    // The agent, with that setting, does not wait for a live holder (the default is 10 s).
+    const other = join(scratch(), "config.json");
+    running(other, winner.pid, "lazy");
+    withEnv("PRIME_FLEET_LOCK_WAIT_MS", "0");
+    const was = process.exitCode;
+    cleanups.push(() => {
+      process.exitCode = was;
+    });
+    const began = Date.now();
+    await runFleetAgent(other);
+    expect(Date.now() - began).toBeLessThan(2000);
+    expect(process.exitCode).toBe(1);
+    // And leaves the winner's state and lock as they were.
+    expect(JSON.parse(readFileSync(fleetAgentStatePath(other), "utf8")).pid).toBe(winner.pid);
+    expect(readFileSync(agentLockPath(fleetAgentDir(other)), "utf8").trim()).toBe(String(winner.pid));
+  });
+
+  test("a configuration with no service restarts its own agent on a mode change (a new pid), and the manager is never called", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    running(configPath, old.pid, "mirror");
+    withMode("lazy");
+    let managerCalls = 0;
+    let spawnedPid = 0;
+    const state = await ensureFleetAgent(configPath, { fromShell: true }, {
+      installed: () => false,
+      pid: () => (managerCalls++, undefined),
+      restart: () => (managerCalls++, true),
+      stopWaitMs: 3000,
+      spawnAgent: () => {
+        spawnedPid = plainAgent().pid;
+        running(configPath, spawnedPid, "lazy");
+      },
+    });
+    expect(state.pid).toBe(spawnedPid);
+    expect(state.pid).not.toBe(old.pid);
+    expect(state.replica).toBe("lazy");
+    expect(() => process.kill(old.pid, 0)).toThrow();
+    expect(managerCalls).toBe(0);
   });
 });

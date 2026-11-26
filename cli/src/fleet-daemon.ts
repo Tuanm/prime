@@ -21,12 +21,13 @@
 // Nothing here holds a secret in the clear beyond what the configuration
 // already holds, and the agent inherits only the environment it needs.
 
-import { mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { acquireAgentLock, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
@@ -109,8 +110,7 @@ export function fleetAgentStatePath(configPath: string): string {
  */
 export function writeAgentState(configPath: string, state: FleetAgentState): void {
   const file = fleetAgentStatePath(configPath);
-  writeFileSync(file + ".tmp", JSON.stringify(state), { mode: 0o600 });
-  renameSync(file + ".tmp", file);
+  writeFileAtomic(file, JSON.stringify(state));
 }
 
 /**
@@ -254,8 +254,7 @@ function writeAgentSettings(configPath: string, settings: AgentSettings): void {
     return;
   }
   mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
-  writeFileSync(file + ".tmp", JSON.stringify(settings, null, 2), { mode: 0o600 });
-  renameSync(file + ".tmp", file);
+  writeFileAtomic(file, JSON.stringify(settings, null, 2));
 }
 
 /**
@@ -307,7 +306,8 @@ export function buildAgentEnv(
   env: Record<string, string | undefined> = process.env,
   shell = true,
 ): Record<string, string | undefined> {
-  const agentEnv: Record<string, string | undefined> = { PRIME_FLEET_AGENT_DIR: fleetAgentDir(configPath) };
+  // A command started this agent after the old one was gone: if the lock is held it lost a race, and leaves at once.
+  const agentEnv: Record<string, string | undefined> = { PRIME_FLEET_AGENT_DIR: fleetAgentDir(configPath), PRIME_FLEET_LOCK_WAIT_MS: "0" };
   const saved = readAgentSettings(configPath);
   const settings = shell ? settingsAsked(saved, env, options) : saved;
   for (const key of SETTING_KEYS) {
@@ -444,7 +444,8 @@ export async function ensureFleetAgent(
   // No service for this configuration, or the manager has no agent to restart and would not start
   // one: the agent is started directly. If the manager did start one meanwhile, the lock makes this
   // one exit and that one's state is returned.
-  rmSync(fleetAgentStatePath(configPath), { force: true });
+  // (Not a live agent's state, though: a racing start may have just started one.)
+  if (!runningAgent(configPath)) rmSync(fleetAgentStatePath(configPath), { force: true });
   mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
   const agentEnv = buildAgentEnv(configPath, options, process.env, shell);
   if (service.spawnAgent) service.spawnAgent(agentEnv);
@@ -1250,6 +1251,17 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
 }
 
 /**
+ * How long a starting agent waits for the holder of the lock. An agent that a command started
+ * (after it had stopped any old one and waited for it to be gone) is told not to wait: a live
+ * holder is a winner of a race, and it leaves at once. One a service manager restarts waits for
+ * the old one to finish its round.
+ */
+function lockWaitFromEnv(): number {
+  const n = Number(process.env.PRIME_FLEET_LOCK_WAIT_MS);
+  return process.env.PRIME_FLEET_LOCK_WAIT_MS !== undefined && Number.isFinite(n) && n >= 0 ? n : 10_000;
+}
+
+/**
  * The agent's loop.
  *
  * Every space gets its own loop, so a space that is slow does not hold up the
@@ -1259,7 +1271,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   // Two agents for the same spaces would both act as the primary. A restart finds the old
   // one still finishing its round, so it is given a moment to let go.
   const lock = await acquireAgentLock(fleetAgentDir(configPath), {
-    waitMs: options.lockWaitMs ?? 10_000,
+    waitMs: options.lockWaitMs ?? lockWaitFromEnv(),
     // Another agent has the lock: two took a dead one at the same moment. This one stops, and its
     // manager (or the next command) starts it again behind the lock. It finishes its current round
     // first, so the two overlap for up to one touch interval plus that round.
@@ -1303,7 +1315,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
 
   // The runtime is found once: it is used to tell whether a space is
   // running, and looking it up on every round would be slow.
-  const runtime = await detectRuntime().catch(() => undefined);
+  const runtimeFound = detectRuntime().catch(() => undefined);
   const startedAt = new Date().toISOString();
   let lastError: string | undefined;
   let lastAction: string | undefined;
@@ -1343,6 +1355,8 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   // says "pull now" must not wait for the next sleep to end.
   const pending = new Set<string>();
   write(0);
+  // Looked for while the first state was being written: a start that is waiting for the state does not wait for this.
+  const runtime = await runtimeFound;
 
   // A signal that a space's work tree changed, so a sleeping loop wakes at once
   // rather than waiting for its next turn.
