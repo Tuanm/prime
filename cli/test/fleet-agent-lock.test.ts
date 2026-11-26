@@ -135,12 +135,48 @@ describe("one fleet agent per configuration", () => {
     const old = new Date(Date.now() - 31_000);
     utimesSync(lock, old, old);
     expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 2, stdout: "" }))).toBe(false);
-    // What it does say is believed, whatever the lock's age: "no such process" and "something else", or "an agent".
+    // What it does say is believed, whatever the lock's age: "something else", or "an agent".
     writeFileSync(lock, process.pid + "\n");
-    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 1, stdout: "" }))).toBe(false);
+    // Status 1 and nothing printed is what busybox's ps says for a pid it cannot list. The pid is alive: unknown, not gone.
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 1, stdout: "" }))).toBe(true);
     expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "vim notes.md\n" }))).toBe(false);
     utimesSync(lock, old, old);
     expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "bun cli.ts __fleet-agent --config x\n" }))).toBe(true);
+  });
+
+  test("an agent of a build from before the lock is still seen where the process list says nothing: by its state file", async () => {
+    const dir = scratch();
+    const old = await fakeAgent();
+    const state = join(dir, "state.json");
+    const none = () => null;
+    writeFileSync(state, JSON.stringify({ pid: old.pid, started_at: "x" }));
+    // No lock, a fresh state file that names it: it is the agent.
+    expect(isFleetAgentProcess(old.pid, dir, none)).toBe(true);
+    // Another pid is not named by it, however fresh.
+    expect(isFleetAgentProcess(process.pid, dir, none)).toBe(false);
+    // A state file nobody has written for a while names nobody.
+    const longAgo = new Date(Date.now() - 600_000);
+    utimesSync(state, longAgo, longAgo);
+    expect(isFleetAgentProcess(old.pid, dir, none)).toBe(false);
+    // With a lock, the lock decides: it names its holder, and nobody else for being alive.
+    writeFileSync(state, JSON.stringify({ pid: old.pid, started_at: "x" }));
+    writeFileSync(agentLockPath(dir), process.pid + "\n");
+    expect(isFleetAgentProcess(old.pid, dir, none)).toBe(false);
+    expect(isFleetAgentProcess(process.pid, dir, none)).toBe(true);
+  });
+
+  test("status, stop and start see a pre-lock agent where the process list says nothing: it is not started beside", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    mkdirp(fleetAgentDir(configPath));
+    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid: old.pid, started_at: "x", config_path: configPath, replica: "lazy" }));
+    // Where ps or /proc answer, the command line names it; where they do not (some sandboxes, Windows), the state file does.
+    expect(fleetAgentStatus(configPath).running).toBe(true);
+    expect((await ensureFleetAgent(configPath, {}, { installed: () => false, pid: () => undefined, restart: () => false })).pid).toBe(old.pid);
+    expect(stopFleetAgent(configPath)).toBe(true);
+    await Bun.sleep(100);
+    expect(() => process.kill(old.pid, 0)).toThrow();
   });
 
   test("a holder keeps its lock fresh while it lives, whatever else it writes: a stopping agent is not mistaken for a dead one", async () => {
@@ -228,7 +264,7 @@ describe("switching the replica mode of a running agent", () => {
     expect(state.pid).not.toBe(old.pid);
     expect(state.replica).toBe("mirror");
     // The old agent was left to the manager: nothing here signalled it.
-    expect(isFleetAgentProcess(old.pid, fleetAgentDir(configPath))).toBe(true);
+    expect(() => process.kill(old.pid, 0)).not.toThrow();
   });
 
   test("without a service the old agent is stopped, and a new one is never spawned while it is alive", async () => {
@@ -452,6 +488,8 @@ describe("switching the replica mode of a running agent", () => {
     cleanups.push(() => other.kill("SIGKILL"));
     mkdirp(fleetAgentDir(configPath));
     writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid: other.pid, started_at: "x", config_path: configPath }));
+    const longAgo = new Date(Date.now() - 600_000);
+    utimesSync(fleetAgentStatePath(configPath), longAgo, longAgo);
     expect(fleetAgentStatus(configPath).running).toBe(false);
     expect(stopFleetAgent(configPath)).toBe(false);
     await Bun.sleep(100);

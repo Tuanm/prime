@@ -9,7 +9,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The lock lives in the agent's own directory (`fleetAgentDir`). */
@@ -47,23 +47,48 @@ const psProbe: ProcessProbe = (pid) => {
   }
 };
 
+// Linux says it without a process to run (and in containers that have no ps).
+const procProbe: ProcessProbe = (pid) => {
+  try {
+    const line = readFileSync("/proc/" + pid + "/cmdline", "utf8").replace(/\0/g, " ").trim();
+    return line === "" ? null : { status: 0, stdout: line };
+  } catch {
+    return null;
+  }
+};
+
+const defaultProbe: ProcessProbe = (pid) => (process.platform === "linux" ? procProbe(pid) : null) ?? psProbe(pid);
+
 /**
  * Whether this pid is a fleet agent. A pid in a lock that survived a reboot may belong to
  * any process now, and a lock that is never let go of would keep the agent from starting
- * for ever. The process list says what the process is, when it gives an answer: a list of
- * one command, or "no such process" (status 1 and nothing printed). Any other outcome (no
- * `ps`, one that does not know `-p`, one that refuses) is not an answer; the pid is alive,
- * and it counts as an agent while its lock was touched recently.
+ * for ever. The process list says what the process is when it gives an answer: one command
+ * line. Nothing else is an answer. The pid is alive (that was checked), so a `ps` that
+ * prints nothing or exits non-zero (busybox, which has no -p; one that is not allowed to see
+ * the process; none at all) has not said it is gone. Then the files say: the lock names this
+ * pid and was touched lately (every agent holds and touches one), or, for an agent of a build
+ * from before the lock, there is no lock and its state file names this pid and was written lately.
  */
-export function isFleetAgentProcess(pid: number, agentDir?: string, probe: ProcessProbe = psProbe): boolean {
+export function isFleetAgentProcess(pid: number, agentDir?: string, probe: ProcessProbe = defaultProbe): boolean {
   if (!pidAlive(pid)) return false;
   if (process.platform !== "win32") {
     const answer = probe(pid);
     if (answer && answer.status === 0 && answer.stdout.trim() !== "") return answer.stdout.includes("__fleet-agent");
-    if (answer && answer.status === 1 && answer.stdout.trim() === "") return false;
   }
   if (agentDir === undefined) return true;
-  return freshFile(agentLockPath(agentDir));
+  const lock = agentLockPath(agentDir);
+  if (existsSync(lock)) return readHolder(lock) === pid && freshFile(lock);
+  const state = join(agentDir, "state.json");
+  return statePid(state) === pid && freshFile(state);
+}
+
+function statePid(file: string): number | null {
+  try {
+    const pid = (JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown }).pid;
+    return typeof pid === "number" ? pid : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface AgentLockOptions {
