@@ -19,7 +19,7 @@
 
 import { createHash, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -349,7 +349,7 @@ function isLeftAlone(rel: string, keep: string[]): boolean {
 // never tracked (.env, node_modules, a build output, a note the person made)
 // is never on the list.
 //
-async function removedBetween(
+export async function removedBetween(
   gitDir: string,
   env: Record<string, string>,
   previous: string | null | undefined,
@@ -418,6 +418,67 @@ function removeTracked(work: string, rel: string): void {
   }
 }
 
+// Make the apply index say what this member's work tree holds from the fleet.
+//
+// read-tree compares its index with the new tree and removes whatever the
+// index has and the tree lacks. That is a second deleter, and it deletes by
+// what the index happens to hold: after the member was primary for a while, or
+// after a half-finished apply, the index is the tree of some older apply, and
+// it would take away files that are the member's own. So before every apply
+// the index is brought to exactly `previous` - the tree the fleet last gave
+// this member - and the directories the fleet leaves alone are taken out of it.
+// Then the only entries read-tree can find that the new tree lacks are the ones
+// in previous-but-not-new, which the guarded removal below has already taken
+// out of the work tree and the index.
+//
+// The index is only rebuilt when it is not already `previous` (a sidecar file
+// says which tree it was written for), so a steady replica pays nothing.
+//
+async function alignApplyIndex(
+  gitDir: string,
+  env: Record<string, string>,
+  previous: string | null | undefined,
+  keep: string[],
+): Promise<void> {
+  const indexFile = join(gitDir, "apply.index");
+  const sidecar = join(gitDir, "apply.commit");
+  let known = false;
+  if (previous && OBJECT_ID.test(previous)) {
+    try {
+      await gitText(gitDir, ["cat-file", "-e", previous + "^{tree}"], env);
+      known = true;
+    } catch {}
+  }
+  if (!known) {
+    // No record of what came before: the index may name anything, so it names
+    // nothing, and nothing is removed.
+    rmSync(indexFile, { force: true });
+    rmSync(sidecar, { force: true });
+    return;
+  }
+  let trusted = false;
+  try {
+    trusted = existsSync(indexFile) && readFileSync(sidecar, "utf8").trim() === previous;
+  } catch {}
+  if (!trusted) {
+    rmSync(indexFile, { force: true });
+    rmSync(sidecar, { force: true });
+    await gitRun(gitDir, ["read-tree", previous!], env);
+    // read-tree leaves no stat data, and without it the next read-tree -u would
+    // write every file again. A refresh records it; files that differ or are
+    // missing make it exit non-zero, which is not a failure here.
+    await gitRun(gitDir, ["update-index", "-q", "--refresh"], env).catch(() => undefined);
+  }
+  if (keep.length > 0) {
+    const listed = await gitRun(
+      gitDir,
+      ["ls-files", "-z", "--cached", "--"].concat(keep.map((p) => ":(literal)" + p)),
+      env,
+    );
+    if (listed.length > 0) await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, listed);
+  }
+}
+
 // Apply a pack to a work tree.
 //
 // The objects go into prime's own store, and the tree is written over the
@@ -425,6 +486,13 @@ function removeTracked(work: string, rel: string): void {
 // fleet owns: those the new snapshot has are written, and those the previous
 // snapshot had and the new one does not are removed. Everything else in the
 // work tree belongs to the member and is left alone.
+//
+// What is removed is decided by the diff between the previous tree and the new
+// one (`removedBetween`) and carried out by `removeTracked`, before anything is
+// written: it is the one place that knows about symlinks, case folding and the
+// directories the fleet leaves alone. The apply index is aligned to the
+// previous tree first, so git's own deletion in read-tree can only ever name
+// the same set; it is a safety net for a crash, not a second opinion.
 //
 export async function applyPack(
   work: string,
@@ -443,18 +511,21 @@ export async function applyPack(
   // those live in the replica's own store from the snapshot before it.
   // Without this the pack cannot be resolved and git refuses it.
   await gitRun(gitDir, ["index-pack", "--stdin", "--fix-thin"], env, pack);
+  const keep = (exclude ?? []).map((p) => p.replace(/\/$/, ""));
+  await alignApplyIndex(gitDir, env, previous, keep);
   // What goes is worked out from the two trees, and goes first: git's own
   // order is removals, then writes. A name that only changes case is then
   // removed before the new spelling is written, never after it.
-  const keep = (exclude ?? []).map((p) => p.replace(/\/$/, ""));
   const gone = (await removedBetween(gitDir, env, previous, commit)).filter((rel) => !isLeftAlone(rel, keep));
   for (const rel of gone) removeTracked(work, rel);
-  // The index is told too, so that read-tree has nothing left to delete: what
-  // leaves the work tree is decided here and nowhere else.
   if (gone.length > 0) {
     await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, gone.join("\u0000") + "\u0000");
   }
+  // The sidecar goes while the index is in between; it comes back when the
+  // apply is whole, so an apply that dies half way is rebuilt next time.
+  rmSync(join(gitDir, "apply.commit"), { force: true });
   await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
+  writeFileSync(join(gitDir, "apply.commit"), commit + "\n");
 }
 
 /** Wait until the work tree stops changing, so a half-written file is not captured. */

@@ -12,6 +12,7 @@ import {
   NestedRepoCache,
   payloadId,
   preserveLocalChange,
+  removedBetween,
   seal,
   snapshot,
   unseal,
@@ -407,11 +408,94 @@ describe("applying a snapshot keeps what the fleet never synced", () => {
     try {
       rmSync(join(r.work, "mine"), { recursive: true });
       const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
-      // The apply's own index no longer knows the file (as after a switch of
-      // role), so only the tree diff names it - and the exclusion holds.
-      rmSync(join(r.otherGit, "apply.index"), { force: true });
       await applyPack(r.other, r.otherGit, second.commit, second.pack, ["mine"], r.first.commit);
       expect(existsSync(join(r.other, "mine", "x.txt"))).toBe(true);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("what leaves the work tree is decided by the two trees", () => {
+  test("with no apply index at all, the dropped file still goes: the tree diff is the deleter", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "gone.txt": "bye", "sub/deep.txt": "d" });
+    try {
+      writeFileSync(join(r.other, "mine.txt"), "mine");
+      rmSync(join(r.work, "gone.txt"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      rmSync(join(r.otherGit, "apply.index"), { force: true });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], r.first.commit);
+      expect(existsSync(join(r.other, "gone.txt"))).toBe(false);
+      expect(existsSync(join(r.other, "mine.txt"))).toBe(true);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("the diff names exactly the paths the fleet dropped, whatever they are called", async () => {
+    const odd = "dir with space/it's \"q\" é.txt";
+    const r = await replicaOf({ "keep.txt": "k", [odd]: "x", "gone.txt": "g", "sub/gone2.txt": "g2" });
+    try {
+      rmSync(join(r.work, "gone.txt"));
+      rmSync(join(r.work, "sub"), { recursive: true });
+      rmSync(join(r.work, "dir with space"), { recursive: true });
+      writeFileSync(join(r.work, "new.txt"), "n");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      const env = { ...process.env } as Record<string, string>;
+      const gone = (await removedBetween(r.gitDir, env, r.first.commit, second.commit)).sort();
+      expect(gone).toEqual([odd, "gone.txt", "sub/gone2.txt"].sort());
+      expect(await removedBetween(r.gitDir, env, null, second.commit)).toEqual([]);
+      expect(await removedBetween(r.gitDir, env, second.commit, second.commit)).toEqual([]);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a stale apply index (the member was primary in between) cannot delete its own files", async () => {
+    // M applies T1, in which .env was tracked. M is promoted, ignores .env and
+    // publishes T2. Later M is a replica again and applies T3: its apply index
+    // still says T1, which names .env, but the fleet dropped nothing of M's.
+    const r = await replicaOf({ "a.txt": "a", ".env": "T1" });
+    try {
+      writeFileSync(join(r.other, ".gitignore"), ".env\n");
+      writeFileSync(join(r.other, ".env"), "M's own secret");
+      const t2 = await snapshot({ work: r.other, gitDir: r.otherGit, base: r.first.commit });
+      await applyPack(r.work, r.gitDir, t2.commit, t2.pack, [], r.first.commit);
+      writeFileSync(join(r.work, "a.txt"), "a3");
+      const t3 = await snapshot({ work: r.work, gitDir: r.gitDir, base: t2.commit });
+      await applyPack(r.other, r.otherGit, t3.commit, t3.delta ?? t3.pack, [], t2.commit);
+      expect(readFileSync(join(r.other, ".env"), "utf8")).toBe("M's own secret");
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("a3");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a directory that became a nested repository on the replica loses nothing, whatever the index says", async () => {
+    const r = await replicaOf({ "lib/a.js": "a", "lib/b.js": "b", "top.txt": "t" });
+    try {
+      gitIn(join(r.other, "lib"), ["init", "-q", "."]);
+      rmSync(join(r.work, "lib", "a.js"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, ["lib"], r.first.commit);
+      expect(readFileSync(join(r.other, "lib", "a.js"), "utf8")).toBe("a");
+      expect(readFileSync(join(r.other, "lib", "b.js"), "utf8")).toBe("b");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("with no record of what came before, a stale index deletes nothing either", async () => {
+    const r = await replicaOf({ "a.txt": "a", "old.txt": "o" });
+    try {
+      rmSync(join(r.work, "old.txt"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      // The apply index names old.txt, but this apply is told nothing about
+      // the snapshot before: it removes nothing.
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], null);
+      expect(existsSync(join(r.other, "old.txt"))).toBe(true);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("a");
     } finally {
       rmSync(r.root, { recursive: true, force: true });
     }
