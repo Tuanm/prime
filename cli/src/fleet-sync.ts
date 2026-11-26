@@ -322,8 +322,15 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   }
 
   const parent = opts.base ?? null;
+  // A snapshot that goes out as a whole tree names no parent. Its pack holds
+  // only its own objects, so a member that takes it in has a commit whose parent
+  // it never got; any git that later walks that commit's history (older clients
+  // build their whole packs by walking it) would stop at the missing parent. With
+  // none, there is nothing to miss. The change since the snapshot before is
+  // built against that snapshot's tree instead (see below).
+  const wholeTree = opts.wantFull === true;
   const commitArgs = ["commit-tree", tree];
-  if (parent) commitArgs.push("-p", parent);
+  if (parent && !wholeTree) commitArgs.push("-p", parent);
   commitArgs.push("-m", "fleet snapshot");
   const commit = await gitText(gitDir, commitArgs, env);
 
@@ -349,7 +356,15 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   const delta =
     opts.treeOnly || (opts.wantFull === true && !opts.withDelta) || !parent
       ? null
-      : await gitRun(gitDir, ["pack-objects", "--stdout", "--revs", "--thin"], env, commit + "\n^" + parent + "\n");
+      : await gitRun(
+          gitDir,
+          ["pack-objects", "--stdout", "--revs", "--thin"],
+          env,
+          // A parentless commit has no history to subtract: naming the snapshot
+          // before it would not mark its objects as already held, and the pack
+          // would carry the whole tree. Its tree does.
+          commit + "\n^" + parent + (wholeTree ? "^{tree}" : "") + "\n",
+        );
 
   // Keep the snapshot commit reachable, or the next garbage collection
   // would take the objects the next delta is built against.

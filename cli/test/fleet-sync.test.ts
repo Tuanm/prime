@@ -3,6 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { randomBytes } from "node:crypto";
 import {
   EMPTY_TREE,
   applyCommit,
@@ -696,6 +698,70 @@ describe("a whole-tree pack carries the tree, not the history", () => {
       expect(readFileSync(join(other, "f9.txt"), "utf8")).toBe("after the anchor");
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a snapshot that goes out as a whole tree", () => {
+  test("names no parent, and the change beside it is built against the tree before, so it is small", async () => {
+    const noise = (): string => randomBytes(1500).toString("hex");
+    const b = noise();
+    const r = await replicaOf({ "a.txt": noise(), "b.txt": b, "c.txt": noise() });
+    try {
+      const changed = noise();
+      writeFileSync(join(r.work, "a.txt"), changed);
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: true, withDelta: true });
+      const parents = execFileSync("git", ["--git-dir=" + r.gitDir, "rev-list", "--parents", "-n", "1", second.commit], { encoding: "utf8" }).trim();
+      expect(parents).toBe(second.commit); // no parent after it
+      // The change carries the changed file and not the two that did not change.
+      expect(second.delta!.length).toBeLessThan(second.pack.length * 0.6); // one of three files
+
+      // A member holding the snapshot before takes the change; one that holds nothing takes the tree.
+      await applyPack(r.other, r.otherGit, second.commit, second.delta!, [], r.first.commit);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe(changed);
+      const fresh = join(r.root, "fresh");
+      mkdirSync(fresh);
+      await applyPack(fresh, join(r.root, "fresh-meta"), second.commit, second.pack, [], null);
+      expect(readFileSync(join(fresh, "b.txt"), "utf8")).toBe(b);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("an older client that took it in can still publish a whole tree of its own", async () => {
+    // main's fleet-sync, as it was before this work: it builds whole packs by walking
+    // the snapshot's history, and stops at a parent it never received.
+    let oldSource = "";
+    try {
+      oldSource = execFileSync("git", ["show", "26e61d1:cli/src/fleet-sync.ts"], { encoding: "utf8", cwd: join(import.meta.dir, "..") });
+    } catch {
+      return; // no history to read (a shallow checkout): nothing to compare with
+    }
+    const r = await replicaOf({ "a.txt": "alpha".repeat(200), "b.txt": "beta".repeat(200) });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "alpha, a checkpoint".repeat(200));
+      const checkpoint = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: true });
+
+      const file = join(r.root, "old-fleet-sync.ts");
+      writeFileSync(file, oldSource);
+      const old = (await import(pathToFileURL(file).href)) as typeof import("../src/fleet-sync");
+      // A member on the old version that joined at the checkpoint: it has never seen the snapshot before it.
+      const work = join(r.root, "old-work");
+      const gitDir = join(r.root, "old-meta");
+      mkdirSync(work);
+      await old.applyPack(work, gitDir, checkpoint.commit, checkpoint.pack);
+      // It is promoted, edits, and its next checkpoint (or a join) is a whole tree.
+      writeFileSync(join(work, "b.txt"), "beta, edited by the old member".repeat(200));
+      const mine = await old.snapshot({ work, gitDir, base: checkpoint.commit, wantFull: true });
+      expect(mine.pack.length).toBeGreaterThan(0);
+
+      // And the new version applies what it publishes.
+      const next = join(r.root, "next");
+      mkdirSync(next);
+      await applyPack(next, join(r.root, "next-meta"), mine.commit, mine.pack, [], null);
+      expect(readFileSync(join(next, "b.txt"), "utf8")).toBe("beta, edited by the old member".repeat(200));
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
     }
   });
 });
