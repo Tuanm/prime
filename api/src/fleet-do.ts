@@ -607,6 +607,7 @@ export class FleetDO implements DurableObject {
       await this.touch();
       return this.applied(caller, body);
     }
+    if (path === "/unreferenced" && request.method === "POST") return this.unreferenced(caller, body, request);
     if (path === "/delete" && request.method === "POST") return this.delete(caller, request);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
     if (path === "/vacate" && request.method === "POST") return this.vacate(caller, body);
@@ -1293,6 +1294,23 @@ export class FleetDO implements DurableObject {
     }
 
     return Response.json({ ok: true, head: next });
+  }
+
+  // Which of these stored objects no retained snapshot names. The Worker stores a snapshot's
+  // objects before the head moves, so a publish that is refused leaves them behind; it asks which
+  // of the ones it wrote are not, and were never, part of a snapshot the fleet keeps (a retry of a
+  // request that already succeeded writes the same bytes: those are the head's) and deletes them.
+  // Only this fleet's own packs and manifests are answered for.
+  private async unreferenced(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const members = await this.members();
+    if (!members[caller.deviceId]) return this.deny();
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
+    const own = new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/(packs|manifests)/[0-9a-f]{64}$");
+    const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, 8) : [];
+    const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
+    const kept = new Set(recent.flatMap((entry) => entry.split("\n")));
+    return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
   }
 
   // What this device may do right now. The Worker asks before serving a

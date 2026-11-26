@@ -190,8 +190,40 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
     }),
   });
   const result = (await moved.json().catch(() => ({}))) as { ok?: boolean; head?: unknown; error?: string };
-  if (!moved.ok) return Response.json({ ok: false, error: result.error ?? "the head did not move" }, { status: moved.status });
+  if (!moved.ok) {
+    // The head did not move, so what was stored for it belongs to no snapshot. (A refusal that
+    // never reached the object, or a publisher that dies after uploading its change pack and
+    // before this request, still leaves objects behind.)
+    await dropUnreferenced(bucket, stub, deviceId, fleetId, [packKey, manifestKey, ...extraKeys]);
+    return Response.json({ ok: false, error: result.error ?? "the head did not move" }, { status: moved.status });
+  }
   return Response.json({ ok: true, head: result.head, seq, manifestKey });
+}
+
+// Delete what a refused publish stored, unless a snapshot the fleet keeps names it. Never fails the answer.
+async function dropUnreferenced(
+  bucket: NonNullable<FleetDeps["env"]["BUCKET"]>,
+  stub: { fetch(input: string, init?: RequestInit): Promise<Response> },
+  deviceId: string,
+  fleetId: string,
+  keys: string[],
+): Promise<void> {
+  try {
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.set("x-prime-caller", "device");
+    headers.set("x-prime-device", deviceId);
+    headers.set("x-prime-fleet", fleetId);
+    const asked = await stub.fetch("https://fleet/unreferenced", { method: "POST", headers, body: JSON.stringify({ keys: keys.filter(Boolean) }) });
+    if (!asked.ok) return;
+    const answer = (await asked.json()) as { keys?: unknown };
+    for (const key of Array.isArray(answer.keys) ? answer.keys : []) {
+      if (typeof key !== "string") continue;
+      countFleetR2("write");
+      await bucket.delete(key);
+    }
+  } catch {
+    // Leaving an object behind is the cost of not knowing; the publish was refused either way.
+  }
 }
 
 async function fleetRole(deps: PayloadDeps, deviceId: string): Promise<FleetRole | null> {

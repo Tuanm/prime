@@ -1402,22 +1402,30 @@ describe("the Worker answers for a paused fleet", () => {
 
 
 describe("the Worker publishes a snapshot", () => {
-  async function publishVia(manifest: Record<string, unknown>) {
+  async function publishVia(manifest: Record<string, unknown>, opts: { refuse?: boolean; retained?: string[] } = {}) {
     const advances: Array<Record<string, any>> = [];
+    const asked: string[][] = [];
     const stub = {
       async fetch(input: Request | string, init?: RequestInit) {
         const url = typeof input === "string" ? input : input.url;
         if (url.endsWith("/role")) return Response.json({ member: true, primary: true, epoch: 1 });
         if (url.endsWith("/head/advance")) {
           advances.push(JSON.parse(String(init?.body ?? "{}")));
+          if (opts.refuse) return Response.json({ error: "stale sequence" }, { status: 409 });
           return Response.json({ ok: true, head: { seq: manifest.seq } });
+        }
+        if (url.endsWith("/unreferenced")) {
+          const keys = (JSON.parse(String(init?.body ?? "{}")) as { keys: string[] }).keys;
+          asked.push(keys);
+          return Response.json({ keys: keys.filter((k) => !(opts.retained ?? []).includes(k)) });
         }
         return Response.json({ ok: true });
       },
     };
     const puts: string[] = [];
+    const deleted: string[] = [];
     const env = {
-      BUCKET: { put: async (key: string) => void puts.push(key) },
+      BUCKET: { put: async (key: string) => void puts.push(key), delete: async (key: string) => void deleted.push(key) },
       FLEET: { idFromName: (n: string) => n, get: () => stub },
     } as never;
     const manifestBytes = Buffer.from(JSON.stringify(manifest));
@@ -1434,7 +1442,7 @@ describe("the Worker publishes a snapshot", () => {
       authorizeDevice: async () => ({ ok: true as const }),
       unauthorized: () => new Response(null, { status: 401 }),
     }))!;
-    return { res, advances, puts };
+    return { res, advances, puts, deleted, asked };
   }
 
   test("the object is told what a member needs to choose a route, and the change pack that goes with it", async () => {
@@ -1453,6 +1461,30 @@ describe("the Worker publishes a snapshot", () => {
     expect(advances[0]!.extraKeys).toEqual([]);
   });
 
+  test("a publish the object refuses leaves nothing behind: the objects it stored are deleted, the change pack too", async () => {
+    const delta = "fleets/acme/packs/" + "c".repeat(64);
+    const { res, puts, deleted, asked } = await publishVia({ seq: 4, full: true, delta: { packKey: delta, bytes: 56 } }, { refuse: true });
+    expect(res.status).toBe(409);
+    expect(puts).toHaveLength(2);
+    expect(asked).toHaveLength(1);
+    expect(deleted.sort()).toEqual([...puts, delta].sort());
+  });
+
+  test("what a snapshot the fleet keeps names is not deleted, though the same bytes were sent again", async () => {
+    const delta = "fleets/acme/packs/" + "c".repeat(64);
+    const first = await publishVia({ seq: 4, full: true, delta: { packKey: delta, bytes: 56 } }, { refuse: true });
+    const retained = first.puts; // the same request, sent twice: the first one made them the head's
+    const again = await publishVia({ seq: 4, full: true, delta: { packKey: delta, bytes: 56 } }, { refuse: true, retained });
+    expect(again.deleted).toEqual([delta]);
+  });
+
+  test("a publish that works deletes nothing", async () => {
+    const { res, deleted, asked } = await publishVia({ seq: 4, full: false });
+    expect(res.status).toBe(200);
+    expect(deleted).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
   test("the index is asked of the object from the sequence the member names", async () => {
     const fetched: string[] = [];
     const stub = { async fetch(input: Request | string) { fetched.push(typeof input === "string" ? input : input.url); return Response.json({ entries: [] }); } };
@@ -1467,5 +1499,34 @@ describe("the Worker publishes a snapshot", () => {
     }))!;
     expect(res.status).toBe(200);
     expect(fetched).toEqual(["https://fleet/index?after=7"]);
+  });
+});
+
+describe("which stored objects belong to no snapshot", () => {
+  test("the object answers for its own fleet's packs and manifests that no retained snapshot names", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    const hex = (c: string) => c.repeat(64);
+    const kept = "fleets/acme/manifests/" + hex("a");
+    const keptPack = "fleets/acme/packs/" + hex("b");
+    const orphan = "fleets/acme/packs/" + hex("c");
+    const orphanManifest = "fleets/acme/manifests/" + hex("d");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    const adv = await call(doInstance, "/head/advance", {
+      caller: "device",
+      device: "dev-owner",
+      body: { expectedSeq: 0, manifestKey: kept, manifestHash: hex("a"), packKey: keptPack },
+    });
+    expect(adv.status).toBe(200);
+    const asked = await call(doInstance, "/unreferenced", {
+      caller: "device",
+      device: "dev-owner",
+      body: { keys: [kept, keptPack, orphan, orphanManifest, "fleets/other/packs/" + hex("e"), "fleets/acme/packs/../../x", "not a key"] },
+    });
+    expect(asked.status).toBe(200);
+    expect(asked.json.keys).toEqual([orphan, orphanManifest]);
+    // A device that is not a member is not answered.
+    const stranger = await call(doInstance, "/unreferenced", { caller: "device", device: "dev-stranger", body: { keys: [orphan] } });
+    expect(stranger.status).toBe(403);
   });
 });
