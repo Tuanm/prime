@@ -31,6 +31,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { acquireAgentLock, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { TamperedSnapshotError } from "./fleet-trust.ts";
 import {
   FETCHED_REPORT_MS,
   SOCKET_HEAD_SAFETY_MS,
@@ -976,8 +977,9 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       // Eligible again once the round has backed off - unless nothing it can do
       // will change the answer: a snapshot sealed for it that does not exist yet (and
       // there is no primary to publish one), a key it no longer has, a work tree it
-      // cannot write. Asking again would only keep the claim from a replica that can.
-      loop.claim = !(err instanceof NotSealedYetError || err instanceof NotSealedError || cannotWrite(err));
+      // cannot write, a snapshot it refuses (see fleet-trust.ts). Asking again would
+      // only keep the claim from a replica that can.
+      loop.claim = !(err instanceof NotSealedYetError || err instanceof NotSealedError || err instanceof TamperedSnapshotError || cannotWrite(err));
       loop.claimAt = Date.now();
       throw err;
     } finally {

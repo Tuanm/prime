@@ -88,7 +88,8 @@ sequenceDiagram
 ```
 
 The gateway never opens a pack. It is sealed for the members' own keys, so the
-gateway carries boxes it cannot read.
+gateway carries boxes it cannot read. Nor does a member take its word for what a
+box is: see "What the gateway can still do" below.
 
 ### A replica does not mirror all the time
 
@@ -227,6 +228,56 @@ an index of its snapshots (which are whole trees, how big the packs are), so a r
 works the route out in one request, then fetches the manifests of the snapshots on it
 side by side; a gateway without an index is walked manifest by manifest. Older members
 ignore the second pack and take the whole tree, as before.
+
+### What the gateway can still do
+
+The gateway stores every manifest in the clear, and decides which one is the head.
+So a member does not believe a manifest because the gateway served it. A snapshot is
+checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
+
+1. **The seal.** The publisher makes a tag (an HMAC, derived from the snapshot key) over the
+   fleet, the sequence, the snapshot it follows (the hash its manifest is stored under), the
+   commit, the tree, whether the pack is a whole tree, the hash of each sealed pack, its own
+   key and the roster, and puts it in the manifest (`seal`). Only a holder of the snapshot
+   key can make it, and the snapshot key is only ever wrapped for members. A replica checks
+   the manifest against it after it opens the pack, and the pack against the hash in it. A
+   manifest the gateway edited, an old snapshot shown under a newer sequence, a tree or pack
+   of another snapshot, a snapshot of another fleet: none match, and the snapshot is refused
+   before anything is written. (Sizes are not sealed: they only choose the route.) A manifest
+   is also read by the hash it is stored under, so the one that comes back is the one that was named.
+2. **The sender.** A snapshot's key is wrapped with a key pair its publisher names in the
+   manifest. That key has to be one the roster lists (read once, kept in
+   `<space>.key.trust.json` beside the key file, and read again only when a snapshot arrives
+   from a key that is not in it). Otherwise the gateway could make a key pair of its own,
+   wrap a snapshot key of its own for each member and seal its forgery itself.
+3. **No going back.** Publishers older than this have no seal, and their snapshots are
+   still accepted - but once a member has opened one snapshot with a seal in a fleet
+   (the same file records the highest), an unsealed one with a higher sequence is refused.
+
+Whose word this rests on: **the roster**. The operator admits the members, and the
+roster says which key each has. The checks hold against anyone who can read and write what
+the gateway stores - a bucket, a backup, a replay of old storage, a bug - and against a
+gateway that edits or reorders manifests. They do not hold against a gateway that also
+lies about the roster: one that adds a key of its own to the list it serves can then
+author snapshots. That is visible (`prime fleets members` and the admin page list who is
+in), and closing it takes a fingerprint the operator checks outside the gateway.
+
+What the gateway can still do, whatever a member checks:
+
+- **Stop the fleet**: not serve, not store, not move the head.
+- **Show an older head** (a rollback): a member sees a snapshot that is real and was the
+  head once. It cannot be shown as newer, so a member that holds a higher sequence ignores it,
+  but a member that has never seen the newer ones cannot know they exist.
+- **Show different members different histories**: each is a real chain; the members
+  find out when they take over and publish on a head the others do not have.
+- **Roll out slowly**: until every publisher has the seal, a replica that has not yet seen a
+  sealed snapshot takes unsealed ones, so an unsealed old snapshot of an old publisher can be
+  shown as a new one to a member that never saw a sealed one. And once one is seen, an old
+  member that is promoted and publishes without a seal is refused by the new replicas
+  ("it carries no seal ... upgrade it"): upgrade every member, then expect no more of that.
+  Older replicas read sealed snapshots as they did before (the packs are unchanged; the tag is
+  an added manifest field), so mixed fleets keep working in that direction.
+- **Know who is in the fleet, how big the work tree is, and when it changes.**
 
 ## Joining
 

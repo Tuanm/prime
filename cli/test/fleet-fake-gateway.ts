@@ -26,6 +26,8 @@ export class FakeGateway {
   claim: { device: string; since: number; until: number; queue?: Array<{ device: string; at: number; by: number }> } | null = null;
   /** Publishers that predate the roster in manifests. */
   stripRoster = false;
+  /** Publishers that predate the seal over the manifest. */
+  unsealed = false;
   /** Publishers that predate the key fingerprint in wrapped keys. */
   stripKeyIds = false;
   /** How many of the next /applied reports fail with a 503. */
@@ -130,6 +132,9 @@ export class FakeGateway {
       const manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
       manifest.packKey = packKey;
       manifest.packHash = hash(pack);
+      // Each of these is a publisher that predates something the manifest is sealed over,
+      // so what it published has no seal either.
+      if (this.legacyManifests || this.stripRoster || this.unsealed) delete manifest.seal;
       if (this.legacyManifests) {
         delete manifest.packBytes;
         delete manifest.delta;

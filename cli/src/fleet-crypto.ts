@@ -15,7 +15,7 @@
 // secret to a new member means re-encrypting the history for it. With a
 // key per member, removal is immediate and joining costs nothing.
 
-import { createCipheriv, createDecipheriv, createHash, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, createPublicKey, createPrivateKey } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, createPublicKey, createPrivateKey, timingSafeEqual } from "node:crypto";
 
 export interface MemberKeyPair {
   /** base64 of the raw 32 byte public key. */
@@ -89,6 +89,73 @@ export interface SealedManyForMembers {
   ciphertexts: Buffer[];
   wrapped: WrappedKey[];
   senderPublicKey: string;
+  /**
+   * The seal of a manifest: a tag only a holder of this snapshot key can make
+   * (see `SealFields`). It travels in the manifest.
+   */
+  seal(fields: SealFields): string;
+}
+
+/**
+ * What a seal binds, so that the manifest the gateway stores and serves cannot
+ * be edited, and a snapshot cannot be shown under another place in the chain.
+ *
+ * The packs' own encryption (AES-GCM under the snapshot key) already says their
+ * bytes are the publisher's; it says nothing about which snapshot they are. The
+ * seal does: the fleet, the sequence, the snapshot it follows (by the hash its
+ * manifest is stored under), the commit and tree, whether the pack is a whole tree,
+ * the hash of each sealed pack, who it is sealed by and for. Sizes (`packBytes`) are not
+ * bound: they only steer the choice of route, and a lie costs bandwidth, not
+ * content.
+ */
+export interface SealFields {
+  fleet: string;
+  seq: number;
+  parentSeq: number | null;
+  parentManifest: string | null;
+  tipCommit: string;
+  tree: string;
+  full: boolean;
+  /** sha256 of the sealed main pack. */
+  packHash: string;
+  /** sha256 of the sealed change pack that travels beside a whole tree, if any. */
+  deltaHash: string | null;
+  senderPublicKey: string;
+  roster: string | null;
+}
+
+const SEAL_INFO = Buffer.from("prime-fleet-seal-v1");
+export const SEAL_PREFIX = "v1:";
+
+// The key that seals manifests is derived from the snapshot key, not the snapshot
+// key itself, so a tag reveals nothing about the key that opens the packs.
+function sealKeyOf(snapshotKey: Buffer): Buffer {
+  return Buffer.from(hkdfSync("sha256", snapshotKey, Buffer.alloc(32), SEAL_INFO, 32));
+}
+
+function sealBytes(f: SealFields): Buffer {
+  // A fixed order and no optional keys: the same fields always give the same bytes.
+  return Buffer.from(
+    JSON.stringify(["prime-fleet-seal-v1", f.fleet, f.seq, f.parentSeq, f.parentManifest, f.tipCommit, f.tree, f.full, f.packHash, f.deltaHash, f.senderPublicKey, f.roster]),
+    "utf8",
+  );
+}
+
+function tagOf(sealKey: Buffer, fields: SealFields): string {
+  return SEAL_PREFIX + createHmac("sha256", sealKey).update(sealBytes(fields)).digest("base64");
+}
+
+function tagMatches(sealKey: Buffer, fields: SealFields, tag: string): boolean {
+  const expected = Buffer.from(tagOf(sealKey, fields), "utf8");
+  const got = Buffer.from(tag, "utf8");
+  return expected.length === got.length && timingSafeEqual(expected, got);
+}
+
+/** A payload opened, with what it takes to check the manifest that named it. */
+export interface OpenedPayload {
+  plain: Buffer;
+  /** Whether `tag` is the seal of exactly these fields, made by a holder of the snapshot key. */
+  sealMatches(fields: SealFields, tag: string): boolean;
 }
 
 /**
@@ -126,7 +193,8 @@ export function sealManyForMembers(
       wrapped: Buffer.concat([wrapIv, sealed, wrapper.getAuthTag()]).toString("base64"),
     });
   }
-  return { ciphertexts, wrapped, senderPublicKey: senderPublicKeyB64 };
+  const sealKey = sealKeyOf(snapshotKey);
+  return { ciphertexts, wrapped, senderPublicKey: senderPublicKeyB64, seal: (fields) => tagOf(sealKey, fields) };
 }
 
 /**
@@ -160,6 +228,17 @@ export function openForMember(
   memberId: string,
   memberPrivateKeyPem: string,
 ): Buffer | null {
+  return openPayload(ciphertext, wrapped, senderPublicKeyB64, memberId, memberPrivateKeyPem)?.plain ?? null;
+}
+
+/** Like `openForMember`, and keeps what is needed to check the snapshot's seal. */
+export function openPayload(
+  ciphertext: Buffer,
+  wrapped: WrappedKey[],
+  senderPublicKeyB64: string,
+  memberId: string,
+  memberPrivateKeyPem: string,
+): OpenedPayload | null {
   const entry = wrapped.find((w) => w.memberId === memberId);
   if (!entry) return null;
   const raw = Buffer.from(entry.wrapped, "base64");
@@ -184,7 +263,9 @@ export function openForMember(
   try {
     const decipher = createDecipheriv("aes-256-gcm", snapshotKey, iv);
     decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(body), decipher.final()]);
+    const plain = Buffer.concat([decipher.update(body), decipher.final()]);
+    const sealKey = sealKeyOf(snapshotKey);
+    return { plain, sealMatches: (fields, tag) => tagMatches(sealKey, fields, tag) };
   } catch {
     return null;
   }

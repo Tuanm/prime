@@ -1565,6 +1565,8 @@ describe("a snapshot from a publisher that does not say who it was sealed for", 
     const w = await world();
     try {
       const r = w.replica("r1");
+      // Both publishers predate seals (a fleet that has seen a sealed snapshot refuses an unsealed newer one).
+      w.gateway.unsealed = true;
       await w.publishNext();
       await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree, roster: s.roster ?? "" }));
       expect(r.state.roster).not.toBe("");

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { generateMemberKeyPair, openForMember, sealForMembers } from "../src/fleet-crypto";
+import { generateMemberKeyPair, openForMember, openPayload, sealForMembers, sealManyForMembers } from "../src/fleet-crypto";
 
 describe("member keys", () => {
   test("are X25519 pairs whose public half is 32 bytes", () => {
@@ -90,5 +90,52 @@ describe("sealing for members", () => {
     expect(sealed.wrapped).toHaveLength(1);
     const opened = openForMember(sealed.ciphertext, sealed.wrapped, sealed.senderPublicKey, "alice", alice.privateKey);
     expect(opened && Buffer.compare(opened, plain)).toBe(0);
+  });
+});
+
+describe("the seal of a manifest", () => {
+  const fields = {
+    fleet: "x", seq: 7, parentSeq: 6, parentManifest: "fleets/x/manifests/abc", tipCommit: "c".repeat(40), tree: "t".repeat(40),
+    full: false, packHash: "a".repeat(64), deltaHash: null as string | null, senderPublicKey: "", roster: "a:b" as string | null,
+  };
+  const make = () => {
+    const alice = generateMemberKeyPair();
+    const sender = generateMemberKeyPair();
+    const f = { ...fields, senderPublicKey: sender.publicKey };
+    const sealed = sealManyForMembers([Buffer.from("x")], [{ memberId: "alice", publicKey: alice.publicKey }], sender.privateKey, sender.publicKey);
+    const opened = openPayload(sealed.ciphertexts[0]!, sealed.wrapped, sender.publicKey, "alice", alice.privateKey)!;
+    return { f, tag: sealed.seal(f), opened, sealed, alice, sender };
+  };
+
+  test("a member that opens the payload can check it", () => {
+    const { f, tag, opened } = make();
+    expect(tag.startsWith("v1:")).toBe(true);
+    expect(opened.sealMatches(f, tag)).toBe(true);
+  });
+
+  test("any field changed, and it does not match", () => {
+    const { f, tag, opened } = make();
+    const changed: Array<Partial<typeof f>> = [
+      { fleet: "y" }, { seq: 8 }, { parentSeq: 5 }, { parentSeq: null as unknown as number }, { parentManifest: "other" }, { tipCommit: "d".repeat(40) },
+      { tree: "u".repeat(40) }, { full: true }, { packHash: "b".repeat(64) }, { deltaHash: "b".repeat(64) }, { roster: null }, { senderPublicKey: "other" },
+    ];
+    for (const c of changed) expect(opened.sealMatches({ ...f, ...c }, tag)).toBe(false);
+  });
+
+  test("a seal made under another snapshot key does not match", () => {
+    const a = make();
+    const b = make();
+    expect(a.opened.sealMatches(a.f, b.sealed.seal(a.f))).toBe(false);
+  });
+
+  test("a garbage tag does not match and does not throw", () => {
+    const { f, opened } = make();
+    expect(opened.sealMatches(f, "")).toBe(false);
+    expect(opened.sealMatches(f, "v1:")).toBe(false);
+  });
+
+  test("the payload still opens for a reader that does not look at the seal", () => {
+    const { sealed, alice, sender } = make();
+    expect(openForMember(sealed.ciphertexts[0]!, sealed.wrapped, sender.publicKey, "alice", alice.privateKey)?.toString()).toBe("x");
   });
 });

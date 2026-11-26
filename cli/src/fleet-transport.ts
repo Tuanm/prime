@@ -62,6 +62,13 @@ export interface FleetManifest {
    * does not take the fleet for changed and publish a whole tree it need not.
    */
   roster?: string;
+  /**
+   * The publisher's seal over what the manifest claims (see `SealFields` in
+   * fleet-crypto.ts). Only a member that holds the snapshot key can make it, so a
+   * manifest the gateway edited, or an old snapshot shown under a newer sequence,
+   * does not match. Absent from snapshots of publishers that predate it.
+   */
+  seal?: string;
   /** Which epoch published this, for the fencing check. */
   epoch: number;
   createdAt: number;
@@ -144,6 +151,11 @@ export async function putPayload(
 /** Fetch a manifest by the id it is stored under. */
 export async function fetchManifest(creds: FleetCredentials, fleet: string, id: string): Promise<FleetManifest> {
   const bytes = await getPayload(creds, fleet, "manifests", id);
+  // A manifest is stored under the hash of its bytes: what came back is what the
+  // head (or the snapshot after it) named, or it is not this manifest at all.
+  if (/^[0-9a-f]{64}$/.test(id) && payloadHash(bytes) !== id) {
+    throw new FleetTransportError("the manifest the gateway returned is not the one that was asked for");
+  }
   return JSON.parse(bytes.toString("utf8")) as FleetManifest;
 }
 
@@ -317,4 +329,20 @@ export async function fetchMemberKeys(
   if (!res.ok) throw new FleetTransportError("could not read the members' keys: " + res.status);
   const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number }> };
   return body.members ?? [];
+}
+
+/**
+ * The public keys the roster lists, as any member may read them.
+ *
+ * (The device ids are cut short for ordinary members; the keys are not.) A snapshot
+ * is accepted only from a key on this list, or one that was on it when it was last
+ * looked at (see fleet-trust.ts).
+ */
+export async function fetchRosterKeys(creds: FleetCredentials, fleet: string): Promise<string[]> {
+  const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/members");
+  if (!res.ok) throw new FleetTransportError("could not read the roster: " + res.status);
+  const body = (await res.json()) as { members?: Array<{ pubkey?: unknown }> };
+  const keys: string[] = [];
+  for (const m of body.members ?? []) if (typeof m.pubkey === "string" && m.pubkey) keys.push(m.pubkey);
+  return keys;
 }

@@ -13,7 +13,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
-import { generateMemberKeyPair, keyIdOf, openForMember, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
+import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
+import { FleetTrust, TamperedSnapshotError, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
   PayloadGoneError,
   type IndexEntry,
@@ -23,6 +24,7 @@ import {
   fetchMemberKeys,
   reportApplied,
   getPayload,
+  payloadHash,
   putPayload,
   putSnapshot,
   type FleetCredentials,
@@ -241,6 +243,10 @@ export async function publish(
     epoch: head?.epoch ?? 0,
     createdAt: Date.now(),
   };
+  // The seal binds what the gateway must not be able to change: which snapshot
+  // this is, what it follows, and the packs it is made of. (The gateway fills in
+  // the packs' keys, but the hashes it computes are the ones taken here.)
+  manifest.seal = sealed.seal(sealFieldsOf(manifest, payloadHash(main), delta?.packHash ?? null));
   // The pack and the manifest travel together, and the gateway moves the head
   // in the same call. One round trip instead of six.
   let moved = await putSnapshot(creds, fleet, manifest, main);
@@ -257,6 +263,14 @@ export async function publish(
   // older one does, and a report that cannot get through is made good the next
   // time the fleet says "catch up first" (see above), so it is not an error here.
   await reportApplied(creds, fleet, seq).catch(() => undefined);
+  // This fleet has a snapshot with a seal now: from here an unsealed one that is newer is refused.
+  const trust = FleetTrust.beside(paths.keyFile);
+  trust.noteBound(seq);
+  try {
+    trust.save();
+  } catch {
+    // Not being able to write it only leaves the guard to be learnt from the next sealed snapshot read.
+  }
   return {
     seq,
     commit: snap.commit,
@@ -560,13 +574,26 @@ export async function openStep(
   fleet: string,
   keys: MemberKeyPair,
   step: RouteStep,
+  /** What this member trusts (see fleet-trust.ts); without it only the seal is checked. */
+  trust?: FleetTrust,
 ): Promise<Buffer> {
   const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
-  const plain = openForMember(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey);
-  if (!plain) throw new NotSealedError(m.seq);
-  return plain;
+  const opened = openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey);
+  if (!opened) {
+    // A sealed snapshot with a key wrapped for exactly this member's key, whose pack
+    // does not open, is not "sealed before this device joined": it is damaged or swapped.
+    const mine = m.wrapped.find((w) => w.memberId === creds.deviceId);
+    if (m.seal !== undefined && mine?.keyId !== undefined && mine.keyId === keyIdOf(keys.publicKey)) {
+      throw new TamperedSnapshotError(m.seq, "its pack does not open with the key it was wrapped for this member (damaged, or another snapshot's)");
+    }
+    throw new NotSealedError(m.seq);
+  }
+  // Opening proves the pack came from a holder of the snapshot key; it does not say
+  // that the manifest is the one that holder made.
+  await verifySnapshot(creds, fleet, m, sealed, m.delta !== undefined && step.packKey === m.delta.packKey, opened, trust);
+  return opened.plain;
 }
 
 /**
@@ -709,9 +736,10 @@ async function ingestRoute(
   onFetched?: (fetched: Position) => void | Promise<void>,
 ): Promise<Position> {
   const downloads: Array<Promise<Buffer> | undefined> = [];
+  const trust = FleetTrust.beside(paths.keyFile);
   const start = (i: number): void => {
     if (i < plan.chain.length && downloads[i] === undefined) {
-      const p = openStep(creds, fleet, keys, plan.chain[i]!);
+      const p = openStep(creds, fleet, keys, plan.chain[i]!, trust);
       // A failure is reported where it is awaited, in order.
       p.catch(() => undefined);
       downloads[i] = p;

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,7 +54,7 @@ class FakeGateway {
       const manifestLength = bytes.readUInt32BE(0);
       const manifestBytes = bytes.subarray(4, 4 + manifestLength);
       const pack = bytes.subarray(4 + manifestLength);
-      const hash = (b: Buffer) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+      const hash = (b: Buffer) => createHash("sha256").update(b).digest("hex");
       const packKey = "fleets/x/packs/" + hash(pack);
       const manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
       manifest.packKey = packKey;
@@ -73,7 +74,7 @@ class FakeGateway {
     if ((kind === "packs" || kind === "manifests") && method === "POST") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
-      const hash = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+      const hash = createHash("sha256").update(bytes).digest("hex");
       const key = "fleets/x/" + kind + "/" + hash;
       this.payloads.set(key, bytes);
       return Response.json({ ok: true, key, hash, size: bytes.length });
