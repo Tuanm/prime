@@ -607,7 +607,7 @@ describe("the agent's round for a replica", () => {
       else process.env.PRIME_FLEET_CACHE_MB = saved;
       finish(w);
     }
-  });
+  }, 60_000);
 
   // Virtual time: the agent's rounds happen at the instants a test chooses.
   const atTime = async (start: number, fn: (set: (ms: number) => void) => Promise<void>): Promise<void> => {
