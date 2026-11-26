@@ -198,7 +198,11 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     );
   }
   if (pulled.applied) {
-    writeFleetState(ctx.configPath, opts.fleet, opts.spaceName, { seq: pulled.seq, base: pulled.commit });
+    writeFleetState(ctx.configPath, opts.fleet, opts.spaceName, {
+      seq: pulled.seq,
+      base: pulled.commit,
+      ...(pulled.tree ? { tree: pulled.tree } : {}),
+    });
   }
   return {
     deviceId: opts.deviceId,

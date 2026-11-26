@@ -619,7 +619,13 @@ export async function syncFleetSpace(
   }
   const pulled = await pull(creds, fleetId, paths, state.seq ?? 0, state.base ?? null);
   if (pulled.applied) {
-    writeFleetState(configPath, fleetId, spaceName, { ...state, seq: pulled.seq, base: pulled.commit });
+    writeFleetState(configPath, fleetId, spaceName, {
+      ...state,
+      seq: pulled.seq,
+      base: pulled.commit,
+      // What it now holds, so the next look can tell a local edit from this state.
+      ...(pulled.tree ? { tree: pulled.tree } : {}),
+    });
     return "applied " + pulled.seq;
   }
   return "up to date";

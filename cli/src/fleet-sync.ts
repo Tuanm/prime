@@ -478,36 +478,44 @@ export function timingSafeEqualBytes(a: Buffer, b: Buffer): boolean {
  *
  * `tree` is the tree the member recorded for the last state it took (the same
  * tree the state file keeps), so this answers "what has changed here since".
+ *
+ * Only paths that really differ from that tree are named: a file edited, a file
+ * deleted, a file added. Files git ignores are never named, and neither is
+ * anything inside a nested repository: they are not the fleet's, so they must
+ * not be moved aside either.
  */
-export async function localChanges(work: string, gitDir: string, tree: string): Promise<string[]> {
+export async function localChanges(
+  work: string,
+  gitDir: string,
+  tree: string,
+  opts: { exclude?: string[]; nested?: NestedRepoCache } = {},
+): Promise<string[]> {
   if (!tree) return [];
   const indexFile = join(gitDir, "local-check.index");
   rmSync(indexFile, { force: true });
   const env = gitEnv(gitDir, work, indexFile);
-  await ensureStore(gitDir, work, env);
-  // Stage exactly what the fleet gave us, then let git say what differs. The
-  // temporary index is thrown away afterwards; the member's own store is not
-  // touched.
-  await gitRun(gitDir, ["read-tree", tree], env);
-  const out = (await gitRun(gitDir, ["status", "--porcelain", "-z", "--", "."], env)).toString("utf8");
-  const paths = new Set<string>();
-  let i = 0;
-  while (i < out.length) {
-    const end = out.indexOf("\u0000", i);
-    if (end < 0) break;
-    const entry = out.slice(i, end);
-    i = end + 1;
-    // "XY <path>", and a rename carries a second NUL-terminated path.
-    const path = entry.slice(3);
-    if (path) paths.add(path);
-    if (entry[0] === "R" || entry[0] === "C") {
-      const endSecond = out.indexOf("\u0000", i);
-      if (endSecond >= 0) paths.add(out.slice(i, endSecond));
-      i = endSecond + 1;
-    }
+  try {
+    await ensureStore(gitDir, work, env);
+    // The temporary index starts as exactly what the fleet gave us. The work
+    // tree is then staged on top of it the way a snapshot does it (ignored
+    // files stay out, nested repositories are left alone), and git compares
+    // the result with the recorded tree. The member's own store and its
+    // snapshot index are not touched.
+    await gitRun(gitDir, ["read-tree", tree], env);
+    const left = new Set((opts.exclude ?? []).map((p) => p.replace(/\/$/, "")));
+    for (const nested of opts.nested ? opts.nested.get() : findNestedRepos(work)) left.add(nested);
+    const pathspec = ["."];
+    for (const path of left) pathspec.push(":(exclude)" + path);
+    await gitText(gitDir, ["add", "-A", "--"].concat(pathspec), env);
+    const out = await gitRun(gitDir, ["diff-index", "--cached", "--name-only", "--no-renames", "-z", tree], env);
+    const keep = [...left];
+    return out
+      .toString("utf8")
+      .split("\u0000")
+      .filter((path) => path !== "" && !isLeftAlone(path, keep));
+  } finally {
+    rmSync(indexFile, { force: true });
   }
-  rmSync(indexFile, { force: true });
-  return [...paths].filter(Boolean);
 }
 
 /**
@@ -523,8 +531,9 @@ export async function preserveLocalChange(
   work: string,
   gitDir: string,
   tree: string,
+  opts: { exclude?: string[]; nested?: NestedRepoCache } = {},
 ): Promise<{ moved: number; to: string }> {
-  const changed = await localChanges(work, gitDir, tree);
+  const changed = await localChanges(work, gitDir, tree, opts);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const to = join(work, "..", "local-change-" + stamp);
   let moved = 0;

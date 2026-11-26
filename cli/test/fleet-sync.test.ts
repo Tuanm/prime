@@ -8,8 +8,10 @@ import {
   applyPack,
   findNestedRepos,
   hasFiles,
+  localChanges,
   NestedRepoCache,
   payloadId,
+  preserveLocalChange,
   seal,
   snapshot,
   unseal,
@@ -410,6 +412,80 @@ describe("applying a snapshot keeps what the fleet never synced", () => {
       rmSync(join(r.otherGit, "apply.index"), { force: true });
       await applyPack(r.other, r.otherGit, second.commit, second.pack, ["mine"], r.first.commit);
       expect(existsSync(join(r.other, "mine", "x.txt"))).toBe(true);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("what changed locally", () => {
+  test("only the edited file is reported, and only it is moved aside", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "b.txt": "beta", "sub/c.txt": "gamma" });
+    try {
+      const tree = r.first.tree;
+      expect(await localChanges(r.other, r.otherGit, tree)).toEqual([]);
+
+      writeFileSync(join(r.other, "b.txt"), "beta, edited here");
+      expect(await localChanges(r.other, r.otherGit, tree)).toEqual(["b.txt"]);
+
+      const kept = await preserveLocalChange(r.other, r.otherGit, tree);
+      expect(kept.moved).toBe(1);
+      expect(readFileSync(join(kept.to, "b.txt"), "utf8")).toBe("beta, edited here");
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha");
+      expect(readFileSync(join(r.other, "sub", "c.txt"), "utf8")).toBe("gamma");
+      rmSync(kept.to, { recursive: true, force: true });
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a new file and a deleted file are reported; an ignored file is not", async () => {
+    const r = await replicaOf({ ".gitignore": "*.log\nbuild/\n", "a.txt": "alpha", "b.txt": "beta" });
+    try {
+      writeFileSync(join(r.other, "new.txt"), "new");
+      rmSync(join(r.other, "b.txt"));
+      writeFileSync(join(r.other, "debug.log"), "noise");
+      mkdirSync(join(r.other, "build"));
+      writeFileSync(join(r.other, "build", "out.js"), "x");
+      expect((await localChanges(r.other, r.otherGit, r.first.tree)).sort()).toEqual(["b.txt", "new.txt"]);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a nested repository is not reported and not moved", async () => {
+    const r = await replicaOf({ "a.txt": "alpha" });
+    try {
+      const nested = join(r.other, "project");
+      mkdirSync(nested, { recursive: true });
+      gitIn(nested, ["init", "-q", "."]);
+      writeFileSync(join(nested, "code.py"), "print(1)");
+      writeFileSync(join(r.other, "edited.txt"), "mine");
+
+      expect(await localChanges(r.other, r.otherGit, r.first.tree)).toEqual(["edited.txt"]);
+      const kept = await preserveLocalChange(r.other, r.otherGit, r.first.tree);
+      expect(kept.moved).toBe(1);
+      expect(existsSync(join(r.other, "project", ".git"))).toBe(true);
+      expect(existsSync(join(r.other, "project", "code.py"))).toBe(true);
+      rmSync(kept.to, { recursive: true, force: true });
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a moved-aside edit is replaced by the fleet's file on the next apply, even when the change does not touch it", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "b.txt": "beta" });
+    try {
+      writeFileSync(join(r.other, "a.txt"), "alpha, edited here");
+      const kept = await preserveLocalChange(r.other, r.otherGit, r.first.tree);
+      expect(existsSync(join(r.other, "a.txt"))).toBe(false);
+
+      writeFileSync(join(r.work, "b.txt"), "beta 2");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      await applyPack(r.other, r.otherGit, second.commit, second.delta!, [], r.first.commit);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha");
+      expect(readFileSync(join(r.other, "b.txt"), "utf8")).toBe("beta 2");
+      rmSync(kept.to, { recursive: true, force: true });
     } finally {
       rmSync(r.root, { recursive: true, force: true });
     }

@@ -392,7 +392,7 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
       ...nestedOpt(paths),
     });
     if (local.tree !== state.tree) {
-      const kept = await preserveLocalChange(paths.work, paths.gitDir, state.tree);
+      const kept = await preserveLocalChange(paths.work, paths.gitDir, state.tree, nestedOpt(paths));
       report("kept " + kept.moved + " locally changed path(s) aside in " + kept.to + ", then caught up");
     }
   }
