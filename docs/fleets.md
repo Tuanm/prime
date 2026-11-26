@@ -382,20 +382,26 @@ with the same.
   shell exports nor restart it *for that*; they do restart it when the saved settings differ from
   the running agent's (for example right after `agent install` saved new ones).
 - There is one login service per machine, and it runs the one configuration it was installed
-  with (`--config`, shown by `agent status`). For that configuration (macOS, Linux) the service
-  manager is what starts the agent: `agent start`, `spaces create` and a settings change ask it to
-  start or restart it, and no agent is spawned beside it. An agent that was started by hand and is
-  running when the service is installed (or is found beside it later) is stopped first, and
-  `agent install` does the same, except for the service's own agent, which the manager replaces.
-  If the manager cannot be reached (no login session on a headless machine, a service file left by
-  an install that failed), the agent is started directly, and the lock below keeps that safe.
-  For any other configuration (`--config`, `PRIME_CONFIG`) the service does not exist: its agent is
-  started, stopped and restarted directly. `agent install` for a configuration while the service
-  runs another is refused: `prime fleets agent uninstall` first, then install again.
+  with (`--config`; `prime fleets agent status` prints it, and `status --json` has a `service`
+  object). For that configuration (macOS, Linux), when its manager answers, the manager is what
+  starts the agent: `agent start`, `spaces create` and a settings change ask it to start or
+  restart it, and no agent is spawned beside it. An agent that was started by hand and is running
+  when the service is installed (or is found beside it later) is stopped first, and `agent install`
+  does the same, except for the service's own agent, which the manager replaces. If the manager
+  cannot be reached (no login session on a headless machine, no user bus, a service file left by an
+  install that failed) the service counts for nothing: the agent is handled directly, as if it
+  were not installed. If the manager answers and will not restart a running agent, the command
+  says so and the agent keeps the settings it has.
+  For any other configuration (`--config`, `PRIME_CONFIG`) the service is not its own: its agent
+  is started, stopped and restarted directly, `agent status` says which configuration the service
+  runs, `agent install` is refused while it runs another, and `agent uninstall` is refused too
+  unless `--force` is given (remove the service from the configuration it runs, or force it).
+  A definition that does not say (a hand-edited unit, a binary plist) is taken for the default
+  configuration's.
 - One agent runs per configuration: a second one that is started exits, saying who holds the
   lock (`fleet-agent/agent.lock`, which the running agent touches every few seconds). A stopping
   agent is given ten seconds to let go. The lock names its holder, and where the process list
-  cannot say what a pid is (Windows, containers without `ps`), a fresh lock that names the pid, or
+  cannot say what a pid is (Windows, or where neither `/proc` nor `ps` can see the process), a fresh lock that names the pid, or
   for an agent of a build from before the lock a fresh `state.json` that names it, is what counts.
   So the upgrade is: `prime fleets agent stop` (it stops an old agent too), then start the new one;
   `agent install` does the stop for you.

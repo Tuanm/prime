@@ -23,8 +23,8 @@ import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "
 import { positions } from "./fleet-replica.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
-import { fleetAgentServiceStatus, uninstallFleetAgentService } from "./fleet-service.ts";
-import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgent } from "./fleet-daemon.ts";
+import { fleetAgentServiceStatus } from "./fleet-service.ts";
+import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgent, uninstallFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
 
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -443,7 +443,7 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
     return;
   }
   if (what === "uninstall") {
-    const had = uninstallFleetAgentService(ctx.configPath);
+    const had = uninstallFleetAgent(ctx.configPath, { force: bool(ctx.parsed, "force") });
     if (ctx.json) {
       printJson({ removed: had });
       return;
@@ -483,20 +483,27 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
     return;
   }
   const status = fleetAgentStatus(ctx.configPath);
+  const service = fleetAgentServiceStatus(ctx.configPath);
   if (ctx.json) {
-    printJson(status);
+    printJson({
+      ...status,
+      service: { installed: service.installed, where: service.where, ...(service.config ? { config: service.config } : {}), ...(service.detail ? { detail: service.detail } : {}) },
+    });
     return;
   }
-  const service = fleetAgentServiceStatus(ctx.configPath);
+  // The one service on the machine runs one configuration; for another it is not this one's.
+  const elsewhere = !service.installed && service.config !== undefined;
+  const notInstalled = elsewhere
+    ? "the service on this machine runs " + service.config + ", not this configuration (one per machine)"
+    : "not installed as a service: run 'prime fleets agent install'";
   if (!status.running) {
     ctx.out(dim("the fleet agent is not running"));
-    if (!service.installed) {
-      ctx.out(dim("  not installed as a service: run 'prime fleets agent install'"));
-    }
+    if (!service.installed) ctx.out(dim("  " + notInstalled));
     return;
   }
   ctx.out(green("the fleet agent is running") + " (pid " + status.pid + ")");
-  if (service.installed) ctx.out(dim("  service   " + service.where));
+  if (service.installed) ctx.out(dim("  service   " + service.where + (service.config ? " (runs " + service.config + ")" : "")));
+  else if (elsewhere) ctx.out(yellow("  service   " + notInstalled));
   else ctx.out(yellow("  service   not installed: it stops when this machine logs out (run 'prime fleets agent install')"));
   ctx.out(dim("  started   " + (status.started_at ?? "-")));
   ctx.out(dim("  spaces    " + (status.spaces ?? 0)));

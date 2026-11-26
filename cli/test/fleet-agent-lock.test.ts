@@ -15,6 +15,7 @@ import {
   readAgentSettings,
   runFleetAgent,
   stopFleetAgent,
+  uninstallFleetAgent,
 } from "../src/fleet-daemon";
 
 const cleanups: Array<() => void> = [];
@@ -577,6 +578,19 @@ describe("switching the replica mode of a running agent", () => {
     expect(String(error)).toContain("installed for /somewhere/else.yaml");
     expect(installed).toBe(false);
     expect(isFleetAgentProcess(old.pid, fleetAgentDir(configPath))).toBe(true);
+  });
+
+  test("uninstalling under another configuration refuses to remove the service that runs the default one, unless forced", () => {
+    let removed = 0;
+    const uninstall = () => (removed++, true);
+    const there = join(scratch(), "config.json");
+    expect(() => uninstallFleetAgent(there, { uninstall, boundTo: () => "/home/me/.prime/config.yaml" })).toThrow("runs /home/me/.prime/config.yaml");
+    expect(removed).toBe(0);
+    // Its own configuration, or when none is installed, or when forced: removed.
+    expect(uninstallFleetAgent(there, { uninstall, boundTo: () => there })).toBe(true);
+    expect(uninstallFleetAgent(there, { uninstall, boundTo: () => undefined })).toBe(true);
+    expect(uninstallFleetAgent(there, { uninstall, boundTo: () => "/home/me/.prime/config.yaml", force: true })).toBe(true);
+    expect(removed).toBe(3);
   });
 
   test("a reinstall leaves the service's own agent to the manager, which stops it itself", async () => {

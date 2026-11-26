@@ -141,7 +141,7 @@ const FLEET_SYNC_FLAGS: FlagSpec[] = [
   flag("space", "string", "The space that belongs to the fleet", { placeholder: "<name>" }),
   flag("watch", "boolean", "Keep going: publish when primary, pull when replica"),
   flag("interval", "number", "Seconds between rounds when watching", { placeholder: "<s>" }),
-  flag("force", "boolean", "Publish even when the workspace has not changed"),
+  flag("force", "boolean", "Publish even when the workspace has not changed; with `agent uninstall`, remove the service although it runs another configuration"),
 ];
 
 const VAULTS_FLAGS: FlagSpec[] = [

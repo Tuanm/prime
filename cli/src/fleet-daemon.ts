@@ -44,7 +44,7 @@ import {
   type PlaceAnswer,
   type ReplicaMode,
 } from "./fleet-replica.ts";
-import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService } from "./fleet-service.ts";
+import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -502,6 +502,25 @@ export async function installFleetAgent(
   const own = running !== undefined && (deps.servicePid ?? (() => fleetAgentServiceStatus(configPath).pid))() === running.pid;
   if (running && !own) await stopAndWait(configPath, running, deps.stopWaitMs ?? STOP_WAIT_MS);
   return deps.install();
+}
+
+/**
+ * Remove the login service. There is one per machine and it runs one configuration: removing it
+ * from another is refused unless asked for (`force`), so that a command for one configuration
+ * cannot take the default one's agent away.
+ */
+export function uninstallFleetAgent(
+  configPath: string,
+  deps: { uninstall?: () => boolean; boundTo?: () => string | undefined; force?: boolean } = {},
+): boolean {
+  const bound = (deps.boundTo ?? fleetAgentServiceConfig)();
+  if (bound !== undefined && !sameConfig(bound, configPath) && !deps.force) {
+    throw new CliError(
+      "the fleet agent service runs " + bound + ", not " + configPath + " (there is one per machine)",
+      "run it with --config " + bound + ", or pass --force to remove it anyway",
+    );
+  }
+  return (deps.uninstall ?? (() => uninstallFleetAgentService(configPath)))();
 }
 
 /** Stop the agent. Returns true when one was running. */
