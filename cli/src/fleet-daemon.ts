@@ -672,10 +672,11 @@ export async function maybeCollect(loop: SpaceLoop, report: (what: string) => vo
   }
 }
 
-// An error from the file system that says the work tree cannot be written to.
-function cannotWrite(err: unknown): boolean {
+// An error from the file system that says the work tree cannot be written to. (Not EMFILE: too
+// many files open is the agent's own load and passes.)
+export function cannotWrite(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === "string" && ["EACCES", "EPERM", "ENOSPC", "EROFS", "EDQUOT", "EMFILE"].includes(code);
+  return typeof code === "string" && ["EACCES", "EPERM", "ENOSPC", "EROFS", "EDQUOT"].includes(code);
 }
 
 /**

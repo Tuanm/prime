@@ -1802,3 +1802,14 @@ describe("the primary's renewal and the rounds", () => {
     }
   });
 });
+
+describe("an error that says the work tree cannot be written", () => {
+  test("is a permission or a full disk; running out of file descriptors is the agent's own load and passes", async () => {
+    const { cannotWrite } = await import("../src/fleet-daemon");
+    for (const code of ["EACCES", "EPERM", "ENOSPC", "EROFS", "EDQUOT"]) expect(cannotWrite({ code })).toBe(true);
+    expect(cannotWrite({ code: "EMFILE" })).toBe(false);
+    expect(cannotWrite({ code: "ENFILE" })).toBe(false);
+    expect(cannotWrite(new Error("plain"))).toBe(false);
+    expect(cannotWrite(null)).toBe(false);
+  });
+});
