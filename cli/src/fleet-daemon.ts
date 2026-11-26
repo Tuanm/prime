@@ -274,6 +274,32 @@ export async function maybeCollect(loop: SpaceLoop, report: (what: string) => vo
   }
 }
 
+/**
+ * One beat of the clock a space keeps for its place, apart from its round.
+ *
+ * A primary renews on every beat. A replica has nothing to renew: it looks now
+ * and then (see placeDue). What the fleet answers is acted on as it is anywhere
+ * else - a replica that is told it could have a free lease sets about taking it,
+ * and `wake` rouses the round that will. A paused fleet takes no one in, and a
+ * space whose rounds keep failing is retried by the round, on its longer wait.
+ */
+export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number = Date.now()): Promise<void> {
+  const due =
+    loop.primary ||
+    placeDue({
+      primary: false,
+      now,
+      lastBootstrap: loop.lastBootstrap,
+      heartbeatMs: 0,
+      wanted: false,
+      eventsConnected: loop.events.connected,
+      ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}),
+    });
+  if (loop.paused || (loop.failures ?? 0) > 0 || !due) return;
+  await takePlace(loop);
+  if (loop.claim) wake();
+}
+
 /** One space as the agent keeps it (exported so a round can be driven in a test). */
 export interface SpaceLoop {
   configPath: string;
@@ -305,8 +331,10 @@ export interface SpaceLoop {
   failures?: number;
   /** A replica should try to become the primary once `claimAt` has passed. */
   claim: boolean;
-  /** What the fleet said when the member last asked and was not given the place. */
-  claimAnswer?: PlaceAnswer;
+  /** What the fleet said the last time the member asked for its place. */
+  lastAnswer?: PlaceAnswer;
+  /** The member is in the middle of trying to take the lease: takePlace leaves the claim to it. */
+  promoting?: boolean;
   claimAt: number;
   /** The socket said the head moved, so there is something to fetch. */
   headDirty: boolean;
@@ -391,19 +419,10 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}),
     })
   ) {
-    const answer = await takePlace(loop);
+    await takePlace(loop);
     if (loop.paused) {
       report("the fleet is paused");
       return;
-    }
-    // The lease is free and this member could have it, but it has not applied
-    // the head: it is eligible, and goes on to catch up below.
-    if (!loop.primary && answer.reason === "not-caught-up") {
-      loop.claim = true;
-      loop.claimAt = Math.min(loop.claimAt || Date.now(), Date.now());
-      loop.claimAnswer = answer;
-    } else if (!loop.primary && answer.reason === "lease-held") {
-      loop.claim = false;
     }
   }
 
@@ -481,20 +500,41 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // stays what it was, having done nothing the fleet has to know about.
   if (loop.claim && Date.now() >= loop.claimAt) {
     loop.claim = false;
+    loop.promoting = true;
     const began = Date.now();
-    const outcome = await promote({
-      takePlace: () => takePlace(loop),
-      catchUp: async () => {
-        const now = readFleetState(loop.configPath, fleet, loop.name);
-        await prefetch(creds, fleet, paths, now, keep);
-        const done = await applyReady(creds, fleet, paths, readFleetState(loop.configPath, fleet, loop.name), keep, { report: true });
-        if (done?.kept) report("kept " + done.kept.moved + " locally changed path(s) aside in " + done.kept.to);
-      },
-    });
+    let outcome: Awaited<ReturnType<typeof promote>>;
+    try {
+      outcome = await promote({
+        takePlace: () => takePlace(loop),
+        catchUp: async () => {
+          const now = readFleetState(loop.configPath, fleet, loop.name);
+          await prefetch(creds, fleet, paths, now, keep);
+          const done = await applyReady(creds, fleet, paths, readFleetState(loop.configPath, fleet, loop.name), keep, { report: true });
+          if (done?.kept) report("kept " + done.kept.moved + " locally changed path(s) aside in " + done.kept.to);
+        },
+      });
+    } catch (err) {
+      // It could not catch up (the network, a failed apply): the member is still
+      // eligible, and tries again once the round has backed off.
+      loop.claim = true;
+      loop.claimAt = Date.now();
+      throw err;
+    } finally {
+      loop.promoting = false;
+    }
     loop.timing.pull = Date.now() - began;
     if (outcome === "primary") {
       report("took over at " + positions(readFleetState(loop.configPath, fleet, loop.name)).applied.seq);
       return;
+    }
+    // Another replica is catching up first, or the question was already being
+    // asked: ask again soon, not at the next safety check.
+    if (outcome === "claimed") {
+      loop.claim = true;
+      loop.claimAt = Date.now() + (loop.lastAnswer?.retryAfterMs ?? 30_000) + Math.floor(Math.random() * 2000);
+    } else if (outcome === "busy" || outcome === "gave-up") {
+      loop.claim = true;
+      loop.claimAt = Date.now() + 1_000;
     }
   }
 
@@ -596,6 +636,7 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     ttlMs?: number;
     reason?: string;
     catchUpTo?: number;
+    retryAfterMs?: number;
     head?: { seq?: number; manifestKey?: string };
   };
   return {
@@ -604,6 +645,7 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     ...(typeof body.ttlMs === "number" && body.ttlMs > 0 ? { ttlMs: body.ttlMs } : {}),
     ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
     ...(typeof body.catchUpTo === "number" ? { catchUpTo: body.catchUpTo } : {}),
+    ...(typeof body.retryAfterMs === "number" && body.retryAfterMs > 0 ? { retryAfterMs: body.retryAfterMs } : {}),
     ...(body.head && typeof body.head.seq === "number" && body.head.seq > 0
       ? { head: { seq: body.head.seq, ...(typeof body.head.manifestKey === "string" && body.head.manifestKey ? { manifestKey: body.head.manifestKey } : {}) } }
       : {}),
@@ -632,7 +674,9 @@ function heartbeatFor(loop: SpaceLoop, ceilingMs: number): number {
  * arriving.
  */
 async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
-  if (loop.placing) return { primary: loop.primary };
+  // Asked while another ask is in flight (the heartbeat and the round meet): not
+  // a "no" from the fleet, and not to be taken for one.
+  if (loop.placing) return { primary: loop.primary, busy: true };
   loop.placing = true;
   try {
     const keys = loadOrCreateKeyPair(loop.paths.keyFile);
@@ -661,11 +705,30 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
       }
       if (placed.head.seq > fetched) loop.headDirty = true;
     }
-    return {
+    const answer: PlaceAnswer = {
       primary: placed.primary,
       ...(placed.reason ? { reason: placed.reason } : {}),
       ...(placed.catchUpTo !== undefined ? { catchUpTo: placed.catchUpTo } : {}),
+      ...(placed.retryAfterMs !== undefined ? { retryAfterMs: placed.retryAfterMs } : {}),
     };
+    loop.lastAnswer = answer;
+    // Whoever asked - the round, the heartbeat, a promotion - the answer sets what
+    // the member does next. While it is already trying to take the lease that is
+    // the promotion's own business.
+    if (!placed.primary && !loop.promoting) {
+      if (answer.reason === "not-caught-up") {
+        // The lease is free and this member could have it once it has applied the head.
+        loop.claim = true;
+        loop.claimAt = Math.min(loop.claimAt || Date.now(), Date.now());
+      } else if (answer.reason === "claimed") {
+        // Another replica is catching up to take it: ask again when its claim runs out.
+        loop.claim = true;
+        loop.claimAt = Date.now() + (answer.retryAfterMs ?? 30_000);
+      } else if (answer.reason === "lease-held") {
+        loop.claim = false;
+      }
+    }
+    return answer;
   } finally {
     loop.placing = false;
   }
@@ -797,24 +860,9 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
     let beat: ReturnType<typeof setTimeout> | undefined;
     const beatTick = (): void => {
       beat = setTimeout(() => {
-        // A paused fleet takes no one in, so there is nothing to renew. A space
-        // whose rounds keep failing is retried by the round, on its longer wait,
-        // not here every few seconds as well.
-        // A primary renews on every beat. A replica has nothing to renew: it
-        // looks now and then (see placeDue), not on a clock of its own.
-        const due =
-          loop.primary ||
-          placeDue({
-            primary: false,
-            now: Date.now(),
-            lastBootstrap: loop.lastBootstrap,
-            heartbeatMs: 0,
-            wanted: false,
-            eventsConnected: loop.events.connected,
-            ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}),
-          });
-        const renew = loop.paused || (loop.failures ?? 0) > 0 || !due ? Promise.resolve() : takePlace(loop).then(() => undefined);
-        void renew.catch(() => {}).finally(beatTick);
+        void heartbeat(loop, () => wake(name, true))
+          .catch(() => {})
+          .finally(beatTick);
       }, heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs ?? heartbeatMs)));
     };
     beatTick();
@@ -861,11 +909,13 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         ...(idle.idleMs !== undefined ? { idleMs: idle.idleMs } : {}),
         failures: loop.failures,
       });
+      // A claim that is waiting for its time wakes the round then.
+      const until = loop.claim ? Math.max(200, loop.claimAt - Date.now()) : sleepMs;
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           wakeups.delete(name);
           resolve();
-        }, sleepMs);
+        }, Math.min(sleepMs, until));
         wakeups.set(name, () => {
           clearTimeout(timer);
           resolve();

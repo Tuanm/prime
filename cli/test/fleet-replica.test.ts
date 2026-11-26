@@ -247,7 +247,8 @@ describe("taking the lease", () => {
         });
       const results = await Promise.all([attempt(a), attempt(b)]);
       expect(results.filter((o) => o === "primary").length).toBe(1);
-      expect(results.filter((o) => o === "lease-held").length).toBe(1);
+      // The other one is told to wait (the first to ask holds the claim) or finds the lease held.
+      expect(results.filter((o) => o === "claimed" || o === "lease-held").length).toBe(1);
       expect(["ra", "rb"]).toContain(w.gateway.primary);
     } finally {
       finish(w);
@@ -271,6 +272,12 @@ describe("taking the lease", () => {
     } finally {
       finish(w);
     }
+  });
+
+  test("a claim held by another replica, or a question already in flight, is not taken for a refusal", async () => {
+    expect(await promote({ takePlace: async () => ({ primary: false, reason: "claimed", retryAfterMs: 20_000 }), catchUp: async () => undefined })).toBe("claimed");
+    expect(await promote({ takePlace: async () => ({ primary: false, busy: true }), catchUp: async () => undefined })).toBe("busy");
+    expect(await promote({ takePlace: async () => ({ primary: false, reason: "lease-held" }), catchUp: async () => undefined })).toBe("lease-held");
   });
 
   test("a head that keeps moving under a member that is catching up ends, and says so", async () => {
@@ -465,6 +472,69 @@ describe("the agent's round for a replica", () => {
       expect(b.loop.primary).toBe(false);
       expect(b.loop.claim).toBe(false);
       expect(w.gateway.primary).toBe("ra");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("the replica that loses the race for a free lease writes nothing, and asks again when the claim runs out", async () => {
+    const w = await world();
+    try {
+      const a = await baseline(w, "ra");
+      const b = await space(w, "rb");
+      await w.publishNext(); // the member that joined is sealed for from here on
+      await a.round();
+      await b.round();
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      for (const s of [a, b]) {
+        s.loop.headDirty = true;
+        await s.round();
+      }
+      w.gateway.primary = ""; // the lease is free; both hear it
+      const staleB = fingerprint(b.paths.work);
+
+      // a asks first: it is told to catch up, and has the claim on doing so.
+      const asked = await fetch("http://fake/fleets/x/bootstrap", { method: "POST", headers: { "x-prime-device": "ra" }, body: "{}" } as RequestInit);
+      expect(((await asked.json()) as { reason?: string }).reason).toBe("not-caught-up");
+
+      // b asks while a is writing its work tree: it is told to wait, and writes nothing.
+      b.loop.claim = true;
+      b.loop.claimAt = 0;
+      await b.round();
+      expect(sameTree(fingerprint(b.paths.work), staleB)).toBe(true);
+      expect(b.state().seq).toBeLessThan(w.gateway.head!.seq);
+      expect(b.loop.primary).toBe(false);
+      expect(b.loop.claim).toBe(true);
+      expect(b.loop.claimAt).toBeGreaterThan(Date.now() + 20_000);
+
+      // a never finishes (it died): the claim runs out and b takes over.
+      w.gateway.claim = { device: "ra", until: Date.now() - 1 };
+      b.loop.claimAt = 0;
+      await b.round();
+      expect(b.loop.primary).toBe(true);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(b.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a heartbeat that finds the lease free sets the replica about taking it, as a round would", async () => {
+    const { heartbeat } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await baseline(w, "r1");
+      for (let i = 0; i < 2; i++) await w.publishNext();
+      s.loop.headDirty = true;
+      await s.round();
+      w.gateway.primary = "";
+      s.loop.lastBootstrap = 1; // long ago: due
+      let woken = 0;
+      await heartbeat(s.loop as never, () => void woken++);
+      expect(s.loop.claim).toBe(true);
+      expect(woken).toBe(1);
+      // And the round that is woken takes over.
+      await s.round();
+      expect(s.loop.primary).toBe(true);
     } finally {
       finish(w);
     }

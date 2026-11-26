@@ -22,6 +22,8 @@ export class FakeGateway {
   indexEnabled = true;
   /** What the index lists; tests may cut holes in it. */
   indexEntries: Array<{ seq: number; manifestKey: string; full: boolean; packBytes?: number; deltaBytes?: number }> = [];
+  /** Who is catching up to take the free lease, and until when. */
+  claim: { device: string; until: number } | null = null;
   /** Publishers that predate the key fingerprint in wrapped keys. */
   stripKeyIds = false;
   /** How many of the next /applied reports fail with a 503. */
@@ -67,8 +69,14 @@ export class FakeGateway {
       }
       const current = this.head?.seq ?? 0;
       if (current > 0 && (this.applied.get(creds.deviceId) ?? 0) < current) {
+        // The first to ask has a claim on catching up; the others wait (as the real object does).
+        if (this.claim && this.claim.until > Date.now() && this.claim.device !== creds.deviceId) {
+          return Response.json({ ok: true, role: "replica", reason: "claimed", holder: this.claim.device, head: this.head, retryAfterMs: this.claim.until - Date.now() });
+        }
+        this.claim = { device: creds.deviceId, until: Date.now() + 30_000 };
         return Response.json({ ok: true, role: "replica", reason: "not-caught-up", catchUpTo: current, head: this.head ?? { seq: 0 } });
       }
+      this.claim = null;
       this.primary = creds.deviceId;
       return Response.json({ ok: true, role: "primary", ttlMs: 45_000, ...(current > 0 ? { catchUpTo: current } : {}) });
     }

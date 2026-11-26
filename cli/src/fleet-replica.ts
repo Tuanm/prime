@@ -167,6 +167,10 @@ export interface PlaceAnswer {
   reason?: string;
   /** For `not-caught-up`: the sequence the member has to have applied first. */
   catchUpTo?: number;
+  /** For `claimed`: how long before another replica's claim on catching up runs out. */
+  retryAfterMs?: number;
+  /** The question was not asked: one is in flight already. */
+  busy?: boolean;
 }
 
 /**
@@ -184,11 +188,15 @@ export async function promote(deps: {
   catchUp: (seq: number) => Promise<void>;
   /** How many times the head may move under a member that is catching up. */
   attempts?: number;
-}): Promise<"primary" | "lease-held" | "paused" | "gave-up"> {
+}): Promise<"primary" | "lease-held" | "claimed" | "busy" | "paused" | "gave-up"> {
   for (let attempt = 0; attempt < (deps.attempts ?? 3); attempt++) {
     const answer = await deps.takePlace();
     if (answer.primary) return "primary";
     if (answer.paused) return "paused";
+    if (answer.busy) return "busy";
+    // Another replica is catching up to take it: this one writes nothing, and
+    // asks again when that claim runs out.
+    if (answer.reason === "claimed") return "claimed";
     if (answer.reason !== "not-caught-up") return "lease-held";
     await deps.catchUp(answer.catchUpTo ?? 0);
   }
