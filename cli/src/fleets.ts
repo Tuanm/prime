@@ -24,7 +24,7 @@ import { positions } from "./fleet-replica.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
-import { ensureFleetAgent, fleetAgentStatus, stopFleetAgent } from "./fleet-daemon.ts";
+import { ensureFleetAgent, fleetAgentStatus, persistAgentSettings, stopFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
 
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -431,6 +431,8 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
   // The agent holds the fleet's lease while it runs, so it has to outlive the
   // terminal that started it: a login service, not a background process.
   if (what === "install") {
+    // The service starts without this shell's environment: what was set here is written down for it.
+    persistAgentSettings(ctx.configPath);
     const where = installFleetAgentService(ctx.configPath);
     if (ctx.json) {
       printJson({ installed: true, where });
@@ -487,6 +489,7 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
   ctx.out(dim("  started   " + (status.started_at ?? "-")));
   ctx.out(dim("  spaces    " + (status.spaces ?? 0)));
   ctx.out(dim("  rounds    " + (status.rounds ?? 0)));
+  if (status.replica) ctx.out(dim("  replicas  " + (status.replica === "mirror" ? "mirror (work tree follows every snapshot)" : "lazy (fetch ahead, apply when needed)")));
   if (status.updates === "push") ctx.out(dim("  updates   pushed by the gateway"));
   else if (status.updates === "polling") ctx.out(dim("  updates   polling the gateway"));
   if (status.paused) ctx.out(yellow("  paused    the fleet is paused"));

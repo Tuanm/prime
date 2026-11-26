@@ -1458,3 +1458,60 @@ describe("a snapshot from a publisher that does not say who it was sealed for", 
     }
   });
 });
+
+describe("what a person sets for the agent", () => {
+  const dirs: string[] = [];
+  const configIn = (): string => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-settings-"));
+    dirs.push(root);
+    return join(root, "config.json");
+  };
+  const cleanup = (): void => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  };
+
+  test("PRIME_FLEET_REPLICA reaches the agent that `prime fleets agent start` spawns", async () => {
+    const { buildAgentEnv, persistAgentSettings } = await import("../src/fleet-daemon");
+    try {
+      const configPath = configIn();
+      // The shell the person typed it in: only a short list of the environment goes on, and this is on it.
+      const env = { PATH: "/bin", HOME: "/h", SECRET_TOKEN: "no", PRIME_FLEET_REPLICA: "mirror", PRIME_FLEET_CACHE_MB: "64" };
+      persistAgentSettings(configPath, env);
+      const child = buildAgentEnv(configPath, {}, env);
+      expect(child.PRIME_FLEET_REPLICA).toBe("mirror");
+      expect(child.PRIME_FLEET_CACHE_MB).toBe("64");
+      expect(child.SECRET_TOKEN).toBeUndefined();
+      // A value that means nothing is not passed on.
+      expect(buildAgentEnv(configIn(), {}, { PRIME_FLEET_REPLICA: "sideways", PRIME_FLEET_CACHE_MB: "-1" }).PRIME_FLEET_REPLICA).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("a restart by the service, which has no such environment, keeps the mode that was set", async () => {
+    const { applyAgentSettings, buildAgentEnv, persistAgentSettings, readAgentSettings } = await import("../src/fleet-daemon");
+    try {
+      const configPath = configIn();
+      persistAgentSettings(configPath, { PRIME_FLEET_REPLICA: "mirror" });
+      expect(readAgentSettings(configPath)).toEqual({ replica: "mirror" });
+      // The agent as the service starts it: nothing in its environment.
+      const serviceEnv: Record<string, string | undefined> = { PATH: "/bin" };
+      applyAgentSettings(configPath, serviceEnv);
+      expect(serviceEnv.PRIME_FLEET_REPLICA).toBe("mirror");
+      expect(replicaMode(serviceEnv)).toBe("mirror");
+      // And so does one started again from a shell that set nothing.
+      expect(buildAgentEnv(configPath, {}, { PATH: "/bin" }).PRIME_FLEET_REPLICA).toBe("mirror");
+      // What the start says wins, and is remembered in turn.
+      const explicit: Record<string, string | undefined> = { PRIME_FLEET_REPLICA: "lazy" };
+      applyAgentSettings(configPath, explicit);
+      expect(explicit.PRIME_FLEET_REPLICA).toBe("lazy");
+      persistAgentSettings(configPath, explicit);
+      expect(readAgentSettings(configPath).replica).toBe("lazy");
+      // A corrupt file is no settings.
+      writeFileSync(join(configPath, "..", "fleet-agent", "settings.json"), "{not json");
+      expect(readAgentSettings(configPath)).toEqual({});
+    } finally {
+      cleanup();
+    }
+  });
+});

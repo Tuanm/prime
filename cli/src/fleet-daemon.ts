@@ -21,7 +21,7 @@
 // Nothing here holds a secret in the clear beyond what the configuration
 // already holds, and the agent inherits only the environment it needs.
 
-import { mkdirSync, readFileSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
@@ -41,6 +41,7 @@ import {
   replicaMode,
   replicaSleepMs,
   type PlaceAnswer,
+  type ReplicaMode,
 } from "./fleet-replica.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
@@ -66,6 +67,8 @@ export interface FleetAgentState {
   updates?: "push" | "polling";
   /** True while a fleet this agent keeps is paused. */
   paused?: boolean;
+  /** How replicas are kept: `lazy` fetches ahead and applies when needed, `mirror` applies as it fetches. */
+  replica?: ReplicaMode;
 }
 
 export interface FleetAgentOptions {
@@ -105,24 +108,87 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+/** What a person can set about how the agent works, and expects to stay set. */
+export interface AgentSettings {
+  /** `lazy` (the default) or `mirror`: see fleet-replica.ts. */
+  replica?: ReplicaMode;
+  /** The size the object store is collected at, in megabytes. */
+  cacheMb?: number;
+}
+
+export function agentSettingsPath(configPath: string): string {
+  return join(fleetAgentDir(configPath), "settings.json");
+}
+
+export function readAgentSettings(configPath: string): AgentSettings {
+  try {
+    const raw = JSON.parse(readFileSync(agentSettingsPath(configPath), "utf8")) as { replica?: unknown; cacheMb?: unknown };
+    return {
+      ...(raw.replica === "lazy" || raw.replica === "mirror" ? { replica: raw.replica } : {}),
+      ...(typeof raw.cacheMb === "number" && raw.cacheMb > 0 ? { cacheMb: raw.cacheMb } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** The settings an environment asks for: only values that mean something. */
+export function settingsFromEnv(env: Record<string, string | undefined>): AgentSettings {
+  const mb = Number(env.PRIME_FLEET_CACHE_MB);
+  return {
+    ...(env.PRIME_FLEET_REPLICA === "lazy" || env.PRIME_FLEET_REPLICA === "mirror" ? { replica: env.PRIME_FLEET_REPLICA } : {}),
+    ...(Number.isFinite(mb) && mb > 0 ? { cacheMb: mb } : {}),
+  };
+}
+
 /**
- * Ensure the agent is running; returns its metadata.
+ * Remember what the environment asks of the agent, and return what is in force.
  *
- * The agent is started the same way the vault broker is: a detached child
- * that writes a state file, with only the environment it needs.
+ * The agent is started from a shell (`prime fleets agent start`) or by the system
+ * (a login service, a restart after a crash), and only the first has the variables
+ * the person set. What they asked for is written down, so that every start - and the
+ * service's - has it.
  */
-export async function ensureFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<FleetAgentState> {
-  const existing = readFleetAgentState(configPath);
-  if (existing && pidAlive(existing.pid)) return existing;
-  rmSync(fleetAgentStatePath(configPath), { force: true });
-  const dir = fleetAgentDir(configPath);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const agentEnv: Record<string, string | undefined> = { PRIME_FLEET_AGENT_DIR: dir };
+export function persistAgentSettings(configPath: string, env: Record<string, string | undefined> = process.env): AgentSettings {
+  const asked = settingsFromEnv(env);
+  const settings = { ...readAgentSettings(configPath), ...asked };
+  if (Object.keys(asked).length > 0) {
+    mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
+    const file = agentSettingsPath(configPath);
+    writeFileSync(file + ".tmp", JSON.stringify(settings, null, 2), { mode: 0o600 });
+    renameSync(file + ".tmp", file);
+  }
+  return settings;
+}
+
+/** In the agent itself: what was set and remembered applies unless this start says otherwise. */
+export function applyAgentSettings(configPath: string, env: Record<string, string | undefined> = process.env): void {
+  const settings = readAgentSettings(configPath);
+  if (env.PRIME_FLEET_REPLICA === undefined && settings.replica) env.PRIME_FLEET_REPLICA = settings.replica;
+  if (env.PRIME_FLEET_CACHE_MB === undefined && settings.cacheMb) env.PRIME_FLEET_CACHE_MB = String(settings.cacheMb);
+}
+
+/**
+ * The environment the agent is started with.
+ *
+ * The agent needs almost nothing from the caller's environment. Copying all of it
+ * would silently hand it unrelated credentials, so what it gets is a short list - and
+ * the settings above, which are the one thing a person sets for it.
+ */
+export function buildAgentEnv(
+  configPath: string,
+  options: FleetAgentOptions,
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const agentEnv: Record<string, string | undefined> = { PRIME_FLEET_AGENT_DIR: fleetAgentDir(configPath) };
   // The timings travel with the agent, so a user can trade traffic for speed.
   if (options.pollMs !== undefined) agentEnv.PRIME_FLEET_POLL_MS = String(options.pollMs);
+  else if (env.PRIME_FLEET_POLL_MS !== undefined) agentEnv.PRIME_FLEET_POLL_MS = env.PRIME_FLEET_POLL_MS;
   if (options.heartbeatMs !== undefined) agentEnv.PRIME_FLEET_HEARTBEAT_MS = String(options.heartbeatMs);
-  // The agent needs almost nothing from the caller's environment. Copying all
-  // of it would silently hand it unrelated credentials.
+  else if (env.PRIME_FLEET_HEARTBEAT_MS !== undefined) agentEnv.PRIME_FLEET_HEARTBEAT_MS = env.PRIME_FLEET_HEARTBEAT_MS;
+  const settings = { ...readAgentSettings(configPath), ...settingsFromEnv(env) };
+  if (settings.replica) agentEnv.PRIME_FLEET_REPLICA = settings.replica;
+  if (settings.cacheMb) agentEnv.PRIME_FLEET_CACHE_MB = String(settings.cacheMb);
   const inherited = new Set([
     "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
     "TERM", "NO_COLOR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
@@ -130,9 +196,34 @@ export async function ensureFleetAgent(configPath: string, options: FleetAgentOp
     "http_proxy", "https_proxy", "no_proxy", "all_proxy",
   ]);
   for (const key of inherited) {
-    const value = process.env[key];
+    const value = env[key];
     if (value !== undefined) agentEnv[key] = value;
   }
+  return agentEnv;
+}
+
+/**
+ * Ensure the agent is running; returns its metadata.
+ *
+ * The agent is started the same way the vault broker is: a detached child
+ * that writes a state file, with only the environment it needs. If one is running
+ * and the person asks for a different replica mode, it is restarted: starting it
+ * "again" must not quietly leave it as it was.
+ */
+export async function ensureFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<FleetAgentState> {
+  const asked = persistAgentSettings(configPath);
+  const existing = readFleetAgentState(configPath);
+  if (existing && pidAlive(existing.pid)) {
+    const wants = settingsFromEnv(process.env).replica;
+    if (!wants || (existing.replica ?? "lazy") === wants) return existing;
+    stopFleetAgent(configPath);
+    const gone = Date.now() + 5000;
+    while (pidAlive(existing.pid) && Date.now() < gone) await Bun.sleep(50);
+  }
+  void asked;
+  rmSync(fleetAgentStatePath(configPath), { force: true });
+  mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
+  const agentEnv = buildAgentEnv(configPath, options);
   const child = Bun.spawn({
     // selfCommand, not process.execPath: when the CLI runs from source the
     // executable is bun, and bun would look for a file named __fleet-agent.
@@ -175,6 +266,7 @@ export function fleetAgentStatus(configPath: string): {
   timing?: RoundTiming;
   updates?: "push" | "polling";
   paused?: boolean;
+  replica?: ReplicaMode;
 } {
   const state = readFleetAgentState(configPath);
   if (!state || !pidAlive(state.pid)) return { running: false };
@@ -189,6 +281,7 @@ export function fleetAgentStatus(configPath: string): {
     timing: state.timing,
     ...(state.updates ? { updates: state.updates } : {}),
     ...(state.paused ? { paused: true } : {}),
+    ...(state.replica ? { replica: state.replica } : {}),
   };
 }
 
@@ -802,6 +895,8 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
  * others.
  */
 export async function runFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<void> {
+  // What a person set (and the service was never told) is read from where it was written down.
+  applyAgentSettings(configPath);
   const env = process.env;
   const pollMs = options.pollMs ?? Number(env.PRIME_FLEET_POLL_MS ?? 1500);
   // The heartbeat never exceeds this; the fleet's own lease can lower it.
@@ -844,6 +939,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       config_path: configPath,
       spaces,
       rounds,
+      replica: replicaMode(),
       ...(lastError ? { last_error: lastError } : {}),
       ...(lastAction ? { last_action: lastAction } : {}),
       ...(timing ? { timing } : {}),
