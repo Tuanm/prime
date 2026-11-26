@@ -588,6 +588,49 @@ describe("names that differ only in case", () => {
   });
 });
 
+describe("a whole-tree pack carries the tree, not the history", () => {
+  test("its size does not grow with the snapshots that came before, and a joiner can use it", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      mkdirSync(work, { recursive: true });
+      let seed = 7;
+      const noise = (): string => {
+        let out = "";
+        for (let i = 0; i < 4000; i++) {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+          out += (seed % 36).toString(36);
+        }
+        return out;
+      };
+      for (let i = 0; i < 10; i++) writeFileSync(join(work, "f" + i + ".txt"), noise());
+      const first = await snapshot({ work, gitDir, wantFull: true });
+      let base = first.commit;
+      let last = first;
+      // Every snapshot rewrites most of the files, so each leaves its own blobs behind.
+      for (let n = 0; n < 12; n++) {
+        for (let i = 0; i < 8; i++) writeFileSync(join(work, "f" + i + ".txt"), noise());
+        last = await snapshot({ work, gitDir, base, wantFull: true });
+        base = last.commit;
+      }
+      expect(last.pack.length).toBeLessThan(first.pack.length * 1.2);
+
+      // A member that has nothing opens it, and a delta applies on top.
+      const other = join(root, "other");
+      mkdirSync(other);
+      await applyPack(other, join(root, "other-meta"), last.commit, last.pack, [], null);
+      expect(readFileSync(join(other, "f0.txt"), "utf8")).toBe(readFileSync(join(work, "f0.txt"), "utf8"));
+      writeFileSync(join(work, "f9.txt"), "after the anchor");
+      const next = await snapshot({ work, gitDir, base: last.commit, wantFull: false });
+      await applyPack(other, join(root, "other-meta"), next.commit, next.delta!, [], last.commit);
+      expect(readFileSync(join(other, "f9.txt"), "utf8")).toBe("after the anchor");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("what changed locally", () => {
   test("only the edited file is reported, and only it is moved aside", async () => {
     const r = await replicaOf({ "a.txt": "alpha", "b.txt": "beta", "sub/c.txt": "gamma" });

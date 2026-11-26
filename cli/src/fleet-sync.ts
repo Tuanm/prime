@@ -32,7 +32,8 @@ export interface Snapshot {
   /**
    * Self-contained pack: the replica can apply it without any history.
    *
-   * It carries the whole tree, so it is what a member that joins later needs.
+   * It carries the whole tree (and only the tree: no earlier snapshot), so it
+   * is what a member that joins later needs.
    */
   pack: Buffer;
   /**
@@ -283,10 +284,20 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
 
   // Only the pack that is needed is built. Building both costs twice the git
   // work, and the common case is that only one of them travels.
+  //
+  // The whole-tree pack is the snapshot's own objects: its commit, its trees and
+  // its blobs. Naming only the commit to pack-objects would walk the commit's
+  // ancestors too, and the pack would carry every snapshot the fleet ever made:
+  // it would grow with the history instead of with the tree.
   const pack =
     opts.treeOnly || opts.wantFull === false
       ? Buffer.alloc(0)
-      : await gitRun(gitDir, ["pack-objects", "--stdout", "--revs"], env, commit + "\n");
+      : await gitRun(
+          gitDir,
+          ["pack-objects", "--stdout"],
+          env,
+          await gitRun(gitDir, ["rev-list", "--objects", "--no-walk", commit], env),
+        );
 
   // The delta against the previous snapshot: only what changed. A member
   // that already has the previous snapshot can apply it on its own.
