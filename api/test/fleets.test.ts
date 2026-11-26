@@ -10,6 +10,7 @@ import {
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
   OWNER_SILENCE_MS,
+  RECENT_SNAPSHOTS,
   newInviteCode,
   validFleetId,
 } from "../src/fleets";
@@ -51,6 +52,9 @@ function fakeBucket() {
   const etagOf = (body: string) => "e" + body.length + "-" + (n++).toString(16);
   return {
     objects,
+    async delete(key: string) {
+      objects.delete(key);
+    },
     async get(key: string) {
       const o = objects.get(key);
       if (!o) return null;
@@ -665,6 +669,46 @@ describe("head advance", () => {
     const head = JSON.parse(bucket.objects.get("fleets/acme/head")!.body);
     expect(head.seq).toBe(1);
     expect(head.manifestKey).toBe("m1");
+  });
+});
+
+describe("what a member far behind needs is kept", () => {
+  // The member publishes a whole tree every 32 snapshots (FULL_PACK_WINDOW in
+  // the CLI) and deltas in between, and a member that fell behind starts from
+  // the newest whole tree. So the gateway has to keep the newest checkpoint and
+  // every delta after it, at any head.
+  const CHECKPOINT_EVERY = 32;
+
+  test("the retention covers a whole checkpoint interval plus the checkpoint before it", () => {
+    expect(RECENT_SNAPSHOTS).toBeGreaterThanOrEqual(2 * CHECKPOINT_EVERY);
+  });
+
+  test("at any head, the newest checkpoint and the deltas after it are still stored", async () => {
+    const { doInstance, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    const total = RECENT_SNAPSHOTS + CHECKPOINT_EVERY + 5;
+    for (let seq = 1; seq <= total; seq++) {
+      bucket.objects.set("fleets/acme/manifests/m" + seq, { body: "{}", etag: "x" });
+      bucket.objects.set("fleets/acme/packs/p" + seq, { body: "pack", etag: "x" });
+      const res = await call(doInstance, "/head/advance", {
+        caller: "device",
+        device: "dev-owner",
+        body: { expectedSeq: seq - 1, manifestKey: "fleets/acme/manifests/m" + seq, manifestHash: "h" + seq, packKey: "fleets/acme/packs/p" + seq },
+      });
+      expect(res.status).toBe(200);
+      await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq } });
+
+      const checkpoint = seq - (seq % CHECKPOINT_EVERY);
+      if (checkpoint >= 1) {
+        for (let kept = checkpoint; kept <= seq; kept++) {
+          expect(bucket.objects.has("fleets/acme/manifests/m" + kept)).toBe(true);
+          expect(bucket.objects.has("fleets/acme/packs/p" + kept)).toBe(true);
+        }
+      }
+    }
+    // Old snapshots do go: the store is bounded.
+    expect(bucket.objects.has("fleets/acme/packs/p1")).toBe(false);
   });
 });
 

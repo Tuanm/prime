@@ -33,8 +33,11 @@ export const OWNER_SILENCE_MS = 24 * 60 * 60_000;
 /**
  * How many snapshots a fleet keeps.
  *
- * A member that falls further behind than this is given a whole tree again,
- * so the older snapshots are of no use to anybody.
+ * The primary publishes a whole tree every 32 snapshots and only the change in
+ * between, and a member that fell behind catches up from the newest whole tree
+ * and the changes after it. That is never more than 32 snapshots back, so
+ * keeping at least twice the interval keeps everything such a member needs, no
+ * matter how far behind it is. Older snapshots are of no use to anybody.
  */
 export const RECENT_SNAPSHOTS = 64;
 

@@ -1108,8 +1108,9 @@ export class FleetDO implements DurableObject {
     // published already has it.
     this.broadcast({ type: "head", seq: next.seq }, caller.deviceId);
 
-    // Keep a bounded number of snapshots. A member that falls further behind
-    // than this is given a whole tree again, so the old ones are of no use.
+    // Keep a bounded number of snapshots: more than the newest whole tree and
+    // the changes after it, which is all a member far behind needs. The old
+    // ones are of no use.
     const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
     recent.push(manifestKey + (packKey ? "\n" + packKey : ""));
     const evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
