@@ -771,10 +771,17 @@ export async function applyCommit(
   rmSync(join(gitDir, "apply.target"), { force: true });
 }
 
-// Wait until a lock file is gone (a git that was left running by an agent that was
-// killed lets go of it when it finishes), and take away one that has been there so
-// long that nothing holds it.
-async function waitForIndexLock(lock: string, waitMs = 15_000): Promise<void> {
+/** A lock this old is a git that died: nothing writes an index for ten minutes. */
+const STALE_LOCK_MS = 10 * 60_000;
+
+/**
+ * Wait until a lock file is gone (a git that was left running by an agent that was
+ * killed lets go of it when it finishes). A lock that is still there when the wait is over
+ * may belong to a git that is still writing the work tree - taking it away would let two
+ * `read-tree -u` write one index - so the apply fails (and is tried again at the next
+ * round) unless the lock is so old that nothing can be holding it.
+ */
+export async function waitForIndexLock(lock: string, waitMs = 15_000, staleMs = STALE_LOCK_MS): Promise<void> {
   const until = Date.now() + waitMs;
   while (existsSync(lock)) {
     let age = 0;
@@ -783,9 +790,12 @@ async function waitForIndexLock(lock: string, waitMs = 15_000): Promise<void> {
     } catch {
       return;
     }
-    if (age > 60_000 || Date.now() > until) {
+    if (age > staleMs) {
       rmSync(lock, { force: true });
       return;
+    }
+    if (Date.now() > until) {
+      throw new Error("another git is still writing this work tree (" + lock + " is held); the apply is tried again shortly");
     }
     await new Promise((r) => setTimeout(r, 100));
   }

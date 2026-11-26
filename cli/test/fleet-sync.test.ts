@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import {
   EMPTY_TREE,
   foldsCase,
+  waitForIndexLock,
   applyCommit,
   applyPack,
   ingestPack,
@@ -1268,5 +1269,30 @@ describe("whether the work directory's file system folds case", () => {
     expect(readdirSync(digits)).toEqual([]);
     // A directory that is not there cannot be probed: taken as case-sensitive.
     expect(foldsCase(join(root, "2025"))).toBe(false);
+  });
+});
+
+describe("the lock on the apply index", () => {
+  test("a lock that is still there when the wait is over is not taken away: the apply fails instead", async () => {
+    const root = scratch();
+    const lock = join(root, "apply.index.lock");
+    writeFileSync(lock, "");
+    await expect(waitForIndexLock(lock, 250)).rejects.toThrow(/still writing/);
+    expect(existsSync(lock)).toBe(true);
+  });
+
+  test("one that goes while it is waited for lets the apply go on, and one that nothing can be holding is removed", async () => {
+    const root = scratch();
+    const lock = join(root, "apply.index.lock");
+    writeFileSync(lock, "");
+    setTimeout(() => rmSync(lock, { force: true }), 150);
+    await waitForIndexLock(lock, 2000);
+    expect(existsSync(lock)).toBe(false);
+
+    writeFileSync(lock, "");
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(lock, old, old);
+    await waitForIndexLock(lock, 250);
+    expect(existsSync(lock)).toBe(false);
   });
 });
