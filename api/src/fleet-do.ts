@@ -1105,9 +1105,9 @@ export class FleetDO implements DurableObject {
         } else {
           // Nobody holds the claim. It goes to the replica that has waited longest,
           // and to anyone if nobody has been waiting.
-          const head = queue[0];
-          if (head && head.device !== caller.deviceId) {
-            out = await queued(head.device, Math.min(CLAIM_MS, head.by - now));
+          const first = queue[0];
+          if (first && first.device !== caller.deviceId) {
+            out = await queued(first.device, Math.min(CLAIM_MS, first.by - now));
             return;
           }
           await this.state.storage.put("claim", {
