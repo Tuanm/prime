@@ -712,6 +712,52 @@ describe("what a member far behind needs is kept", () => {
   });
 });
 
+describe("a snapshot's other packs", () => {
+  async function advance(doInstance: FleetDO, seq: number, extra?: string[]) {
+    return call(doInstance, "/head/advance", {
+      caller: "device",
+      device: "dev-owner",
+      body: {
+        expectedSeq: seq - 1,
+        manifestKey: "fleets/acme/manifests/m" + seq,
+        manifestHash: "h" + seq,
+        packKey: "fleets/acme/packs/p" + seq,
+        ...(extra ? { extraKeys: extra } : {}),
+      },
+    });
+  }
+
+  test("the change pack beside a checkpoint is let go with its snapshot, and only this fleet's own can be named", async () => {
+    const { doInstance, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    const mine = "fleets/acme/packs/" + "a".repeat(16);
+    const theirs = "fleets/other/packs/" + "b".repeat(16);
+    bucket.objects.set(mine, { body: "delta", etag: "x" });
+    bucket.objects.set(theirs, { body: "not ours", etag: "x" });
+    for (let seq = 1; seq <= RECENT_SNAPSHOTS + 3; seq++) {
+      bucket.objects.set("fleets/acme/manifests/m" + seq, { body: "{}", etag: "x" });
+      bucket.objects.set("fleets/acme/packs/p" + seq, { body: "pack", etag: "x" });
+      const res = await advance(doInstance, seq, seq === 1 ? [mine, theirs, 42 as unknown as string] : undefined);
+      expect(res.status).toBe(200);
+      await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq } });
+    }
+    expect(bucket.objects.has(mine)).toBe(false);
+    expect(bucket.objects.has(theirs)).toBe(true);
+    expect(bucket.objects.has("fleets/acme/packs/p1")).toBe(false);
+  });
+
+  test("an older client names no extra packs and everything works as it did", async () => {
+    const { doInstance, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    const res = await advance(doInstance, 1);
+    expect(res.status).toBe(200);
+    expect(res.json.head.seq).toBe(1);
+    void bucket;
+  });
+});
+
 describe("a fleet the registry has forgotten", () => {
   test("says who it is again when it is woken up", async () => {
     const registry = fakeRegistry();

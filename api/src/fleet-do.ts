@@ -1070,6 +1070,13 @@ export class FleetDO implements DurableObject {
     const manifestKey = typeof body.manifestKey === "string" ? body.manifestKey : "";
     const manifestHash = typeof body.manifestHash === "string" ? body.manifestHash : "";
     const packKey = typeof body.packKey === "string" ? body.packKey : "";
+    // Other objects that belong to this snapshot (the change pack beside a
+    // checkpoint's whole tree): kept and let go with it. Only this fleet's own
+    // payloads may be named, so a publisher cannot have another fleet's deleted.
+    const own = "fleets/" + fleetId + "/packs/";
+    const extraKeys = Array.isArray(body.extraKeys)
+      ? body.extraKeys.filter((k): k is string => typeof k === "string" && k.startsWith(own) && /^[0-9a-f]{16,64}$/.test(k.slice(own.length))).slice(0, 4)
+      : [];
     if (!manifestKey || !manifestHash) return Response.json({ error: "manifest required" }, { status: 400 });
 
     const held = await this.lease();
@@ -1113,7 +1120,7 @@ export class FleetDO implements DurableObject {
     // the changes after it, which is all a member far behind needs. The old
     // ones are of no use.
     const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
-    recent.push(manifestKey + (packKey ? "\n" + packKey : ""));
+    recent.push([manifestKey, packKey, ...extraKeys].filter(Boolean).join("\n"));
     const evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
     await this.state.storage.put("recent", recent);
     for (const entry of evicted) {

@@ -124,9 +124,9 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   const pack = body.subarray(4 + manifestLength);
   if (pack.length === 0) return Response.json({ error: "empty pack" }, { status: 400 });
 
-  let manifest: { seq?: number; packKey?: string; packHash?: string };
+  let manifest: { seq?: number; packKey?: string; packHash?: string; delta?: { packKey?: unknown } };
   try {
-    manifest = JSON.parse(manifestBytes.toString("utf8")) as { seq?: number; packKey?: string; packHash?: string };
+    manifest = JSON.parse(manifestBytes.toString("utf8")) as { seq?: number; packKey?: string; packHash?: string; delta?: { packKey?: unknown } };
   } catch {
     return Response.json({ error: "malformed manifest" }, { status: 400 });
   }
@@ -142,6 +142,10 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   // the gateway knows where the bytes ended up - so it is filled in here.
   manifest.packKey = packKey;
   manifest.packHash = packHash;
+  // A checkpoint's whole tree may carry the change since the snapshot before as
+  // a pack of its own, uploaded just before. The object is told, so it is kept
+  // for as long as the snapshot is and let go with it.
+  const extraKeys = typeof manifest.delta?.packKey === "string" ? [manifest.delta.packKey] : [];
   const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
   const manifestHash = await sha256Hex(finalManifest);
   const manifestKey = "fleets/" + fleetId + "/manifests/" + manifestHash;
@@ -163,7 +167,7 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   const moved = await stub.fetch("https://fleet/head/advance", {
     method: "POST",
     headers,
-    body: JSON.stringify({ expectedSeq: seq - 1, manifestKey, manifestHash, packKey }),
+    body: JSON.stringify({ expectedSeq: seq - 1, manifestKey, manifestHash, packKey, extraKeys }),
   });
   const result = (await moved.json().catch(() => ({}))) as { ok?: boolean; head?: unknown; error?: string };
   if (!moved.ok) return Response.json({ ok: false, error: result.error ?? "the head did not move" }, { status: moved.status });
