@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess } from "../src/fleet-agent-lock";
@@ -78,7 +78,68 @@ describe("one fleet agent per configuration", () => {
     expect(other.held).toBe(true);
     expect(readFileSync(agentLockPath(dir), "utf8").trim()).toBe(String(process.pid + 1));
     writeFileSync(agentLockPath(dir), "not a pid");
+    utimesSync(agentLockPath(dir), old, old);
     expect((await acquireAgentLock(dir)).held).toBe(true);
+  });
+
+  test("two agents that start at the same moment do not both hold it: the lock appears with the pid in it", async () => {
+    const dir = scratch();
+    let second: Awaited<ReturnType<typeof acquireAgentLock>> | undefined;
+    // Agent A has written its pid and is about to put the lock in place; agent B (pid 2222) starts right then.
+    const a = await acquireAgentLock(dir, {
+      pid: 1111,
+      isAgent: () => true,
+      beforeLink: async () => {
+        if (!second) second = await acquireAgentLock(dir, { pid: 2222, isAgent: () => true });
+      },
+    });
+    expect(second?.held).toBe(true);
+    expect(a).toEqual({ held: false, holder: 2222 });
+    expect(readFileSync(agentLockPath(dir), "utf8").trim()).toBe("2222");
+    if (second?.held) second.release();
+    // No file of the attempts is left behind.
+    expect(readdirSync(dir).filter((n) => n.startsWith("agent.lock"))).toEqual([]);
+  });
+
+  test("a lock that is empty and only just made (an older build's, being written) is waited for, an old empty one is not", async () => {
+    const dir = scratch();
+    writeFileSync(agentLockPath(dir), "");
+    expect(await acquireAgentLock(dir, { waitMs: 250 })).toEqual({ held: false, holder: 0 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(agentLockPath(dir), old, old);
+    expect((await acquireAgentLock(dir)).held).toBe(true);
+  });
+
+  test("a process list that gives no answer is not an answer: a live pid with a fresh lock is an agent, with an old one it is not", () => {
+    const dir = scratch();
+    const lock = agentLockPath(dir);
+    writeFileSync(lock, process.pid + "\n");
+    // A `ps` that exited 2 (busybox, no -p), one that was refused, one that printed nothing.
+    for (const probe of [() => ({ status: 2, stdout: "" }), () => ({ status: 127, stdout: "usage" }), () => null, () => ({ status: 0, stdout: "" })]) {
+      expect(isFleetAgentProcess(process.pid, dir, probe)).toBe(true);
+    }
+    const old = new Date(Date.now() - 31_000);
+    utimesSync(lock, old, old);
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 2, stdout: "" }))).toBe(false);
+    // What it does say is believed, whatever the lock's age: "no such process" and "something else", or "an agent".
+    writeFileSync(lock, process.pid + "\n");
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 1, stdout: "" }))).toBe(false);
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "vim notes.md\n" }))).toBe(false);
+    utimesSync(lock, old, old);
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "bun cli.ts __fleet-agent --config x\n" }))).toBe(true);
+  });
+
+  test("a holder keeps its lock fresh while it lives, whatever else it writes: a stopping agent is not mistaken for a dead one", async () => {
+    const dir = scratch();
+    const lock = await acquireAgentLock(dir, { touchMs: 40 });
+    expect(lock.held).toBe(true);
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(agentLockPath(dir), old, old);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(Date.now() - statSync(agentLockPath(dir)).mtimeMs).toBeLessThan(5_000);
+    expect(isFleetAgentProcess(process.pid, dir, () => null)).toBe(true);
+    if (lock.held) lock.release();
+    expect(existsSync(agentLockPath(dir))).toBe(false);
   });
 
   test("a second agent for the same configuration exits without touching the first's files", async () => {

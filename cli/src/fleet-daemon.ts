@@ -1105,7 +1105,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   // one still finishing its round, so it is given a moment to let go.
   const lock = await acquireAgentLock(fleetAgentDir(configPath), { waitMs: options.lockWaitMs ?? 10_000 });
   if (!lock.held) {
-    process.stderr.write("another fleet agent is already running (pid " + lock.holder + "); this one exits\n");
+    process.stderr.write("another fleet agent is already running" + (lock.holder > 0 ? " (pid " + lock.holder + ")" : "") + "; this one exits\n");
     process.exitCode = 1;
     return;
   }
