@@ -784,6 +784,104 @@ describe("nested repositories are remembered", () => {
   });
 });
 
+describe("a repository that arrives while the cache is stale", () => {
+  function repoWithCommit(dir: string): void {
+    mkdirSync(dir, { recursive: true });
+    gitIn(dir, ["init", "-q", "."]);
+    gitIn(dir, ["config", "user.email", "t@t"]);
+    gitIn(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "code.py"), "print(1)");
+    gitIn(dir, ["add", "."]);
+    gitIn(dir, ["commit", "-q", "-m", "init"]);
+  }
+  const listed = (gitDir: string, args: string[]): string =>
+    execFileSync("git", ["--git-dir=" + gitDir].concat(args), { encoding: "utf8" });
+
+  test("a directory moved in with a repository deeper down puts no gitlink in the snapshot", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      mkdirSync(work, { recursive: true });
+      writeFileSync(join(work, "a.txt"), "a");
+      const cache = new NestedRepoCache(work);
+      await snapshot({ work, gitDir, nested: cache });
+      // `mv ~/stuff work/`: the cache is not told, and the repository is two levels down.
+      repoWithCommit(join(work, "stuff", "proj"));
+      const snap = await snapshot({ work, gitDir, nested: cache });
+      expect(listed(gitDir, ["ls-tree", "-r", snap.commit])).not.toContain("160000");
+      expect(listed(gitDir, ["ls-tree", "-r", snap.commit])).not.toContain("proj");
+      // And not in the index the next snapshot starts from.
+      expect(listed(gitDir, ["ls-files", "-s"])).not.toContain("160000");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a repository with no commit does not make the snapshot fail", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      mkdirSync(join(work, "stuff", "fresh"), { recursive: true });
+      writeFileSync(join(work, "a.txt"), "a");
+      const cache = new NestedRepoCache(work);
+      await snapshot({ work, gitDir, nested: cache });
+      gitIn(join(work, "stuff", "fresh"), ["init", "-q", "."]);
+      writeFileSync(join(work, "stuff", "fresh", "x.txt"), "x");
+      const snap = await snapshot({ work, gitDir, nested: cache });
+      expect(listed(gitDir, ["ls-tree", "-r", snap.commit])).toContain("a.txt");
+      expect(listed(gitDir, ["ls-tree", "-r", snap.commit])).not.toContain("fresh");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a directory that was synced and then became a repository stops being published", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      mkdirSync(join(work, "lib"), { recursive: true });
+      writeFileSync(join(work, "lib", "a.js"), "v1");
+      writeFileSync(join(work, "top.txt"), "t");
+      const first = await snapshot({ work, gitDir });
+      expect(listed(gitDir, ["ls-tree", "-r", "--name-only", first.commit])).toContain("lib/a.js");
+      gitIn(join(work, "lib"), ["init", "-q", "."]);
+      writeFileSync(join(work, "lib", "a.js"), "v2");
+      const second = await snapshot({ work, gitDir, base: first.commit });
+      expect(listed(gitDir, ["ls-tree", "-r", "--name-only", second.commit])).not.toContain("lib/a.js");
+      expect(listed(gitDir, ["ls-tree", "-r", "--name-only", second.commit])).toContain("top.txt");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the cache hears about a directory that arrives, and ignores the work tree's own .git", () => {
+    const root = scratch();
+    try {
+      const cache = new NestedRepoCache(root);
+      expect(cache.get()).toEqual([]);
+      repoWithCommit(join(root, "stuff", "proj"));
+      // The files of the work tree's own repository change all the time.
+      cache.noteChange("change", ".git/index");
+      cache.noteChange("rename", ".git/index.lock");
+      cache.noteChange("change", "other/.git/HEAD");
+      expect(cache.get()).toEqual([]);
+      // A directory that was moved in is a rename of the directory itself.
+      cache.noteChange("rename", "stuff");
+      expect(cache.get()).toEqual(["stuff/proj"]);
+      // A .git entry that appears or goes is the signal, wherever it is.
+      mkdirSync(join(root, "x"), { recursive: true });
+      gitIn(join(root, "x"), ["init", "-q", "."]);
+      cache.noteChange("rename", "x/.git");
+      expect(cache.get().sort()).toEqual(["stuff/proj", "x"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("sealing", () => {
   test("round trips exactly", () => {
     const plain = Buffer.from("the workspace contents".repeat(100));

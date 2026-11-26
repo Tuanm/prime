@@ -167,6 +167,8 @@ export const NESTED_REPOS_TTL_MS = 30_000;
 export class NestedRepoCache {
   private found: string[] | null = null;
   private at = 0;
+  /** Whether the last `get` walked the tree, rather than answering from memory. */
+  walked = false;
 
   constructor(
     private readonly work: string,
@@ -180,10 +182,12 @@ export class NestedRepoCache {
     // A repository that is gone from where it was is a stale answer whatever
     // the age: a missing exclusion is harmless, a wrong one is not.
     if (this.found !== null && now - this.at < this.ttlMs && this.found.every((p) => existsSync(join(this.work, p, ".git")))) {
+      this.walked = false;
       return [...this.found];
     }
     this.found = findNestedRepos(this.work);
     this.at = now;
+    this.walked = true;
     return [...this.found];
   }
 
@@ -195,10 +199,13 @@ export class NestedRepoCache {
   /**
    * Tell the cache about a change the watcher saw.
    *
-   * Anything under a `.git` path may be a repository appearing or going away.
-   * A path that was just created or moved and now holds a `.git` is a whole
-   * repository arriving at once, which reports no event under `.git`. An event
-   * with no path says nothing, so it is treated as a change.
+   * A repository comes or goes as a `.git` entry that appears or disappears, so
+   * that is the signal - wherever it is, except at the top: the work tree's own
+   * repository is not a nested one, and its files change whenever somebody runs
+   * git. A directory that was created or moved is a rename of the directory
+   * itself and may hold a repository deeper down (a whole `mv ~/stuff work/`),
+   * which reports no event under `.git`. An event with no path says nothing, so
+   * it is treated as a change.
    */
   noteChange(eventType: string | undefined, filename: string | null | undefined): void {
     if (!filename) {
@@ -206,11 +213,20 @@ export class NestedRepoCache {
       return;
     }
     const parts = filename.split(/[\\/]/);
-    if (parts.includes(".git")) {
+    if (parts[0] === ".git") return;
+    if (parts[parts.length - 1] === ".git") {
       this.invalidate();
       return;
     }
-    if (eventType === "rename" && existsSync(join(this.work, filename, ".git"))) this.invalidate();
+    // Something inside a .git directory: a repository being used, not arriving.
+    if (parts.includes(".git")) return;
+    if (eventType === "rename") {
+      try {
+        if (statSync(join(this.work, filename)).isDirectory()) this.invalidate();
+      } catch {
+        // Gone already: a removal of something that is not a directory any more.
+      }
+    }
   }
 }
 
@@ -261,12 +277,39 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   await gitText(gitDir, ["config", "user.name", "prime fleet"], env);
 
   // Nested repositories are excluded: the fleet does not mirror them.
-  const excluded = new Set(opts.exclude ?? []);
-  for (const nested of opts.nested ? opts.nested.get() : findNestedRepos(work)) excluded.add(nested);
-
-  const pathspec: string[] = ["."];
-  for (const path of excluded) pathspec.push(":(exclude)" + path);
-  await gitText(gitDir, ["add", "-A", "--"].concat(pathspec), env);
+  const stage = async (): Promise<void> => {
+    const excluded = new Set(opts.exclude ?? []);
+    for (const nested of opts.nested ? opts.nested.get() : findNestedRepos(work)) excluded.add(nested);
+    const left = [...excluded];
+    // A path the fleet leaves alone may already be in the index, from before it
+    // became a nested repository (or was excluded): add -A with an exclusion
+    // leaves such entries as they were, and the old contents would be
+    // published for ever.
+    if (left.length > 0) {
+      await gitText(gitDir, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--"].concat(left.map((p) => ":(literal)" + p)), env);
+    }
+    await gitText(gitDir, ["add", "-A", "--", "."].concat(left.map((p) => ":(exclude)" + p)), env);
+  };
+  try {
+    await stage();
+  } catch (err) {
+    // A repository with no commit cannot be added at all, and one that arrived
+    // since the cache last looked is exactly that case: look again, once.
+    if (!opts.nested || !/does not have a commit checked out|unable to index/.test(String(err))) throw err;
+    opts.nested.invalidate();
+    await stage();
+  }
+  // A repository that arrived since the cache last looked, and has a commit,
+  // is added as a gitlink: a pointer to history this fleet does not carry. It
+  // is taken out again here, whatever the cache knew, and the cache is told.
+  if (opts.nested && !opts.nested.walked) {
+    const staged = (await gitRun(gitDir, ["ls-files", "-z", "--stage"], env)).toString("utf8").split("\u0000");
+    const links = staged.filter((e) => e.startsWith("160000 ")).map((e) => e.slice(e.indexOf("\t") + 1));
+    if (links.length > 0) {
+      await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, links.join("\u0000") + "\u0000");
+      opts.nested.invalidate();
+    }
+  }
 
   const tree = await gitText(gitDir, ["write-tree"], env);
   if (tree === EMPTY_TREE && hasFiles(work)) {
