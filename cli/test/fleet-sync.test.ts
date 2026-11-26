@@ -453,6 +453,57 @@ describe("a removal never leaves the work tree", () => {
   });
 });
 
+describe("names that differ only in case", () => {
+  // Needs a file system that folds case (macOS, Windows); elsewhere the two
+  // names are two files and there is nothing to lose.
+  function foldsCase(dir: string): boolean {
+    writeFileSync(join(dir, "Probe.tmp"), "x");
+    const folds = existsSync(join(dir, "probe.tmp"));
+    rmSync(join(dir, "Probe.tmp"));
+    return folds;
+  }
+
+  test("a rename that only changes case does not leave the replica with neither file", async () => {
+    const r = await replicaOf({ "README.md": "hello", "other.txt": "o" });
+    try {
+      if (!foldsCase(r.other)) return;
+      // A primary on a case-sensitive file system renamed README.md -> readme.md.
+      const git = (args: string[], input?: string) =>
+        execFileSync("git", ["--git-dir=" + r.gitDir, ...args], {
+          input,
+          env: { ...process.env, GIT_AUTHOR_NAME: "a", GIT_AUTHOR_EMAIL: "a@a", GIT_COMMITTER_NAME: "a", GIT_COMMITTER_EMAIL: "a@a" },
+        }).toString().trim();
+      const hello = git(["hash-object", "-w", "--stdin"], "hello");
+      const other = git(["hash-object", "-w", "--stdin"], "o");
+      const tree = git(["mktree"], "100644 blob " + hello + "\treadme.md\n100644 blob " + other + "\tother.txt\n");
+      const commit = git(["commit-tree", tree, "-p", r.first.commit, "-m", "x"]);
+      const pack = execFileSync("git", ["--git-dir=" + r.gitDir, "pack-objects", "--stdout", "--revs"], { input: commit + "\n" });
+      await applyPack(r.other, r.otherGit, commit, pack, [], r.first.commit);
+      expect(readFileSync(join(r.other, "readme.md"), "utf8")).toBe("hello");
+      expect(readdirSync(r.other).filter((n) => n.toLowerCase() === "readme.md")).toEqual(["readme.md"]);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a file that is not named exactly as the dropped path is not the fleet's to remove", async () => {
+    const r = await replicaOf({ "Notes.txt": "fleet", "keep.txt": "k" });
+    try {
+      if (!foldsCase(r.other)) return;
+      // The fleet drops Notes.txt. On disk the name is notes.txt now (the
+      // owner renamed it): a different name, so it is left alone.
+      rmSync(join(r.other, "Notes.txt"));
+      writeFileSync(join(r.other, "notes.txt"), "the owner's");
+      rmSync(join(r.work, "Notes.txt"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], r.first.commit);
+      expect(readFileSync(join(r.other, "notes.txt"), "utf8")).toBe("the owner's");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("what changed locally", () => {
   test("only the edited file is reported, and only it is moved aside", async () => {
     const r = await replicaOf({ "a.txt": "alpha", "b.txt": "beta", "sub/c.txt": "gamma" });

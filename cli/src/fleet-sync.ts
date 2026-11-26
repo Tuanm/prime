@@ -395,6 +395,11 @@ function removeTracked(work: string, rel: string): void {
   }
   const full = join(dirs[dirs.length - 1]!, parts[parts.length - 1]!);
   try {
+    // On a file system that folds case (or normalisation) a name that differs
+    // only in that way finds the same file: it is the member's own file under
+    // another name, or the file the fleet has just written, and is not ours
+    // to remove.
+    if (!readdirSync(dirs[dirs.length - 1]!).includes(parts[parts.length - 1]!)) return;
     // A path that has become a directory (a file replaced by a folder of the
     // same name) is the new tree's, not a leftover.
     if (lstatSync(full).isDirectory()) return;
@@ -438,17 +443,18 @@ export async function applyPack(
   // those live in the replica's own store from the snapshot before it.
   // Without this the pack cannot be resolved and git refuses it.
   await gitRun(gitDir, ["index-pack", "--stdin", "--fix-thin"], env, pack);
-  // What goes is worked out before the tree is written, while both trees are
-  // still only names in the store.
-  const gone = await removedBetween(gitDir, env, previous, commit);
-  await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
-  // read-tree writes what the tree contains. A file the primary deleted is
-  // still sitting in the replica, so it is removed here - the paths the fleet
-  // leaves alone excepted: those belong to the member, not to the fleet.
+  // What goes is worked out from the two trees, and goes first: git's own
+  // order is removals, then writes. A name that only changes case is then
+  // removed before the new spelling is written, never after it.
   const keep = (exclude ?? []).map((p) => p.replace(/\/$/, ""));
-  for (const rel of gone) {
-    if (!isLeftAlone(rel, keep)) removeTracked(work, rel);
+  const gone = (await removedBetween(gitDir, env, previous, commit)).filter((rel) => !isLeftAlone(rel, keep));
+  for (const rel of gone) removeTracked(work, rel);
+  // The index is told too, so that read-tree has nothing left to delete: what
+  // leaves the work tree is decided here and nowhere else.
+  if (gone.length > 0) {
+    await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, gone.join("\u0000") + "\u0000");
   }
+  await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
 }
 
 /** Wait until the work tree stops changing, so a half-written file is not captured. */
