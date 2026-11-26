@@ -3,7 +3,17 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, u
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess } from "../src/fleet-agent-lock";
-import { agentSettingsPath, ensureFleetAgent, fleetAgentDir, fleetAgentStatePath, readAgentSettings, runFleetAgent } from "../src/fleet-daemon";
+import {
+  agentSettingsPath,
+  ensureFleetAgent,
+  fleetAgentDir,
+  fleetAgentStatePath,
+  fleetAgentStatus,
+  installFleetAgent,
+  readAgentSettings,
+  runFleetAgent,
+  stopFleetAgent,
+} from "../src/fleet-daemon";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -17,12 +27,14 @@ function scratch(): string {
 }
 
 /** A process that looks like a fleet agent to the process list (and does nothing). */
+function plainAgent(): { pid: number } {
+  const child = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  cleanups.push(() => child.kill("SIGKILL"));
+  return { pid: child.pid };
+}
+
 async function fakeAgent(ignoreTerm = false): Promise<{ pid: number }> {
-  if (!ignoreTerm) {
-    const child = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    cleanups.push(() => child.kill("SIGKILL"));
-    return { pid: child.pid };
-  }
+  if (!ignoreTerm) return plainAgent();
   // One that does not stop when asked to: it says so when it is set up to ignore the signal.
   const child = Bun.spawn(
     ["python3", "-c", "import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)", "__fleet-agent"],
@@ -178,14 +190,19 @@ describe("switching the replica mode of a running agent", () => {
     mkdirp(fleetAgentDir(configPath));
     const settings = { replica, cacheMb, pollMs: 1500, heartbeatMs: 15000 };
     writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath, replica, settings }));
+    // An agent holds its lock (where the process list cannot be asked, that is what says it is one).
+    writeFileSync(agentLockPath(fleetAgentDir(configPath)), pid + "\n");
   }
-  const hooks = (restarts: { n: number }, configPath: string, replica: "lazy" | "mirror", cacheMb = 512) => ({
+  /** A service whose manager runs `servicePid` and, when asked to restart it, starts another agent. */
+  const hooks = (restarts: { n: number }, configPath: string, replica: "lazy" | "mirror", cacheMb = 512, servicePid?: number) => ({
     installed: () => true,
+    pid: () => servicePid,
     restart: () => {
       restarts.n++;
-      running(configPath, process.pid, replica, cacheMb);
+      running(configPath, plainAgent().pid, replica, cacheMb);
       return true;
     },
+    stopWaitMs: 3000,
   });
 
   test("an agent the service runs is restarted by the service, and nothing else is spawned", async () => {
@@ -197,18 +214,19 @@ describe("switching the replica mode of a running agent", () => {
     let restarts = 0;
     const state = await ensureFleetAgent(configPath, { fromShell: true }, {
       installed: () => true,
+      pid: () => old.pid,
       restart: () => {
         restarts++;
-        // The manager has started the agent again: it is another process (this one stands in for it).
-        running(configPath, process.pid, "mirror");
+        // The manager has started the agent again: it is another process.
+        running(configPath, plainAgent().pid, "mirror");
         return true;
       },
     });
     expect(restarts).toBe(1);
-    expect(state.pid).toBe(process.pid);
+    expect(state.pid).not.toBe(old.pid);
     expect(state.replica).toBe("mirror");
     // The old agent was left to the manager: nothing here signalled it.
-    expect(isFleetAgentProcess(old.pid)).toBe(true);
+    expect(isFleetAgentProcess(old.pid, fleetAgentDir(configPath))).toBe(true);
   });
 
   test("without a service the old agent is stopped, and a new one is never spawned while it is alive", async () => {
@@ -219,14 +237,14 @@ describe("switching the replica mode of a running agent", () => {
     withMode("mirror");
     let error: unknown;
     try {
-      await ensureFleetAgent(configPath, { fromShell: true }, { installed: () => false, restart: () => false, stopWaitMs: 400 });
+      await ensureFleetAgent(configPath, { fromShell: true }, { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 400 });
     } catch (err) {
       error = err;
     }
     expect(String(error)).toContain("has not stopped yet");
     // Nobody else was started: the state still is the old agent's.
     expect(existsSync(fleetAgentStatePath(configPath))).toBe(false);
-    expect(isFleetAgentProcess(stubborn.pid)).toBe(true);
+    expect(isFleetAgentProcess(stubborn.pid, fleetAgentDir(configPath))).toBe(true);
   });
 
   test("a new cache size restarts it too, not only a new mode", async () => {
@@ -236,12 +254,12 @@ describe("switching the replica mode of a running agent", () => {
     running(configPath, old.pid, "lazy", 512);
     withEnv("PRIME_FLEET_CACHE_MB", "64");
     const restarts = { n: 0 };
-    const state = await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy", 64));
+    const state = await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy", 64, old.pid));
     expect(restarts.n).toBe(1);
     expect(state.settings?.cacheMb).toBe(64);
     expect(readAgentSettings(configPath)).toEqual({ cacheMb: 64 });
     // The same again changes nothing.
-    await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy", 64));
+    await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy", 64, state.pid));
     expect(restarts.n).toBe(1);
   });
 
@@ -252,7 +270,7 @@ describe("switching the replica mode of a running agent", () => {
     running(configPath, old.pid, "lazy");
     withMode("mirror");
     const restarts = { n: 0 };
-    const state = await ensureFleetAgent(configPath, {}, hooks(restarts, configPath, "mirror"));
+    const state = await ensureFleetAgent(configPath, {}, hooks(restarts, configPath, "mirror", 512, old.pid));
     expect(restarts.n).toBe(0);
     expect(state.pid).toBe(old.pid);
     expect(existsSync(agentSettingsPath(configPath))).toBe(false);
@@ -267,9 +285,99 @@ describe("switching the replica mode of a running agent", () => {
     running(configPath, old.pid, "mirror");
     withMode("");
     const restarts = { n: 0 };
-    const state = await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy"));
+    const state = await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy", 512, old.pid));
     expect(restarts.n).toBe(1);
     expect(state.replica).toBe("lazy");
     expect(existsSync(agentSettingsPath(configPath))).toBe(false);
+  });
+
+  test("an agent that is not the service's is stopped, not left beside it: the service starts its own", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    // Started by hand (or by `spaces create`, or by an older build with no lock), then the service was installed.
+    const detached = await fakeAgent();
+    running(configPath, detached.pid, "lazy");
+    const restarts = { n: 0 };
+    let detachedAtRestart: boolean | undefined;
+    const base = hooks(restarts, configPath, "lazy", 512, undefined);
+    const state = await ensureFleetAgent(configPath, {}, {
+      ...base,
+      restart: () => {
+        detachedAtRestart = isFleetAgentProcess(detached.pid, fleetAgentDir(configPath));
+        return base.restart();
+      },
+    });
+    expect(restarts.n).toBe(1);
+    // By the time the manager started its agent, the one beside it was gone.
+    expect(detachedAtRestart).toBe(false);
+    expect(state.pid).not.toBe(detached.pid);
+  });
+
+  test("with a service installed and no agent running, the service starts it: nothing is spawned beside it", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const restarts = { n: 0 };
+    const state = await ensureFleetAgent(configPath, {}, hooks(restarts, configPath, "lazy"));
+    expect(restarts.n).toBe(1);
+    expect(isFleetAgentProcess(state.pid, fleetAgentDir(configPath))).toBe(true);
+    // And a manager that will not is an error, not a reason to start one by hand.
+    const other = join(scratch(), "config.json");
+    let error: unknown;
+    try {
+      await ensureFleetAgent(other, {}, { installed: () => true, pid: () => undefined, restart: () => false, stopWaitMs: 300 });
+    } catch (err) {
+      error = err;
+    }
+    expect(String(error)).toContain("would not start it");
+    expect(existsSync(fleetAgentStatePath(other))).toBe(false);
+  });
+
+  test("installing the service stops a running agent first, and waits for it", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    running(configPath, old.pid, "lazy");
+    withMode("mirror");
+    let aliveAtInstall: boolean | undefined;
+    const where = await installFleetAgent(configPath, {
+      stopWaitMs: 3000,
+      install: () => {
+        aliveAtInstall = isFleetAgentProcess(old.pid, fleetAgentDir(configPath));
+        return "the unit";
+      },
+    });
+    expect(where).toBe("the unit");
+    expect(aliveAtInstall).toBe(false);
+    // What was set here is saved for the service.
+    expect(readAgentSettings(configPath)).toEqual({ replica: "mirror" });
+    // One that will not stop is an error, and the service is not installed over it.
+    const stubborn = await fakeAgent(true);
+    const other = join(scratch(), "config.json");
+    running(other, stubborn.pid, "lazy");
+    let installed = false;
+    let error: unknown;
+    try {
+      await installFleetAgent(other, { stopWaitMs: 300, install: () => ((installed = true), "x") });
+    } catch (err) {
+      error = err;
+    }
+    expect(String(error)).toContain("has not stopped yet");
+    expect(installed).toBe(false);
+  });
+
+  test("a pid left in the state by an agent that is gone is not signalled, and is not a running agent", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    // Some other process now has the pid the dead agent had.
+    const other = Bun.spawn(["sh", "-c", "sleep 60"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    cleanups.push(() => other.kill("SIGKILL"));
+    mkdirp(fleetAgentDir(configPath));
+    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid: other.pid, started_at: "x", config_path: configPath }));
+    expect(fleetAgentStatus(configPath).running).toBe(false);
+    expect(stopFleetAgent(configPath)).toBe(false);
+    await Bun.sleep(100);
+    expect(other.killed).toBe(false);
+    expect(other.exitCode).toBeNull();
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(false);
   });
 });

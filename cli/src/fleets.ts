@@ -23,8 +23,8 @@ import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "
 import { positions } from "./fleet-replica.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
-import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
-import { ensureFleetAgent, fleetAgentStatus, persistAgentSettings, resetAgentSettings, stopFleetAgent } from "./fleet-daemon.ts";
+import { fleetAgentServiceStatus, uninstallFleetAgentService } from "./fleet-service.ts";
+import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
 
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -431,9 +431,8 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
   // The agent holds the fleet's lease while it runs, so it has to outlive the
   // terminal that started it: a login service, not a background process.
   if (what === "install") {
-    // The service starts without this shell's environment: what was set here is written down for it.
-    persistAgentSettings(ctx.configPath);
-    const where = installFleetAgentService(ctx.configPath);
+    // Settings are saved for the service, and an agent that is running is stopped before it starts.
+    const where = await installFleetAgent(ctx.configPath);
     if (ctx.json) {
       printJson({ installed: true, where });
       return;

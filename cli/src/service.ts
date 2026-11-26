@@ -32,6 +32,8 @@ export interface ServiceStatus {
   /** Where the definition lives (file, or the task's full name). */
   where: string;
   detail?: string;
+  /** The process the manager is running for it, when it says. */
+  pid?: number;
 }
 
 export interface ServiceSpec {
@@ -357,13 +359,21 @@ export function serviceStatus(
     const where = systemdUnitPath(process.env, homedir(), name);
     if (!Bun.which("systemctl")) return { installed: existsSync(where), running: false, where, detail: "systemctl not found" };
     const active = run(["systemctl", "--user", "is-active", name + ".service"]).out.trim();
-    return { installed: existsSync(where), running: active === "active", where, detail: active || undefined };
+    const main = Number.parseInt(run(["systemctl", "--user", "show", "-p", "MainPID", "--value", name + ".service"]).out.trim(), 10);
+    return { installed: existsSync(where), running: active === "active", where, detail: active || undefined, ...(main > 0 ? { pid: main } : {}) };
   }
   if (platform === "darwin") {
     const where = launchdPlistPath(homedir(), label);
     const printed = run(["launchctl", "print", "gui/" + uid() + "/" + label]);
     const state = /^\s*state = (\S+)/m.exec(printed.out)?.[1];
-    return { installed: existsSync(where), running: printed.code === 0 && state === "running", where, detail: printed.code === 0 ? state : "not loaded" };
+    const pid = Number.parseInt(/^\s*pid = (\d+)/m.exec(printed.out)?.[1] ?? "", 10);
+    return {
+      installed: existsSync(where),
+      running: printed.code === 0 && state === "running",
+      where,
+      detail: printed.code === 0 ? state : "not loaded",
+      ...(pid > 0 ? { pid } : {}),
+    };
   }
   if (platform === "win32") {
     const where = "Task Scheduler " + TASK_PATH + TASK_NAME;

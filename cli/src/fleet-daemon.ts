@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
-import { acquireAgentLock } from "./fleet-agent-lock.ts";
+import { acquireAgentLock, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import {
@@ -44,7 +44,7 @@ import {
   type PlaceAnswer,
   type ReplicaMode,
 } from "./fleet-replica.ts";
-import { fleetAgentServiceStatus, restartFleetAgentService } from "./fleet-service.ts";
+import { fleetAgentServiceStatus, installFleetAgentService, restartFleetAgentService } from "./fleet-service.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -318,19 +318,31 @@ function settingsDiffer(running: FleetAgentState, settings: AgentSettings): bool
 
 /** How the agent's login service is asked about and restarted; replaced in tests. */
 export interface AgentServiceHooks {
+  /** Whether a login service runs the agent here (one that a service manager can restart). */
   installed(): boolean;
-  /** Ask the service manager to restart it; false when it would not. */
+  /** The pid the service manager runs the agent as, when it is running. */
+  pid(): number | undefined;
+  /** Ask the service manager to (re)start it; false when it would not. */
   restart(): boolean;
-  /** How long a running agent is given to stop when it is replaced without the service (tests make it short). */
+  /** How long a running agent is given to stop when it is replaced, or to come back (tests make it short). */
   stopWaitMs?: number;
 }
 
 const systemService: AgentServiceHooks = {
   installed: () => {
+    // Only where the manager can be asked to restart it: elsewhere the agent is started as it always was.
+    if (process.platform !== "darwin" && process.platform !== "linux") return false;
     try {
       return fleetAgentServiceStatus().installed;
     } catch {
       return false;
+    }
+  },
+  pid: () => {
+    try {
+      return fleetAgentServiceStatus().pid;
+    } catch {
+      return undefined;
     }
   },
   restart: () => restartFleetAgentService(),
@@ -358,27 +370,38 @@ export async function ensureFleetAgent(
 ): Promise<FleetAgentState> {
   const shell = options.fromShell === true;
   const settings = shell ? persistAgentSettings(configPath, process.env, options) : readAgentSettings(configPath);
-  const existing = readFleetAgentState(configPath);
-  if (existing && pidAlive(existing.pid)) {
+  const waitMs = service.stopWaitMs ?? STOP_WAIT_MS;
+  const managed = service.installed();
+  let existing = runningAgent(configPath);
+  if (existing && managed && service.pid() !== existing.pid) {
+    // An agent that is not the service's, beside a service that would start its own: one of
+    // them has to go, and it is this one (an agent started by hand, or left from before the
+    // service was installed).
+    await stopAndWait(configPath, existing, waitMs);
+    existing = undefined;
+  }
+  if (existing) {
     if (!settingsDiffer(existing, settings)) return existing;
-    if (service.installed() && service.restart()) {
-      // The manager kills it and starts it again: the new one is the one with another pid.
-      const deadline = Date.now() + (service.stopWaitMs ?? STOP_WAIT_MS);
-      for (;;) {
-        const state = readFleetAgentState(configPath);
-        if (state && state.pid !== existing.pid && pidAlive(state.pid)) return state;
-        if (Date.now() > deadline) throw new CliError("the fleet agent did not come back after the service was restarted");
-        await Bun.sleep(100);
-      }
+    if (!managed) {
+      await stopAndWait(configPath, existing, waitMs);
+      existing = undefined;
     }
-    stopFleetAgent(configPath);
-    const gone = Date.now() + (service.stopWaitMs ?? STOP_WAIT_MS);
-    while (pidAlive(existing.pid) && Date.now() < gone) await Bun.sleep(50);
-    if (pidAlive(existing.pid)) {
+  }
+  if (managed) {
+    // The service manager starts it (or restarts it, to take the new settings): nothing is
+    // spawned beside the service's own agent.
+    if (!service.restart()) {
       throw new CliError(
-        "the running fleet agent (pid " + existing.pid + ") has not stopped yet",
-        "it may be finishing a round: try again in a moment",
+        "the fleet agent's service would not start it",
+        "run 'prime fleets agent install' to set the service up again",
       );
+    }
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const state = runningAgent(configPath);
+      if (state && state.pid !== existing?.pid) return state;
+      if (Date.now() > deadline) throw new CliError("the fleet agent did not come back after the service was restarted");
+      await Bun.sleep(100);
     }
   }
   rmSync(fleetAgentStatePath(configPath), { force: true });
@@ -396,22 +419,61 @@ export async function ensureFleetAgent(
   (child as unknown as { unref?: () => void }).unref?.();
   const deadline = Date.now() + 5000;
   for (;;) {
-    const state = readFleetAgentState(configPath);
-    if (state && pidAlive(state.pid)) return state;
+    const state = runningAgent(configPath);
+    if (state) return state;
     if (Date.now() > deadline) throw new CliError("the fleet agent did not start");
     await Bun.sleep(50);
   }
+}
+
+/** The state of the agent that is running, if one is: its pid is alive and is an agent (not a pid that was reused). */
+function runningAgent(configPath: string): FleetAgentState | undefined {
+  const state = readFleetAgentState(configPath);
+  return state && isFleetAgentProcess(state.pid, fleetAgentDir(configPath)) ? state : undefined;
+}
+
+/** Ask the agent to stop and wait for it to be gone; never leave it to be started beside. */
+async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: number): Promise<void> {
+  stopFleetAgent(configPath);
+  const gone = Date.now() + waitMs;
+  while (pidAlive(state.pid) && Date.now() < gone) await Bun.sleep(50);
+  if (pidAlive(state.pid)) {
+    throw new CliError(
+      "the running fleet agent (pid " + state.pid + ") has not stopped yet",
+      "it may be finishing a round: try again in a moment",
+    );
+  }
+}
+
+/**
+ * Install the agent as a login service. An agent that is already running is stopped first and
+ * waited for: the service starts its own, and two of them would act as the primary for the
+ * same spaces (an agent from before the lock existed would not even notice the other).
+ */
+export async function installFleetAgent(
+  configPath: string,
+  deps: { install: () => string; stopWaitMs?: number } = { install: () => installFleetAgentService(configPath) },
+): Promise<string> {
+  // The service starts without this shell's environment: what was set here is written down for it.
+  persistAgentSettings(configPath);
+  const running = runningAgent(configPath);
+  if (running) await stopAndWait(configPath, running, deps.stopWaitMs ?? STOP_WAIT_MS);
+  return deps.install();
 }
 
 /** Stop the agent. Returns true when one was running. */
 export function stopFleetAgent(configPath: string): boolean {
   const state = readFleetAgentState(configPath);
   if (!state) return false;
-  try {
-    process.kill(state.pid, "SIGTERM");
-  } catch {}
+  // A pid left in the state by an agent that is gone may belong to anything now.
+  const agent = isFleetAgentProcess(state.pid, fleetAgentDir(configPath));
+  if (agent) {
+    try {
+      process.kill(state.pid, "SIGTERM");
+    } catch {}
+  }
   rmSync(fleetAgentStatePath(configPath), { force: true });
-  return true;
+  return agent;
 }
 
 /** Whether the agent is running, and what it is doing. */
@@ -428,8 +490,8 @@ export function fleetAgentStatus(configPath: string): {
   paused?: boolean;
   replica?: ReplicaMode;
 } {
-  const state = readFleetAgentState(configPath);
-  if (!state || !pidAlive(state.pid)) return { running: false };
+  const state = runningAgent(configPath);
+  if (!state) return { running: false };
   return {
     running: true,
     pid: state.pid,
