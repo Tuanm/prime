@@ -14,7 +14,7 @@
 //            applied;
 //   head     what the fleet has, which the agent learns from its socket.
 
-import { applyFetched, fetchAhead, type MemberPaths, type Position } from "./fleet-agent";
+import { applyFetched, fetchAhead, type HeadHint, type MemberPaths, type Position } from "./fleet-agent";
 import { preserveLocalChange, snapshot } from "./fleet-sync";
 import { reportApplied, type FleetCredentials, type FleetHead } from "./fleet-transport";
 
@@ -61,11 +61,20 @@ export async function prefetch(
   paths: MemberPaths,
   state: ReplicaState,
   save: (patch: Partial<ReplicaState>) => void,
+  /** What the socket said the head is: with it, the gateway is not asked for the head. */
+  hint?: HeadHint,
 ): Promise<{ head: FleetHead; fetched: Position; steps: number }> {
   const { fetched } = positions(state);
-  return fetchAhead(creds, fleet, paths, fetched, (p) => {
-    save({ fetchedSeq: p.seq, ...(p.commit ? { fetchedCommit: p.commit } : {}), ...(p.tree ? { fetchedTree: p.tree } : {}) });
-  });
+  return fetchAhead(
+    creds,
+    fleet,
+    paths,
+    fetched,
+    (p) => {
+      save({ fetchedSeq: p.seq, ...(p.commit ? { fetchedCommit: p.commit } : {}), ...(p.tree ? { fetchedTree: p.tree } : {}) });
+    },
+    hint,
+  );
 }
 
 /** What happened when a replica was brought up to date. */

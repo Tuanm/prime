@@ -18,6 +18,10 @@ export class FakeGateway {
   primary = "";
   /** How many snapshots are kept; older packs and manifests are deleted, as the real gateway does. */
   retain = Infinity;
+  /** Whether the gateway has an index (an older one answers 404). */
+  indexEnabled = true;
+  /** What the index lists; tests may cut holes in it. */
+  indexEntries: Array<{ seq: number; manifestKey: string; full: boolean; packBytes?: number; deltaBytes?: number }> = [];
   /** How many times a member asked for its place. */
   bootstraps = 0;
   /** Requests of each kind, by route. */
@@ -35,13 +39,18 @@ export class FakeGateway {
     if (!this.primary) this.primary = deviceId;
   }
 
-  async handle(creds: FleetCredentials, method: string, path: string, body?: Buffer | string): Promise<Response> {
+  async handle(creds: FleetCredentials, method: string, path: string, body?: Buffer | string, search = ""): Promise<Response> {
     const parts = path.split("/").filter(Boolean);
     const kind = parts[2];
     this.requests.set(method + " " + kind, (this.requests.get(method + " " + kind) ?? 0) + 1);
     if (kind === "head" && method === "GET") {
       if (!this.head) return new Response("{}", { status: 404 });
       return Response.json({ head: this.head });
+    }
+    if (kind === "index" && method === "GET") {
+      if (!this.indexEnabled) return Response.json({ error: "no such fleet action" }, { status: 404 });
+      const after = Number(new URLSearchParams(search).get("after") ?? 0);
+      return Response.json({ entries: this.indexEntries.filter((e) => e.seq > after) });
     }
     if (kind === "bootstrap" && method === "POST") {
       this.bootstraps++;
@@ -91,6 +100,14 @@ export class FakeGateway {
       const manifestKey = "fleets/x/manifests/" + hash(finalManifest);
       this.payloads.set(packKey, pack);
       this.payloads.set(manifestKey, finalManifest);
+      this.indexEntries.push({
+        seq: typeof manifest.seq === "number" ? manifest.seq : 0,
+        manifestKey,
+        full: manifest.full === true,
+        ...(typeof manifest.packBytes === "number" ? { packBytes: manifest.packBytes } : {}),
+        ...(manifest.delta && typeof (manifest.delta as { bytes?: unknown }).bytes === "number" ? { deltaBytes: (manifest.delta as { bytes: number }).bytes } : {}),
+      });
+      while (this.indexEntries.length > this.retain) this.indexEntries.shift();
       this.kept.push([packKey, manifestKey]);
       while (this.kept.length > this.retain) for (const key of this.kept.shift()!) this.payloads.delete(key);
       const current = this.head?.seq ?? 0;
@@ -140,9 +157,10 @@ export function credsFor(deviceId: string): FleetCredentials {
 export function useFakeGateway(gateway: FakeGateway): void {
   const original = globalThis.fetch;
   (globalThis as { fetch: unknown }).fetch = (async (url: string, init: { method: string; headers: Record<string, string>; body?: Buffer | string }) => {
-    const path = new URL(url).pathname;
+    const parsed = new URL(url);
+    const path = parsed.pathname;
     const deviceId = init.headers["x-prime-device"] ?? "";
-    return gateway.handle(credsFor(deviceId), init.method, path, init.body);
+    return gateway.handle(credsFor(deviceId), init.method, path, init.body, parsed.search);
   }) as unknown as typeof fetch;
   (globalThis as { __restoreFetch?: () => void }).__restoreFetch = () => {
     (globalThis as { fetch: unknown }).fetch = original;

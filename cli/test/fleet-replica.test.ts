@@ -489,3 +489,111 @@ describe("the agent's round for a replica", () => {
     }
   });
 });
+
+describe("planning from the gateway's index", () => {
+  const reads = (w: World, what: string): number => w.gateway.requests.get(what) ?? 0;
+
+  async function behind(w: World, name: string, lag: number) {
+    const r = w.replica(name);
+    await w.publishNext();
+    await pull(credsFor(name), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+    for (let i = 0; i < lag; i++) await w.publishNext();
+    return r;
+  }
+
+  test("a replica one behind takes the index, one manifest and one pack - fewer than walking", async () => {
+    const withIndex = await world();
+    let indexed = 0;
+    try {
+      const r = await behind(withIndex, "r1", 1);
+      const m = reads(withIndex, "GET manifests");
+      const i = reads(withIndex, "GET index");
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(2);
+      indexed = reads(withIndex, "GET manifests") - m;
+      expect(reads(withIndex, "GET index") - i).toBe(1);
+    } finally {
+      finish(withIndex);
+    }
+    const walking = await world();
+    try {
+      walking.gateway.indexEnabled = false;
+      const r = await behind(walking, "r1", 1);
+      const m = reads(walking, "GET manifests");
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(2);
+      const walked = reads(walking, "GET manifests") - m;
+      // The walk fetches the head's manifest and then its parent to see where it stops.
+      expect(walked).toBe(2);
+      expect(indexed).toBe(1);
+    } finally {
+      finish(walking);
+    }
+  });
+
+  test("a head the socket named is not asked for", async () => {
+    const w = await world();
+    try {
+      const r = await behind(w, "r1", 2);
+      const heads = reads(w, "GET head");
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save, { seq: w.gateway.head!.seq, manifestKey: w.gateway.head!.manifestKey });
+      expect(got.fetched.seq).toBe(3);
+      expect(reads(w, "GET head")).toBe(heads);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a gateway with no index, or an index with a hole in it, is walked, and the replica still gets there", async () => {
+    const w = await world();
+    try {
+      const r = await behind(w, "r1", 4);
+      w.gateway.indexEntries.splice(2, 1); // a hole
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(5);
+    } finally {
+      finish(w);
+    }
+    const old = await world();
+    try {
+      old.gateway.indexEnabled = false;
+      const r = await behind(old, "r1", 3);
+      expect((await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save)).fetched.seq).toBe(4);
+    } finally {
+      finish(old);
+    }
+  });
+
+  test("an index that claims a snapshot this member cannot open is not believed", async () => {
+    const w = await world();
+    try {
+      await w.publishNext(); // seq 1, sealed for the primary only
+      const r = w.replica("r1"); // joins after it
+      await w.publishNext(); // seq 2: a whole tree, sealed for r1 too (the roster changed)
+      await w.publishNext();
+      // The index is honest about sizes but cannot know who a snapshot is sealed for:
+      // the replica finds out from the manifest, and takes the tree at 2.
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(3);
+      const { applied } = positions(r.state);
+      expect(applied.seq).toBe(0);
+      await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("what the socket says", () => {
+  test("a head news without a manifest, from a gateway that does not name it, still parses", async () => {
+    const { parseFleetEvent } = await import("../src/fleet-events");
+    expect(parseFleetEvent('{"type":"head","seq":4}')).toEqual({ type: "head", seq: 4 });
+    expect(parseFleetEvent('{"type":"head","seq":4,"manifestKey":"fleets/x/manifests/abc"}')).toEqual({
+      type: "head",
+      seq: 4,
+      manifestKey: "fleets/x/manifests/abc",
+    });
+    expect(parseFleetEvent('{"type":"head","seq":4,"manifestKey":7}')).toEqual({ type: "head", seq: 4 });
+  });
+});

@@ -16,7 +16,7 @@ export type FleetEvent =
   | { type: "hello"; paused: boolean; leaseHolder: string | null; leaseMs: number }
   | { type: "paused" }
   | { type: "resumed" }
-  | { type: "head"; seq: number }
+  | { type: "head"; seq: number; manifestKey?: string }
   | { type: "lease-free" }
   | { type: "bye"; reason: string };
 
@@ -132,7 +132,9 @@ export function parseFleetEvent(text: string): FleetEvent | undefined {
         leaseMs: typeof o.leaseMs === "number" ? o.leaseMs : 0,
       };
     case "head":
-      return typeof o.seq === "number" ? { type: "head", seq: o.seq } : undefined;
+      return typeof o.seq === "number"
+        ? { type: "head", seq: o.seq, ...(typeof o.manifestKey === "string" && o.manifestKey ? { manifestKey: o.manifestKey } : {}) }
+        : undefined;
     case "bye":
       return { type: "bye", reason: typeof o.reason === "string" ? o.reason : "" };
     default:

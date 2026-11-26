@@ -31,7 +31,7 @@ import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { applyReady, placeDue, positions, prefetch, promote, promotionDelayMs, replicaMode, type PlaceAnswer } from "./fleet-replica.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
-import { fetchMemberKeys, releaseLease, type FleetCredentials } from "./fleet-transport.ts";
+import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
@@ -263,6 +263,10 @@ export interface SpaceLoop {
   headDirty: boolean;
   /** The newest head sequence the socket has mentioned. */
   knownHeadSeq?: number;
+  /** Its manifest, when the socket named it. */
+  knownHeadManifest?: string;
+  /** When the replica last told the fleet how far it has fetched. */
+  lastFetchedReport?: number;
   /** When the head was last looked at; a replica that is told does not ask. */
   lastHeadCheck: number;
 }
@@ -449,9 +453,22 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
 
   const pullBegan = Date.now();
   const fetchedState = readFleetState(loop.configPath, fleet, loop.name);
-  const got = await prefetch(creds, fleet, paths, fetchedState, keep);
+  // The socket said which manifest is the head: no need to ask the gateway.
+  const hint =
+    loop.knownHeadManifest && loop.knownHeadSeq !== undefined && loop.knownHeadSeq > positions(fetchedState).fetched.seq
+      ? { seq: loop.knownHeadSeq, manifestKey: loop.knownHeadManifest }
+      : undefined;
+  const got = await prefetch(creds, fleet, paths, fetchedState, keep, hint);
   loop.timing.pull = Date.now() - pullBegan;
-  if (got.steps > 0) report("fetched " + got.fetched.seq);
+  if (got.steps > 0) {
+    report("fetched " + got.fetched.seq);
+    // Tell the fleet how far this member has fetched, as seldom as is useful: it
+    // is for whoever reads the fleet, and nothing waits on it.
+    if (Date.now() - (loop.lastFetchedReport ?? 0) > 15_000) {
+      loop.lastFetchedReport = Date.now();
+      await reportApplied(creds, fleet, positions(readFleetState(loop.configPath, fleet, loop.name)).applied.seq, got.fetched.seq).catch(() => false);
+    }
+  }
   // A member that has never applied anything has no baseline: whatever else it
   // is set to, it is given one, once.
   if (mode === "mirror" || fetchedState.base === undefined) {
@@ -789,7 +806,11 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         wake(loop.name, true);
         break;
       case "head":
-        loop.knownHeadSeq = Math.max(loop.knownHeadSeq ?? 0, event.seq);
+        if (event.seq >= (loop.knownHeadSeq ?? 0)) {
+          loop.knownHeadSeq = event.seq;
+          if (event.manifestKey) loop.knownHeadManifest = event.manifestKey;
+          else delete loop.knownHeadManifest;
+        }
         loop.headDirty = true;
         wake(loop.name, true);
         break;

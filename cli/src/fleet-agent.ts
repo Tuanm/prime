@@ -15,7 +15,9 @@ import { join } from "node:path";
 import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, openForMember, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
 import {
+  type IndexEntry,
   fetchHead,
+  fetchIndex,
   fetchManifest,
   fetchMemberKeys,
   reportApplied,
@@ -347,19 +349,101 @@ export function chooseRoute(walked: FleetManifest[], lastSeq: number, memberId: 
   return best;
 }
 
+/** The head as the socket told it: enough to start without asking the gateway. */
+export interface HeadHint {
+  seq: number;
+  manifestKey?: string;
+}
+
 /**
  * Work out which snapshots a member has to take to reach the head.
  *
- * The chain is walked back from the head until it reaches the snapshot the member
- * already holds, a snapshot with only a whole tree (nothing older can matter), or
- * the end of what the gateway keeps; then `chooseRoute` picks the cheapest
- * route. Nothing is downloaded but manifests, and nothing is written. The chain
- * is empty when there is nothing newer than `lastSeq`.
+ * With the gateway's index the route is chosen from sizes in one request, and
+ * only the manifests of the snapshots on the route are fetched, side by side.
+ * Without one (an older gateway, or a gap in what it recorded) the chain is
+ * walked back from the head until it reaches the snapshot the member already
+ * holds, a snapshot with only a whole tree (nothing older can matter), or the
+ * end of what the gateway keeps; then `chooseRoute` picks the cheapest route.
+ * Nothing is downloaded but manifests, and nothing is written. The chain is
+ * empty when there is nothing newer than `lastSeq`.
  */
-export async function planCatchUp(creds: FleetCredentials, fleet: string, lastSeq: number): Promise<CatchUpPlan> {
-  const head: FleetHead = await fetchHead(creds, fleet);
+export async function planCatchUp(
+  creds: FleetCredentials,
+  fleet: string,
+  lastSeq: number,
+  /** What the socket said the head is, if it did. */
+  hint?: HeadHint,
+): Promise<CatchUpPlan> {
+  const known = hint && hint.seq > lastSeq && hint.manifestKey;
+  const head: FleetHead = known
+    ? { seq: hint.seq, manifestKey: hint.manifestKey!, manifestHash: "", epoch: 0 }
+    : await fetchHead(creds, fleet);
   if (head.seq <= lastSeq) return { head, chain: [] };
 
+  const indexed = await planFromIndex(creds, fleet, lastSeq, head);
+  if (indexed) return indexed;
+  return planByWalking(creds, fleet, lastSeq, head);
+}
+
+// Choose the route from the index, then fetch the manifests it names. Returns
+// null whenever the index does not settle it, so the caller walks.
+async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead): Promise<CatchUpPlan | null> {
+  const entries = await fetchIndex(creds, fleet, lastSeq).catch(() => null);
+  if (!entries || entries.length === 0) return null;
+  // Consecutive, and reaching the head: otherwise the index is behind or has a hole.
+  for (let i = 1; i < entries.length; i++) if (entries[i]!.seq !== entries[i - 1]!.seq + 1) return null;
+  const tip = entries[entries.length - 1]!;
+  if (tip.seq < head.seq) return null;
+
+  // A skeleton of each manifest, as sealed for this member: the real one is
+  // fetched (and checked) for the snapshots the route turns out to use.
+  const skeleton = (e: IndexEntry): FleetManifest => ({
+    fleet,
+    seq: e.seq,
+    tipCommit: "",
+    tree: "",
+    packKey: "",
+    packHash: "",
+    ...(e.packBytes !== undefined ? { packBytes: e.packBytes } : {}),
+    ...(e.deltaBytes !== undefined ? { delta: { packKey: "", packHash: "", bytes: e.deltaBytes } } : {}),
+    full: e.full,
+    senderPublicKey: "",
+    wrapped: [{ memberId: creds.deviceId, wrapped: "" }],
+    epoch: 0,
+    createdAt: 0,
+  });
+  const route = chooseRoute([...entries].reverse().map(skeleton), lastSeq, creds.deviceId);
+  if (route === null) return null;
+
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const real = await mapLimit(route, 6, async (step) => fetchManifest(creds, fleet, manifestIdOf(bySeq.get(step.manifest.seq)!.manifestKey)));
+  const chain: RouteStep[] = [];
+  for (const [i, step] of route.entries()) {
+    const m = real[i]!;
+    const chosen = step.whole ? wholeOf(m, creds.deviceId) : changeOf(m, creds.deviceId);
+    // The manifest says otherwise (not sealed for this member, or not what the
+    // index claimed): do not trust the index for this one.
+    if (!chosen || m.seq !== step.manifest.seq) return null;
+    chain.push(chosen);
+  }
+  return { head: tip.seq > head.seq ? { ...head, seq: tip.seq, manifestKey: tip.manifestKey } : head, chain };
+}
+
+// Run `fn` over `items`, a few at a time, keeping the order of the results.
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead): Promise<CatchUpPlan> {
   // Each snapshot names the one it was built against, so the chain is walked
   // backwards until it reaches what is already here.
   const walked: FleetManifest[] = [];
@@ -441,8 +525,10 @@ export async function fetchAhead(
   paths: MemberPaths,
   from: Position,
   onFetched?: (fetched: Position) => void | Promise<void>,
+  /** What the socket said the head is, so the gateway need not be asked. */
+  hint?: HeadHint,
 ): Promise<{ head: FleetHead; fetched: Position; steps: number }> {
-  const plan = await planCatchUp(creds, fleet, from.seq);
+  const plan = await planCatchUp(creds, fleet, from.seq, hint);
   if (plan.chain.length === 0) return { head: plan.head, fetched: from, steps: 0 };
   const keys = loadOrCreateKeyPair(paths.keyFile);
 

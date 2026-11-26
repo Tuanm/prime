@@ -171,9 +171,49 @@ export async function advanceHead(
  * The fleet uses this to fence a member that took over: it may not publish
  * until it has applied the state it is about to replace.
  */
-export async function reportApplied(creds: FleetCredentials, fleet: string, seq: number): Promise<boolean> {
-  const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/applied", JSON.stringify({ seq }));
+export async function reportApplied(creds: FleetCredentials, fleet: string, seq: number, fetched?: number): Promise<boolean> {
+  const res = await request(
+    creds,
+    "POST",
+    "/fleets/" + encodeURIComponent(fleet) + "/applied",
+    JSON.stringify({ seq, ...(fetched !== undefined ? { fetched } : {}) }),
+  );
   return res.ok;
+}
+
+/** One snapshot the gateway keeps, as its index lists it. */
+export interface IndexEntry {
+  seq: number;
+  manifestKey: string;
+  full: boolean;
+  packBytes?: number;
+  deltaBytes?: number;
+}
+
+/**
+ * The snapshots the gateway keeps from `after` on, in one request.
+ *
+ * Returns null when the gateway does not have an index (an older one): the
+ * caller walks the manifests instead.
+ */
+export async function fetchIndex(creds: FleetCredentials, fleet: string, after: number): Promise<IndexEntry[] | null> {
+  const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/index?after=" + Math.max(0, Math.floor(after)));
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => null)) as { entries?: unknown } | null;
+  if (!body || !Array.isArray(body.entries)) return null;
+  const entries: IndexEntry[] = [];
+  for (const raw of body.entries) {
+    const e = raw as Partial<IndexEntry>;
+    if (typeof e.seq !== "number" || typeof e.manifestKey !== "string" || typeof e.full !== "boolean") return null;
+    entries.push({
+      seq: e.seq,
+      manifestKey: e.manifestKey,
+      full: e.full,
+      ...(typeof e.packBytes === "number" ? { packBytes: e.packBytes } : {}),
+      ...(typeof e.deltaBytes === "number" ? { deltaBytes: e.deltaBytes } : {}),
+    });
+  }
+  return entries;
 }
 
 /**
