@@ -35,6 +35,10 @@ export interface ReplicaState {
   fetchedSeq?: number;
   fetchedCommit?: string;
   fetchedTree?: string;
+  /** Who the fetched snapshot was sealed for. */
+  fetchedRoster?: string;
+  /** Who the snapshot the work tree holds (or the last publish) was sealed for. */
+  roster?: string;
 }
 
 /** The snapshot the work tree holds, and the newest the store holds (never behind it). */
@@ -43,7 +47,12 @@ export function positions(state: ReplicaState): { applied: Position; fetched: Po
   if (state.fetchedCommit && (state.fetchedSeq ?? 0) > applied.seq) {
     return {
       applied,
-      fetched: { seq: state.fetchedSeq!, commit: state.fetchedCommit, ...(state.fetchedTree ? { tree: state.fetchedTree } : {}) },
+      fetched: {
+        seq: state.fetchedSeq!,
+        commit: state.fetchedCommit,
+        ...(state.fetchedTree ? { tree: state.fetchedTree } : {}),
+        ...(state.fetchedRoster !== undefined ? { roster: state.fetchedRoster } : {}),
+      },
     };
   }
   return { applied, fetched: applied };
@@ -71,7 +80,12 @@ export async function prefetch(
     paths,
     fetched,
     (p) => {
-      save({ fetchedSeq: p.seq, ...(p.commit ? { fetchedCommit: p.commit } : {}), ...(p.tree ? { fetchedTree: p.tree } : {}) });
+      save({
+        fetchedSeq: p.seq,
+        ...(p.commit ? { fetchedCommit: p.commit } : {}),
+        ...(p.tree ? { fetchedTree: p.tree } : {}),
+        ...(p.roster !== undefined ? { fetchedRoster: p.roster } : {}),
+      });
     },
     hint,
   );
@@ -137,6 +151,9 @@ export async function applyReady(
     fetchedSeq: now.seq,
     fetchedCommit: now.commit!,
     ...(now.tree ? { fetchedTree: now.tree } : {}),
+    // The roster the snapshot stands on: the member takes it as its own, so that
+    // when it takes over it can tell a change of members from no change.
+    ...(fetched.roster !== undefined ? { roster: fetched.roster, fetchedRoster: fetched.roster } : {}),
   });
   await reportApplied(creds, fleet, now.seq);
   return { applied: now, ...(kept ? { kept } : {}) };

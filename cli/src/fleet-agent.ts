@@ -224,6 +224,7 @@ export async function publish(
     ...(head ? { parentManifest: head.manifestKey, parentSeq: head.seq } : {}),
     senderPublicKey: sealed.senderPublicKey,
     wrapped: sealed.wrapped,
+    roster,
     epoch: head?.epoch ?? 0,
     createdAt: Date.now(),
   };
@@ -263,6 +264,8 @@ export interface PullResult {
   upToDate: boolean;
   /** The tree that was applied, so the caller knows what it now holds. */
   tree?: string;
+  /** Who that snapshot was sealed for, when it says. */
+  roster?: string;
 }
 
 /** One snapshot to take on the way to the head, and which of its packs to take. */
@@ -570,6 +573,8 @@ export interface AppliedStep {
   seq: number;
   commit: string;
   tree: string;
+  /** Who the snapshot was sealed for, when it says. */
+  roster?: string;
 }
 
 /** A snapshot a member holds: its sequence, the commit that names it and its tree. */
@@ -577,6 +582,8 @@ export interface Position {
   seq: number;
   commit: string | null;
   tree?: string;
+  /** Who the snapshot was sealed for, when it says. */
+  roster?: string;
 }
 
 // How many packs are downloaded at the same time while earlier ones are taken in.
@@ -634,7 +641,12 @@ function keptBefore(plan: CatchUpPlan, failedSeq: number, from: Position): { pos
   let steps = 0;
   for (const step of plan.chain) {
     if (step.manifest.seq >= failedSeq) break;
-    position = { seq: step.manifest.seq, commit: step.manifest.tipCommit, tree: step.manifest.tree };
+    position = {
+      seq: step.manifest.seq,
+      commit: step.manifest.tipCommit,
+      tree: step.manifest.tree,
+      ...(step.manifest.roster !== undefined ? { roster: step.manifest.roster } : {}),
+    };
     steps++;
   }
   return { position, steps };
@@ -673,7 +685,7 @@ async function ingestRoute(
       tree: m.tree,
       ...(i === plan.chain.length - 1 ? { seq: m.seq } : {}),
     });
-    fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree };
+    fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);
   }
   return fetched;
@@ -728,10 +740,17 @@ export async function pull(
   }
   const tip = got.fetched;
   await applyFetched(paths, applied, tip);
-  const step: AppliedStep = { seq: tip.seq, commit: tip.commit!, tree: tip.tree ?? "" };
+  const step: AppliedStep = { seq: tip.seq, commit: tip.commit!, tree: tip.tree ?? "", ...(tip.roster !== undefined ? { roster: tip.roster } : {}) };
   await onStep?.(step);
   await reportApplied(creds, fleet, tip.seq);
-  return { seq: tip.seq, commit: tip.commit!, applied: true, upToDate: false, ...(tip.tree ? { tree: tip.tree } : {}) };
+  return {
+    seq: tip.seq,
+    commit: tip.commit!,
+    applied: true,
+    upToDate: false,
+    ...(tip.tree ? { tree: tip.tree } : {}),
+    ...(tip.roster !== undefined ? { roster: tip.roster } : {}),
+  };
 }
 
 /** The storage id at the end of a payload key. */

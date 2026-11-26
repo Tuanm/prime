@@ -434,6 +434,10 @@ describe("the agent's round for a replica", () => {
       expect(s.state().seq).toBe(5);
       expect(sameTree(fingerprint(w.primaryWork), fingerprint(s.paths.work))).toBe(true);
       expect(s.said.some((m) => m.startsWith("took over at 5"))).toBe(true);
+      // Nothing changed in the fleet or in the work tree: taking over publishes nothing.
+      const head = w.gateway.head!.seq;
+      await s.round();
+      expect(w.gateway.head!.seq).toBe(head);
     } finally {
       finish(w);
     }
@@ -964,4 +968,37 @@ describe("a member that joined and has nothing sealed for it yet", () => {
       finish(w);
     }
   }, 60_000);
+});
+
+describe("a replica that takes over knows who the fleet was sealed for", () => {
+  test("it does not take the fleet for changed: no whole tree, no snapshot for nothing", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree, ...(s.roster !== undefined ? { roster: s.roster } : {}) }));
+      const second = await w.publishNext();
+      for (let i = 0; i < 2; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      w.gateway.primary = "";
+      const outcome = await promote({
+        takePlace: async () => {
+          const res = await fetch("http://fake/fleets/x/bootstrap", { method: "POST", headers: { "x-prime-device": "r1" }, body: "{}" } as RequestInit);
+          const b = (await res.json()) as { role?: string; reason?: string; catchUpTo?: number };
+          return { primary: b.role === "primary", ...(b.reason ? { reason: b.reason } : {}), ...(b.catchUpTo ? { catchUpTo: b.catchUpTo } : {}) };
+        },
+        catchUp: async () => {
+          await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save, { report: true });
+        },
+      });
+      expect(outcome).toBe("primary");
+      // The roster of the snapshot it applied is the one it publishes from.
+      expect(r.state.roster).toBe(second.roster);
+      writeFileSync(join(r.paths.work, "new.txt"), "from the new primary");
+      const next = await publish(credsFor("r1"), "x", r.paths, r.state.base!, r.state.seq!, 2, r.state.roster);
+      expect(next.full).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
 });

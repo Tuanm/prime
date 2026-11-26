@@ -56,6 +56,12 @@ export interface FleetManifest {
   senderPublicKey: string;
   /** The snapshot key, wrapped for each member. */
   wrapped: Array<{ memberId: string; wrapped: string; keyId?: string }>;
+  /**
+   * Who this snapshot was sealed for, and with which keys (see `rosterOf`). A
+   * member that applies it knows the roster it stands on, so when it takes over it
+   * does not take the fleet for changed and publish a whole tree it need not.
+   */
+  roster?: string;
   /** Which epoch published this, for the fencing check. */
   epoch: number;
   createdAt: number;

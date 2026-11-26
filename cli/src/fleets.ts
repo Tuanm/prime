@@ -638,6 +638,7 @@ export async function syncFleetSpace(
         fetchedSeq: step.seq,
         fetchedCommit: step.commit,
         fetchedTree: step.tree,
+        ...(step.roster !== undefined ? { roster: step.roster, fetchedRoster: step.roster } : {}),
       });
     },
     positions(state).fetched,
@@ -774,6 +775,7 @@ export interface FleetMemberState {
   fetchedSeq?: number;
   fetchedCommit?: string;
   fetchedTree?: string;
+  fetchedRoster?: string;
 }
 
 /** The member's own record of how far it has got. */
