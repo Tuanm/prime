@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
 import { effectiveCodeMcpArgv, serviceEnv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
 import { FLEET_AGENT_LABEL, FLEET_AGENT_NAME, bindServiceStatus, fleetAgentServiceConfig, fleetAgentSpec, sameConfig } from "../src/fleet-service.ts";
-import { defaultConfigPath, emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
+import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
 import { rememberAnonymous } from "../src/connect.ts";
 import {
   captureNetworkEnv,
@@ -281,14 +281,23 @@ describe("which configuration a service runs", () => {
     }
   });
 
-  test("a definition that does not say is the default configuration's, and binds no other", () => {
-    expect(fleetAgentServiceConfig(null)).toBeUndefined();
-    expect(fleetAgentServiceConfig({ config: "/cfg/x.yaml" })).toBe("/cfg/x.yaml");
-    const runs = fleetAgentServiceConfig({ config: undefined })!;
-    expect(runs).toBe(defaultConfigPath());
-    const status = { installed: true, running: true, where: "w" };
-    expect(bindServiceStatus(status, runs, defaultConfigPath()).installed).toBe(true);
-    expect(bindServiceStatus(status, runs, "/some/other/config.yaml").installed).toBe(false);
+  test("a definition that does not say is the default configuration's (not whatever PRIME_CONFIG names), and binds no other", () => {
+    const was = process.env.PRIME_CONFIG;
+    process.env.PRIME_CONFIG = "/elsewhere/x.yaml";
+    try {
+      expect(fleetAgentServiceConfig(null)).toBeUndefined();
+      expect(fleetAgentServiceConfig({ config: "/cfg/x.yaml" })).toBe("/cfg/x.yaml");
+      const runs = fleetAgentServiceConfig({ config: undefined })!;
+      expect(runs).toBe(join(homedir(), ".prime", "config.yaml"));
+      const status = { installed: true, running: true, where: "w" };
+      expect(bindServiceStatus(status, runs, join(homedir(), ".prime", "config.yaml")).installed).toBe(true);
+      // The configuration the environment points at is not the one the unreadable service runs.
+      expect(bindServiceStatus(status, runs, "/elsewhere/x.yaml").installed).toBe(false);
+      expect(bindServiceStatus(status, runs, "/some/other/config.yaml").installed).toBe(false);
+    } finally {
+      if (was === undefined) delete process.env.PRIME_CONFIG;
+      else process.env.PRIME_CONFIG = was;
+    }
   });
 
   test("a definition that exists and does not say is told apart from none", () => {

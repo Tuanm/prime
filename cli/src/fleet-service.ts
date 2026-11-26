@@ -71,7 +71,8 @@ export function fleetAgentServiceConfig(
   definition: { config: string | undefined } | null = readServiceDefinition(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL }) ?? null,
 ): string | undefined {
   if (definition === null) return undefined;
-  return definition.config ?? defaultConfigPath();
+  // Not defaultConfigPath(): that honours PRIME_CONFIG, and an install is made for the real default.
+  return definition.config ?? join(homedir(), ".prime", "config.yaml");
 }
 
 /** A path as the file system knows it: symlinks followed where the file (or its directory) exists. */
