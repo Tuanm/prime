@@ -285,6 +285,18 @@ export interface CatchUpPlan {
 
 // How many manifests are looked at before giving up on finding a route.
 const WALK_LIMIT = 2 * FULL_PACK_WINDOW + 1;
+/**
+ * What each step of a route costs besides its pack, in bytes.
+ *
+ * A step is two round trips (the manifest and the pack), a manifest that carries
+ * a wrapped key for every member (about 4 KB with thirty-two of them), two git
+ * processes and a record of progress. Counting only the bytes of the packs would
+ * send a member forty-one steps and eighty-four requests to save two kilobytes
+ * over one whole tree. Twenty-four kilobytes is about where a round trip over a
+ * poor link and the manifest stop being noise.
+ */
+export const ROUTE_STEP_COST = 24 * 1024;
+
 // A size that is not known (a snapshot published before sizes were recorded):
 // a whole tree is assumed large and a change small.
 const UNKNOWN_WHOLE = 1e12;
@@ -297,6 +309,8 @@ export interface Asker {
   keyId?: string;
   /** Snapshots up to this sequence are known not to open (a step that failed): leave them out. */
   skipThrough?: number;
+  /** What a step costs besides its pack, in bytes (default `ROUTE_STEP_COST`). */
+  stepCost?: number;
 }
 
 function openableBy(manifest: FleetManifest, who: Asker): boolean {
@@ -330,7 +344,8 @@ function wholeOf(manifest: FleetManifest, who: Asker): RouteStep | null {
  * `walked` is the snapshots from the head back, newest first, with consecutive
  * sequences. A route is either all the changes since `lastSeq`, or a whole tree
  * at some snapshot and the changes after it; the one that moves the fewest bytes
- * wins, and with equal bytes the one with fewer steps. A snapshot the member
+ * wins (each step counting `ROUTE_STEP_COST` besides its pack), and with equal
+ * cost the one with fewer steps. A snapshot the member
  * cannot open (sealed before it joined, or for another key) is not a step.
  * Returns null when there is no route.
  */
@@ -352,7 +367,8 @@ export function chooseRoute(walked: FleetManifest[], lastSeq: number, asker: Ask
     }
     return steps;
   };
-  const cost = (steps: RouteStep[]): number => steps.reduce((sum, s) => sum + s.bytes, 0);
+  const each = who.stepCost ?? ROUTE_STEP_COST;
+  const cost = (steps: RouteStep[]): number => steps.reduce((sum, s) => sum + s.bytes + each, 0);
 
   let best: RouteStep[] | null = null;
   const consider = (steps: RouteStep[] | null): void => {

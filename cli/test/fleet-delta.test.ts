@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFileSync as readSource } from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FULL_PACK_WINDOW, chooseRoute, loadOrCreateKeyPair, manifestIdOf, openStep, publish, pull, rosterGained, type MemberPaths } from "../src/fleet-agent";
+import { FULL_PACK_WINDOW, ROUTE_STEP_COST, chooseRoute, loadOrCreateKeyPair, manifestIdOf, openStep, publish, pull, rosterGained, type MemberPaths } from "../src/fleet-agent";
 import { applyPack } from "../src/fleet-sync";
 import type { FleetManifest } from "../src/fleet-transport";
 
@@ -490,20 +491,37 @@ describe("choosing the cheapest route", () => {
   });
 });
 
+describe("what a step costs", () => {
+  test("a handful of tiny changes is not worth forty-one steps: the whole tree is taken instead", () => {
+    // 41 snapshots of 300 bytes against a tree of 14 KB: the changes save 1.7 KB and cost 41 round trips.
+    const list: FleetManifest[] = [manifest(1, { full: true, bytes: 14_600 })];
+    for (let seq = 2; seq <= 42; seq++) list.push(seq === 42 ? manifest(42, { full: true, bytes: 14_600, delta: 300 }) : manifest(seq, { bytes: 300 }));
+    const route = chooseRoute(newestFirst(list), 1, "me")!;
+    expect(route.map((s) => [s.manifest.seq, s.whole])).toEqual([[42, true]]);
+    // With steps costing nothing it would take all forty-one (the bytes alone say so).
+    expect(chooseRoute(newestFirst(list), 1, { memberId: "me", stepCost: 0 })!.length).toBe(41);
+  });
+
+  test("a big tree is still worth many small changes: 39 snapshots of 1.5 KB against 1.9 MB", () => {
+    const list: FleetManifest[] = [manifest(1, { full: true, bytes: 1_900_000 })];
+    for (let seq = 2; seq <= 40; seq++) list.push(manifest(seq, { bytes: 1500 }));
+    list[31] = manifest(32, { full: true, bytes: 1_900_000, delta: 1500 });
+    const route = chooseRoute(newestFirst(list), 1, "me")!;
+    expect(route.length).toBe(39);
+    expect(route.every((s) => !s.whole)).toBe(true);
+  });
+
+  test("the cost of a step is a named constant", () => {
+    expect(ROUTE_STEP_COST).toBe(24 * 1024);
+  });
+});
+
 describe("a checkpoint carries the change as well as the tree", () => {
   async function fleet(root: string, files = 24) {
     const gateway = new FakeGateway();
     const primaryWork = join(root, "primary");
     mkdirSync(primaryWork, { recursive: true });
-    let seed = 11;
-    const noise = (): string => {
-      let out = "";
-      for (let i = 0; i < 3000; i++) {
-        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-        out += (seed % 36).toString(36);
-      }
-      return out;
-    };
+    const noise = (): string => randomBytes(1500).toString("hex");
     for (let i = 0; i < files; i++) writeFileSync(join(primaryWork, "f" + i + ".txt"), noise());
     const primary: MemberPaths = { work: primaryWork, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
     const replica = (name: string): MemberPaths => {
@@ -566,15 +584,15 @@ describe("a checkpoint carries the change as well as the tree", () => {
   test("a laggard that crosses the checkpoint takes the small changes, not the tree", async () => {
     const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
     try {
-      // A tree big enough that 34 small changes weigh less than the tree.
-      const { gateway, primary, primaryWork, replica, noise } = await fleet(root, 150);
+      // A tree big enough that 34 small changes, steps and all, weigh less than the tree.
+      const { gateway, primary, primaryWork, replica, noise } = await fleet(root, 700);
       const r1 = replica("r1");
       await join_(gateway, r1, "r1");
       let last = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
       const got = await pull(credsFor("r1"), "x", r1, 0);
       let whole = 0;
       for (let seq = 2; seq <= FULL_PACK_WINDOW + 3; seq++) {
-        writeFileSync(join(primaryWork, "f" + (seq % 150) + ".txt"), noise());
+        writeFileSync(join(primaryWork, "f" + (seq % 700) + ".txt"), noise());
         last = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster);
         if (last.full) whole = last.bytes;
       }
