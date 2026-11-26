@@ -193,6 +193,29 @@ export function promotionDelayMs(deviceId: string, behind: boolean, random: () =
   return (behind ? 1500 : 0) + (h % 8) * 250 + Math.floor(random() * 200);
 }
 
+/** With a socket: how long a replica goes without asking for its place, in case it missed a message. */
+export const SOCKET_PLACE_SAFETY_MS = 5 * 60_000;
+/** With a socket: how long a replica goes without looking at the head. */
+export const SOCKET_HEAD_SAFETY_MS = 10 * 60_000;
+/** How seldom a replica says how far it has fetched. Nothing waits on it. */
+export const FETCHED_REPORT_MS = 5 * 60_000;
+
+/**
+ * How long a replica's round sleeps when nothing happens.
+ *
+ * A replica that fetches ahead and writes its work tree only when it takes over
+ * has nothing to do between messages. With a socket it sleeps until one comes
+ * (and wakes now and then in case one did not); without one it looks as often as
+ * a lease that runs out would be noticed - a third of the lease - and the answer
+ * to its question already carries the head. A replica that mirrors wants a fresh
+ * work tree, so it keeps polling.
+ */
+export function replicaSleepMs(a: { mode: ReplicaMode; connected: boolean; pollMs: number; leaseMs?: number }): { pollMs: number; idleMs: number } {
+  if (a.mode === "mirror") return { pollMs: a.pollMs, idleMs: 30_000 };
+  const lease = Math.max(5_000, Math.floor((a.leaseMs ?? DEFAULT_LEASE_MS) / 3));
+  return { pollMs: Math.max(a.pollMs, lease), idleMs: SOCKET_PLACE_SAFETY_MS };
+}
+
 // How long the fleet's lease lasts, when this member has not been told: a replica
 // is only told by a socket, and the fleet's lease is forty-five seconds.
 const DEFAULT_LEASE_MS = 45_000;
@@ -213,7 +236,9 @@ export function placeDue(a: {
   if (a.primary) return since > a.heartbeatMs;
   if (a.wanted || a.lastBootstrap === 0) return true;
   // A replica has nothing to renew. It only looks now and then, in case a
-  // message was missed: rarely when the fleet tells it, about as often as the
-  // lease is renewed when it has to ask.
-  return since > (a.eventsConnected ? 60_000 : Math.max(5_000, Math.floor((a.leaseMs ?? DEFAULT_LEASE_MS) / 3)));
+  // message was missed: rarely when the fleet tells it (a dead socket is found
+  // by its pings, and then the replica asks as if it had none), a third of a
+  // lease apart when it has to ask - often enough that a lease that runs out is
+  // noticed within one more.
+  return since >= (a.eventsConnected ? SOCKET_PLACE_SAFETY_MS : Math.max(5_000, Math.floor((a.leaseMs ?? DEFAULT_LEASE_MS) / 3)));
 }

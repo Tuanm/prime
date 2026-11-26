@@ -289,11 +289,11 @@ describe("taking the lease", () => {
 describe("when a replica asks the fleet anything", () => {
   const base = { primary: false, lastBootstrap: 1_000_000, heartbeatMs: 5_000, wanted: false, leaseMs: 45_000 };
 
-  test("with the socket up it asks about once a minute; without, about as often as the lease is renewed", () => {
+  test("with the socket up it asks about every five minutes; without, a third of a lease apart", () => {
     expect(placeDue({ ...base, now: 1_000_000 + 10_000, eventsConnected: true })).toBe(false);
-    expect(placeDue({ ...base, now: 1_000_000 + 59_000, eventsConnected: true })).toBe(false);
-    expect(placeDue({ ...base, now: 1_000_000 + 61_000, eventsConnected: true })).toBe(true);
-    expect(placeDue({ ...base, now: 1_000_000 + 4_000, eventsConnected: false })).toBe(false);
+    expect(placeDue({ ...base, now: 1_000_000 + 299_000, eventsConnected: true })).toBe(false);
+    expect(placeDue({ ...base, now: 1_000_000 + 301_000, eventsConnected: true })).toBe(true);
+    expect(placeDue({ ...base, now: 1_000_000 + 14_000, eventsConnected: false })).toBe(false);
     expect(placeDue({ ...base, now: 1_000_000 + 16_000, eventsConnected: false })).toBe(true);
   });
 
@@ -532,19 +532,115 @@ describe("the agent's round for a replica", () => {
     }
   });
 
-  test("without a socket a replica looks at the head every round but takes no place again", async () => {
+  // Virtual time: the agent's rounds happen at the instants a test chooses.
+  const atTime = async (start: number, fn: (set: (ms: number) => void) => Promise<void>): Promise<void> => {
+    const real = Date.now;
+    let clock = start;
+    Date.now = () => clock;
+    try {
+      await fn((ms) => void (clock = start + ms));
+    } finally {
+      Date.now = real;
+    }
+  };
+
+  test("without a socket a lazy replica asks for its place about every fifteen seconds and for nothing else", async () => {
     const w = await world();
     try {
       const s = await space(w, "r1", { connected: false });
       await w.publishNext();
-      await s.round();
-      const bootstraps = w.gateway.bootstraps;
-      for (let i = 0; i < 5; i++) await s.round();
-      expect(w.gateway.bootstraps).toBe(bootstraps);
-      expect(w.gateway.requests.get("GET head") ?? 0).toBeGreaterThanOrEqual(5);
+      await atTime(1_000_000, async (at) => {
+        await s.round(); // the first look: it gets a baseline
+        const heads = w.gateway.requests.get("GET head") ?? 0;
+        const bootstraps = w.gateway.bootstraps;
+        // Rounds a second and a half apart: nothing to ask, nothing asked.
+        for (let t = 1500; t < 14_000; t += 1500) {
+          at(t);
+          await s.round();
+        }
+        expect(w.gateway.bootstraps).toBe(bootstraps);
+        expect(w.gateway.requests.get("GET head") ?? 0).toBe(heads);
+
+        // The primary publishes. The replica finds out when it next asks for its
+        // place, and the answer carries the head: no separate look at it.
+        await w.publishNext();
+        const headsNow = w.gateway.requests.get("GET head") ?? 0; // the primary asked for it once
+        expect(headsNow).toBeGreaterThan(heads);
+        at(16_000);
+        await s.round();
+        expect(w.gateway.bootstraps).toBe(bootstraps + 1);
+        expect(w.gateway.requests.get("GET head") ?? 0).toBe(headsNow);
+        expect(s.state().fetchedSeq).toBe(2);
+        expect(s.state().seq).toBe(1);
+      });
     } finally {
       finish(w);
     }
+  });
+
+  test("a replica that mirrors, without a socket, still looks at the head every round", async () => {
+    const w = await world();
+    const saved = process.env.PRIME_FLEET_REPLICA;
+    process.env.PRIME_FLEET_REPLICA = "mirror";
+    try {
+      const s = await space(w, "r1", { connected: false });
+      await w.publishNext();
+      await atTime(1_000_000, async (at) => {
+        await s.round();
+        const heads = w.gateway.requests.get("GET head") ?? 0;
+        for (let i = 1; i <= 5; i++) {
+          at(i * 1500);
+          await s.round();
+        }
+        expect((w.gateway.requests.get("GET head") ?? 0) - heads).toBe(5);
+      });
+    } finally {
+      if (saved === undefined) delete process.env.PRIME_FLEET_REPLICA;
+      else process.env.PRIME_FLEET_REPLICA = saved;
+      finish(w);
+    }
+  });
+
+  test("with a socket a lazy replica looks at the head every ten minutes and at its place every five, when nothing is said", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      await w.publishNext();
+      await atTime(1_000_000, async (at) => {
+        await s.round();
+        const heads = w.gateway.requests.get("GET head") ?? 0;
+        const bootstraps = w.gateway.bootstraps;
+        at(4 * 60_000);
+        await s.round();
+        expect(total(w)).toBe(total(w));
+        expect(w.gateway.bootstraps).toBe(bootstraps);
+        at(5.5 * 60_000);
+        await s.round();
+        expect(w.gateway.bootstraps).toBe(bootstraps + 1);
+        expect(w.gateway.requests.get("GET head") ?? 0).toBe(heads);
+        at(11 * 60_000);
+        await s.round();
+        expect((w.gateway.requests.get("GET head") ?? 0) - heads).toBe(1);
+      });
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("how long a replica sleeps, and how often a primary renews against the lease", async () => {
+    const { heartbeatIntervalMs } = await import("../src/fleet-daemon");
+    const { replicaSleepMs } = await import("../src/fleet-replica");
+    expect(replicaSleepMs({ mode: "lazy", connected: false, pollMs: 1500 })).toEqual({ pollMs: 15_000, idleMs: 300_000 });
+    expect(replicaSleepMs({ mode: "lazy", connected: false, pollMs: 1500, leaseMs: 15_000 }).pollMs).toBe(5_000);
+    expect(replicaSleepMs({ mode: "mirror", connected: false, pollMs: 1500 }).pollMs).toBe(1500);
+    // Two renewals can be lost and the place is still held, for any lease the fleet reports.
+    for (const lease of [15_000, 45_000, 120_000]) {
+      const beat = heartbeatIntervalMs(lease, 15_000);
+      expect(beat * 3).toBeLessThanOrEqual(lease);
+    }
+    expect(heartbeatIntervalMs(45_000, 15_000)).toBe(15_000);
+    expect(heartbeatIntervalMs(undefined, 15_000)).toBe(15_000);
+    expect(heartbeatIntervalMs(15_000, 15_000)).toBe(5_000);
   });
 });
 

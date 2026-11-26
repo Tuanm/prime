@@ -63,11 +63,11 @@ export class FakeGateway {
       if (!this.members.has(creds.deviceId)) return Response.json({ error: "forbidden" }, { status: 403 });
       // Whoever holds the lease keeps it; the others are told so.
       if (this.primary && this.primary !== creds.deviceId) {
-        return Response.json({ ok: true, role: "replica", reason: "lease-held", holder: this.primary });
+        return Response.json({ ok: true, role: "replica", reason: "lease-held", holder: this.primary, head: this.head ?? { seq: 0 } });
       }
       const current = this.head?.seq ?? 0;
       if (current > 0 && (this.applied.get(creds.deviceId) ?? 0) < current) {
-        return Response.json({ ok: true, role: "replica", reason: "not-caught-up", catchUpTo: current });
+        return Response.json({ ok: true, role: "replica", reason: "not-caught-up", catchUpTo: current, head: this.head ?? { seq: 0 } });
       }
       this.primary = creds.deviceId;
       return Response.json({ ok: true, role: "primary", ttlMs: 45_000, ...(current > 0 ? { catchUpTo: current } : {}) });

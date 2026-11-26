@@ -29,7 +29,19 @@ import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
-import { applyReady, placeDue, positions, prefetch, promote, promotionDelayMs, replicaMode, type PlaceAnswer } from "./fleet-replica.ts";
+import {
+  FETCHED_REPORT_MS,
+  SOCKET_HEAD_SAFETY_MS,
+  applyReady,
+  placeDue,
+  positions,
+  prefetch,
+  promote,
+  promotionDelayMs,
+  replicaMode,
+  replicaSleepMs,
+  type PlaceAnswer,
+} from "./fleet-replica.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -475,10 +487,20 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     }
   }
 
-  // Look at the head when the fleet said it moved, now and then in case a
-  // message was lost, and always when there is no socket to say.
+  // Look at the head when the fleet said it moved (the socket's news, or the
+  // head that came with the answer when this member asked for its place). A
+  // replica that does not mirror has no use for a fresher head than that, so it
+  // does not ask for one: now and then in case a message was lost, with a socket
+  // - and without one, the next time it asks for its place. A replica that
+  // mirrors wants a fresh work tree and looks every round.
   const now = Date.now();
-  if (!loop.headDirty && loop.events.connected && now - loop.lastHeadCheck < 30_000 && loop.lastHeadCheck !== 0) return;
+  const lazy = mode === "lazy" && positions(readFleetState(loop.configPath, fleet, loop.name)).applied.commit !== null;
+  if (lazy) {
+    const overdue = loop.events.connected && now - loop.lastHeadCheck >= SOCKET_HEAD_SAFETY_MS;
+    if (!loop.headDirty && !overdue && loop.lastHeadCheck !== 0) return;
+  } else if (!loop.headDirty && loop.events.connected && now - loop.lastHeadCheck < 30_000 && loop.lastHeadCheck !== 0) {
+    return;
+  }
   loop.headDirty = false;
   loop.lastHeadCheck = now;
 
@@ -495,7 +517,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     report("fetched " + got.fetched.seq);
     // Tell the fleet how far this member has fetched, as seldom as is useful: it
     // is for whoever reads the fleet, and nothing waits on it.
-    if (Date.now() - (loop.lastFetchedReport ?? 0) > 15_000) {
+    if (Date.now() - (loop.lastFetchedReport ?? 0) > FETCHED_REPORT_MS) {
       loop.lastFetchedReport = Date.now();
       await reportApplied(creds, fleet, positions(readFleetState(loop.configPath, fleet, loop.name)).applied.seq, got.fetched.seq).catch(() => false);
     }
@@ -526,6 +548,8 @@ interface BootstrapResult {
   reason?: string;
   /** For `not-caught-up`: the sequence to have applied first. */
   catchUpTo?: number;
+  /** The head, as the fleet had it when it answered. */
+  head?: { seq: number; manifestKey?: string };
 }
 
 /** Take a place in the fleet, without the CLI's machinery. */
@@ -556,19 +580,36 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     }
     return { ok: false, primary: false, error: "status " + res.status };
   }
-  const body = (await res.json()) as { role?: string; ttlMs?: number; reason?: string; catchUpTo?: number };
+  const body = (await res.json()) as {
+    role?: string;
+    ttlMs?: number;
+    reason?: string;
+    catchUpTo?: number;
+    head?: { seq?: number; manifestKey?: string };
+  };
   return {
     ok: true,
     primary: body.role === "primary",
     ...(typeof body.ttlMs === "number" && body.ttlMs > 0 ? { ttlMs: body.ttlMs } : {}),
     ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
     ...(typeof body.catchUpTo === "number" ? { catchUpTo: body.catchUpTo } : {}),
+    ...(body.head && typeof body.head.seq === "number" && body.head.seq > 0
+      ? { head: { seq: body.head.seq, ...(typeof body.head.manifestKey === "string" && body.head.manifestKey ? { manifestKey: body.head.manifestKey } : {}) } }
+      : {}),
   };
 }
 
-/** How often this space must renew its place, from the lease the fleet reports. */
+/**
+ * How often a primary renews its place: a third of the lease the fleet reports,
+ * so that two renewals can be lost in a row and the place is still held, and
+ * never more rarely than the ceiling. The lease is forty-five seconds, so fifteen.
+ */
+export function heartbeatIntervalMs(leaseMs: number | undefined, ceilingMs: number): number {
+  return Math.max(500, Math.min(ceilingMs, Math.floor((leaseMs ?? 45_000) / 3)));
+}
+
 function heartbeatFor(loop: SpaceLoop, ceilingMs: number): number {
-  return Math.max(500, Math.min(ceilingMs, Math.floor((loop.leaseMs ?? 15_000) / 3)));
+  return heartbeatIntervalMs(loop.leaseMs, ceilingMs);
 }
 
 /**
@@ -598,6 +639,17 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     // What the fleet says a place lasts. An agent that renews at its own pace
     // against a lease it never asked about is how a live primary loses it.
     if (placed.ttlMs) loop.leaseMs = placed.ttlMs;
+    // The answer says where the head is: that is how a replica without a socket
+    // learns that there is something to fetch, without asking again.
+    if (placed.head && !placed.primary) {
+      const fetched = positions(readFleetState(loop.configPath, loop.fleet, loop.name)).fetched.seq;
+      if (placed.head.seq > (loop.knownHeadSeq ?? 0)) {
+        loop.knownHeadSeq = placed.head.seq;
+        if (placed.head.manifestKey) loop.knownHeadManifest = placed.head.manifestKey;
+        else delete loop.knownHeadManifest;
+      }
+      if (placed.head.seq > fetched) loop.headDirty = true;
+    }
     return {
       primary: placed.primary,
       ...(placed.reason ? { reason: placed.reason } : {}),
@@ -618,7 +670,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   const env = process.env;
   const pollMs = options.pollMs ?? Number(env.PRIME_FLEET_POLL_MS ?? 1500);
   // The heartbeat never exceeds this; the fleet's own lease can lower it.
-  const heartbeatMs = options.heartbeatMs ?? Number(env.PRIME_FLEET_HEARTBEAT_MS ?? 5_000);
+  const heartbeatMs = options.heartbeatMs ?? Number(env.PRIME_FLEET_HEARTBEAT_MS ?? 15_000);
   options = { ...options, heartbeatMs };
   const dir = fleetAgentDir(configPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -784,12 +836,18 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
       write(spacesSeen);
       // Sleep until the next turn, or until something happens.
       if (pending.delete(name)) continue;
+      // A replica that does not mirror has nothing to do between messages; it
+      // sleeps long (see replicaSleepMs). The primary keeps the pace it had.
+      const idle = loop.primary
+        ? { pollMs, idleMs: undefined }
+        : replicaSleepMs({ mode: replicaMode(), connected: loop.events.connected, pollMs, ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}) });
       const sleepMs = roundSleepMs({
         paused: loop.paused,
         connected: loop.events.connected,
         supported: loop.events.supported,
         retryAfterMs: loop.retryAfterMs,
-        pollMs,
+        pollMs: idle.pollMs,
+        ...(idle.idleMs !== undefined ? { idleMs: idle.idleMs } : {}),
         failures: loop.failures,
       });
       await new Promise<void>((resolve) => {

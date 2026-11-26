@@ -92,6 +92,8 @@ export function roundSleepMs(input: {
   pollMs: number;
   /** Rounds in a row that failed: each one doubles the wait. */
   failures?: number;
+  /** With a socket, how long to sleep when nothing happens (the default is thirty seconds). */
+  idleMs?: number;
 }): number {
   if (input.paused) {
     if (input.connected) return PAUSED_SAFETY_MS;
@@ -101,7 +103,7 @@ export function roundSleepMs(input: {
     }
     return PAUSED_RETRY_MS;
   }
-  const base = input.connected ? EVENTS_SAFETY_POLL_MS : input.pollMs;
+  const base = input.connected ? (input.idleMs ?? EVENTS_SAFETY_POLL_MS) : input.pollMs;
   const failures = Math.min(30, Math.max(0, Math.floor(input.failures ?? 0)));
   if (failures === 0) return base;
   // A gateway that keeps refusing - an answer this agent does not understand,
