@@ -31,12 +31,19 @@ At any moment exactly one space holds the lease. That one writes. The others are
 **replicas**: they keep a copy ready, and they never write.
 
 The lease is short - forty-five seconds - and the one holding it renews every fifteen
-(a third of it). A renewal that fails is tried again two seconds later, and a request for
+(a third of it), on a beat of its own, whatever its rounds are doing: a primary whose
+snapshots keep failing (a file it cannot read, a pack the gateway refuses) still holds its
+place. A renewal that is lost on the way is tried again two seconds later, and a request for
 the place is cut off after ten seconds, so even two failures - each as slow as it may be -
-leave a third attempt before the place is gone. A space that goes quiet loses the lease
-quickly rather than locking the fleet: when it runs out the fleet tells every member over
-its socket, and takeover is the rest of the lease plus a few seconds (a minute at the most
-from the holder's last renewal).
+leave a third attempt before the place is gone. A renewal the gateway answered with a refusal
+(too many requests, over budget) is not hammered: it is asked again when the gateway said to
+(`retry-after`), and in any case within a third of the lease. A space that goes quiet loses
+the lease quickly rather than locking the fleet: when it runs out the fleet tells every member
+over its socket, and a replica that is current takes over in the rest of the lease plus a few
+seconds - about a minute from the holder's last renewal. A request that fails while a replica
+is taking over is asked again after a short wait that doubles (three seconds, six, twelve, ...),
+not after the replica's usual rest, so one failure costs seconds; a replica that is behind first
+has to catch up (see below).
 
 ```mermaid
 sequenceDiagram
@@ -104,8 +111,8 @@ a half-written mix. If something reads a replica's directory and must see the
 newest state, run `prime fleets sync`, or set `PRIME_FLEET_REPLICA=mirror` for the
 agent: it then writes every snapshot as it is fetched, as replicas did before. The setting is
 passed to the agent and written down in its directory (`fleet-agent/settings.json`), so an agent
-started by the login service, or restarted after a crash, has it; starting the agent again with
-another value restarts it, and `prime fleets agent status` says which mode it is in.
+started by the login service, or restarted after a crash, has it; `prime fleets agent status` says
+which mode it is in. See "The agent's settings" below for how they are set, changed and cleared.
 
 The member's state file records both positions: `seq`, `base` and `tree` are what the
 work tree holds, and `fetchedSeq`, `fetchedCommit` and `fetchedTree` the newest snapshot
@@ -122,13 +129,19 @@ minutes with one. It does not renew a lease it does not hold.
 When the lease is free, replicas that are behind each need to write their work tree to take
 it, and only one can. The first to ask is told to catch up and holds a claim on doing so for
 thirty seconds (renewed whenever it asks again, but a claim lasts sixty seconds in all); the
-others are told to wait, write nothing, and ask again when the claim runs out. A claimant that
-died half way costs the others that wait. One that is alive and cannot catch up - nothing is
-sealed for it yet, it has lost its key, its work tree cannot be written - loses the claim at
-sixty seconds and may not take the next for thirty, and such a replica stops asking for the
-lease until something changes; so a replica that can catch up takes over within about two
-minutes of the lease being free, however many are stuck. Who actually gets the lease is
-decided as ever: a member that has applied the head.
+others are told to wait, write nothing, and ask again when the claim runs out - and are kept
+in the order they asked: when a claim ends the next is given to the one that has waited
+longest, and one that asks every second does not overtake one that was told to ask in thirty.
+A claimant that died half way costs the others that wait. One that is alive and cannot catch up
+- nothing is sealed for it yet, it has lost its key, its work tree cannot be written - has the
+claim for its sixty seconds, then goes to the back of the line, and takes it again only if nobody
+is waiting; a current client in that state also stops asking for the lease until something
+changes. So a replica that can catch up takes over after the claims of the replicas that were
+waiting before it: about a minute for each of them that is stuck (measured on the gateway's own
+code with a stuck replica ahead of a healthy one: 65 seconds with one stuck, about three minutes
+with three), not however many there are. Who actually gets the lease is decided as ever: a
+member that has applied the head - a replica that finishes catching up after its claim ended
+still takes it.
 
 ### What a replica keeps
 
@@ -346,9 +359,30 @@ prime fleets agent status       # rounds, the last thing it did, and whether it 
 ```
 
 The lease and the heartbeat are two numbers that have to agree. The heartbeat is
-a third of the lease the fleet reports, and a failed renewal is tried again after two
-seconds, so more than one can fail before the place is gone - and a fleet keeps
-answering its clients meanwhile.
+a third of the lease the fleet reports, a renewal that is lost is tried again after two
+seconds, and one the gateway refused after the time it named (never more than a third of the
+lease later), so more than one can fail before the place is gone - and a fleet keeps
+answering its clients meanwhile. The beat does not wait for the rounds: it renews even when
+the rounds are failing.
+
+### The agent's settings
+
+Four things can be set for the agent, in the shell that runs `prime fleets agent start`
+(or `install`): `PRIME_FLEET_REPLICA` (`lazy` or `mirror`), `PRIME_FLEET_CACHE_MB`,
+`PRIME_FLEET_POLL_MS` and `PRIME_FLEET_HEARTBEAT_MS`. They are written down in
+`fleet-agent/settings.json`, so the login service, and an agent restarted after a crash, run
+with the same.
+
+- A value that means nothing (`sideways`, `-3`) is ignored.
+- A clean shell changes nothing: what was saved stands. To go back to a default, name the
+  variable empty (`PRIME_FLEET_REPLICA= prime fleets agent start`), or forget everything with
+  `prime fleets agent reset`.
+- `agent start` with a setting that differs from the one the running agent has restarts it
+  (through the service, when it is installed - the service manager restarts it, nothing else
+  is started beside it). Commands that only need an agent running, like `prime spaces create`,
+  neither save what their shell exports nor restart it.
+- One agent runs per configuration: a second one that is started exits, saying who holds the
+  lock (`fleet-agent/agent.lock`). A stopping agent is given ten seconds to let go.
 
 A member holds its place only while the gateway can see its device tunnel: a holder whose
 device is not connected is taken out of the running the next time anyone asks. Spaces always
@@ -416,6 +450,7 @@ it, and so does everything that is not a fleet.
 | snapshots kept | the last 64 |
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
+| `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (15000 ms; the fleet's own lease can lower it); saved like the others |
 | a fleet nobody touches | cleaned up after a day |
 
 ## Where to read more
