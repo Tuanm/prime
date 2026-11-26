@@ -14,8 +14,11 @@
 //            applied;
 //   head     what the fleet has, which the agent learns from its socket.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { applyFetched, fetchAhead, type HeadHint, type MemberPaths, type Position } from "./fleet-agent";
-import { preserveLocalChange, snapshot } from "./fleet-sync";
+import { hasCommit, preserveLocalChange, snapshot } from "./fleet-sync";
 import { reportApplied, type FleetCredentials, type FleetHead } from "./fleet-transport";
 
 /** `lazy` fetches ahead and applies on demand; `mirror` applies after every fetch. */
@@ -72,8 +75,17 @@ export async function prefetch(
   save: (patch: Partial<ReplicaState>) => void,
   /** What the socket said the head is: with it, the gateway is not asked for the head. */
   hint?: HeadHint,
-): Promise<{ head: FleetHead; fetched: Position; steps: number }> {
-  const { fetched } = positions(state);
+): Promise<{ head: FleetHead; fetched: Position; steps: number; evicted: number }> {
+  let { fetched } = positions(state);
+  // What the state says is in the store may not be (a copied state directory, a
+  // garbage collection run by hand, an older client that cleaned up): every
+  // change would then fail to resolve against a base that is not there, for ever.
+  // Start from what is there - the snapshot the work tree holds, or nothing.
+  if (fetched.commit !== null && !(await hasCommit(paths.gitDir, fetched.commit))) {
+    const { applied } = positions({ ...state, fetchedSeq: 0 });
+    fetched = (await hasCommit(paths.gitDir, applied.commit)) ? applied : { seq: 0, commit: null };
+    save({ fetchedSeq: fetched.seq, ...(fetched.commit ? { fetchedCommit: fetched.commit } : {}) });
+  }
   return fetchAhead(
     creds,
     fleet,
@@ -89,6 +101,17 @@ export async function prefetch(
     },
     hint,
   );
+}
+
+// Whether the last apply into this store wrote `commit` (it finished: the sidecar
+// is only written when it has).
+async function workTreeHolds(gitDir: string, commit: string | null): Promise<boolean> {
+  if (commit === null) return false;
+  try {
+    return readFileSync(join(gitDir, "apply.commit"), "utf8").trim() === commit;
+  } catch {
+    return false;
+  }
 }
 
 /** What happened when a replica was brought up to date. */
@@ -127,8 +150,12 @@ export async function applyReady(
     return null;
   }
 
+  // A member that was stopped after it wrote the work tree and before it recorded
+  // that holds the newest snapshot already, and its state says it holds an older
+  // one: looking at the work tree would take every file the fleet wrote for the
+  // member's own edit. The sidecar of the apply says what was written last.
   let kept: ApplyReport["kept"];
-  if (state.tree !== undefined) {
+  if (!(await workTreeHolds(paths.gitDir, fetched.commit)) && state.tree !== undefined) {
     const local = await snapshot({
       work: paths.work,
       gitDir: paths.gitDir,
@@ -140,7 +167,7 @@ export async function applyReady(
       kept = await preserveLocalChange(paths.work, paths.gitDir, state.tree, paths.nested ? { nested: paths.nested } : {});
     }
   }
-  await applyFetched(paths, applied, fetched);
+  if (!(await workTreeHolds(paths.gitDir, fetched.commit))) await applyFetched(paths, applied, fetched);
   const now: Position = { seq: fetched.seq, commit: fetched.commit, ...(fetched.tree ? { tree: fetched.tree } : {}) };
   // The state is recorded right after the work tree has it, so the next look
   // can tell a change made here from what the fleet gave.

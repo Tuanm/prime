@@ -242,6 +242,17 @@ async function ensureStore(gitDir: string, work: string, env: Record<string, str
   await gitText(gitDir, ["config", "core.worktree", work], env);
 }
 
+/** Whether prime's object store has this commit (and so its tree and what it needs to build on it). */
+export async function hasCommit(gitDir: string, commit: string | null | undefined): Promise<boolean> {
+  if (!commit || !OBJECT_ID.test(commit)) return false;
+  try {
+    await gitRun(gitDir, ["cat-file", "-e", commit + "^{commit}"], process.env as Record<string, string>);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether the work tree holds any file at all. */
 export function hasFiles(work: string): boolean {
   let entries: string[];

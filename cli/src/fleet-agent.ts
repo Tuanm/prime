@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, keyIdOf, openForMember, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
 import {
+  PayloadGoneError,
   type IndexEntry,
   fetchHead,
   fetchIndex,
@@ -202,6 +203,14 @@ export async function publish(
   // manifest names it, as it names the pack.
   let delta: FleetManifest["delta"];
   if (sealed.ciphertexts[1]) {
+    // The change pack is stored before the manifest that names it, and nothing
+    // takes it away if the publish then fails (a gateway that predates this does
+    // not know it belongs to a snapshot). So the head is looked at once more
+    // first: a publish that is going to be refused is refused before the upload.
+    const again = await fetchHead(creds, fleet).catch(() => null);
+    if ((again?.seq ?? 0) !== (head?.seq ?? 0)) {
+      throw new Error("the fleet head moved while publishing: another member won");
+    }
     const stored = await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
     delta = { packKey: stored.key, packHash: stored.hash, bytes: sealed.ciphertexts[1].length };
   }
@@ -465,11 +474,21 @@ async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: nu
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   // The newest snapshot first, on its own: if it is not sealed for this member no
   // route reaches it, and nothing else need be read.
-  const newest = await fetchManifest(creds, fleet, manifestIdOf(tip.manifestKey));
+  const newest = await fetchManifest(creds, fleet, manifestIdOf(tip.manifestKey)).catch((err: unknown) => {
+    if (err instanceof PayloadGoneError) return null; // the index is behind what the gateway keeps
+    throw err;
+  });
+  if (newest === null) return null;
   if (newest.seq === tip.seq && !openableBy(newest, who)) throw new NotSealedYetError();
-  const real = await mapLimit(route, 6, async (step) =>
-    step.manifest.seq === newest.seq ? newest : fetchManifest(creds, fleet, manifestIdOf(bySeq.get(step.manifest.seq)!.manifestKey)),
-  );
+  let real: FleetManifest[];
+  try {
+    real = await mapLimit(route, 6, async (step) =>
+      step.manifest.seq === newest.seq ? newest : fetchManifest(creds, fleet, manifestIdOf(bySeq.get(step.manifest.seq)!.manifestKey)),
+    );
+  } catch (err) {
+    if (err instanceof PayloadGoneError) return null; // let go since the index was read
+    throw err;
+  }
   const chain: RouteStep[] = [];
   for (const [i, step] of route.entries()) {
     const m = real[i]!;
@@ -607,7 +626,7 @@ export async function fetchAhead(
   onFetched?: (fetched: Position) => void | Promise<void>,
   /** What the socket said the head is, so the gateway need not be asked. */
   hint?: HeadHint,
-): Promise<{ head: FleetHead; fetched: Position; steps: number }> {
+): Promise<{ head: FleetHead; fetched: Position; steps: number; evicted: number }> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
   const keyId = keyIdOf(keys.publicKey);
   // A route can run through a snapshot that cannot be opened (the index does not
@@ -618,13 +637,36 @@ export async function fetchAhead(
   let skipThrough: number | undefined;
   let position = from;
   let steps = 0;
+  // How often a snapshot the route needed was let go by the gateway before it was
+  // fetched: it keeps a number of snapshots, not a length of time, and a fleet
+  // that publishes fast outruns a member that downloads a big tree slowly.
+  let evicted = 0;
   for (let attempt = 0; ; attempt++) {
     const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(skipThrough !== undefined ? { skipThrough } : {}) });
-    if (plan.chain.length === 0) return { head: plan.head, fetched: position, steps };
+    if (plan.chain.length === 0) return { head: plan.head, fetched: position, steps, evicted };
+    const progress: Position[] = [];
     try {
-      const got = await ingestRoute(creds, fleet, paths, keys, plan, position, onFetched);
-      return { head: plan.head, fetched: got, steps: steps + plan.chain.length };
+      const got = await ingestRoute(creds, fleet, paths, keys, plan, position, async (p) => {
+        progress.push(p);
+        await onFetched?.(p);
+      });
+      return { head: plan.head, fetched: got, steps: steps + plan.chain.length, evicted };
     } catch (err) {
+      if (err instanceof PayloadGoneError && attempt < 3) {
+        // Plan again from what was kept: the head has moved on, and so has the route.
+        evicted++;
+        const last = progress[progress.length - 1];
+        if (last) {
+          steps += progress.length;
+          position = last;
+        }
+        continue;
+      }
+      if (err instanceof PayloadGoneError) {
+        throw new Error(
+          "the snapshots this catch-up needs were let go by the gateway while it ran " + (evicted + 1) + " times: the fleet publishes faster than this member can fetch",
+        );
+      }
       if (!(err instanceof NotSealedError) || attempt >= 2) throw err;
       skipThrough = Math.max(skipThrough ?? 0, err.seq);
       // What was kept before the step that failed stays kept.

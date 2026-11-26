@@ -69,6 +69,13 @@ export interface FleetManifest {
 
 export class FleetTransportError extends Error {}
 
+/** A payload the gateway no longer has (a snapshot it let go while it was being fetched). */
+export class PayloadGoneError extends FleetTransportError {
+  constructor() {
+    super("no such payload");
+  }
+}
+
 function headers(creds: FleetCredentials, extra: Record<string, string> = {}): Record<string, string> {
   const out: Record<string, string> = {
     "x-prime-device": creds.deviceId,
@@ -143,7 +150,7 @@ export async function fetchManifest(creds: FleetCredentials, fleet: string, id: 
 /** Fetch a stored payload. */
 export async function getPayload(creds: FleetCredentials, fleet: string, kind: "packs" | "manifests", id: string): Promise<Buffer> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/" + kind + "/" + encodeURIComponent(id));
-  if (res.status === 404) throw new FleetTransportError("no such payload");
+  if (res.status === 404) throw new PayloadGoneError();
   if (!res.ok) throw new FleetTransportError("could not read the payload: " + res.status);
   return Buffer.from(await res.arrayBuffer());
 }

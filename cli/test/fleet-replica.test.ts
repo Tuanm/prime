@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { chooseRoute } from "../src/fleet-agent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
+import { applyFetched, loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import {
   applyReady,
   placeDue,
@@ -1069,6 +1069,161 @@ describe("a replica that takes over knows who the fleet was sealed for", () => {
       expect(next.full).toBe(false);
     } finally {
       finish(w);
+    }
+  });
+});
+
+describe("a publish that is refused", () => {
+  test("does not leave a change pack behind when the head moved before it was uploaded", async () => {
+    const w = await world();
+    try {
+      await w.publishNext();
+      // The next snapshot is a whole tree with a change beside it (a member joined).
+      w.replica("late");
+      let heads = 0;
+      const handle = w.gateway.handle.bind(w.gateway);
+      w.gateway.handle = async (creds, method, path, body, search) => {
+        // The second look at the head (just before the upload) finds another snapshot on top.
+        if (method === "GET" && path.endsWith("/head") && ++heads === 2 && w.gateway.head) {
+          return Response.json({ head: { ...w.gateway.head, seq: w.gateway.head.seq + 1 } });
+        }
+        return handle(creds, method, path, body, search);
+      };
+      await expect(w.publishNext()).rejects.toThrow("head moved while publishing");
+      expect(w.gateway.requests.get("POST packs") ?? 0).toBe(0);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("snapshots the gateway lets go of while a catch-up runs", () => {
+  test("the catch-up is planned again from what it kept, and the member is told it happened", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 5; i++) await w.publishNext();
+      // The pack of seq 4 is gone when it is asked for (let go meanwhile), and back after.
+      const handle = w.gateway.handle.bind(w.gateway);
+      let gone = true;
+      w.gateway.handle = async (creds, method, path, body, search) => {
+        if (gone && method === "GET" && path.includes("/packs/")) {
+          const wanted = [...w.gateway.payloads.keys()].find((k) => path.endsWith("/" + k.split("/").pop()));
+          const manifest = [...w.gateway.payloads.entries()].find(([k, v]) => k.includes("/manifests/") && wanted && v.toString().includes(wanted));
+          if (manifest && JSON.parse(manifest[1].toString()).seq === 4) {
+            gone = false;
+            return new Response("{}", { status: 404 });
+          }
+        }
+        return handle(creds, method, path, body, search);
+      };
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(6);
+      expect(got.evicted).toBe(1);
+      expect(r.state.fetchedSeq).toBe(6);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a gateway that keeps letting go says so instead of looping", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      const handle = w.gateway.handle.bind(w.gateway);
+      w.gateway.handle = async (creds, method, path, body, search) =>
+        method === "GET" && path.includes("/packs/") ? new Response("{}", { status: 404 }) : handle(creds, method, path, body, search);
+      await expect(prefetch(credsFor("r1"), "x", r.paths, r.state, r.save)).rejects.toThrow("let go by the gateway");
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("an apply that was stopped before it was recorded", () => {
+  test("is recorded next time, and the fleet's files are not taken for the member's own edits", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      // The work tree is written ... and the member is stopped before it says so.
+      const { applied, fetched } = positions(r.state);
+      await applyFetched(r.paths, applied, fetched);
+      expect(r.state.seq).toBe(1);
+
+      const done = await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(done!.applied.seq).toBe(4);
+      expect(done!.kept).toBeUndefined();
+      expect(r.state.seq).toBe(4);
+      expect(w.gateway.applied.get("r1")).toBe(4);
+      expect(readdirSync(join(r.paths.work, "..")).filter((n) => n.startsWith("local-change-"))).toEqual([]);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("what the state says was fetched but is not in the store", () => {
+  test("is fetched again from what is there, instead of failing for ever", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(r.state.fetchedSeq).toBe(4);
+
+      // Something cleaned the store (a git gc by hand, with the fetched snapshot unreferenced).
+      const long = new Date(Date.now() - 2 * COLLECT_GRACE_MS);
+      const walk = (dir: string): void => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          if (e.isDirectory()) walk(join(dir, e.name));
+          else utimesSync(join(dir, e.name), long, long);
+        }
+      };
+      walk(join(r.paths.gitDir, "objects"));
+      const { collectStore } = await import("../src/fleet-store");
+      await collectStore(r.paths.gitDir, [r.state.base]);
+
+      await w.publishNext();
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(5);
+      const done = await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(done!.applied.seq).toBe(5);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("the member's state file", () => {
+  test("is replaced whole, never rewritten in place, and leaves nothing beside it", async () => {
+    const { readFleetState, writeFleetState, fleetStateDir } = await import("../src/fleets");
+    const root = mkdtempSync(join(tmpdir(), "fleet-state-"));
+    try {
+      const configPath = join(root, "config.json");
+      mkdirSync(fleetStateDir(configPath, "x", "s"), { recursive: true });
+      writeFleetState(configPath, "x", "s", { seq: 1, base: "a" });
+      const file = join(fleetStateDir(configPath, "x", "s"), "state.json");
+      const before = statSync(file).ino;
+      writeFleetState(configPath, "x", "s", { seq: 2, base: "b", roster: "r" });
+      // A reader that opened the old one keeps a whole file; the new one is another file.
+      expect(statSync(file).ino).not.toBe(before);
+      expect(readFleetState(configPath, "x", "s")).toEqual({ seq: 2, base: "b", roster: "r" });
+      expect(readdirSync(fleetStateDir(configPath, "x", "s")).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

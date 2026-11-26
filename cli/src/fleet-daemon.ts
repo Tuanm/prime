@@ -564,6 +564,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       : undefined;
   const got = await prefetch(creds, fleet, paths, fetchedState, keep, hint);
   loop.timing.pull = Date.now() - pullBegan;
+  if (got.evicted > 0) report("snapshots the catch-up needed were let go by the gateway meanwhile (" + got.evicted + " times): it was planned again");
   if (got.steps > 0) {
     report("fetched " + got.fetched.seq);
     // Tell the fleet how far this member has fetched, as seldom as is useful: it
