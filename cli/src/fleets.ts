@@ -24,7 +24,7 @@ import { positions } from "./fleet-replica.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
-import { ensureFleetAgent, fleetAgentStatus, persistAgentSettings, stopFleetAgent } from "./fleet-daemon.ts";
+import { ensureFleetAgent, fleetAgentStatus, persistAgentSettings, resetAgentSettings, stopFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
 
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -461,8 +461,21 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
     ctx.out(stopped ? green("stopped the fleet agent") : dim("the fleet agent was not running"));
     return;
   }
+  if (what === "reset") {
+    // Forget the saved settings (mode, cache size, timings): a running agent is restarted with the defaults.
+    resetAgentSettings(ctx.configPath);
+    const running = fleetAgentStatus(ctx.configPath).running;
+    if (running) await ensureFleetAgent(ctx.configPath);
+    if (ctx.json) {
+      printJson({ reset: true, restarted: running });
+      return;
+    }
+    ctx.out(green("the fleet agent's settings are back to their defaults") + (running ? dim(" (restarted)") : ""));
+    return;
+  }
   if (what === "start") {
-    const state = await ensureFleetAgent(ctx.configPath);
+    // `start` is the person speaking: what their shell sets is what they ask for, and is remembered.
+    const state = await ensureFleetAgent(ctx.configPath, { fromShell: true });
     if (ctx.json) {
       printJson({ started: true, pid: state.pid });
       return;

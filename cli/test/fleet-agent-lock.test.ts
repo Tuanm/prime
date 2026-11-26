@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess } from "../src/fleet-agent-lock";
-import { ensureFleetAgent, fleetAgentDir, fleetAgentStatePath, runFleetAgent } from "../src/fleet-daemon";
+import { agentSettingsPath, ensureFleetAgent, fleetAgentDir, fleetAgentStatePath, readAgentSettings, runFleetAgent } from "../src/fleet-daemon";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -104,18 +104,28 @@ function mkdirp(dir: string): void {
 }
 
 describe("switching the replica mode of a running agent", () => {
-  function withMode(mode: string): void {
-    const was = process.env.PRIME_FLEET_REPLICA;
-    process.env.PRIME_FLEET_REPLICA = mode;
+  function withEnv(name: string, value: string): void {
+    const was = process.env[name];
+    process.env[name] = value;
     cleanups.push(() => {
-      if (was === undefined) delete process.env.PRIME_FLEET_REPLICA;
-      else process.env.PRIME_FLEET_REPLICA = was;
+      if (was === undefined) delete process.env[name];
+      else process.env[name] = was;
     });
   }
-  function running(configPath: string, pid: number, replica: "lazy" | "mirror"): void {
+  const withMode = (mode: string): void => withEnv("PRIME_FLEET_REPLICA", mode);
+  function running(configPath: string, pid: number, replica: "lazy" | "mirror", cacheMb = 512): void {
     mkdirp(fleetAgentDir(configPath));
-    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath, replica }));
+    const settings = { replica, cacheMb, pollMs: 1500, heartbeatMs: 15000 };
+    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath, replica, settings }));
   }
+  const hooks = (restarts: { n: number }, configPath: string, replica: "lazy" | "mirror", cacheMb = 512) => ({
+    installed: () => true,
+    restart: () => {
+      restarts.n++;
+      running(configPath, process.pid, replica, cacheMb);
+      return true;
+    },
+  });
 
   test("an agent the service runs is restarted by the service, and nothing else is spawned", async () => {
     const root = scratch();
@@ -124,7 +134,7 @@ describe("switching the replica mode of a running agent", () => {
     running(configPath, old.pid, "lazy");
     withMode("mirror");
     let restarts = 0;
-    const state = await ensureFleetAgent(configPath, {}, {
+    const state = await ensureFleetAgent(configPath, { fromShell: true }, {
       installed: () => true,
       restart: () => {
         restarts++;
@@ -148,7 +158,7 @@ describe("switching the replica mode of a running agent", () => {
     withMode("mirror");
     let error: unknown;
     try {
-      await ensureFleetAgent(configPath, {}, { installed: () => false, restart: () => false, stopWaitMs: 400 });
+      await ensureFleetAgent(configPath, { fromShell: true }, { installed: () => false, restart: () => false, stopWaitMs: 400 });
     } catch (err) {
       error = err;
     }
@@ -156,5 +166,49 @@ describe("switching the replica mode of a running agent", () => {
     // Nobody else was started: the state still is the old agent's.
     expect(existsSync(fleetAgentStatePath(configPath))).toBe(false);
     expect(isFleetAgentProcess(stubborn.pid)).toBe(true);
+  });
+
+  test("a new cache size restarts it too, not only a new mode", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    running(configPath, old.pid, "lazy", 512);
+    withEnv("PRIME_FLEET_CACHE_MB", "64");
+    const restarts = { n: 0 };
+    const state = await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy", 64));
+    expect(restarts.n).toBe(1);
+    expect(state.settings?.cacheMb).toBe(64);
+    expect(readAgentSettings(configPath)).toEqual({ cacheMb: 64 });
+    // The same again changes nothing.
+    await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy", 64));
+    expect(restarts.n).toBe(1);
+  });
+
+  test("a command that only needs an agent (creating a space) neither saves the shell's settings nor restarts for them", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    running(configPath, old.pid, "lazy");
+    withMode("mirror");
+    const restarts = { n: 0 };
+    const state = await ensureFleetAgent(configPath, {}, hooks(restarts, configPath, "mirror"));
+    expect(restarts.n).toBe(0);
+    expect(state.pid).toBe(old.pid);
+    expect(existsSync(agentSettingsPath(configPath))).toBe(false);
+  });
+
+  test("an empty variable at `agent start` takes a saved mode away, and the running agent goes back to the default", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    mkdirp(fleetAgentDir(configPath));
+    writeFileSync(agentSettingsPath(configPath), JSON.stringify({ replica: "mirror" }));
+    running(configPath, old.pid, "mirror");
+    withMode("");
+    const restarts = { n: 0 };
+    const state = await ensureFleetAgent(configPath, { fromShell: true }, hooks(restarts, configPath, "lazy"));
+    expect(restarts.n).toBe(1);
+    expect(state.replica).toBe("lazy");
+    expect(existsSync(agentSettingsPath(configPath))).toBe(false);
   });
 });

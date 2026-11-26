@@ -71,6 +71,8 @@ export interface FleetAgentState {
   paused?: boolean;
   /** How replicas are kept: `lazy` fetches ahead and applies when needed, `mirror` applies as it fetches. */
   replica?: ReplicaMode;
+  /** What the agent runs with, so that a start that asks for something else can tell. */
+  settings?: EffectiveSettings;
 }
 
 export interface FleetAgentOptions {
@@ -84,6 +86,13 @@ export interface FleetAgentOptions {
   settleMs?: number;
   /** How long a starting agent waits for another one that is stopping to let go. */
   lockWaitMs?: number;
+  /**
+   * This call speaks for the person at a shell (`prime fleets agent start`): the settings in
+   * its environment are what they ask for, are remembered, and restart a running agent that
+   * runs with others. Without it (creating a space just needs an agent) the remembered
+   * settings stand, whatever the shell happens to export.
+   */
+  fromShell?: boolean;
 }
 
 export function fleetAgentDir(configPath: string): string {
@@ -118,6 +127,58 @@ export interface AgentSettings {
   replica?: ReplicaMode;
   /** The size the object store is collected at, in megabytes. */
   cacheMb?: number;
+  /** How often a replica looks at the fleet's head, in milliseconds. */
+  pollMs?: number;
+  /** How often the primary renews its lease, at most, in milliseconds. */
+  heartbeatMs?: number;
+}
+
+/** The settings with what they come to when nothing is set: what an agent runs with. */
+export interface EffectiveSettings {
+  replica: ReplicaMode;
+  cacheMb: number;
+  pollMs: number;
+  heartbeatMs: number;
+}
+
+const DEFAULT_POLL_MS = 1500;
+const DEFAULT_HEARTBEAT_MS = 15_000;
+
+export function effectiveSettings(settings: AgentSettings): EffectiveSettings {
+  return {
+    replica: settings.replica ?? "lazy",
+    cacheMb: settings.cacheMb ?? cacheLimitMb({}),
+    pollMs: settings.pollMs ?? DEFAULT_POLL_MS,
+    heartbeatMs: settings.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
+  };
+}
+
+/** The environment variable each setting is given in. */
+const SETTING_ENV = {
+  replica: "PRIME_FLEET_REPLICA",
+  cacheMb: "PRIME_FLEET_CACHE_MB",
+  pollMs: "PRIME_FLEET_POLL_MS",
+  heartbeatMs: "PRIME_FLEET_HEARTBEAT_MS",
+} as const satisfies Record<keyof AgentSettings, string>;
+
+const SETTING_KEYS = Object.keys(SETTING_ENV) as Array<keyof AgentSettings>;
+
+function positive(value: unknown): number | undefined {
+  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function sanitize(raw: Record<string, unknown>): AgentSettings {
+  const replica = raw.replica === "lazy" || raw.replica === "mirror" ? raw.replica : undefined;
+  const cacheMb = positive(raw.cacheMb);
+  const pollMs = positive(raw.pollMs);
+  const heartbeatMs = positive(raw.heartbeatMs);
+  return {
+    ...(replica ? { replica } : {}),
+    ...(cacheMb ? { cacheMb } : {}),
+    ...(pollMs ? { pollMs } : {}),
+    ...(heartbeatMs ? { heartbeatMs } : {}),
+  };
 }
 
 export function agentSettingsPath(configPath: string): string {
@@ -126,11 +187,7 @@ export function agentSettingsPath(configPath: string): string {
 
 export function readAgentSettings(configPath: string): AgentSettings {
   try {
-    const raw = JSON.parse(readFileSync(agentSettingsPath(configPath), "utf8")) as { replica?: unknown; cacheMb?: unknown };
-    return {
-      ...(raw.replica === "lazy" || raw.replica === "mirror" ? { replica: raw.replica } : {}),
-      ...(typeof raw.cacheMb === "number" && raw.cacheMb > 0 ? { cacheMb: raw.cacheMb } : {}),
-    };
+    return sanitize(JSON.parse(readFileSync(agentSettingsPath(configPath), "utf8")) as Record<string, unknown>);
   } catch {
     return {};
   }
@@ -138,11 +195,48 @@ export function readAgentSettings(configPath: string): AgentSettings {
 
 /** The settings an environment asks for: only values that mean something. */
 export function settingsFromEnv(env: Record<string, string | undefined>): AgentSettings {
-  const mb = Number(env.PRIME_FLEET_CACHE_MB);
-  return {
-    ...(env.PRIME_FLEET_REPLICA === "lazy" || env.PRIME_FLEET_REPLICA === "mirror" ? { replica: env.PRIME_FLEET_REPLICA } : {}),
-    ...(Number.isFinite(mb) && mb > 0 ? { cacheMb: mb } : {}),
-  };
+  return sanitize({
+    replica: env.PRIME_FLEET_REPLICA,
+    cacheMb: env.PRIME_FLEET_CACHE_MB,
+    pollMs: env.PRIME_FLEET_POLL_MS,
+    heartbeatMs: env.PRIME_FLEET_HEARTBEAT_MS,
+  });
+}
+
+/** The settings an environment asks to be put back to their defaults: its variable is set, and empty. */
+export function clearedByEnv(env: Record<string, string | undefined>): Array<keyof AgentSettings> {
+  return SETTING_KEYS.filter((key) => env[SETTING_ENV[key]] === "");
+}
+
+/**
+ * What the saved settings come to once a shell's environment (and the options of the
+ * call) have had their say: a value they give replaces the saved one, and an empty
+ * variable (`PRIME_FLEET_REPLICA=`) takes the saved one away.
+ */
+export function settingsAsked(
+  saved: AgentSettings,
+  env: Record<string, string | undefined>,
+  options: FleetAgentOptions = {},
+): AgentSettings {
+  const merged: AgentSettings = { ...saved };
+  for (const key of clearedByEnv(env)) delete merged[key];
+  Object.assign(
+    merged,
+    settingsFromEnv(env),
+    sanitize({ pollMs: options.pollMs, heartbeatMs: options.heartbeatMs }),
+  );
+  return merged;
+}
+
+function writeAgentSettings(configPath: string, settings: AgentSettings): void {
+  const file = agentSettingsPath(configPath);
+  if (Object.keys(settings).length === 0) {
+    rmSync(file, { force: true });
+    return;
+  }
+  mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
+  writeFileSync(file + ".tmp", JSON.stringify(settings, null, 2), { mode: 0o600 });
+  renameSync(file + ".tmp", file);
 }
 
 /**
@@ -151,25 +245,33 @@ export function settingsFromEnv(env: Record<string, string | undefined>): AgentS
  * The agent is started from a shell (`prime fleets agent start`) or by the system
  * (a login service, a restart after a crash), and only the first has the variables
  * the person set. What they asked for is written down, so that every start - and the
- * service's - has it.
+ * service's - has it. Only `agent start` and `agent install` call this: a command that
+ * merely needs an agent running (creating a space) has no say in how it runs.
  */
-export function persistAgentSettings(configPath: string, env: Record<string, string | undefined> = process.env): AgentSettings {
-  const asked = settingsFromEnv(env);
-  const settings = { ...readAgentSettings(configPath), ...asked };
-  if (Object.keys(asked).length > 0) {
-    mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
-    const file = agentSettingsPath(configPath);
-    writeFileSync(file + ".tmp", JSON.stringify(settings, null, 2), { mode: 0o600 });
-    renameSync(file + ".tmp", file);
-  }
+export function persistAgentSettings(
+  configPath: string,
+  env: Record<string, string | undefined> = process.env,
+  options: FleetAgentOptions = {},
+): AgentSettings {
+  const saved = readAgentSettings(configPath);
+  const settings = settingsAsked(saved, env, options);
+  if (JSON.stringify(settings) !== JSON.stringify(saved)) writeAgentSettings(configPath, settings);
   return settings;
+}
+
+/** Forget every saved setting: the agent runs with its defaults from its next start. */
+export function resetAgentSettings(configPath: string): void {
+  rmSync(agentSettingsPath(configPath), { force: true });
 }
 
 /** In the agent itself: what was set and remembered applies unless this start says otherwise. */
 export function applyAgentSettings(configPath: string, env: Record<string, string | undefined> = process.env): void {
   const settings = readAgentSettings(configPath);
-  if (env.PRIME_FLEET_REPLICA === undefined && settings.replica) env.PRIME_FLEET_REPLICA = settings.replica;
-  if (env.PRIME_FLEET_CACHE_MB === undefined && settings.cacheMb) env.PRIME_FLEET_CACHE_MB = String(settings.cacheMb);
+  for (const key of SETTING_KEYS) {
+    const name = SETTING_ENV[key];
+    const value = settings[key];
+    if (env[name] === undefined && value !== undefined) env[name] = String(value);
+  }
 }
 
 /**
@@ -177,22 +279,22 @@ export function applyAgentSettings(configPath: string, env: Record<string, strin
  *
  * The agent needs almost nothing from the caller's environment. Copying all of it
  * would silently hand it unrelated credentials, so what it gets is a short list - and
- * the settings above, which are the one thing a person sets for it.
+ * the settings above, which are the one thing a person sets for it. With `shell` false
+ * the environment has no say in them: the saved ones are what the agent runs with.
  */
 export function buildAgentEnv(
   configPath: string,
   options: FleetAgentOptions,
   env: Record<string, string | undefined> = process.env,
+  shell = true,
 ): Record<string, string | undefined> {
   const agentEnv: Record<string, string | undefined> = { PRIME_FLEET_AGENT_DIR: fleetAgentDir(configPath) };
-  // The timings travel with the agent, so a user can trade traffic for speed.
-  if (options.pollMs !== undefined) agentEnv.PRIME_FLEET_POLL_MS = String(options.pollMs);
-  else if (env.PRIME_FLEET_POLL_MS !== undefined) agentEnv.PRIME_FLEET_POLL_MS = env.PRIME_FLEET_POLL_MS;
-  if (options.heartbeatMs !== undefined) agentEnv.PRIME_FLEET_HEARTBEAT_MS = String(options.heartbeatMs);
-  else if (env.PRIME_FLEET_HEARTBEAT_MS !== undefined) agentEnv.PRIME_FLEET_HEARTBEAT_MS = env.PRIME_FLEET_HEARTBEAT_MS;
-  const settings = { ...readAgentSettings(configPath), ...settingsFromEnv(env) };
-  if (settings.replica) agentEnv.PRIME_FLEET_REPLICA = settings.replica;
-  if (settings.cacheMb) agentEnv.PRIME_FLEET_CACHE_MB = String(settings.cacheMb);
+  const saved = readAgentSettings(configPath);
+  const settings = shell ? settingsAsked(saved, env, options) : saved;
+  for (const key of SETTING_KEYS) {
+    const value = settings[key];
+    if (value !== undefined) agentEnv[SETTING_ENV[key]] = String(value);
+  }
   const inherited = new Set([
     "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
     "TERM", "NO_COLOR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
@@ -204,6 +306,14 @@ export function buildAgentEnv(
     if (value !== undefined) agentEnv[key] = value;
   }
   return agentEnv;
+}
+
+/** Whether a running agent runs with other settings than the ones in force. */
+function settingsDiffer(running: FleetAgentState, settings: AgentSettings): boolean {
+  const wanted = effectiveSettings(settings);
+  // An agent from before settings were recorded says only its mode.
+  const has: Partial<EffectiveSettings> = running.settings ?? { replica: running.replica ?? "lazy" };
+  return SETTING_KEYS.some((key) => has[key] !== undefined && has[key] !== wanted[key]);
 }
 
 /** How the agent's login service is asked about and restarted; replaced in tests. */
@@ -246,11 +356,11 @@ export async function ensureFleetAgent(
   options: FleetAgentOptions = {},
   service: AgentServiceHooks = systemService,
 ): Promise<FleetAgentState> {
-  persistAgentSettings(configPath);
+  const shell = options.fromShell === true;
+  const settings = shell ? persistAgentSettings(configPath, process.env, options) : readAgentSettings(configPath);
   const existing = readFleetAgentState(configPath);
   if (existing && pidAlive(existing.pid)) {
-    const wants = settingsFromEnv(process.env).replica;
-    if (!wants || (existing.replica ?? "lazy") === wants) return existing;
+    if (!settingsDiffer(existing, settings)) return existing;
     if (service.installed() && service.restart()) {
       // The manager kills it and starts it again: the new one is the one with another pid.
       const deadline = Date.now() + (service.stopWaitMs ?? STOP_WAIT_MS);
@@ -273,7 +383,7 @@ export async function ensureFleetAgent(
   }
   rmSync(fleetAgentStatePath(configPath), { force: true });
   mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
-  const agentEnv = buildAgentEnv(configPath, options);
+  const agentEnv = buildAgentEnv(configPath, options, process.env, shell);
   const child = Bun.spawn({
     // selfCommand, not process.execPath: when the CLI runs from source the
     // executable is bun, and bun would look for a file named __fleet-agent.
@@ -1010,9 +1120,9 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   // What a person set (and the service was never told) is read from where it was written down.
   applyAgentSettings(configPath);
   const env = process.env;
-  const pollMs = options.pollMs ?? Number(env.PRIME_FLEET_POLL_MS ?? 1500);
+  const pollMs = options.pollMs ?? positive(env.PRIME_FLEET_POLL_MS) ?? DEFAULT_POLL_MS;
   // The heartbeat never exceeds this; the fleet's own lease can lower it.
-  const heartbeatMs = options.heartbeatMs ?? Number(env.PRIME_FLEET_HEARTBEAT_MS ?? 15_000);
+  const heartbeatMs = options.heartbeatMs ?? positive(env.PRIME_FLEET_HEARTBEAT_MS) ?? DEFAULT_HEARTBEAT_MS;
   options = { ...options, heartbeatMs };
   const dir = fleetAgentDir(configPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -1052,6 +1162,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       spaces,
       rounds,
       replica: replicaMode(),
+      settings: { ...effectiveSettings(settingsFromEnv(env)), pollMs, heartbeatMs },
       ...(lastError ? { last_error: lastError } : {}),
       ...(lastAction ? { last_action: lastAction } : {}),
       ...(timing ? { timing } : {}),

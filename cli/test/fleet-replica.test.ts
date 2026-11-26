@@ -1581,6 +1581,52 @@ describe("what a person sets for the agent", () => {
       cleanup();
     }
   });
+
+  test("a setting is cleared by naming it empty, and the file goes when nothing is left", async () => {
+    const { applyAgentSettings, buildAgentEnv, persistAgentSettings, readAgentSettings, resetAgentSettings, agentSettingsPath } = await import("../src/fleet-daemon");
+    try {
+      const configPath = configIn();
+      persistAgentSettings(configPath, { PRIME_FLEET_REPLICA: "mirror", PRIME_FLEET_CACHE_MB: "64" });
+      // A clean shell says nothing and changes nothing; an empty variable is the person saying "back to the default".
+      persistAgentSettings(configPath, {});
+      expect(readAgentSettings(configPath)).toEqual({ replica: "mirror", cacheMb: 64 });
+      persistAgentSettings(configPath, { PRIME_FLEET_REPLICA: "" });
+      expect(readAgentSettings(configPath)).toEqual({ cacheMb: 64 });
+      expect(buildAgentEnv(configPath, {}, { PRIME_FLEET_REPLICA: "" }).PRIME_FLEET_REPLICA).toBeUndefined();
+      persistAgentSettings(configPath, { PRIME_FLEET_CACHE_MB: "" });
+      expect(readAgentSettings(configPath)).toEqual({});
+      expect(existsSync(agentSettingsPath(configPath))).toBe(false);
+
+      persistAgentSettings(configPath, { PRIME_FLEET_REPLICA: "mirror" });
+      resetAgentSettings(configPath);
+      expect(readAgentSettings(configPath)).toEqual({});
+      const serviceEnv: Record<string, string | undefined> = { PATH: "/bin" };
+      applyAgentSettings(configPath, serviceEnv);
+      expect(serviceEnv.PRIME_FLEET_REPLICA).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("the timings are remembered with the rest, so the service runs with those of `agent start`", async () => {
+    const { applyAgentSettings, buildAgentEnv, persistAgentSettings, readAgentSettings } = await import("../src/fleet-daemon");
+    try {
+      const configPath = configIn();
+      persistAgentSettings(configPath, { PRIME_FLEET_POLL_MS: "500", PRIME_FLEET_HEARTBEAT_MS: "5000", PRIME_FLEET_REPLICA: "nonsense" });
+      expect(readAgentSettings(configPath)).toEqual({ pollMs: 500, heartbeatMs: 5000 });
+      const serviceEnv: Record<string, string | undefined> = { PATH: "/bin" };
+      applyAgentSettings(configPath, serviceEnv);
+      expect(serviceEnv.PRIME_FLEET_POLL_MS).toBe("500");
+      expect(serviceEnv.PRIME_FLEET_HEARTBEAT_MS).toBe("5000");
+      // A spawned agent has them too, from a shell that set nothing; and what is not a number is not kept.
+      const child = buildAgentEnv(configPath, {}, { PATH: "/bin" });
+      expect([child.PRIME_FLEET_POLL_MS, child.PRIME_FLEET_HEARTBEAT_MS]).toEqual(["500", "5000"]);
+      persistAgentSettings(configPath, { PRIME_FLEET_POLL_MS: "soon" });
+      expect(readAgentSettings(configPath).pollMs).toBe(500);
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("an agent killed while it writes the work tree", () => {
