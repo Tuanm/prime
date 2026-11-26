@@ -280,15 +280,36 @@ export function foldsCase(dir: string): boolean {
     const name = basename(dir);
     const swapped = name === name.toLowerCase() ? name.toUpperCase() : name.toLowerCase();
     if (swapped !== name) {
+      // The directory's own name, in the other case, if it has one: nothing is written.
       const same = statSync(join(dir, "..", swapped));
       const own = statSync(dir);
       folds = same.ino === own.ino && same.dev === own.dev;
+    } else {
+      // A name with no letters in it (`2024`) cannot be asked for in the other case: a file
+      // made for the purpose can, and is gone again.
+      folds = foldsCaseInside(dir);
     }
   } catch {
     folds = false;
   }
   foldsCaseCache.set(dir, folds);
   return folds;
+}
+
+function foldsCaseInside(dir: string): boolean {
+  const probe = join(dir, ".prime-Case-probe-" + process.pid + "-" + Date.now());
+  try {
+    writeFileSync(probe, "");
+    const slash = probe.lastIndexOf("/") + 1;
+    const lower = probe.slice(0, slash) + probe.slice(slash).toLowerCase();
+    const a = statSync(probe);
+    const b = statSync(lower);
+    return a.ino === b.ino && a.dev === b.dev;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { force: true });
+  }
 }
 
 // On a file system that folds case, `git add -A` after a case-only rename finds the old

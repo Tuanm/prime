@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import {
   EMPTY_TREE,
+  foldsCase,
   applyCommit,
   applyPack,
   ingestPack,
@@ -1251,5 +1252,21 @@ describe("sealing", () => {
     expect(payloadId(Buffer.from("a"))).toBe(payloadId(Buffer.from("a")));
     expect(payloadId(Buffer.from("a"))).not.toBe(payloadId(Buffer.from("b")));
     expect(payloadId(Buffer.from("a"))).toHaveLength(64);
+  });
+});
+
+describe("whether the work directory's file system folds case", () => {
+  test("a directory whose name has no letters is probed from inside, and leaves nothing behind", () => {
+    const root = scratch();
+    // Is this file system one that folds case at all? (The same check, with a name that has letters.)
+    const letters = join(root, "Abc");
+    mkdirSync(letters);
+    const folding = existsSync(join(root, "abc"));
+    const digits = join(root, "2024");
+    mkdirSync(digits);
+    expect(foldsCase(digits)).toBe(folding);
+    expect(readdirSync(digits)).toEqual([]);
+    // A directory that is not there cannot be probed: taken as case-sensitive.
+    expect(foldsCase(join(root, "2025"))).toBe(false);
   });
 });
