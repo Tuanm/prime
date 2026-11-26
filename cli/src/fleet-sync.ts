@@ -374,9 +374,26 @@ async function removedBetween(
 }
 
 // Remove a file the fleet no longer has, and the directories that leaves empty.
+//
+// The path names a file inside the work tree, and it has to stay there: a
+// directory the fleet (or the replica's owner) turned into a symlink would
+// carry a removal out of the work tree to whatever it points at. Every
+// directory on the way is looked at without following links, and a path
+// through anything that is not a plain directory is left alone, as git does.
 function removeTracked(work: string, rel: string): void {
-  if (rel.split("/").includes("..")) return;
-  const full = join(work, ...rel.split("/"));
+  const parts = rel.split("/");
+  if (parts.some((p) => p === "" || p === "." || p === "..")) return;
+  const dirs: string[] = [work];
+  for (let i = 0; i < parts.length - 1; i++) {
+    const next = join(dirs[dirs.length - 1]!, parts[i]!);
+    try {
+      if (!lstatSync(next).isDirectory()) return;
+    } catch {
+      return;
+    }
+    dirs.push(next);
+  }
+  const full = join(dirs[dirs.length - 1]!, parts[parts.length - 1]!);
   try {
     // A path that has become a directory (a file replaced by a folder of the
     // same name) is the new tree's, not a leftover.
@@ -387,14 +404,12 @@ function removeTracked(work: string, rel: string): void {
   }
   // Like git, take away a directory that the removal emptied; never one that
   // still holds something, and never the work tree itself.
-  let dir = join(full, "..");
-  while (dir.length > work.length && dir.startsWith(work)) {
+  for (let i = dirs.length - 1; i >= 1; i--) {
     try {
-      rmdirSync(dir);
+      rmdirSync(dirs[i]!);
     } catch {
       return;
     }
-    dir = join(dir, "..");
   }
 }
 

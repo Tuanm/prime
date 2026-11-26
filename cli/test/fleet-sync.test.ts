@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -412,6 +412,41 @@ describe("applying a snapshot keeps what the fleet never synced", () => {
       rmSync(join(r.otherGit, "apply.index"), { force: true });
       await applyPack(r.other, r.otherGit, second.commit, second.pack, ["mine"], r.first.commit);
       expect(existsSync(join(r.other, "mine", "x.txt"))).toBe(true);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a removal never leaves the work tree", () => {
+  test("a directory the primary turned into a symlink does not take outside files with it", async () => {
+    const r = await replicaOf({ "cfg/secret.txt": "fleet", "keep.txt": "k" });
+    try {
+      mkdirSync(join(r.root, "outside"));
+      writeFileSync(join(r.root, "outside", "secret.txt"), "the user's, outside the work tree");
+      // The primary replaces cfg/ with a link out of the tree.
+      rmSync(join(r.work, "cfg"), { recursive: true });
+      symlinkSync("../outside", join(r.work, "cfg"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], r.first.commit);
+      expect(readFileSync(join(r.root, "outside", "secret.txt"), "utf8")).toBe("the user's, outside the work tree");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a tracked directory the replica's owner turned into a symlink is not followed", async () => {
+    const r = await replicaOf({ "cfg/secret.txt": "fleet", "keep.txt": "k" });
+    try {
+      mkdirSync(join(r.root, "outside"));
+      writeFileSync(join(r.root, "outside", "secret.txt"), "the user's, outside the work tree");
+      rmSync(join(r.other, "cfg"), { recursive: true });
+      symlinkSync("../outside", join(r.other, "cfg"));
+      // The primary deletes the file; the replica's cfg is a link now.
+      rmSync(join(r.work, "cfg"), { recursive: true });
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], r.first.commit);
+      expect(readFileSync(join(r.root, "outside", "secret.txt"), "utf8")).toBe("the user's, outside the work tree");
     } finally {
       rmSync(r.root, { recursive: true, force: true });
     }
