@@ -5,7 +5,9 @@ import { readFileSync as readSource } from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { FULL_PACK_WINDOW, loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
+import { FULL_PACK_WINDOW, chooseRoute, loadOrCreateKeyPair, manifestIdOf, openStep, publish, pull, rosterGained, type MemberPaths } from "../src/fleet-agent";
+import { applyPack } from "../src/fleet-sync";
+import type { FleetManifest } from "../src/fleet-transport";
 import { type FleetCredentials } from "../src/fleet-transport";
 
 /**
@@ -25,6 +27,10 @@ class FakeGateway {
   retain = Infinity;
   /** Pack downloads, by the pack's key. */
   packReads: string[] = [];
+  /** Bytes served for pack downloads. */
+  packBytesServed = 0;
+  /** Behave like a gateway whose publisher predates pack sizes and the checkpoint's change pack. */
+  legacyManifests = false;
   private kept: string[][] = [];
 
   seed(deviceId: string, pubkey: string): void {
@@ -65,6 +71,10 @@ class FakeGateway {
       const manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
       manifest.packKey = packKey;
       manifest.packHash = hash(pack);
+      if (this.legacyManifests) {
+        delete manifest.packBytes;
+        delete manifest.delta;
+      }
       const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
       const manifestKey = "fleets/x/manifests/" + hash(finalManifest);
       this.payloads.set(packKey, pack);
@@ -91,7 +101,10 @@ class FakeGateway {
       const id = parts[3] ?? "";
       const found = [...this.payloads.entries()].find(([k]) => k.endsWith("/" + id));
       if (!found) return Response.json({ error: "no such payload" }, { status: 404 });
-      if (kind === "packs") this.packReads.push(found[0]);
+      if (kind === "packs") {
+        this.packReads.push(found[0]);
+        this.packBytesServed += found[1].length;
+      }
       return new Response(found[1]);
     }
     if (kind === "head" && parts[3] === "advance") {
@@ -551,5 +564,249 @@ describe("the gateway keeps what the checkpoint interval needs", () => {
     const kept = Number(/export const RECENT_SNAPSHOTS = (\d+);/.exec(source)?.[1]);
     expect(Number.isInteger(kept)).toBe(true);
     expect(kept).toBeGreaterThanOrEqual(2 * FULL_PACK_WINDOW);
+  });
+});
+
+// A manifest with only what the route choice looks at.
+function manifest(seq: number, opts: { full?: boolean; bytes?: number; delta?: number; sealedFor?: string[] } = {}): FleetManifest {
+  return {
+    fleet: "x",
+    seq,
+    tipCommit: "c" + seq,
+    tree: "t" + seq,
+    packKey: "fleets/x/packs/p" + seq,
+    packHash: "p" + seq,
+    ...(opts.bytes !== undefined ? { packBytes: opts.bytes } : {}),
+    ...(opts.delta !== undefined ? { delta: { packKey: "fleets/x/packs/d" + seq, packHash: "d" + seq, bytes: opts.delta } } : {}),
+    full: opts.full ?? false,
+    senderPublicKey: "k",
+    wrapped: (opts.sealedFor ?? ["me"]).map((id) => ({ memberId: id, wrapped: "w" })),
+    epoch: 1,
+    createdAt: 0,
+  };
+}
+const newestFirst = (list: FleetManifest[]): FleetManifest[] => [...list].sort((a, b) => b.seq - a.seq);
+
+describe("choosing the cheapest route", () => {
+  test("a member that holds the snapshot before takes the change, also across a checkpoint", () => {
+    const route = chooseRoute(newestFirst([manifest(31, { bytes: 10 }), manifest(32, { full: true, bytes: 5000, delta: 12 }), manifest(33, { bytes: 11 })]), 31, "me")!;
+    expect(route.map((s) => [s.manifest.seq, s.packKey, s.whole])).toEqual([
+      [32, "fleets/x/packs/d32", false],
+      [33, "fleets/x/packs/p33", false],
+    ]);
+  });
+
+  test("many small changes beat one whole tree, and one whole tree beats many large changes", () => {
+    const small = [1, 2, 3, 4, 5].map((n) => manifest(n, { bytes: 10 }));
+    small[0] = manifest(1, { full: true, bytes: 500 }); // the first snapshot has no base, so no change pack
+    small[2] = manifest(3, { full: true, bytes: 500, delta: 10 });
+    // From nothing the route starts at the newest whole tree.
+    expect(chooseRoute(newestFirst(small), 0, "me")!.map((s) => [s.manifest.seq, s.whole])).toEqual([[3, true], [4, false], [5, false]]);
+    const mixed = [manifest(2, { full: true, bytes: 500, delta: 10 }), manifest(3, { bytes: 10 }), manifest(4, { bytes: 10 })];
+    expect(chooseRoute(newestFirst(mixed), 1, "me")!.map((s) => s.manifest.seq)).toEqual([2, 3, 4]);
+    expect(chooseRoute(newestFirst(mixed), 1, "me")!.every((s) => !s.whole)).toBe(true);
+    // Large changes, and a whole tree at the head that weighs less than all three.
+    const large = [manifest(2, { bytes: 400 }), manifest(3, { bytes: 400 }), manifest(4, { full: true, bytes: 450, delta: 400 })];
+    const route = chooseRoute(newestFirst(large), 1, "me")!;
+    expect(route.map((s) => [s.manifest.seq, s.whole])).toEqual([[4, true]]);
+  });
+
+  test("a member with nothing starts from a whole tree; the newest one that is cheaper wins", () => {
+    const list = [manifest(1, { full: true, bytes: 900 }), manifest(2, { bytes: 5 }), manifest(3, { full: true, bytes: 800, delta: 5 }), manifest(4, { bytes: 5 })];
+    const route = chooseRoute(newestFirst(list), 0, "me")!;
+    expect(route.map((s) => [s.manifest.seq, s.whole])).toEqual([[3, true], [4, false]]);
+  });
+
+  test("a snapshot sealed for others is not a step; the route goes round it or there is none", () => {
+    const list = [manifest(1, { bytes: 5 }), manifest(2, { bytes: 5, sealedFor: ["other"] }), manifest(3, { full: true, bytes: 100, delta: 5 }), manifest(4, { bytes: 5 })];
+    // From seq 1 the change at 2 cannot be opened: the whole tree at 3 is the way.
+    expect(chooseRoute(newestFirst(list), 1, "me")!.map((s) => [s.manifest.seq, s.whole])).toEqual([[3, true], [4, false]]);
+    // A whole tree nobody can open for this member, and a gap before it: no route.
+    const none = [manifest(2, { bytes: 5, sealedFor: ["other"] }), manifest(3, { bytes: 5 })];
+    expect(chooseRoute(newestFirst(none), 1, "me")).toBeNull();
+  });
+
+  test("a snapshot published before sizes were recorded: a whole tree is assumed large, a change small", () => {
+    const list = [manifest(2, { full: true }), manifest(3, {}), manifest(4, {})];
+    // With the previous snapshot in hand the changes are chosen, though seq 2 has no change pack: only the tree.
+    expect(chooseRoute(newestFirst(list), 1, "me")!.map((s) => [s.manifest.seq, s.whole])).toEqual([[2, true], [3, false], [4, false]]);
+    // Another with a change pack and no sizes at the checkpoint is cheaper than its whole tree.
+    const withDelta = [manifest(2, { full: true, delta: 7 }), manifest(3, {})];
+    expect(chooseRoute(newestFirst(withDelta), 1, "me")!.every((s) => !s.whole)).toBe(true);
+  });
+});
+
+describe("a checkpoint carries the change as well as the tree", () => {
+  async function fleet(root: string, files = 24) {
+    const gateway = new FakeGateway();
+    const primaryWork = join(root, "primary");
+    mkdirSync(primaryWork, { recursive: true });
+    let seed = 11;
+    const noise = (): string => {
+      let out = "";
+      for (let i = 0; i < 3000; i++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        out += (seed % 36).toString(36);
+      }
+      return out;
+    };
+    for (let i = 0; i < files; i++) writeFileSync(join(primaryWork, "f" + i + ".txt"), noise());
+    const primary: MemberPaths = { work: primaryWork, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+    const replica = (name: string): MemberPaths => {
+      mkdirSync(join(root, name), { recursive: true });
+      return { work: join(root, name), gitDir: join(root, name + "-meta"), keyFile: join(root, name + ".key") };
+    };
+    useFakeGateway(gateway);
+    gateway.seed("primary-device", loadOrCreateKeyPair(primary.keyFile).publicKey);
+    return { gateway, primary, primaryWork, replica, noise };
+  }
+  const join_ = async (gateway: FakeGateway, paths: MemberPaths, id: string) => gateway.seed(id, loadOrCreateKeyPair(paths.keyFile).publicKey);
+
+  test("a replica that is caught up crosses it on the change; a newcomer takes the tree", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    try {
+      const { gateway, primary, primaryWork, replica, noise } = await fleet(root);
+      const r1 = replica("r1");
+      await join_(gateway, r1, "r1");
+      let last = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+      let got = await pull(credsFor("r1"), "x", r1, 0);
+      let wholeAt = 0;
+      let wholeBytes = 0;
+      let deltaBytes = 0;
+      for (let seq = 2; seq <= FULL_PACK_WINDOW + 1; seq++) {
+        writeFileSync(join(primaryWork, "f" + (seq % 24) + ".txt"), noise());
+        last = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster);
+        if (last.full) {
+          wholeAt = seq;
+          wholeBytes = last.bytes;
+          deltaBytes = last.deltaBytes ?? 0;
+        }
+        gateway.packBytesServed = 0;
+        got = await pull(credsFor("r1"), "x", r1, got.seq, got.commit);
+        if (seq === FULL_PACK_WINDOW) {
+          // The checkpoint: the replica took the change, not the tree.
+          expect(gateway.packBytesServed).toBeLessThan(wholeBytes / 5);
+        }
+      }
+      expect(wholeAt).toBe(FULL_PACK_WINDOW);
+      expect(deltaBytes).toBeGreaterThan(0);
+      expect(deltaBytes).toBeLessThan(wholeBytes / 5);
+      expect(sameTree(fingerprint(primaryWork), fingerprint(r1.work))).toBe(true);
+
+      // A newcomer starts from the tree at the checkpoint and the changes after it.
+      const r2 = replica("r2");
+      await join_(gateway, r2, "r2");
+      last = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster);
+      expect(last.full).toBe(true); // a member joined: the whole tree is sealed for it
+      gateway.packBytesServed = 0;
+      const joined = await pull(credsFor("r2"), "x", r2, 0);
+      expect(joined.seq).toBe(last.seq);
+      expect(gateway.packBytesServed).toBeGreaterThan(wholeBytes * 0.9);
+      expect(sameTree(fingerprint(primaryWork), fingerprint(r2.work))).toBe(true);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test("a laggard that crosses the checkpoint takes the small changes, not the tree", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    try {
+      // A tree big enough that 34 small changes weigh less than the tree.
+      const { gateway, primary, primaryWork, replica, noise } = await fleet(root, 150);
+      const r1 = replica("r1");
+      await join_(gateway, r1, "r1");
+      let last = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+      const got = await pull(credsFor("r1"), "x", r1, 0);
+      let whole = 0;
+      for (let seq = 2; seq <= FULL_PACK_WINDOW + 3; seq++) {
+        writeFileSync(join(primaryWork, "f" + (seq % 150) + ".txt"), noise());
+        last = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster);
+        if (last.full) whole = last.bytes;
+      }
+      gateway.packBytesServed = 0;
+      gateway.packReads.length = 0;
+      const caught = await pull(credsFor("r1"), "x", r1, got.seq, got.commit);
+      expect(caught.seq).toBe(FULL_PACK_WINDOW + 3);
+      // 34 small changes, one of them the checkpoint's own: far less than the tree.
+      expect(gateway.packReads.length).toBe(FULL_PACK_WINDOW + 2);
+      expect(gateway.packBytesServed).toBeLessThan(whole);
+      expect(sameTree(fingerprint(primaryWork), fingerprint(r1.work))).toBe(true);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test("a replica that predates the change pack still applies the checkpoint's whole tree", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    try {
+      const { gateway, primary, primaryWork, replica, noise } = await fleet(root, 6);
+      const old = replica("old");
+      await join_(gateway, old, "old");
+      let last = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+      let got = await pull(credsFor("old"), "x", old, 0);
+      for (let seq = 2; seq <= FULL_PACK_WINDOW; seq++) {
+        writeFileSync(join(primaryWork, "f" + (seq % 6) + ".txt"), noise());
+        last = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster);
+      }
+      // What an older client does: walk back to the first whole-tree snapshot (or
+      // what it has) and apply each snapshot's own pack. Nothing of the new fields.
+      const keys = loadOrCreateKeyPair(old.keyFile);
+      const chain: FleetManifest[] = [];
+      let m = JSON.parse(gateway.payloads.get(gateway.head!.manifestKey)!.toString("utf8")) as FleetManifest;
+      while (m.seq > got.seq) {
+        chain.push(m);
+        if (m.full || !m.parentManifest) break;
+        m = JSON.parse(gateway.payloads.get(m.parentManifest)!.toString("utf8")) as FleetManifest;
+      }
+      chain.reverse();
+      expect(chain[0]!.full).toBe(true);
+      let previous = got.commit;
+      for (const step of chain) {
+        const pack = await openStep(credsFor("old"), "x", keys, { manifest: step, packKey: step.packKey, bytes: 0, whole: step.full });
+        await applyPack(old.work, old.gitDir, step.tipCommit, pack, [], previous);
+        previous = step.tipCommit;
+      }
+      expect(sameTree(fingerprint(primaryWork), fingerprint(old.work))).toBe(true);
+      expect(manifestIdOf(chain[0]!.packKey)).toBeTruthy();
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test("a publisher that predates sizes and the change pack still works with a new replica", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    try {
+      const { gateway, primary, primaryWork, replica, noise } = await fleet(root, 6);
+      gateway.legacyManifests = true;
+      const r1 = replica("r1");
+      await join_(gateway, r1, "r1");
+      let last = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+      let got = await pull(credsFor("r1"), "x", r1, 0);
+      for (let seq = 2; seq <= FULL_PACK_WINDOW + 2; seq++) {
+        writeFileSync(join(primaryWork, "f" + (seq % 6) + ".txt"), noise());
+        last = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster);
+        got = await pull(credsFor("r1"), "x", r1, got.seq, got.commit);
+      }
+      expect(got.seq).toBe(FULL_PACK_WINDOW + 2);
+      expect(sameTree(fingerprint(primaryWork), fingerprint(r1.work))).toBe(true);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
+describe("who needs a whole tree", () => {
+  test("a member that joined or changed its key does; one that only left does not", () => {
+    const before = "a:AAAA,b:BBBB,c:CCCC";
+    expect(rosterGained(before, before)).toBe(false);
+    expect(rosterGained(before, "a:AAAA,c:CCCC")).toBe(false); // b left
+    expect(rosterGained(before, "a:AAAA,b:BBBB,c:CCCC,d:DDDD")).toBe(true); // d joined
+    expect(rosterGained(before, "a:AAAA,b:ZZZZ,c:CCCC")).toBe(true); // b came back with a new key
+    expect(rosterGained(before, "a:AAAA,c:CCCC,d:DDDD")).toBe(true); // b left, d joined
+    expect(rosterGained("", "a:AAAA")).toBe(true);
   });
 });

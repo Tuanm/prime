@@ -32,6 +32,14 @@ export interface FleetManifest {
   packKey: string;
   /** sha256 of the sealed pack. */
   packHash: string;
+  /** Size of the sealed pack in bytes, so a member can choose the cheaper route. */
+  packBytes?: number;
+  /**
+   * The change since the snapshot before, for a snapshot whose pack is a whole
+   * tree. A member that holds that snapshot takes this instead of the tree; it
+   * is sealed with the same key as the pack. Older members ignore it.
+   */
+  delta?: { packKey: string; packHash: string; bytes: number };
   /**
    * True when the pack carries the whole tree.
    *

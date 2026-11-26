@@ -13,13 +13,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
-import { generateMemberKeyPair, openForMember, sealForMembers, type MemberKeyPair } from "./fleet-crypto";
+import { generateMemberKeyPair, openForMember, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
 import {
   fetchHead,
   fetchManifest,
   fetchMemberKeys,
   reportApplied,
   getPayload,
+  putPayload,
   putSnapshot,
   type FleetCredentials,
   type FleetHead,
@@ -60,10 +61,35 @@ export function rosterOf(members: Array<{ deviceId: string; pubkey?: string }>):
   return members.map((m) => m.deviceId + ":" + (m.pubkey ?? "").slice(0, 12)).join(",");
 }
 
+/**
+ * Whether a member is in `roster` now that was not before, or has a different key.
+ *
+ * Only that needs a snapshot of its own: a newcomer, or a member that came back
+ * with a new key, cannot open anything sealed before. A member that left needs
+ * nothing - the next snapshot is simply not sealed for it, which is what keeps it
+ * out.
+ */
+export function rosterGained(before: string, now: string): boolean {
+  const had = new Map<string, string>();
+  for (const entry of before.split(",")) {
+    if (!entry) continue;
+    const at = entry.lastIndexOf(":");
+    had.set(entry.slice(0, at), entry.slice(at + 1));
+  }
+  for (const entry of now.split(",")) {
+    if (!entry) continue;
+    const at = entry.lastIndexOf(":");
+    if (had.get(entry.slice(0, at)) !== entry.slice(at + 1)) return true;
+  }
+  return false;
+}
+
 export interface PublishResult {
   seq: number;
   commit: string;
   bytes: number;
+  /** The change-only pack that travelled beside a whole tree, when there was one. */
+  deltaBytes?: number;
   members: number;
   /** The members this snapshot was sealed for (see `rosterOf`). */
   roster: string;
@@ -131,9 +157,10 @@ export async function publish(
   // new key, cannot open what was sealed before and needs a pack that carries
   // the whole tree sealed for it. The roster tells: it names who and which
   // key, so a swap (one leaves, one joins) is a change even though the count
-  // is the same. A caller with no roster on record falls back to the count.
+  // is the same, while a member that only left is not. A caller with no roster
+  // on record falls back to the count.
   const roster = rosterOf(members);
-  const membershipChanged = lastRoster !== undefined ? roster !== lastRoster : members.length !== lastMemberCount;
+  const membershipChanged = lastRoster !== undefined ? rosterGained(lastRoster, roster) : members.length !== lastMemberCount;
   // A member that is far behind does not make the publish a whole tree. It
   // catches up from the newest whole tree and the deltas after it, and the
   // checkpoint below guarantees there is one within FULL_PACK_WINDOW snapshots.
@@ -143,23 +170,39 @@ export async function publish(
   const noBase = base === null;
   const wantFull = noBase || membershipChanged || checkpoint;
 
-  // The snapshot builds only the pack that will travel.
+  // The snapshot builds the packs that will travel: the whole tree when a member
+  // needs one, only the change otherwise. A whole tree built on a snapshot of
+  // the fleet's own also carries the change, so the members that hold that
+  // snapshot (nearly all of them, at a checkpoint) do not have to take the tree.
+  const withDelta = wantFull && base !== null;
   const snap = await snapshot({
     work: paths.work,
     gitDir: paths.gitDir,
     base,
     seq,
     wantFull,
+    withDelta,
     ...(paths.nested ? { nested: paths.nested } : {}),
   });
-  const payload = wantFull ? snap.pack : snap.delta!;
+  const payloads = [wantFull ? snap.pack : snap.delta!];
+  if (withDelta && snap.delta) payloads.push(snap.delta);
 
-  const sealed = sealForMembers(
-    payload,
+  // One key seals them all, so a member opens either with what it was given.
+  const sealed = sealManyForMembers(
+    payloads,
     members.map((m) => ({ memberId: m.deviceId, publicKey: m.pubkey })),
     keys.privateKey,
     keys.publicKey,
   );
+  const main = sealed.ciphertexts[0]!;
+
+  // The change travels first and on its own: the gateway stores it and the
+  // manifest names it, as it names the pack.
+  let delta: FleetManifest["delta"];
+  if (sealed.ciphertexts[1]) {
+    const stored = await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
+    delta = { packKey: stored.key, packHash: stored.hash, bytes: sealed.ciphertexts[1].length };
+  }
 
   const manifest: FleetManifest = {
     fleet,
@@ -170,6 +213,8 @@ export async function publish(
     // ended up.
     packKey: "",
     packHash: "",
+    packBytes: main.length,
+    ...(delta ? { delta } : {}),
     full: wantFull,
     // The snapshot this one follows is the head's, whoever published it: the
     // gateway only accepts a publish on top of the head, so this link is always
@@ -182,7 +227,7 @@ export async function publish(
   };
   // The pack and the manifest travel together, and the gateway moves the head
   // in the same call. One round trip instead of six.
-  const moved = await putSnapshot(creds, fleet, manifest, sealed.ciphertext);
+  const moved = await putSnapshot(creds, fleet, manifest, main);
   if (!moved.ok) {
     throw new Error("the fleet head moved while publishing: " + (moved.error ?? "another member won"));
   }
@@ -190,7 +235,8 @@ export async function publish(
   return {
     seq,
     commit: snap.commit,
-    bytes: sealed.ciphertext.length,
+    bytes: main.length,
+    ...(delta ? { deltaBytes: delta.bytes } : {}),
     members: sealed.wrapped.length,
     roster,
     manifestKey: moved.manifestKey ?? "",
@@ -208,22 +254,107 @@ export interface PullResult {
   tree?: string;
 }
 
-/** What it takes to bring a member from `lastSeq` to the head: whole tree first, then deltas. */
+/** One snapshot to take on the way to the head, and which of its packs to take. */
+export interface RouteStep {
+  manifest: FleetManifest;
+  /** Where the pack to download is stored. */
+  packKey: string;
+  /** Its size, sealed. */
+  bytes: number;
+  /** Whether it is the whole tree (an anchor) rather than the change. */
+  whole: boolean;
+}
+
+/** What it takes to bring a member from `lastSeq` to the head. */
 export interface CatchUpPlan {
   head: FleetHead;
-  /** Oldest first. The first is a whole tree unless the member is only one behind. */
-  chain: FleetManifest[];
+  /** Oldest first: a whole tree, if the route needs one, then changes. */
+  chain: RouteStep[];
+}
+
+// How many manifests are looked at before giving up on finding a route.
+const WALK_LIMIT = 2 * FULL_PACK_WINDOW + 1;
+// A size that is not known (a snapshot published before sizes were recorded):
+// a whole tree is assumed large and a change small.
+const UNKNOWN_WHOLE = 1e12;
+const UNKNOWN_CHANGE = 1;
+
+function openableBy(manifest: FleetManifest, memberId: string): boolean {
+  return manifest.wrapped.some((w) => w.memberId === memberId);
+}
+
+// The pack that brings a member that holds the snapshot before this one to this
+// snapshot, if there is one it can open.
+function changeOf(manifest: FleetManifest, memberId: string): RouteStep | null {
+  if (!openableBy(manifest, memberId)) return null;
+  if (!manifest.full) {
+    return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_CHANGE, whole: false };
+  }
+  if (manifest.delta) return { manifest, packKey: manifest.delta.packKey, bytes: manifest.delta.bytes, whole: false };
+  return null;
+}
+
+// The pack that brings a member that holds nothing of the fleet to this snapshot.
+function wholeOf(manifest: FleetManifest, memberId: string): RouteStep | null {
+  if (!manifest.full || !openableBy(manifest, memberId)) return null;
+  return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_WHOLE, whole: true };
+}
+
+/**
+ * Pick the cheapest way from what a member holds to the snapshots it needs.
+ *
+ * `walked` is the snapshots from the head back, newest first, with consecutive
+ * sequences. A route is either all the changes since `lastSeq`, or a whole tree
+ * at some snapshot and the changes after it; the one that moves the fewest bytes
+ * wins, and with equal bytes the one with fewer steps. A snapshot the member
+ * cannot open (sealed before it joined, or for another key) is not a step.
+ * Returns null when there is no route.
+ */
+export function chooseRoute(walked: FleetManifest[], lastSeq: number, memberId: string): RouteStep[] | null {
+  if (walked.length === 0) return [];
+  const byRow = [...walked].reverse(); // oldest first
+  const head = byRow[byRow.length - 1]!.seq;
+  const lowest = byRow[0]!.seq;
+  const at = (seq: number): FleetManifest | undefined => byRow[seq - lowest];
+
+  const changesFrom = (first: number): RouteStep[] | null => {
+    const steps: RouteStep[] = [];
+    for (let seq = first; seq <= head; seq++) {
+      const m = at(seq);
+      const step = m ? changeOf(m, memberId) : null;
+      if (!step) return null;
+      steps.push(step);
+    }
+    return steps;
+  };
+  const cost = (steps: RouteStep[]): number => steps.reduce((sum, s) => sum + s.bytes, 0);
+
+  let best: RouteStep[] | null = null;
+  const consider = (steps: RouteStep[] | null): void => {
+    if (!steps) return;
+    if (best === null || cost(steps) < cost(best) || (cost(steps) === cost(best) && steps.length < best.length)) best = steps;
+  };
+  // Only the changes, from what the member holds: needs every one of them.
+  if (lowest <= lastSeq + 1) consider(changesFrom(lastSeq + 1));
+  // A whole tree at k, then the changes after it.
+  for (let k = Math.max(lowest, lastSeq + 1); k <= head; k++) {
+    const m = at(k);
+    const whole = m ? wholeOf(m, memberId) : null;
+    if (!whole) continue;
+    const rest = k === head ? [] : changesFrom(k + 1);
+    if (rest) consider([whole, ...rest]);
+  }
+  return best;
 }
 
 /**
  * Work out which snapshots a member has to take to reach the head.
  *
- * The chain is walked back from the head until it reaches a whole tree or the
- * snapshot the member already holds. A member far behind therefore starts from
- * the newest checkpoint and applies the deltas after it; how far behind it was
- * does not matter. Nothing is downloaded but manifests, and nothing is written.
- * The chain is empty when there is nothing
- * newer than `lastSeq`.
+ * The chain is walked back from the head until it reaches the snapshot the member
+ * already holds, a snapshot with only a whole tree (nothing older can matter), or
+ * the end of what the gateway keeps; then `chooseRoute` picks the cheapest
+ * route. Nothing is downloaded but manifests, and nothing is written. The chain
+ * is empty when there is nothing newer than `lastSeq`.
  */
 export async function planCatchUp(creds: FleetCredentials, fleet: string, lastSeq: number): Promise<CatchUpPlan> {
   const head: FleetHead = await fetchHead(creds, fleet);
@@ -231,31 +362,31 @@ export async function planCatchUp(creds: FleetCredentials, fleet: string, lastSe
 
   // Each snapshot names the one it was built against, so the chain is walked
   // backwards until it reaches what is already here.
-  const chain: FleetManifest[] = [];
+  const walked: FleetManifest[] = [];
   let manifest: FleetManifest | null = await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey));
   while (manifest !== null && manifest.seq > lastSeq) {
-    chain.push(manifest);
-    if (manifest.full || manifest.parentManifest === undefined) break;
+    walked.push(manifest);
+    // A whole tree with no change beside it ends the walk: no route goes back past it.
+    if (manifest.full && !manifest.delta) break;
+    if (manifest.parentManifest === undefined || walked.length >= WALK_LIMIT) break;
     const parent: FleetManifest | null = await fetchManifest(creds, fleet, manifestIdOf(manifest.parentManifest)).catch(() => null);
-    if (parent === null) break;
+    if (parent === null || parent.seq !== manifest.seq - 1) break;
     manifest = parent;
   }
-  chain.reverse();
+  if (walked.length === 0) return { head, chain: [] };
 
-  const first = chain[0];
-  if (first === undefined) return { head, chain };
-  // The chain has to start at a whole tree or right after what the member
-  // holds. Anything else means the checkpoint it needs is gone.
-  if (!first.full && first.seq > lastSeq + 1) {
+  const chain = chooseRoute(walked, lastSeq, creds.deviceId);
+  if (chain === null) {
+    const oldest = walked[walked.length - 1]!;
     throw new Error(
-      "this member is " + (first.seq - lastSeq) + " snapshots behind and the fleet no longer has a whole tree to start from; it gets one at the next checkpoint (every " + FULL_PACK_WINDOW + " snapshots) or when a member joins",
+      "this member is " + (oldest.seq - lastSeq) + " snapshots behind and the fleet no longer has a whole tree to start from; it gets one at the next checkpoint (every " + FULL_PACK_WINDOW + " snapshots) or when a member joins",
     );
   }
   return { head, chain };
 }
 
 /**
- * Download one snapshot and open it: the pack, ready to apply.
+ * Download one pack and open it, ready to apply.
  *
  * It touches no work tree, so it can run ahead of the apply.
  */
@@ -263,11 +394,12 @@ export async function openStep(
   creds: FleetCredentials,
   fleet: string,
   keys: MemberKeyPair,
-  step: FleetManifest,
+  step: RouteStep,
 ): Promise<Buffer> {
   const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
   // The gateway cannot open this: the snapshot key was sealed for us.
-  const plain = openForMember(sealed, step.wrapped, step.senderPublicKey, creds.deviceId, keys.privateKey);
+  const m = step.manifest;
+  const plain = openForMember(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey);
   if (!plain) {
     throw new Error(
       "this snapshot was not sealed for this member: it was published before this device joined, so the primary has to publish again now that it has",
@@ -327,13 +459,14 @@ export async function pull(
   let previous: string | null = lastCommit ?? null;
   try {
     for (const [i, step] of plan.chain.entries()) {
-      await ingestPack(paths.work, paths.gitDir, step.tipCommit, packs[i]!, { tree: step.tree, seq: step.seq });
-      await applyCommit(paths.work, paths.gitDir, step.tipCommit, exclude, previous);
-      previous = step.tipCommit;
-      lastSeqApplied = step.seq;
-      lastCommitApplied = step.tipCommit;
-      lastTree = step.tree;
-      await onStep?.({ seq: step.seq, commit: step.tipCommit, tree: step.tree });
+      const m = step.manifest;
+      await ingestPack(paths.work, paths.gitDir, m.tipCommit, packs[i]!, { tree: m.tree, seq: m.seq });
+      await applyCommit(paths.work, paths.gitDir, m.tipCommit, exclude, previous);
+      previous = m.tipCommit;
+      lastSeqApplied = m.seq;
+      lastCommitApplied = m.tipCommit;
+      lastTree = m.tree;
+      await onStep?.({ seq: m.seq, commit: m.tipCommit, tree: m.tree });
     }
   } catch (err) {
     // What was applied is real; say so before failing, so the fleet knows.

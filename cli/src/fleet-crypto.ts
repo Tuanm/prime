@@ -73,24 +73,34 @@ export interface SealedForMembers {
   senderPublicKey: string;
 }
 
+export interface SealedManyForMembers {
+  /** The sealed payloads, in the order given; each has its own nonce. */
+  ciphertexts: Buffer[];
+  wrapped: WrappedKey[];
+  senderPublicKey: string;
+}
+
 /**
- * Seal a payload with a fresh random key, and wrap that key for each member.
+ * Seal several payloads of one snapshot with one fresh random key, and wrap
+ * that key for each member.
  *
- * The wrapped keys travel with the snapshot; the snapshot key itself does not
- * leave this sender in the clear.
- *
+ * The payloads are different encodings of the same snapshot (the whole tree and
+ * the change since the one before), so a member opens whichever it fetches with
+ * the key it was given. Every payload has a nonce of its own.
  */
-export function sealForMembers(
-  plain: Buffer,
+export function sealManyForMembers(
+  plains: Buffer[],
   members: Array<{ memberId: string; publicKey?: string }>,
   senderPrivateKeyPem: string,
   senderPublicKeyB64: string,
-): SealedForMembers {
+): SealedManyForMembers {
   const snapshotKey = randomBytes(32);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", snapshotKey, iv);
-  const body = Buffer.concat([cipher.update(plain), cipher.final()]);
-  const ciphertext = Buffer.concat([iv, body, cipher.getAuthTag()]);
+  const ciphertexts = plains.map((plain) => {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", snapshotKey, iv);
+    const body = Buffer.concat([cipher.update(plain), cipher.final()]);
+    return Buffer.concat([iv, body, cipher.getAuthTag()]);
+  });
 
   const wrapped: WrappedKey[] = [];
   for (const member of members) {
@@ -104,7 +114,24 @@ export function sealForMembers(
       wrapped: Buffer.concat([wrapIv, sealed, wrapper.getAuthTag()]).toString("base64"),
     });
   }
-  return { ciphertext, wrapped, senderPublicKey: senderPublicKeyB64 };
+  return { ciphertexts, wrapped, senderPublicKey: senderPublicKeyB64 };
+}
+
+/**
+ * Seal a payload with a fresh random key, and wrap that key for each member.
+ *
+ * The wrapped keys travel with the snapshot; the snapshot key itself does not
+ * leave this sender in the clear.
+ *
+ */
+export function sealForMembers(
+  plain: Buffer,
+  members: Array<{ memberId: string; publicKey?: string }>,
+  senderPrivateKeyPem: string,
+  senderPublicKeyB64: string,
+): SealedForMembers {
+  const many = sealManyForMembers([plain], members, senderPrivateKeyPem, senderPublicKeyB64);
+  return { ciphertext: many.ciphertexts[0]!, wrapped: many.wrapped, senderPublicKey: many.senderPublicKey };
 }
 
 /**

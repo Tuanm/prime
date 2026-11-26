@@ -59,6 +59,8 @@ export interface SnapshotOptions {
   seq?: number;
   /** Which pack to build: the whole tree, only the change, or both. */
   wantFull?: boolean;
+  /** With a whole-tree pack, build the change since `base` too (a checkpoint carries both). */
+  withDelta?: boolean;
   /** Build no pack at all: the caller only wants to know the tree. */
   treeOnly?: boolean;
   /** Remembered nested repositories of this work tree, to spare the walk. */
@@ -345,7 +347,7 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   // The delta against the previous snapshot: only what changed. A member
   // that already has the previous snapshot can apply it on its own.
   const delta =
-    opts.treeOnly || opts.wantFull === true || !parent
+    opts.treeOnly || (opts.wantFull === true && !opts.withDelta) || !parent
       ? null
       : await gitRun(gitDir, ["pack-objects", "--stdout", "--revs", "--thin"], env, commit + "\n^" + parent + "\n");
 
