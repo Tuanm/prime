@@ -617,7 +617,7 @@ export async function syncFleetSpace(
       await preserveLocalChange(work, paths.gitDir, state.tree);
     }
   }
-  const pulled = await pull(creds, fleetId, paths, state.seq ?? 0);
+  const pulled = await pull(creds, fleetId, paths, state.seq ?? 0, state.base ?? null);
   if (pulled.applied) {
     writeFleetState(configPath, fleetId, spaceName, { ...state, seq: pulled.seq, base: pulled.commit });
     return "applied " + pulled.seq;

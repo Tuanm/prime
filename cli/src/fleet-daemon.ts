@@ -376,7 +376,7 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   }
 
   const pullBegan = Date.now();
-  const pulled = await pull(creds, fleet, paths, state.seq ?? 0);
+  const pulled = await pull(creds, fleet, paths, state.seq ?? 0, state.base ?? null);
   loop.timing.pull = Date.now() - pullBegan;
   if (pulled.applied) {
     // The tree it now holds is remembered, so the next round can tell a

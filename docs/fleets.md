@@ -77,6 +77,24 @@ sequenceDiagram
 The gateway never opens a pack. It is sealed for the members' own keys, so the
 gateway carries boxes it cannot read.
 
+### What a replica keeps
+
+A replica mirrors what the fleet carries, and only that. The fleet carries the
+files the space in charge has in its work tree except what git ignores
+(`.gitignore`) and except nested git repositories, so those are never sent.
+
+When a snapshot arrives, the replica writes the files it has and removes the
+files the *previous* snapshot had and this one does not - the ones the primary
+deleted. Anything else is left alone: a `.env`, `node_modules`, a build output,
+a note someone wrote in the mirror, a nested repository. The fleet never put those
+there, so it never takes them away.
+
+The first snapshot a replica applies has no previous one to compare with. It
+removes nothing: a stray file is better than a lost one, and from the second
+snapshot on the replica knows exactly what the fleet put there.
+
+### Taking over
+
 A member that has not caught up cannot be promoted: a new space in charge applies
 every snapshot up to the head before it accepts a single write. A space in charge
 that starts behind the head would fork the fleet, and the fleet refuses it rather

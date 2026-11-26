@@ -101,7 +101,7 @@ export async function publish(
   // before it publishes on top of it. Otherwise the fleet would lose
   // whatever this member never saw.
   if (head !== null && head.seq > appliedSeq) {
-    const caught = await pull(creds, fleet, paths, appliedSeq);
+    const caught = await pull(creds, fleet, paths, appliedSeq, base);
     if (!caught.applied) {
       throw new Error("the fleet is at sequence " + head.seq + " and this member has only applied " + appliedSeq);
     }
@@ -179,26 +179,27 @@ export interface PullResult {
   tree?: string;
 }
 
-/**
- *  Fetch the fleet's current state and apply it to this member's work tree.
- *
- *  Returns upToDate when the member already holds this sequence, so a caller
- *  can poll without doing any work.
- *
- */
-export async function pull(
-  creds: FleetCredentials,
-  fleet: string,
-  paths: MemberPaths,
-  lastSeq: number,
-): Promise<PullResult> {
-  const head: FleetHead = await fetchHead(creds, fleet);
-  if (head.seq <= lastSeq) {
-    return { seq: head.seq, commit: "", applied: false, upToDate: true };
-  }
-  const keys = loadOrCreateKeyPair(paths.keyFile);
+/** What it takes to bring a member from `lastSeq` to the head: whole tree first, then deltas. */
+export interface CatchUpPlan {
+  head: FleetHead;
+  /** Oldest first. The first is a whole tree unless the member is only one behind. */
+  chain: FleetManifest[];
+}
 
-  // Walk back from the head until the snapshot this member already holds.
+/**
+ * Work out which snapshots a member has to take to reach the head.
+ *
+ * The chain is walked back from the head until it reaches a whole tree or the
+ * snapshot the member already holds. A member far behind therefore starts from
+ * the newest checkpoint and applies the deltas after it; how far behind it was
+ * does not matter. Nothing is downloaded but manifests, and nothing is written.
+ * The chain is empty when there is nothing
+ * newer than `lastSeq`.
+ */
+export async function planCatchUp(creds: FleetCredentials, fleet: string, lastSeq: number): Promise<CatchUpPlan> {
+  const head: FleetHead = await fetchHead(creds, fleet);
+  if (head.seq <= lastSeq) return { head, chain: [] };
+
   // Each snapshot names the one it was built against, so the chain is walked
   // backwards until it reaches what is already here.
   const chain: FleetManifest[] = [];
@@ -212,43 +213,80 @@ export async function pull(
   }
   chain.reverse();
 
-  // A member that is too far behind cannot be caught up with deltas: it
-  // needs a snapshot that carries the whole tree.
   const first = chain[0];
-  if (first === undefined) return { seq: head.seq, commit: "", applied: false, upToDate: true };
+  if (first === undefined) return { head, chain };
+  // The chain has to start at a whole tree or right after what the member
+  // holds. Anything else means the checkpoint it needs is gone.
   if (!first.full && first.seq > lastSeq + 1) {
     throw new Error(
       "this member is " + (first.seq - lastSeq) + " snapshots behind and the fleet has no whole tree for it; the primary has to publish one",
     );
   }
+  return { head, chain };
+}
+
+/**
+ * Download one snapshot and open it: the pack, ready to apply.
+ *
+ * It touches no work tree, so it can run ahead of the apply.
+ */
+export async function openStep(
+  creds: FleetCredentials,
+  fleet: string,
+  keys: MemberKeyPair,
+  step: FleetManifest,
+): Promise<Buffer> {
+  const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
+  // The gateway cannot open this: the snapshot key was sealed for us.
+  const plain = openForMember(sealed, step.wrapped, step.senderPublicKey, creds.deviceId, keys.privateKey);
+  if (!plain) {
+    throw new Error(
+      "this snapshot was not sealed for this member: it was published before this device joined, so the primary has to publish again now that it has",
+    );
+  }
+  return plain;
+}
+
+/**
+ *  Fetch the fleet's current state and apply it to this member's work tree.
+ *
+ *  Returns upToDate when the member already holds this sequence, so a caller
+ *  can poll without doing any work.
+ *
+ *  `lastCommit` is the snapshot commit the member holds now (the one its state
+ *  file records). It tells the apply what the fleet itself wrote, so that only
+ *  what the fleet dropped is removed; with none, nothing is removed.
+ *
+ */
+export async function pull(
+  creds: FleetCredentials,
+  fleet: string,
+  paths: MemberPaths,
+  lastSeq: number,
+  lastCommit?: string | null,
+): Promise<PullResult> {
+  const plan = await planCatchUp(creds, fleet, lastSeq);
+  if (plan.chain.length === 0) return { seq: plan.head.seq, commit: "", applied: false, upToDate: true };
+  const keys = loadOrCreateKeyPair(paths.keyFile);
 
   // Directories the fleet leaves alone are not mirrored, so they must survive
   // the apply untouched.
   const exclude = findNestedRepos(paths.work);
 
-  let applied = false;
   let lastSeqApplied = lastSeq;
-  let lastCommit = "";
+  let lastCommitApplied = "";
   let lastTree: string | undefined;
-  for (const step of chain) {
-    const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
-
-    // The gateway cannot open this: the snapshot key was sealed for us.
-    const plain = openForMember(sealed, step.wrapped, step.senderPublicKey, creds.deviceId, keys.privateKey);
-    if (!plain) {
-      throw new Error(
-        "this snapshot was not sealed for this member: it was published before this device joined, so the primary has to publish again now that it has",
-      );
-    }
-    await applyPack(paths.work, paths.gitDir, step.tipCommit, plain, exclude);
-    applied = true;
+  let previous: string | null = lastCommit ?? null;
+  for (const step of plan.chain) {
+    const plain = await openStep(creds, fleet, keys, step);
+    await applyPack(paths.work, paths.gitDir, step.tipCommit, plain, exclude, previous);
+    previous = step.tipCommit;
     lastSeqApplied = step.seq;
-    lastCommit = step.tipCommit;
+    lastCommitApplied = step.tipCommit;
     lastTree = step.tree;
   }
-  if (!applied) return { seq: head.seq, commit: "", applied: false, upToDate: true };
   await reportApplied(creds, fleet, lastSeqApplied);
-  return { seq: lastSeqApplied, commit: lastCommit, applied: true, upToDate: false, ...(lastTree ? { tree: lastTree } : {}) };
+  return { seq: lastSeqApplied, commit: lastCommitApplied, applied: true, upToDate: false, ...(lastTree ? { tree: lastTree } : {}) };
 }
 
 /** The storage id at the end of a payload key. */

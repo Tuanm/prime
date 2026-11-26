@@ -180,13 +180,13 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   // The reason the last attempt failed is kept, so the answer says what went
   // wrong rather than only that something did.
   let lastError: string | undefined;
-  let pulled = await pull(creds, opts.fleet, paths, state.seq ?? 0).catch((err: unknown) => {
+  let pulled = await pull(creds, opts.fleet, paths, state.seq ?? 0, state.base ?? null).catch((err: unknown) => {
     lastError = err instanceof Error ? err.message : String(err);
     return null;
   });
   while ((pulled === null || (!pulled.applied && !pulled.upToDate)) && Date.now() < deadline) {
     await Bun.sleep(2000);
-    pulled = await pull(creds, opts.fleet, paths, state.seq ?? 0).catch((err: unknown) => {
+    pulled = await pull(creds, opts.fleet, paths, state.seq ?? 0, state.base ?? null).catch((err: unknown) => {
       lastError = err instanceof Error ? err.message : String(err);
       return pulled;
     });

@@ -19,7 +19,7 @@
 
 import { createHash, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -266,11 +266,76 @@ export function payloadId(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/** Whether a path is one of the directories the fleet leaves alone, or inside one. */
+function isLeftAlone(rel: string, keep: string[]): boolean {
+  return keep.some((k) => rel === k || rel.startsWith(k + "/"));
+}
+
+// The paths the fleet put in the work tree before and takes out now.
+//
+// This is a tree diff, not a walk of the work tree: it costs what changed, and
+// it can only ever name a path the fleet itself once wrote. A file the fleet
+// never tracked (.env, node_modules, a build output, a note the person made)
+// is never on the list.
+//
+async function removedBetween(
+  gitDir: string,
+  env: Record<string, string>,
+  previous: string | null | undefined,
+  commit: string,
+): Promise<string[]> {
+  // No record of what this member held: the first apply, or a store that lost
+  // it. Nothing is removed then. A stray file is better than a lost one: the
+  // fleet cannot tell its own files from the person's, and the next apply that
+  // does have a record will remove what the primary deleted from then on.
+  if (!previous || previous === commit || !OBJECT_ID.test(previous)) return [];
+  try {
+    await gitText(gitDir, ["cat-file", "-e", previous + "^{tree}"], env);
+  } catch {
+    return [];
+  }
+  const out = await gitRun(
+    gitDir,
+    ["diff-tree", "-r", "--name-only", "--no-renames", "--diff-filter=D", "-z", previous, commit],
+    env,
+  );
+  return out.toString("utf8").split("\u0000").filter(Boolean);
+}
+
+// Remove a file the fleet no longer has, and the directories that leaves empty.
+function removeTracked(work: string, rel: string): void {
+  if (rel.split("/").includes("..")) return;
+  const full = join(work, ...rel.split("/"));
+  try {
+    // A path that has become a directory (a file replaced by a folder of the
+    // same name) is the new tree's, not a leftover.
+    if (lstatSync(full).isDirectory()) return;
+    rmSync(full, { force: true });
+  } catch {
+    return;
+  }
+  // Like git, take away a directory that the removal emptied; never one that
+  // still holds something, and never the work tree itself.
+  let dir = join(full, "..");
+  while (dir.length > work.length && dir.startsWith(work)) {
+    try {
+      rmdirSync(dir);
+    } catch {
+      return;
+    }
+    dir = join(dir, "..");
+  }
+}
+
 // Apply a pack to a work tree.
 //
 // The objects go into prime's own store, and the tree is written over the
-// work tree. Files the snapshot does not contain are removed: a replica
-// must end up with the primary's tree, not with a merge of the two.
+// work tree. A replica must end up with the primary's tree for the paths the
+// fleet owns: those the new snapshot has are written, and those the previous
+// snapshot had and the new one does not are removed. Everything else in the
+// work tree belongs to the member and is left alone.
 //
 export async function applyPack(
   work: string,
@@ -279,6 +344,8 @@ export async function applyPack(
   pack: Buffer,
   /** Directories the fleet leaves alone; their contents are not mirrored. */
   exclude?: string[],
+  /** The commit (or tree) this member held before, so what the fleet dropped can be removed. */
+  previous?: string | null,
 ): Promise<void> {
   mkdirSync(gitDir, { recursive: true });
   const env = gitEnv(gitDir, work, join(gitDir, "apply.index"));
@@ -287,47 +354,16 @@ export async function applyPack(
   // those live in the replica's own store from the snapshot before it.
   // Without this the pack cannot be resolved and git refuses it.
   await gitRun(gitDir, ["index-pack", "--stdin", "--fix-thin"], env, pack);
+  // What goes is worked out before the tree is written, while both trees are
+  // still only names in the store.
+  const gone = await removedBetween(gitDir, env, previous, commit);
   await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
-  // read-tree only writes what the tree contains. A file the primary deleted
-  // is still sitting in the replica, so the replica would keep it forever.
-  // Remove anything the tree does not have, except the paths the fleet leaves
-  // alone: those belong to the member, not to the fleet.
-  const wanted = new Set(
-    (await gitText(gitDir, ["ls-tree", "-r", "--name-only", commit], env))
-      .split("\n")
-      .filter(Boolean),
-  );
-  const keep = new Set((exclude ?? []).map((p) => p.replace(/\/$/, "")));
-  const stray: string[] = [];
-  const walk = (dir: string, prefix: string): void => {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return;
-    }
-    for (const name of entries) {
-      const full = join(dir, name);
-      const rel = prefix ? prefix + "/" + name : name;
-      if (keep.has(rel)) continue;
-      let isDir = false;
-      try {
-        isDir = statSync(full).isDirectory();
-      } catch {
-        continue;
-      }
-      if (isDir) {
-        walk(full, rel);
-        continue;
-      }
-      if (!wanted.has(rel)) stray.push(full);
-    }
-  };
-  walk(work, "");
-  for (const file of stray) {
-    try {
-      rmSync(file, { force: true });
-    } catch {}
+  // read-tree writes what the tree contains. A file the primary deleted is
+  // still sitting in the replica, so it is removed here - the paths the fleet
+  // leaves alone excepted: those belong to the member, not to the fleet.
+  const keep = (exclude ?? []).map((p) => p.replace(/\/$/, ""));
+  for (const rel of gone) {
+    if (!isLeftAlone(rel, keep)) removeTracked(work, rel);
   }
 }
 

@@ -243,7 +243,7 @@ describe("applying a snapshot", () => {
       // The primary deletes the file and publishes again.
       rmSync(join(work, "gone.txt"));
       const second = await snapshot({ work, gitDir, base: first.commit });
-      await applyPack(other, otherGit, second.commit, second.pack);
+      await applyPack(other, otherGit, second.commit, second.pack, [], first.commit);
       expect(existsSync(join(other, "keep.txt"))).toBe(true);
       expect(existsSync(join(other, "gone.txt"))).toBe(false);
     } finally {
@@ -270,6 +270,147 @@ describe("applying a snapshot", () => {
       expect(readFileSync(join(other, "mine", "local.txt"), "utf8")).toBe("still mine");
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// A replica with the primary's first snapshot applied, ready for the next one.
+async function replicaOf(files: Record<string, string>) {
+  const root = scratch();
+  const work = join(root, "work");
+  const gitDir = join(root, "meta");
+  const other = join(root, "other");
+  const otherGit = join(root, "other-meta");
+  mkdirSync(work, { recursive: true });
+  mkdirSync(other, { recursive: true });
+  for (const [path, body] of Object.entries(files)) {
+    mkdirSync(join(work, path, ".."), { recursive: true });
+    writeFileSync(join(work, path), body);
+  }
+  const first = await snapshot({ work, gitDir });
+  await applyPack(other, otherGit, first.commit, first.pack);
+  return { root, work, gitDir, other, otherGit, first };
+}
+
+describe("applying a snapshot keeps what the fleet never synced", () => {
+  test("a gitignored file and an untracked directory survive, a dropped tracked file goes", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "gone.txt": "bye", "sub/deep.txt": "deep", ".gitignore": ".env\nnode_modules/\n" });
+    try {
+      // Things the replica's owner has and the fleet never carried.
+      writeFileSync(join(r.other, ".env"), "SECRET=1");
+      mkdirSync(join(r.other, "node_modules", "pkg"), { recursive: true });
+      writeFileSync(join(r.other, "node_modules", "pkg", "index.js"), "x");
+      writeFileSync(join(r.other, "notes.md"), "mine");
+
+      rmSync(join(r.work, "gone.txt"));
+      writeFileSync(join(r.work, "a.txt"), "alpha 2");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      await applyPack(r.other, r.otherGit, second.commit, second.delta!, [], r.first.commit);
+
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha 2");
+      expect(existsSync(join(r.other, "gone.txt"))).toBe(false);
+      expect(readFileSync(join(r.other, ".env"), "utf8")).toBe("SECRET=1");
+      expect(existsSync(join(r.other, "node_modules", "pkg", "index.js"))).toBe(true);
+      expect(readFileSync(join(r.other, "notes.md"), "utf8")).toBe("mine");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("the first apply, with no record of what came before, removes nothing", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const other = join(root, "other");
+      mkdirSync(work, { recursive: true });
+      mkdirSync(other, { recursive: true });
+      writeFileSync(join(work, "a.txt"), "alpha");
+      writeFileSync(join(other, "already-here.txt"), "not the fleet's");
+      const snap = await snapshot({ work, gitDir: join(root, "meta") });
+      await applyPack(other, join(root, "other-meta"), snap.commit, snap.pack);
+      expect(existsSync(join(other, "a.txt"))).toBe(true);
+      expect(existsSync(join(other, "already-here.txt"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a previous commit the store does not have removes nothing and does not fail", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "b.txt": "beta" });
+    try {
+      rmSync(join(r.work, "b.txt"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      writeFileSync(join(r.other, "keep-me.txt"), "mine");
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], "0123456789abcdef0123456789abcdef01234567");
+      expect(existsSync(join(r.other, "keep-me.txt"))).toBe(true);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a directory the removal empties goes with it, one that still holds something stays", async () => {
+    const r = await replicaOf({ "only/one.txt": "1", "shared/two.txt": "2", "shared/three.txt": "3" });
+    try {
+      writeFileSync(join(r.other, "shared", "mine.txt"), "mine");
+      rmSync(join(r.work, "only"), { recursive: true });
+      rmSync(join(r.work, "shared", "two.txt"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], r.first.commit);
+      expect(existsSync(join(r.other, "only"))).toBe(false);
+      expect(existsSync(join(r.other, "shared", "two.txt"))).toBe(false);
+      expect(existsSync(join(r.other, "shared", "three.txt"))).toBe(true);
+      expect(existsSync(join(r.other, "shared", "mine.txt"))).toBe(true);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a file that became a directory of the same name is the new tree's", async () => {
+    const r = await replicaOf({ "thing": "was a file", "keep.txt": "k" });
+    try {
+      rmSync(join(r.work, "thing"));
+      mkdirSync(join(r.work, "thing"));
+      writeFileSync(join(r.work, "thing", "inner.txt"), "now a folder");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, [], r.first.commit);
+      expect(readFileSync(join(r.other, "thing", "inner.txt"), "utf8")).toBe("now a folder");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a whole-tree checkpoint after a long gap still removes what the fleet dropped in between", async () => {
+    const r = await replicaOf({ "a.txt": "alpha", "old.txt": "old" });
+    try {
+      let base = r.first.commit;
+      rmSync(join(r.work, "old.txt"));
+      for (let i = 0; i < 3; i++) {
+        writeFileSync(join(r.work, "a.txt"), "alpha " + i);
+        base = (await snapshot({ work: r.work, gitDir: r.gitDir, base })).commit;
+      }
+      const checkpoint = await snapshot({ work: r.work, gitDir: r.gitDir, base, wantFull: true });
+      writeFileSync(join(r.other, ".env"), "mine");
+      await applyPack(r.other, r.otherGit, checkpoint.commit, checkpoint.pack, [], r.first.commit);
+      expect(existsSync(join(r.other, "old.txt"))).toBe(false);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha 2");
+      expect(existsSync(join(r.other, ".env"))).toBe(true);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a path inside an excluded directory is never removed", async () => {
+    const r = await replicaOf({ "mine/x.txt": "x", "a.txt": "a" });
+    try {
+      rmSync(join(r.work, "mine"), { recursive: true });
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit });
+      // The apply's own index no longer knows the file (as after a switch of
+      // role), so only the tree diff names it - and the exclusion holds.
+      rmSync(join(r.otherGit, "apply.index"), { force: true });
+      await applyPack(r.other, r.otherGit, second.commit, second.pack, ["mine"], r.first.commit);
+      expect(existsSync(join(r.other, "mine", "x.txt"))).toBe(true);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
     }
   });
 });
