@@ -90,7 +90,12 @@ function gitEnv(gitDir: string, work: string, indexFile: string): Record<string,
 // agent and `prime fleets sync`, or two syncs, work in one store) has done nothing yet, so it is run
 // again after a short wait, for as long as a lock is plausibly held. Only that failure is retried.
 const LOCK_RETRY_MS = 15_000;
-const LOCK_CONFLICT = /could not lock config file|Unable to create '[^']*\.lock': File exists|Another git process seems to be running|cannot lock ref/;
+const LOCK_CONFLICT = /could not lock config file|Unable to create '[^']*\.lock': File exists/;
+
+/** Whether git's message says it could not take a lock file that another git holds (and nothing else is wrong). */
+export function isLockConflict(message: string): boolean {
+  return LOCK_CONFLICT.test(message);
+}
 
 async function gitRun(
   gitDir: string,
@@ -105,7 +110,7 @@ async function gitRun(
     try {
       return await gitRunOnce(gitDir, args, env, input, onSpawn);
     } catch (err) {
-      if (!(err instanceof Error) || !LOCK_CONFLICT.test(err.message) || Date.now() > until) throw err;
+      if (!(err instanceof Error) || !isLockConflict(err.message) || Date.now() > until) throw err;
       await new Promise((r) => setTimeout(r, 30 + Math.floor(Math.random() * 90) + Math.min(attempt, 10) * 20));
     }
   }
@@ -861,6 +866,8 @@ export function withApplyLock<T>(gitDir: string, fn: () => Promise<T> | T): Prom
 
 /** A lock this old, with no note of which git holds it, is a git that died: nothing writes an index for ten minutes. */
 const STALE_LOCK_MS = 10 * 60_000;
+/** A lock this old is nobody's even when the pid noted for it runs: after a crash or a reboot the pid is another process's. */
+const PID_LOCK_MAX_MS = 60 * 60_000;
 
 function pidRunning(pid: number): boolean {
   try {
@@ -880,9 +887,10 @@ function pidRunning(pid: number): boolean {
  *
  * Whether a git still holds it is what the apply that started it wrote down (`<lock>.pid`, the pid
  * of the git): a lock of a git that is not running is removed at once, and one of a git that is
- * running is waited for however old it is (a huge checkout, or a git suspended with the machine,
- * is older than any time that could be guessed). Only a lock with no such note (an earlier build's)
- * falls back to its age.
+ * running is waited for even when the lock is older than any time that could be guessed (a huge
+ * checkout, or a git suspended with the machine), but not past an hour: after a crash or a reboot the
+ * pid that runs may be another process's. Only a lock with no such note (an earlier build's) falls back
+ * to ten minutes.
  */
 export async function waitForIndexLock(lock: string, waitMs = 15_000, staleMs = STALE_LOCK_MS): Promise<void> {
   const until = Date.now() + waitMs;
@@ -896,7 +904,13 @@ export async function waitForIndexLock(lock: string, waitMs = 15_000, staleMs = 
       holder = undefined;
     }
     if (holder !== undefined) {
-      if (!pidRunning(holder)) {
+      let age = 0;
+      try {
+        age = Date.now() - statSync(lock).mtimeMs;
+      } catch {
+        return;
+      }
+      if (!pidRunning(holder) || age > PID_LOCK_MAX_MS) {
         rmSync(lock, { force: true });
         rmSync(pidFile, { force: true });
         return;

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LockBusyError } from "../src/dir-lock";
-import { fleetStateDir, memberRows, readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
+import { fleetKeyFile, fleetStateDir, fleetsJoin, memberRows, readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
 import type { Config } from "../src/config";
 
 function config(over: Partial<Config> = {}): Config {
@@ -177,6 +177,52 @@ describe("the lock on a member's state file", () => {
       expect(existsSync(join(dir, "state.lock"))).toBe(true);
     } finally {
       done();
+    }
+  });
+});
+
+describe("what a member knows of a fleet, when it joins", () => {
+  function joinCtx(configPath: string) {
+    return {
+      parsed: { positionals: ["fleets", "join", "x"], flags: new Map<string, string | number | boolean>([["code", "c0de"], ["device", "dev-1"], ["token", "t"], ["gateway", "https://gw.example"], ["json", true]]), help: false },
+      config: { defaults: {}, devices: {}, spaces: {}, codeMcp: {} },
+      configPath,
+      json: true,
+      quiet: true,
+      verbose: false,
+      color: false,
+      out() {},
+      note() {},
+    } as never;
+  }
+
+  async function withGateway(status: number, fn: () => Promise<void>): Promise<void> {
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json(status === 200 ? { status: "member" } : { error: "no" }, { status });
+    try {
+      await fn();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+  }
+
+  test("is forgotten when the join has been made, and kept when it has not", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-join-"));
+    try {
+      const cfg = join(root, "config.yaml");
+      const trustFile = fleetKeyFile(cfg, "x", "dev-1") + ".trust.json";
+      writeFileSync(trustFile, JSON.stringify({ sealedFrom: 3, peers: {} }));
+      await withGateway(403, async () => {
+        await expect(fleetsJoin(joinCtx(cfg))).rejects.toThrow();
+      });
+      // A join that failed (a wrong code, a gateway that was down) changes nothing.
+      expect(existsSync(trustFile)).toBe(true);
+      await withGateway(200, async () => {
+        await fleetsJoin(joinCtx(cfg));
+      });
+      expect(existsSync(trustFile)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

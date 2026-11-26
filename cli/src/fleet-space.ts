@@ -98,8 +98,6 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   const already = await fleetCall(creds, "GET", "/fleets/" + encodeURIComponent(opts.fleet) + "/me", undefined);
   const isMember = already.status === 200 && already.json?.status === "member";
   if (!isMember) {
-    // A new membership starts knowing nothing of the fleet: what an earlier one under this name left beside the key is not this fleet's.
-    FleetTrust.forget(paths.keyFile);
     if (opts.create) {
       const created = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet), {
         pubkey: keys.publicKey,
@@ -119,6 +117,9 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     } else {
       await joinFleet(ctx, creds, opts);
     }
+    // A new membership starts knowing nothing of the fleet: what an earlier one under this name left
+    // beside the key is not this fleet's. Only once it has been made: a join that failed changes nothing.
+    FleetTrust.forget(paths.keyFile);
   }
 
   // The operator admits the member. The space waits for that: a space that

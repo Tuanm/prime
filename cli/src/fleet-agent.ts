@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
-import { FleetTrust, TamperedSnapshotError, sealFieldsOf, verifySnapshot } from "./fleet-trust";
+import { FleetTrust, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
   PayloadGoneError,
   type IndexEntry,
@@ -148,8 +148,9 @@ export async function publish(
     fetchMemberKeys(creds, fleet),
     fetchHead(creds, fleet).catch(() => null),
     // Which fleet of this name it is, for the seal; a gateway that does not say, or does not answer, leaves it out.
-    fetchRole(creds, fleet).catch(() => undefined),
+    gatewayHasNoIncarnation(creds, fleet) ? Promise.resolve(undefined) : fetchRole(creds, fleet).catch(() => undefined),
   ]);
+  if (role?.member) noteIncarnationAnswer(creds, fleet, role.incarnation !== undefined);
   const incarnation = role?.member ? role.incarnation : undefined;
 
   // A member that took over has to fetch the state it is about to replace

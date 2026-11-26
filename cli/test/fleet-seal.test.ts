@@ -8,7 +8,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, createPrivate
 
 import { loadOrCreateKeyPair, manifestIdOf, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import { generateMemberKeyPair, openForMember, sealManyForMembers } from "../src/fleet-crypto";
-import { FleetTrust, TamperedSnapshotError, sealFieldsOf } from "../src/fleet-trust";
+import { FleetTrust, TamperedSnapshotError, forgetIncarnationAnswers, sealFieldsOf } from "../src/fleet-trust";
 import { snapshot } from "../src/fleet-sync";
 import { FleetTransportError, payloadHash, fetchManifest, type FleetManifest } from "../src/fleet-transport";
 
@@ -35,6 +35,7 @@ afterEach(() => {
 });
 
 async function world(): Promise<World> {
+  forgetIncarnationAnswers();
   const root = mkdtempSync(join(tmpdir(), "fleet-seal-"));
   roots.push(root);
   const gateway = new FakeGateway();
@@ -133,6 +134,13 @@ describe("a manifest the gateway rewrote", () => {
     const other = "0".repeat(40);
     w.forge({ ...m1, tree: other });
     await expect(w.pullReplica(0)).rejects.toThrow(/refused|does not match/);
+  });
+
+  test("a seal of a kind this version does not know is refused as such", async () => {
+    const w = await world();
+    const one = await w.next("one\n");
+    w.forge({ ...w.manifest(one.manifestKey), seal: "v9:whatever" });
+    await expect(w.pullReplica(0)).rejects.toThrow(/kind this version does not know/);
   });
 
   test("a snapshot of another fleet is refused", async () => {
@@ -602,6 +610,7 @@ describe("a fleet made again under the name of a deleted one", () => {
     w.gateway.incarnation = undefined;
     await w.next("one\n");
     w.gateway.incarnation = "incarnation-1";
+    forgetIncarnationAnswers(); // the gateway is upgraded: what was found of it is not remembered for ever
     const two = await w.next("two\n");
     expect(w.manifest(two.manifestKey).full).toBe(true);
     expect(w.manifest(two.manifestKey).incarnation).toBe("incarnation-1");
@@ -621,12 +630,25 @@ describe("a fleet made again under the name of a deleted one", () => {
   });
 });
 
+describe("a gateway that does not say which fleet of a name it is", () => {
+  test("is asked once, not for every snapshot of every route", async () => {
+    const w = await world();
+    w.gateway.incarnation = undefined;
+    for (const n of ["1", "2", "3", "4"]) await w.next(n + "\n");
+    const before = w.gateway.requests.get("GET role") ?? 0;
+    await w.pullReplica(0);
+    await w.pullReplica(0); // again, another route
+    const asked = (w.gateway.requests.get("GET role") ?? 0) - before;
+    expect(asked).toBeLessThanOrEqual(1);
+  });
+});
+
 describe("old readers and new publishers", () => {
   test("a reader that knows nothing of seals opens what a sealing publisher stored", async () => {
     const w = await world();
     const one = await w.next("one\n");
     const m1 = w.manifest(one.manifestKey);
-    expect(m1.seal).toMatch(/^v1:/);
+    expect(m1.seal).toMatch(/^v2:/);
     const keys = loadOrCreateKeyPair(w.replica.keyFile);
     const plain = openForMember(w.gateway.payloads.get(m1.packKey)!, m1.wrapped, m1.senderPublicKey, "replica-device", keys.privateKey);
     expect(plain).not.toBeNull();

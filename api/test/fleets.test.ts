@@ -1645,13 +1645,11 @@ describe("the Worker publishes a snapshot", () => {
     expect(deleted.sort()).toEqual([...puts, delta].sort());
   });
 
-  test("a publish refused with \"catch up first\" keeps the change pack: the member sends the manifest again, and it names it", async () => {
+  test("a publish refused with \"catch up first\" deletes what it stored too: the member stores the change pack again when it sends it", async () => {
     const delta = "fleets/acme/packs/" + "c".repeat(64);
     const { res, puts, deleted } = await publishVia({ seq: 4, full: true, delta: { packKey: delta, bytes: 56 } }, { refuse: true, refuseWith: "catch up first" });
     expect(res.status).toBe(409);
-    // The pack and manifest are in the request that is sent again; the change pack is not.
-    expect(deleted.sort()).toEqual([...puts].sort());
-    expect(deleted).not.toContain(delta);
+    expect(deleted.sort()).toEqual([...puts, delta].sort());
   });
 
   test("what a snapshot the fleet keeps names is not deleted, though the same bytes were sent again", async () => {

@@ -33,7 +33,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { SEAL_PREFIX, type OpenedPayload, type SealFields } from "./fleet-crypto";
+import { knownSealKind, type OpenedPayload, type SealFields } from "./fleet-crypto";
 import { fetchRole, fetchRoster, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
@@ -69,6 +69,29 @@ interface TrustFile {
   incarnationFrom?: number;
   accepted: string[];
   peers: Map<string, number>;
+}
+
+// Gateways that were asked which fleet of a name it is and said nothing (one that predates it): not
+// asked again for a while, by anyone in this process - there would be nothing new to learn each time.
+const saysNoIncarnation = new Map<string, number>();
+const NO_INCARNATION_MS = 10 * 60_000;
+
+/** Whether this gateway was found, lately, not to say which fleet of a name it is. */
+export function gatewayHasNoIncarnation(creds: FleetCredentials, fleet: string): boolean {
+  const until = saysNoIncarnation.get(creds.gateway + "\n" + fleet);
+  return until !== undefined && until > Date.now();
+}
+
+/** Remember that this gateway did not say (or that it does, so it is asked as usual). */
+export function noteIncarnationAnswer(creds: FleetCredentials, fleet: string, said: boolean): void {
+  const key = creds.gateway + "\n" + fleet;
+  if (said) saysNoIncarnation.delete(key);
+  else saysNoIncarnation.set(key, Date.now() + NO_INCARNATION_MS);
+}
+
+/** Forget which gateways were found not to say (for a process that talks to a gateway that has since been upgraded, and for tests). */
+export function forgetIncarnationAnswers(): void {
+  saysNoIncarnation.clear();
 }
 
 /** What this member has learnt about who and what to trust in one fleet. */
@@ -287,9 +310,11 @@ export class FleetTrust {
    */
   async ensureIncarnation(creds: FleetCredentials, fleet: string): Promise<string | undefined> {
     if (this.incarnation !== undefined) return this.incarnation;
+    if (gatewayHasNoIncarnation(creds, fleet)) return undefined;
     this.learning ??= (async () => {
       try {
         const role = await fetchRole(creds, fleet);
+        if (role.member) noteIncarnationAnswer(creds, fleet, role.incarnation !== undefined);
         if (role.member && role.incarnation !== undefined) {
           this.incarnation = role.incarnation;
           this.dirty = true;
@@ -395,7 +420,7 @@ export async function verifySnapshot(
   }
 
   if (m.seal !== undefined) {
-    if (!m.seal.startsWith(SEAL_PREFIX)) throw new TamperedSnapshotError(m.seq, "its seal is of a kind this version does not know");
+    if (!knownSealKind(m.seal)) throw new TamperedSnapshotError(m.seq, "its seal is of a kind this version does not know");
     const fields = sealFieldsOf(m, m.packHash, m.delta?.packHash ?? null);
     if (!opened.sealMatches(fields, m.seal)) {
       throw new TamperedSnapshotError(m.seq, "its manifest does not match what its publisher sealed (the sequence, parent, commit, tree or packs were changed, or it is another snapshot)");

@@ -109,7 +109,8 @@ describe("the seal of a manifest", () => {
 
   test("a member that opens the payload can check it", () => {
     const { f, tag, opened } = make();
-    expect(tag.startsWith("v1:")).toBe(true);
+    // A seal that covers the fleet's incarnation is of a kind of its own: an earlier build says so, not "changed".
+    expect(tag.startsWith("v2:")).toBe(true);
     expect(opened.sealMatches(f, tag)).toBe(true);
   });
 
@@ -125,7 +126,9 @@ describe("the seal of a manifest", () => {
   test("a publisher that does not know the incarnation seals what it always did", () => {
     const { f, sealed, opened } = make();
     const without = { ...f, incarnation: null };
-    expect(opened.sealMatches(without, sealed.seal(without))).toBe(true);
+    const old = sealed.seal(without);
+    expect(old.startsWith("v1:")).toBe(true);
+    expect(opened.sealMatches(without, old)).toBe(true);
     // And the seal says which fleet of the name it is, so one of an earlier fleet is not this one's.
     expect(opened.sealMatches(without, sealed.seal(f))).toBe(false);
   });

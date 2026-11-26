@@ -592,10 +592,14 @@ What is deliberately not done, so that nobody has to find it out:
   has left for the snapshots up to where the fleet says the head was when it did. A gateway that was
   malicious while that member was in the fleet can say a later sequence, as it can say the roster is
   anything; nothing here checks it outside the gateway.
-- **Which fleet of a name it is is learnt from the gateway the first time it is needed.** A member
-  that joins forgets what an earlier membership under the name left beside its key and learns the id
-  then; one that joined before this existed learns it at its first check, so a replay of an older
-  fleet's snapshot is refused from then on, not before. A gateway that does not say leaves the check out.
+- **Which fleet of a name it is is the gateway's word, taken on first use.** A member learns the id
+  from the gateway the first time it checks a snapshot, and keeps it: a replay of an older fleet's
+  snapshot from storage (a bucket, a backup) is refused from then on. A gateway that lies about it
+  once, to a member that has not yet learnt it, is believed. A member that joins forgets what an
+  earlier membership under the name left beside its key, once the join has been made (a join that
+  failed changes nothing). It does not take a new key pair for the new membership, so snapshots sealed
+  for its old key are still ones it could open. A gateway that does not say leaves the check out (and is
+  asked again after ten minutes).
 - **Unsealed snapshots are taken until the first sealed one is seen.** And a replica that has seen a
   sealed one refuses an unsealed one at or above it, so an old member that is promoted stalls the new
   replicas on the snapshot before it, until an upgraded member publishes (a whole tree) or the

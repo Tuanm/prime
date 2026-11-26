@@ -138,6 +138,17 @@ export interface SealFields {
 const SEAL_INFO = Buffer.from("prime-fleet-seal-v1");
 const MAC_INFO = Buffer.from("prime-fleet-seal-v2");
 export const SEAL_PREFIX = "v1:";
+/**
+ * What a seal that covers the fleet's incarnation starts with. The bytes it is made over have one
+ * more element, so an earlier build that checks it would call it a manifest that was changed; with a
+ * prefix of its own that build says what it is: a kind it does not know.
+ */
+export const SEAL_PREFIX_INCARNATION = "v2:";
+
+/** Whether a seal is of a kind this version knows. */
+export function knownSealKind(seal: string): boolean {
+  return seal.startsWith(SEAL_PREFIX) || seal.startsWith(SEAL_PREFIX_INCARNATION);
+}
 
 // The key that seals manifests is derived from the snapshot key, not the snapshot
 // key itself, so a tag reveals nothing about the key that opens the packs.
@@ -169,7 +180,7 @@ function sealBytes(f: SealFields): Buffer {
 }
 
 function tagOf(sealKey: Buffer, fields: SealFields): string {
-  return SEAL_PREFIX + createHmac("sha256", sealKey).update(sealBytes(fields)).digest("base64");
+  return (fields.incarnation !== null ? SEAL_PREFIX_INCARNATION : SEAL_PREFIX) + createHmac("sha256", sealKey).update(sealBytes(fields)).digest("base64");
 }
 
 // What the sender and one member tag the seal fields with, from the secret the two of them share.

@@ -9,6 +9,7 @@ import {
   EMPTY_TREE,
   finishedApply,
   foldsCase,
+  isLockConflict,
   waitForIndexLock,
   applyCommit,
   applyPack,
@@ -1346,9 +1347,9 @@ describe("the lock on the apply index, when the apply that took it wrote down wh
     const root = scratch();
     const lock = join(root, "apply.index.lock");
     writeFileSync(lock, "");
-    const old = new Date(Date.now() - 3 * 60 * 60_000);
+    const old = new Date(Date.now() - 30 * 60_000);
     utimesSync(lock, old, old);
-    // A git (here, any process) that is running: three hours old is not stale.
+    // A git (here, any process) that is running: half an hour old is not stale.
     writeFileSync(lock + ".pid", String(process.pid));
     await expect(waitForIndexLock(lock, 250)).rejects.toThrow(/still writing/);
     expect(existsSync(lock)).toBe(true);
@@ -1359,6 +1360,27 @@ describe("the lock on the apply index, when the apply that took it wrote down wh
     await waitForIndexLock(lock, 250);
     expect(existsSync(lock)).toBe(false);
     expect(existsSync(lock + ".pid")).toBe(false);
+  });
+
+  test("but not for ever: after a reboot the pid it names is another process's, and a lock that old is cleared", async () => {
+    const root = scratch();
+    const lock = join(root, "apply.index.lock");
+    writeFileSync(lock, "");
+    const old = new Date(Date.now() - 90 * 60_000);
+    utimesSync(lock, old, old);
+    writeFileSync(lock + ".pid", String(process.pid)); // a pid that runs, and has nothing to do with it
+    await waitForIndexLock(lock, 250);
+    expect(existsSync(lock)).toBe(false);
+  });
+});
+
+describe("what is a lock conflict between gits", () => {
+  test("only a lock file that another git holds is waited for", () => {
+    expect(isLockConflict("git add -A -- . failed (128): fatal: Unable to create '/s/snapshot.index.lock': File exists.")).toBe(true);
+    expect(isLockConflict("git config core.bare false failed (255): error: could not lock config file /s/config: File exists")).toBe(true);
+    // Not conflicts: waiting does not change them.
+    expect(isLockConflict("fatal: cannot lock ref 'refs/prime/fetched/1': unable to resolve reference 'refs/prime/fetched/1': reference broken")).toBe(false);
+    expect(isLockConflict("error: cannot lock ref 'refs/x': is at abc but expected def")).toBe(false);
   });
 });
 

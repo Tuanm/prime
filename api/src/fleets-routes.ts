@@ -197,11 +197,9 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
     // The head did not move, so what was stored for it belongs to no snapshot. (A refusal that
     // never reached the object, or a publisher that dies after uploading its change pack and
     // before this request, still leaves objects behind.)
-    // A member that is told to catch up applies the head and sends this same snapshot again, and
-    // its manifest names the change pack, which it does not send a second time: it stays. (The pack
-    // and the manifest are in the request that comes again.)
-    const catchUp = /catch up first/.test(result.error ?? "");
-    await dropUnreferenced(bucket, stub, deviceId, fleetId, catchUp ? [packKey, manifestKey] : [packKey, manifestKey, ...extraKeys]);
+    // (A member that is told to catch up stores the change pack again before it sends the manifest
+    // that names it: what it sent for a refused publish is not kept for one that may not come.)
+    await dropUnreferenced(bucket, stub, deviceId, fleetId, [packKey, manifestKey, ...extraKeys]);
     return Response.json({ ok: false, error: result.error ?? "the head did not move" }, { status: moved.status });
   }
   return Response.json({ ok: true, head: result.head, seq, manifestKey });
