@@ -278,28 +278,36 @@ async function reconcileCase(work: string, gitDir: string, env: Record<string, s
   const listed = (await gitRun(gitDir, ["ls-files", "-z"], env)).toString("utf8").split("\u0000").filter(Boolean);
   const byFolded = new Map<string, string[]>();
   for (const path of listed) {
-    const key = path.toLowerCase();
+    const key = path.normalize("NFC").toLowerCase();
     const group = byFolded.get(key);
     if (group) group.push(path);
     else byFolded.set(key, [path]);
   }
-  const names = new Map<string, Set<string>>();
-  const here = (dir: string): Set<string> => {
+  // Names as the directory lists them, in NFC: git keeps index paths in NFC on macOS
+  // (core.precomposeunicode) while APFS hands back whatever bytes the name was created
+  // with, so a directory made with a decomposed name never matches byte for byte. null:
+  // the directory could not be read, which says nothing about what is in it.
+  const names = new Map<string, Set<string> | null>();
+  const here = (dir: string): Set<string> | null => {
     let set = names.get(dir);
-    if (!set) {
+    if (set === undefined) {
       try {
-        set = new Set(readdirSync(dir));
+        set = new Set(readdirSync(dir).map((name) => name.normalize("NFC")));
       } catch {
-        set = new Set();
+        set = null;
       }
       names.set(dir, set);
     }
     return set;
   };
+  // Whether the path is on disk under exactly this spelling. A directory that cannot be
+  // listed counts as "yes": the entry is kept rather than dropped on a guess.
   const exact = (path: string): boolean => {
     let dir = work;
     for (const part of path.split("/")) {
-      if (!here(dir).has(part)) return false;
+      const set = here(dir);
+      if (set === null) return true;
+      if (!set.has(part.normalize("NFC"))) return false;
       dir = join(dir, part);
     }
     return true;
@@ -307,7 +315,10 @@ async function reconcileCase(work: string, gitDir: string, env: Record<string, s
   const stale: string[] = [];
   for (const group of byFolded.values()) {
     if (group.length < 2) continue;
-    for (const path of group) if (!exact(path)) stale.push(path);
+    const gone = group.filter((path) => !exact(path));
+    // Every spelling "gone" means this check cannot tell them apart (a name it does
+    // not understand), not that the file is gone: a real file is never dropped for it.
+    if (gone.length < group.length) stale.push(...gone);
   }
   if (stale.length > 0) {
     await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, stale.join("\u0000") + "\u0000");

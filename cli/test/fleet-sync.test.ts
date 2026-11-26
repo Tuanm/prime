@@ -809,6 +809,44 @@ describe("a case-only rename on the primary", () => {
   });
 });
 
+describe("a case-only rename under a directory whose name is decomposed unicode", () => {
+  // macOS keeps the bytes a name was created with (Cafe + U+0301), and git keeps index
+  // paths composed (U+00E9): the two never compared equal, and both spellings of the
+  // renamed file were removed from the published tree.
+  test("the renamed file stays in the fleet's tree, with the spelling on disk", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      const nfd = "Cafe\u0301";
+      mkdirSync(join(work, nfd), { recursive: true });
+      writeFileSync(join(work, nfd, "notes.md"), "the user's notes");
+      writeFileSync(join(work, "other.txt"), "x");
+      const first = await snapshot({ work, gitDir });
+      writeFileSync(join(work, "Probe.tmp"), "x");
+      const folds = existsSync(join(work, "probe.tmp"));
+      rmSync(join(work, "Probe.tmp"));
+      // Needs a case-folding file system that keeps decomposed names as they were made (macOS).
+      if (!folds || readdirSync(work).every((n) => n !== nfd)) return;
+
+      renameSync(join(work, nfd, "notes.md"), join(work, nfd, "tmp-name"));
+      renameSync(join(work, nfd, "tmp-name"), join(work, nfd, "Notes.md"));
+      const second = await snapshot({ work, gitDir, base: first.commit, wantFull: false });
+      const names = () =>
+        execFileSync("git", ["-c", "core.quotepath=false", "--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", second.commit], { encoding: "utf8" })
+          .split("\n")
+          .filter(Boolean)
+          .map((n) => n.normalize("NFC"))
+          .sort();
+      expect(names()).toEqual(["Caf\u00e9/Notes.md", "other.txt"]);
+      const third = await snapshot({ work, gitDir, base: second.commit, wantFull: false });
+      expect(third.tree).toBe(second.tree);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("an apply that was killed half way", () => {
   test("the files it had written are the fleet's, and only the member's own edit is reported", async () => {
     const r = await replicaOf({ "a.txt": "a1", "b.txt": "b1", "c.txt": "c1", "keep.txt": "k" });
