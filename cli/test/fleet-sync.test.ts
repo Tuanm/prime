@@ -8,6 +8,7 @@ import {
   applyPack,
   findNestedRepos,
   hasFiles,
+  NestedRepoCache,
   payloadId,
   seal,
   snapshot,
@@ -411,6 +412,85 @@ describe("applying a snapshot keeps what the fleet never synced", () => {
       expect(existsSync(join(r.other, "mine", "x.txt"))).toBe(true);
     } finally {
       rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("nested repositories are remembered", () => {
+  test("the walk is not repeated until something says it must be", () => {
+    const root = scratch();
+    try {
+      mkdirSync(join(root, "a"), { recursive: true });
+      gitIn(join(root, "a"), ["init", "-q", "."]);
+      let now = 1000;
+      const cache = new NestedRepoCache(root, 30_000, () => now);
+      expect(cache.get()).toEqual(["a"]);
+
+      // A repository appears: the cache does not know yet.
+      mkdirSync(join(root, "b"), { recursive: true });
+      gitIn(join(root, "b"), ["init", "-q", "."]);
+      expect(cache.get()).toEqual(["a"]);
+
+      // Changes the watcher reports that have nothing to do with a repository.
+      cache.noteChange("change", "a/file.txt");
+      cache.noteChange("rename", "c.txt");
+      expect(cache.get()).toEqual(["a"]);
+
+      // A change under .git is the signal.
+      cache.noteChange("rename", "b/.git");
+      expect(cache.get().sort()).toEqual(["a", "b"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a repository that arrives whole, a repository that leaves, an event with no path, and the age all refresh it", () => {
+    const root = scratch();
+    try {
+      let now = 1000;
+      const cache = new NestedRepoCache(root, 30_000, () => now);
+      expect(cache.get()).toEqual([]);
+
+      // A directory holding a repository moved in: the event names the directory.
+      mkdirSync(join(root, "moved"), { recursive: true });
+      gitIn(join(root, "moved"), ["init", "-q", "."]);
+      cache.noteChange("rename", "moved");
+      expect(cache.get()).toEqual(["moved"]);
+
+      // It goes away: the answer is wrong at once, whatever the age.
+      rmSync(join(root, "moved"), { recursive: true });
+      expect(cache.get()).toEqual([]);
+
+      mkdirSync(join(root, "later"), { recursive: true });
+      gitIn(join(root, "later"), ["init", "-q", "."]);
+      expect(cache.get()).toEqual([]);
+      cache.noteChange("rename", null);
+      expect(cache.get()).toEqual(["later"]);
+
+      // With no event at all it is found when the answer is old enough.
+      mkdirSync(join(root, "quiet"), { recursive: true });
+      gitIn(join(root, "quiet"), ["init", "-q", "."]);
+      expect(cache.get()).toEqual(["later"]);
+      now += 31_000;
+      expect(cache.get().sort()).toEqual(["later", "quiet"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a snapshot given the cache excludes the same repositories as one that walks", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      mkdirSync(join(work, "project"), { recursive: true });
+      writeFileSync(join(work, "loose.txt"), "loose");
+      gitIn(join(work, "project"), ["init", "-q", "."]);
+      writeFileSync(join(work, "project", "code.py"), "print(1)");
+      const walked = await snapshot({ work, gitDir: join(root, "m1") });
+      const cached = await snapshot({ work, gitDir: join(root, "m2"), nested: new NestedRepoCache(work) });
+      expect(cached.tree).toBe(walked.tree);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

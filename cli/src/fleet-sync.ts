@@ -60,6 +60,8 @@ export interface SnapshotOptions {
   wantFull?: boolean;
   /** Build no pack at all: the caller only wants to know the tree. */
   treeOnly?: boolean;
+  /** Remembered nested repositories of this work tree, to spare the walk. */
+  nested?: NestedRepoCache;
 }
 
 function gitEnv(gitDir: string, work: string, indexFile: string): Record<string, string> {
@@ -144,6 +146,73 @@ export function findNestedRepos(work: string, maxDepth = 6): string[] {
   return found;
 }
 
+/**
+ * How long a walk for nested repositories is trusted when the watcher has said
+ * nothing. The watcher catches the changes that matter at once; this only
+ * bounds how long a change it could not see (a directory that holds a
+ * repository moved as a whole) can go unnoticed.
+ */
+export const NESTED_REPOS_TTL_MS = 30_000;
+
+/**
+ * The nested repositories of one work tree, found once and remembered.
+ *
+ * Finding them walks the whole tree, ignored directories included, and a
+ * snapshot or a pull asks every time. The answer changes only when somebody
+ * creates, removes or moves a repository, and that shows up as a change under a
+ * `.git` path, so the walk is repeated then and otherwise every
+ * `NESTED_REPOS_TTL_MS`. The answer is the same one `findNestedRepos` gives.
+ */
+export class NestedRepoCache {
+  private found: string[] | null = null;
+  private at = 0;
+
+  constructor(
+    private readonly work: string,
+    private readonly ttlMs: number = NESTED_REPOS_TTL_MS,
+    private readonly clock: () => number = Date.now,
+  ) {}
+
+  /** The nested repositories, relative to the work tree. */
+  get(): string[] {
+    const now = this.clock();
+    // A repository that is gone from where it was is a stale answer whatever
+    // the age: a missing exclusion is harmless, a wrong one is not.
+    if (this.found !== null && now - this.at < this.ttlMs && this.found.every((p) => existsSync(join(this.work, p, ".git")))) {
+      return [...this.found];
+    }
+    this.found = findNestedRepos(this.work);
+    this.at = now;
+    return [...this.found];
+  }
+
+  /** Forget the answer; the next `get` walks the tree again. */
+  invalidate(): void {
+    this.found = null;
+  }
+
+  /**
+   * Tell the cache about a change the watcher saw.
+   *
+   * Anything under a `.git` path may be a repository appearing or going away.
+   * A path that was just created or moved and now holds a `.git` is a whole
+   * repository arriving at once, which reports no event under `.git`. An event
+   * with no path says nothing, so it is treated as a change.
+   */
+  noteChange(eventType: string | undefined, filename: string | null | undefined): void {
+    if (!filename) {
+      this.invalidate();
+      return;
+    }
+    const parts = filename.split(/[\\/]/);
+    if (parts.includes(".git")) {
+      this.invalidate();
+      return;
+    }
+    if (eventType === "rename" && existsSync(join(this.work, filename, ".git"))) this.invalidate();
+  }
+}
+
 /** Make sure prime's object store exists and points at the work tree. */
 async function ensureStore(gitDir: string, work: string, env: Record<string, string>): Promise<void> {
   mkdirSync(gitDir, { recursive: true });
@@ -192,7 +261,7 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
 
   // Nested repositories are excluded: the fleet does not mirror them.
   const excluded = new Set(opts.exclude ?? []);
-  for (const nested of findNestedRepos(work)) excluded.add(nested);
+  for (const nested of opts.nested ? opts.nested.get() : findNestedRepos(work)) excluded.add(nested);
 
   const pathspec: string[] = ["."];
   for (const path of excluded) pathspec.push(":(exclude)" + path);

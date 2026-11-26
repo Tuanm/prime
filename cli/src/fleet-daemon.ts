@@ -29,7 +29,7 @@ import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "./fleet-agent.ts";
-import { preserveLocalChange, settle, snapshot } from "./fleet-sync.ts";
+import { NestedRepoCache, preserveLocalChange, settle, snapshot } from "./fleet-sync.ts";
 import { fetchHead, fetchMemberKeys, releaseLease, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, writeFleetState } from "./fleets.ts";
@@ -195,10 +195,13 @@ export function fleetSpaces(configPath: string): Array<{ name: string; space: Sp
  * wait for a poll to notice. It is a hint, not a promise - the agent still
  * checks the tree from time to time, because a watcher can miss something.
  */
-export function watchTree(work: string, onChange: () => void): { stop: () => void } {
+export function watchTree(
+  work: string,
+  onChange: (eventType?: string, filename?: string | null) => void,
+): { stop: () => void } {
   let watcher: FSWatcher | undefined;
   try {
-    watcher = watch(work, { recursive: true }, () => onChange());
+    watcher = watch(work, { recursive: true }, (eventType, filename) => onChange(eventType, filename));
   } catch {
     // A platform that cannot watch recursively: the agent falls back to
     // checking the tree on its own.
@@ -262,6 +265,11 @@ function heartbeatCeiling(loop: SpaceLoop, ceilingMs: number): number {
   return loop.events.connected ? Math.max(ceilingMs, EVENTS_HEARTBEAT_MS) : ceilingMs;
 }
 
+// The remembered nested repositories, as the option the sync functions take.
+function nestedOpt(paths: MemberPaths): { nested?: NestedRepoCache } {
+  return paths.nested ? { nested: paths.nested } : {};
+}
+
 /** One round for one space: take a place, then publish or pull. */
 async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what: string) => void): Promise<void> {
   const { creds, fleet, paths } = loop;
@@ -319,7 +327,14 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
     // capture.
     if (changed) await settle(paths.work, options.settleMs ?? 250);
     const snapBegan = Date.now();
-    const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base: state.base ?? null, seq: state.seq ?? 0, treeOnly: true });
+    const snap = await snapshot({
+      work: paths.work,
+      gitDir: paths.gitDir,
+      base: state.base ?? null,
+      seq: state.seq ?? 0,
+      treeOnly: true,
+      ...nestedOpt(paths),
+    });
     loop.timing.snapshot = Date.now() - snapBegan;
     const members = await fetchMemberKeys(creds, fleet);
     // Nothing changed in the workspace and nobody joined: publishing the same
@@ -368,7 +383,14 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
   // are all behind has nobody it may promote. So the change is moved aside
   // (nothing deleted) and the mirror is brought up to date.
   if (state.tree !== undefined) {
-    const local = await snapshot({ work: paths.work, gitDir: paths.gitDir, base: state.base ?? null, seq: state.seq ?? 0 });
+    const local = await snapshot({
+      work: paths.work,
+      gitDir: paths.gitDir,
+      base: state.base ?? null,
+      seq: state.seq ?? 0,
+      treeOnly: true,
+      ...nestedOpt(paths),
+    });
     if (local.tree !== state.tree) {
       const kept = await preserveLocalChange(paths.work, paths.gitDir, state.tree);
       report("kept " + kept.moved + " locally changed path(s) aside in " + kept.to + ", then caught up");
@@ -568,6 +590,7 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
         work,
         gitDir: fleetStateDir(configPath, fleet, name),
         keyFile: fleetKeyFile(configPath, fleet, name),
+        nested: new NestedRepoCache(work),
       },
       dirty: false,
       lastPublish: 0,
@@ -607,7 +630,9 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
     };
     beatTick();
     loop.events.start();
-    const watcher = watchTree(work, () => {
+    const watcher = watchTree(work, (eventType, filename) => {
+      // A repository that appeared or went away changes what is left alone.
+      loop.paths.nested?.noteChange(eventType, filename);
       loop.dirty = true;
       wake(name);
     });

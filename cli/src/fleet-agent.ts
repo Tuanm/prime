@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyPack, findNestedRepos, settle, snapshot } from "./fleet-sync";
+import { applyPack, findNestedRepos, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, openForMember, sealForMembers, type MemberKeyPair } from "./fleet-crypto";
 import {
   fetchHead,
@@ -33,6 +33,8 @@ export interface MemberPaths {
   gitDir: string;
   /** The member's key pair file. */
   keyFile: string;
+  /** Remembered nested repositories of the work tree, to spare the walk. */
+  nested?: NestedRepoCache;
 }
 
 /**
@@ -126,7 +128,14 @@ export async function publish(
   const wantFull = noBase || membershipChanged || someoneBehind || checkpoint;
 
   // The snapshot builds only the pack that will travel.
-  const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base, seq, wantFull });
+  const snap = await snapshot({
+    work: paths.work,
+    gitDir: paths.gitDir,
+    base,
+    seq,
+    wantFull,
+    ...(paths.nested ? { nested: paths.nested } : {}),
+  });
   const payload = wantFull ? snap.pack : snap.delta!;
 
   const sealed = sealForMembers(
@@ -271,7 +280,7 @@ export async function pull(
 
   // Directories the fleet leaves alone are not mirrored, so they must survive
   // the apply untouched.
-  const exclude = findNestedRepos(paths.work);
+  const exclude = paths.nested ? paths.nested.get() : findNestedRepos(paths.work);
 
   let lastSeqApplied = lastSeq;
   let lastCommitApplied = "";
