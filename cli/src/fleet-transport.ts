@@ -307,16 +307,18 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
-  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown };
+  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown };
   return {
     member: body.member === true,
     primary: body.primary === true,
     epoch: body.epoch ?? 0,
     // Which fleet of this name it is: absent from a gateway that predates it.
     ...(typeof body.incarnation === "string" && body.incarnation ? { incarnation: body.incarnation } : {}),
+    // Whether the gateway refuses to move the head from a sealed snapshot to one that is not.
+    ...(body.sealGate === true ? { sealGate: true as const } : {}),
   };
 }
 

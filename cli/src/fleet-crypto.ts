@@ -201,9 +201,19 @@ function sameBase64(expected: string, got: string): boolean {
 }
 
 function tagMatches(sealKey: Buffer, fields: SealFields, tag: string): boolean {
-  const expected = Buffer.from(tagOf(sealKey, fields), "utf8");
   const got = Buffer.from(tag, "utf8");
-  return expected.length === got.length && timingSafeEqual(expected, got);
+  const same = (expected: string): boolean => {
+    const want = Buffer.from(expected, "utf8");
+    return want.length === got.length && timingSafeEqual(want, got);
+  };
+  // A seal that covers the incarnation is read under either prefix: the bytes it is made over say
+  // what it covers, and an earlier test build (27c7c10) wrote `v1:` for it. The prefix is for a
+  // build that cannot check it to say so; what is signed does not depend on it.
+  if (fields.incarnation !== null) {
+    const body = createHmac("sha256", sealKey).update(sealBytes(fields)).digest("base64");
+    return same(SEAL_PREFIX_INCARNATION + body) || same(SEAL_PREFIX + body);
+  }
+  return same(tagOf(sealKey, fields));
 }
 
 /** A payload opened, with what it takes to check the manifest that named it. */

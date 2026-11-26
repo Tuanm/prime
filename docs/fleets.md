@@ -259,9 +259,12 @@ checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
    a catch-up and kept in `<space>.key.trust.json` beside the key file, each key with the highest
    sequence of a snapshot that was checked with it while it was on the roster: nothing credits a key
    for snapshots that were not looked at. A member that leaves is remembered by the fleet with the
-   sequence the head was at when it did (the roster lists it as `left`, with `until`), so a member
-   that was away while the primary published and then left still takes in what it made, and takes over;
-   and the key is trusted for no snapshot after that sequence. So a removed member cannot publish with
+   sequence the head was at when it did (the roster lists it as `left`, with `until`; a key a member
+   replaces on joining again is listed the same way), so a member that was away while the primary
+   published and then left still takes in what it made, and takes over; and the key is trusted for no
+   snapshot after that sequence. A member that is removed while its own publish is in flight has that
+   snapshot covered too: the fleet raises `until` to it when the write lands. Up to 256 such keys are
+   kept, and one is dropped once the snapshots it could have made are out of the retained history. So a removed member cannot publish with
    its own key, provided the gateway was honest about the roster while it was a member. Otherwise the
    gateway could make a key pair of its own, wrap a snapshot key of its own for each member and seal
    its forgery itself.
@@ -305,15 +308,26 @@ What the gateway can still do, whatever a member checks:
   sealed snapshots. (Deploy the gateway before the members.) That is a rule of the gateway about
   availability, not a check a member relies on: a member that has seen a sealed snapshot refuses an
   unsealed one at or above it whatever the gateway lets through ("it carries no seal ..."), and goes
-  around it by the next whole tree. When the old member published before the gateway had the rule, was
-  then lost, and no upgraded member can take over (the catch-up to that head is what is refused), the
-  refusal prints the manifest's hash and the operator of the member that cannot go on runs
-  `prime fleets trust accept <fleet> --space <name> --manifest <hash>`. That takes that one snapshot -
-  the member cannot tell it from an old snapshot the gateway made up, so it is the operator's decision,
-  and the hash is to be checked with the member that published it - and its own next publish is a whole
-  tree, sealed. It lowers nothing the member has seen, and it is only offered for a snapshot without a
+  around it by the next whole tree. The bar that keeps the old member from the lease again lasts ten
+  minutes, and ends when it asks for its place as a build that seals (the bootstrap says so); a sealed
+  fleet whose only members are old builds does not move until one is upgraded.
+  A gateway with the gate says so (`/role`), and then a snapshot without a seal is reported as
+  tampering and no command is offered: it cannot be an old member's. Against one that does not say, a
+  head written before the gate existed can be one. When that member was then lost and no upgraded
+  member can take over (the catch-up to that head is what is refused), the refusal prints the
+  manifest's hash and the operator of the member that cannot go on may run
+  `prime fleets trust accept <fleet> --space <name> --manifest <hash>`. **That trusts the gateway for
+  that one snapshot**: the member cannot tell it from an old snapshot the gateway made up (a rollback
+  of the whole fleet to it), and if the member is promoted its next publish, a whole tree, republishes
+  it to everyone. There is nothing here to compare the hash with once the publisher is gone: it is
+  the operator's call. It lowers nothing the member has seen, and it only takes a snapshot without a
   seal: a snapshot with a seal and no sender's tag, or no mark of its fleet, after ones that had them
   is refused as tampering, and there is no command to take it.
+  **Builds from before this was released**: members built from the intermediate fleet test builds
+  (the ones that already sealed the incarnation, with a `v1:` seal, or no tag at all) are not all
+  interoperable with a release: a seal over the incarnation is read under either prefix, but a build
+  without the sender's tag in an entry is refused as tampering once a member has seen one. They are to
+  be upgraded together. Released builds (without a seal) are read as always.
   Older replicas read sealed snapshots as they did before (the packs are unchanged; the tag is
   an added manifest field), so mixed fleets keep working in that direction.
 - **Know who is in the fleet, how big the work tree is, and when it changes.**
@@ -599,7 +613,8 @@ What is deliberately not done, so that nobody has to find it out:
   earlier membership under the name left beside its key, once the join has been made (a join that
   failed changes nothing). It does not take a new key pair for the new membership, so snapshots sealed
   for its old key are still ones it could open. A gateway that does not say leaves the check out (and is
-  asked again after ten minutes).
+  asked again after a minute). Joining again as a member that already is one is not a new membership:
+  what it has learnt stays.
 - **Unsealed snapshots are taken until the first sealed one is seen.** And a replica that has seen a
   sealed one refuses an unsealed one at or above it, so an old member that is promoted stalls the new
   replicas on the snapshot before it, until an upgraded member publishes (a whole tree) or the

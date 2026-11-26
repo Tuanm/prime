@@ -1379,6 +1379,8 @@ describe("what is a lock conflict between gits", () => {
     expect(isLockConflict("git add -A -- . failed (128): fatal: Unable to create '/s/snapshot.index.lock': File exists.")).toBe(true);
     expect(isLockConflict("git config core.bare false failed (255): error: could not lock config file /s/config: File exists")).toBe(true);
     // Not conflicts: waiting does not change them.
+    expect(isLockConflict("error: could not lock config file /s/config: Permission denied")).toBe(false);
+    expect(isLockConflict("error: could not lock config file /s/config: Read-only file system")).toBe(false);
     expect(isLockConflict("fatal: cannot lock ref 'refs/prime/fetched/1': unable to resolve reference 'refs/prime/fetched/1': reference broken")).toBe(false);
     expect(isLockConflict("error: cannot lock ref 'refs/x': is at abc but expected def")).toBe(false);
   });

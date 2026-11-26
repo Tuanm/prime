@@ -343,6 +343,9 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   const keys = loadOrCreateKeyPair(keyFile);
   const label = str(ctx.parsed, "label") ?? spaceName ?? "";
 
+  // Joining again as a member is not a new membership: what it has learnt of the fleet stays.
+  const before = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/me");
+  const wasMember = before.status === 200 && before.json?.status === "member";
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/join", {
     code,
     ...(label ? { label } : {}),
@@ -351,7 +354,7 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   failOn(res.status, res.json, "could not join the fleet");
   // A new membership starts knowing nothing of the fleet: what an earlier one under this name left
   // beside the key is not this fleet's. Only once it has been made: a join that failed changes nothing.
-  FleetTrust.forget(keyFile);
+  if (!wasMember) FleetTrust.forget(keyFile);
   if (ctx.json) {
     printJson({ fleet: fleetId, status: res.json.status });
     return;
@@ -806,7 +809,7 @@ export async function bootstrap(creds: FleetCredentials, fleet: string): Promise
   const res = await fetch(creds.gateway + "/fleets/" + encodeURIComponent(fleet) + "/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json", "x-prime-device": creds.deviceId, "x-device-token": creds.deviceToken },
-    body: "{}",
+    body: JSON.stringify({ seals: true }),
     signal: AbortSignal.timeout(creds.timeoutMs ?? 120_000),
   });
   if (!res.ok) {

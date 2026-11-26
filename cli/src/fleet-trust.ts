@@ -74,7 +74,7 @@ interface TrustFile {
 // Gateways that were asked which fleet of a name it is and said nothing (one that predates it): not
 // asked again for a while, by anyone in this process - there would be nothing new to learn each time.
 const saysNoIncarnation = new Map<string, number>();
-const NO_INCARNATION_MS = 10 * 60_000;
+const NO_INCARNATION_MS = 60_000;
 
 /** Whether this gateway was found, lately, not to say which fleet of a name it is. */
 export function gatewayHasNoIncarnation(creds: FleetCredentials, fleet: string): boolean {
@@ -112,6 +112,8 @@ export class FleetTrust {
    * snapshot: nothing else is let through by it, and no bound above is changed.
    */
   readonly accepted = new Set<string>();
+  /** Whether the gateway says it refuses to move the head from a sealed snapshot to one that is not; undefined until asked (see `learnGate`). */
+  gated: boolean | undefined;
   /**
    * The public keys the roster has listed, each with the highest sequence a roster that listed it
    * was read for (see `trusts`).
@@ -198,16 +200,26 @@ export class FleetTrust {
     if (m.seal === undefined && hash !== undefined && this.accepted.has(hash)) return;
     const level = protectionOf(m, memberId);
     if (level < 1 && this.sealedFrom !== undefined && m.seq >= this.sealedFrom) {
-      // The one refusal that has an honest cause: a member of an old build that was promoted publishes this way.
+      if (this.gated === true) {
+        // A gateway that has the gate never moves the head from a sealed snapshot to one that is not, so
+        // this is not what a member of an old build that was promoted leaves: it is an old snapshot shown as new.
+        throw new TamperedSnapshotError(
+          m.seq,
+          "it carries no seal, but snapshot " + this.sealedFrom + " did, and this fleet's gateway does not move the head from a sealed snapshot to one that is not: it was not published through the gateway as it is now (it is tampered with)",
+          true,
+        );
+      }
+      // Without the gate, the cause may be an honest one: a member of an old build that was promoted publishes this way.
       throw new TamperedSnapshotError(
         m.seq,
         "it carries no seal, but snapshot " +
           this.sealedFrom +
-          " did: either the gateway swapped in an old snapshot, or a member that has not been upgraded published it. Upgrade that member. If it is gone and nobody else can take over, and you know this snapshot is the fleet's own" +
-          (hash !== undefined ? " (manifest " + hash + ": compare it with what that member's own 'prime fleets status' says it published)" : "") +
-          ", run 'prime fleets trust accept <fleet> --space <space> --manifest " +
+          " did: either the gateway swapped in an old snapshot, or a member that has not been upgraded published it. Upgrade that member." +
+          " If it is gone and nobody else can take over, the only way on is 'prime fleets trust accept <fleet> --space <space> --manifest " +
           (hash ?? "<hash>") +
-          "' on this member to take that one snapshot",
+          "' on this member. That trusts the gateway for this one snapshot (manifest " +
+          (hash ?? "unknown") +
+          "): the gateway can show an old snapshot under this name, and if this member is then promoted it republishes that snapshot to everyone. Do it only if you know that member published exactly that one",
         true,
       );
     }
@@ -228,6 +240,21 @@ export class FleetTrust {
         true,
       );
     }
+  }
+
+  /**
+   * Ask the gateway whether it has the gate, when this snapshot is about to be refused for having no seal
+   * (the answer words the refusal; it is asked for nothing else, and once). A gateway that does not say
+   * has none.
+   */
+  async learnGate(creds: FleetCredentials, fleet: string, m: FleetManifest): Promise<void> {
+    if (this.gated !== undefined || m.seal !== undefined || this.sealedFrom === undefined || m.seq < this.sealedFrom) return;
+    const hash = manifestHashOf(m);
+    if (hash !== undefined && this.accepted.has(hash)) return;
+    this.gated = await fetchRole(creds, fleet).then(
+      (role) => role.sealGate === true,
+      () => false,
+    );
   }
 
   /** A snapshot has been taken in: what it showed is now known of this fleet. */

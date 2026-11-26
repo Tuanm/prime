@@ -114,6 +114,16 @@ describe("the seal of a manifest", () => {
     expect(opened.sealMatches(f, tag)).toBe(true);
   });
 
+  test("a seal that covers the incarnation is read under either prefix (an earlier test build wrote v1: for it), and only then", () => {
+    const { f, tag, sealed, opened } = make();
+    expect(opened.sealMatches(f, "v1:" + tag.slice(3))).toBe(true);
+    // The prefix does not stand in for the incarnation: without one, a v2 tag is not what such a publisher seals.
+    const without = { ...f, incarnation: null };
+    const old = sealed.seal(without);
+    expect(opened.sealMatches(without, "v2:" + old.slice(3))).toBe(false);
+    expect(opened.sealMatches({ ...f, incarnation: "inc-2" }, "v1:" + tag.slice(3))).toBe(false);
+  });
+
   test("any field changed, and it does not match", () => {
     const { f, tag, opened } = make();
     const changed: Array<Partial<typeof f>> = [

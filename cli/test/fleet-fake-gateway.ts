@@ -28,6 +28,8 @@ export class FakeGateway {
   stripRoster = false;
   /** Publishers that predate the seal over the manifest. */
   unsealed = false;
+  /** What /role says of the gate that keeps the head from going from a sealed snapshot to one that is not. */
+  sealGate = false;
   /** Which fleet of the name this is (what /role says); undefined for a gateway that predates it. */
   incarnation: string | undefined = "incarnation-1";
   /** A refused publish deletes the change pack its manifest names (the gateway's cleanup). */
@@ -121,7 +123,7 @@ export class FakeGateway {
     }
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);
-      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}) });
+      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}) });
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });

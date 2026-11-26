@@ -90,7 +90,7 @@ function gitEnv(gitDir: string, work: string, indexFile: string): Record<string,
 // agent and `prime fleets sync`, or two syncs, work in one store) has done nothing yet, so it is run
 // again after a short wait, for as long as a lock is plausibly held. Only that failure is retried.
 const LOCK_RETRY_MS = 15_000;
-const LOCK_CONFLICT = /could not lock config file|Unable to create '[^']*\.lock': File exists/;
+const LOCK_CONFLICT = /could not lock config file [^\n]*: File exists|Unable to create '[^']*\.lock': File exists/;
 
 /** Whether git's message says it could not take a lock file that another git holds (and nothing else is wrong). */
 export function isLockConflict(message: string): boolean {

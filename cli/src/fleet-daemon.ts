@@ -1128,7 +1128,7 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     // if the fleet learns the new one. The name travels too, so a space that
     // was renamed - or an identity another space took over - reads correctly
     // in the operator's list.
-    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(label ? { label } : {}) }),
+    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(label ? { label } : {}), seals: true }),
     // Asking for the place is how the lease is renewed: a request that hangs for
     // a minute would outlast the lease, so it is cut short (and asked again).
     signal: AbortSignal.timeout(Math.min(creds.timeoutMs ?? PLACE_TIMEOUT_MS, PLACE_TIMEOUT_MS)),

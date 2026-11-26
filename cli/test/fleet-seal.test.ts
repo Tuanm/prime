@@ -8,7 +8,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, createPrivate
 
 import { loadOrCreateKeyPair, manifestIdOf, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import { generateMemberKeyPair, openForMember, sealManyForMembers } from "../src/fleet-crypto";
-import { FleetTrust, TamperedSnapshotError, forgetIncarnationAnswers, sealFieldsOf } from "../src/fleet-trust";
+import { FleetTrust, TamperedSnapshotError, forgetIncarnationAnswers, gatewayHasNoIncarnation, noteIncarnationAnswer, sealFieldsOf } from "../src/fleet-trust";
 import { snapshot } from "../src/fleet-sync";
 import { FleetTransportError, payloadHash, fetchManifest, type FleetManifest } from "../src/fleet-transport";
 
@@ -331,6 +331,34 @@ describe("a fleet that is upgraded one member at a time", () => {
     expect(trust.incarnationFrom).toBe(1);
   });
 
+  test("the refusal says plainly that accepting trusts the gateway, and prints the hash to compare", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    w.gateway.unsealed = true;
+    await w.next("two\n");
+    const refused = (await w.pullReplica(1).catch((e: unknown) => e)) as Error;
+    expect(refused.message).toMatch(/trusts the gateway for this one snapshot \(manifest [0-9a-f]{64}\)/);
+    expect(refused.message).toMatch(/republishes that snapshot to everyone/);
+    // It does not send the operator to a command that cannot say what it is asked to compare.
+    expect(refused.message).not.toMatch(/prime fleets status/);
+  });
+
+  test("against a gateway that has the gate, a snapshot without a seal is tampering, and no command is offered", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    w.gateway.sealGate = true;
+    w.gateway.unsealed = true;
+    await w.next("two\n");
+    const refused = (await w.pullReplica(1).catch((e: unknown) => e)) as Error;
+    expect(refused.message).toMatch(/does not move the head from a sealed snapshot to one that is not/);
+    expect(refused.message).toMatch(/tampered/);
+    expect(refused.message).not.toMatch(/trust accept/);
+    // Asked once, for the refusal; a member that is not refused is not asked.
+    expect(w.gateway.requests.get("GET role") ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
   test("accepting one snapshot does not let another through", async () => {
     const w = await world();
     await w.next("one\n");
@@ -640,6 +668,25 @@ describe("a gateway that does not say which fleet of a name it is", () => {
     await w.pullReplica(0); // again, another route
     const asked = (w.gateway.requests.get("GET role") ?? 0) - before;
     expect(asked).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("how long a gateway that says nothing of the incarnation is believed", () => {
+  test("a minute: a gateway that is upgraded is asked again soon", () => {
+    forgetIncarnationAnswers();
+    const creds = { gateway: "https://gw.example", deviceId: "d", deviceToken: "t" } as never;
+    const real = Date.now;
+    try {
+      noteIncarnationAnswer(creds, "x", false);
+      expect(gatewayHasNoIncarnation(creds, "x")).toBe(true);
+      Date.now = () => real() + 59_000;
+      expect(gatewayHasNoIncarnation(creds, "x")).toBe(true);
+      Date.now = () => real() + 61_000;
+      expect(gatewayHasNoIncarnation(creds, "x")).toBe(false);
+    } finally {
+      Date.now = real;
+      forgetIncarnationAnswers();
+    }
   });
 });
 

@@ -826,6 +826,7 @@ async function ingestRoute(
     // Whether this one may be taken in is asked here, in order, and what it shows is
     // remembered once it has been: a snapshot downloaded ahead of the ones before it
     // says nothing yet about what the fleet has shown.
+    await trust.learnGate(creds, fleet, m);
     trust.checkNotDowngrade(m, creds.deviceId);
     // Only the newest one is named by a ref: it is what the member goes on from,
     // and one ref (one more git process) per step is cost for nothing.
