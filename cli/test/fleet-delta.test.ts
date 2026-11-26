@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { publish, pull, type MemberPaths } from "../src/fleet-agent";
+import { FULL_PACK_WINDOW, loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import { type FleetCredentials } from "../src/fleet-transport";
 
 /**
@@ -18,6 +19,11 @@ class FakeGateway {
   members = new Map<string, { deviceId: string; role: string; pubkey?: string }>();
   applied = new Map<string, number>();
   primary = "";
+  /** How many snapshots are kept; older packs and manifests are deleted, as the real gateway does. */
+  retain = Infinity;
+  /** Pack downloads, by the pack's key. */
+  packReads: string[] = [];
+  private kept: string[][] = [];
 
   seed(deviceId: string, pubkey: string): void {
     this.members.set(deviceId, { deviceId, role: "member", pubkey });
@@ -39,7 +45,7 @@ class FakeGateway {
     }
     if (kind === "keys" && method === "GET") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
-      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey })) });
+      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, applied: this.applied.get(m.deviceId) ?? 0 })) });
     }
     if (kind === "applied" && method === "POST") {
       const parsed = JSON.parse(String(body ?? "{}")) as { seq: number };
@@ -52,7 +58,7 @@ class FakeGateway {
       const manifestLength = bytes.readUInt32BE(0);
       const manifestBytes = bytes.subarray(4, 4 + manifestLength);
       const pack = bytes.subarray(4 + manifestLength);
-      const hash = (b: Buffer) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+      const hash = (b: Buffer) => createHash("sha256").update(b).digest("hex");
       const packKey = "fleets/x/packs/" + hash(pack);
       const manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
       manifest.packKey = packKey;
@@ -61,6 +67,8 @@ class FakeGateway {
       const manifestKey = "fleets/x/manifests/" + hash(finalManifest);
       this.payloads.set(packKey, pack);
       this.payloads.set(manifestKey, finalManifest);
+      this.kept.push([packKey, manifestKey]);
+      while (this.kept.length > this.retain) for (const key of this.kept.shift()!) this.payloads.delete(key);
       const current = this.head?.seq ?? 0;
       if ((this.applied.get(creds.deviceId) ?? 0) < current) {
         return Response.json({ error: "catch up first", required: current }, { status: 409 });
@@ -72,7 +80,7 @@ class FakeGateway {
     if ((kind === "packs" || kind === "manifests") && method === "POST") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
-      const hash = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+      const hash = createHash("sha256").update(bytes).digest("hex");
       const key = "fleets/x/" + kind + "/" + hash;
       this.payloads.set(key, bytes);
       return Response.json({ ok: true, key, hash, size: bytes.length });
@@ -81,6 +89,7 @@ class FakeGateway {
       const id = parts[3] ?? "";
       const found = [...this.payloads.entries()].find(([k]) => k.endsWith("/" + id));
       if (!found) return Response.json({ error: "no such payload" }, { status: 404 });
+      if (kind === "packs") this.packReads.push(found[0]);
       return new Response(found[1]);
     }
     if (kind === "head" && parts[3] === "advance") {
@@ -261,6 +270,114 @@ describe("incremental snapshots", () => {
       expect(pulled.applied).toBe(true);
       expect(pulled.seq).toBe(4);
       expect(sameTree(fingerprint(primaryWork), fingerprint(replicaWork))).toBe(true);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a member far behind does not turn every publish into a whole tree, and still catches up", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    const gateway = new FakeGateway();
+    try {
+      const primaryWork = join(root, "primary");
+      const replicaWork = join(root, "replica");
+      mkdirSync(primaryWork, { recursive: true });
+      mkdirSync(replicaWork, { recursive: true });
+      for (let i = 0; i < 20; i++) writeFileSync(join(primaryWork, "file-" + i + ".txt"), "content ".repeat(100) + i);
+      writeFileSync(join(primaryWork, "doomed.txt"), "will be deleted");
+
+      const primaryPaths: MemberPaths = { work: primaryWork, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+      const replicaPaths: MemberPaths = { work: replicaWork, gitDir: join(root, "r-meta"), keyFile: join(root, "r.key") };
+
+      useFakeGateway(gateway);
+      gateway.seed("primary-device", loadOrCreateKeyPair(primaryPaths.keyFile).publicKey);
+      gateway.seed("replica-device", loadOrCreateKeyPair(replicaPaths.keyFile).publicKey);
+      // Fewer snapshots are kept than were published: the replica's own is long gone.
+      gateway.retain = FULL_PACK_WINDOW + 2;
+
+      let last = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, undefined, 2);
+      const first = last;
+      const firstPull = await pull(credsFor("replica-device"), "x", replicaPaths, 0);
+      expect(firstPull.applied).toBe(true);
+      writeFileSync(join(replicaWork, ".env"), "SECRET=1");
+
+      // The replica goes away at seq 1. The primary keeps working past the
+      // checkpoint and beyond; each publish is a delta, the checkpoint apart.
+      rmSync(join(primaryWork, "doomed.txt"));
+      const publishedFull: number[] = [];
+      const deltaBytes: number[] = [];
+      let checkpointBytes = 0;
+      for (let seq = 2; seq <= FULL_PACK_WINDOW + 3; seq++) {
+        writeFileSync(join(primaryWork, "file-0.txt"), "edit " + seq + " ".repeat(10));
+        last = await publish(credsFor("primary-device"), "x", primaryPaths, last.commit, last.seq, last.manifestKey, 2, last.roster);
+        expect(last.seq).toBe(seq);
+        if (last.full) {
+          publishedFull.push(seq);
+          checkpointBytes = last.bytes;
+        } else deltaBytes.push(last.bytes);
+      }
+      // Only the checkpoint was a whole tree, and a delta is a fraction of it.
+      expect(publishedFull).toEqual([FULL_PACK_WINDOW]);
+      expect(Math.max(...deltaBytes)).toBeLessThan(checkpointBytes / 4);
+
+      // The replica is further behind than the window. It starts at the
+      // checkpoint and applies the deltas after it: it never asks for the
+      // snapshots in between, which the gateway no longer has.
+      gateway.packReads.length = 0;
+      const caught = await pull(credsFor("replica-device"), "x", replicaPaths, first.seq, first.commit);
+      expect(caught.applied).toBe(true);
+      expect(caught.seq).toBe(FULL_PACK_WINDOW + 3);
+      expect(gateway.packReads.length).toBe(4);
+      const fp = fingerprint(replicaWork);
+      fp.delete(".env");
+      expect(sameTree(fingerprint(primaryWork), fp)).toBe(true);
+      // What the fleet dropped on the way is gone; what it never had stays.
+      expect(readFileSync(join(replicaWork, ".env"), "utf8")).toBe("SECRET=1");
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("a swap of one member for another is a membership change, though the count is the same", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    const gateway = new FakeGateway();
+    try {
+      const primaryWork = join(root, "primary");
+      const newcomerWork = join(root, "newcomer");
+      mkdirSync(primaryWork, { recursive: true });
+      mkdirSync(newcomerWork, { recursive: true });
+      writeFileSync(join(primaryWork, "a.txt"), "alpha".repeat(100));
+      const primaryPaths: MemberPaths = { work: primaryWork, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+      const newcomerPaths: MemberPaths = { work: newcomerWork, gitDir: join(root, "n-meta"), keyFile: join(root, "n.key") };
+
+      useFakeGateway(gateway);
+      gateway.seed("primary-device", loadOrCreateKeyPair(primaryPaths.keyFile).publicKey);
+      gateway.seed("leaver-device", loadOrCreateKeyPair(join(root, "l.key")).publicKey);
+      const first = await publish(credsFor("primary-device"), "x", primaryPaths, null, 0, undefined, 2);
+
+      // One leaves, one joins: still two members.
+      gateway.members.delete("leaver-device");
+      gateway.seed("newcomer-device", loadOrCreateKeyPair(newcomerPaths.keyFile).publicKey);
+      writeFileSync(join(primaryWork, "a.txt"), "alpha changed".repeat(100));
+
+      // The roster names who is in, so the swap is seen: the snapshot carries
+      // the whole tree, sealed for the newcomer, who can open it.
+      const second = await publish(
+        credsFor("primary-device"), "x", primaryPaths, first.commit, first.seq, first.manifestKey, first.members, first.roster,
+      );
+      expect(second.full).toBe(true);
+      const pulled = await pull(credsFor("newcomer-device"), "x", newcomerPaths, 0);
+      expect(pulled.applied).toBe(true);
+      expect(sameTree(fingerprint(primaryWork), fingerprint(newcomerWork))).toBe(true);
+
+      // Nothing changed in the roster since: the next publish is a delta again.
+      writeFileSync(join(primaryWork, "a.txt"), "alpha changed again".repeat(100));
+      const third = await publish(
+        credsFor("primary-device"), "x", primaryPaths, second.commit, second.seq, second.manifestKey, second.members, second.roster,
+      );
+      expect(third.full).toBe(false);
     } finally {
       (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
       rmSync(root, { recursive: true, force: true });

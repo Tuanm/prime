@@ -37,6 +37,7 @@ export interface MemberPaths {
   nested?: NestedRepoCache;
 }
 
+
 /**
  *  The member's key pair, created on first use.
  *
@@ -55,11 +56,18 @@ export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
   return pair;
 }
 
+/** The members a snapshot is sealed for, as one string: who, and with which key. */
+export function rosterOf(members: Array<{ deviceId: string; pubkey?: string }>): string {
+  return members.map((m) => m.deviceId + ":" + (m.pubkey ?? "").slice(0, 12)).join(",");
+}
+
 export interface PublishResult {
   seq: number;
   commit: string;
   bytes: number;
   members: number;
+  /** The members this snapshot was sealed for (see `rosterOf`). */
+  roster: string;
   /** Where the manifest of this snapshot is stored. */
   manifestKey: string;
   /** True when the pack carries the whole tree rather than only the change. */
@@ -67,10 +75,13 @@ export interface PublishResult {
 }
 
 /**
- * How far a member may fall behind before it is given a whole tree again.
+ * How often the fleet publishes a whole tree, in snapshots.
  *
- * The gateway keeps a bounded number of snapshots. A member that is further
- * behind than this cannot be caught up with deltas alone.
+ * It is the anchor of the chain of deltas. A member that is far behind does not
+ * change what is published: it starts from the newest whole tree and applies
+ * the deltas after it, so at most this many snapshots. The gateway keeps more
+ * than twice this many (`RECENT_SNAPSHOTS`), so that anchor and the deltas
+ * after it are always still there.
  */
 export const FULL_PACK_WINDOW = 32;
 
@@ -94,6 +105,8 @@ export async function publish(
   parentManifest?: string,
   /** How many members the last publish sealed for. */
   lastMemberCount = 0,
+  /** Who the last publish sealed for (see `rosterOf`); tells a swap from no change. */
+  lastRoster?: string,
 ): Promise<PublishResult> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
   const members = await fetchMemberKeys(creds, fleet);
@@ -114,18 +127,21 @@ export async function publish(
   const seq = (head?.seq ?? 0) + 1;
 
   // A delta is only useful to a member that already holds the snapshot it is
-  // built against. A member that joined since then needs a pack that carries
-  // the whole tree, and so does a member that fell too far behind. The
-  // membership tells the first case; the distance tells the second.
-  const membershipChanged = members.length !== lastMemberCount;
-  // A member that is behind cannot be caught up with deltas alone, because
-  // the snapshots it missed may be gone.
-  const someoneBehind = members.some((m) => seq - (m.applied ?? 0) > FULL_PACK_WINDOW);
+  // built against. A member that joined since then, or that came back with a
+  // new key, cannot open what was sealed before and needs a pack that carries
+  // the whole tree sealed for it. The roster tells: it names who and which
+  // key, so a swap (one leaves, one joins) is a change even though the count
+  // is the same. A caller with no roster on record falls back to the count.
+  const roster = rosterOf(members);
+  const membershipChanged = lastRoster !== undefined ? roster !== lastRoster : members.length !== lastMemberCount;
+  // A member that is far behind does not make the publish a whole tree. It
+  // catches up from the newest whole tree and the deltas after it, and the
+  // checkpoint below guarantees there is one within FULL_PACK_WINDOW snapshots.
   // Every so often a whole tree is published anyway, so the chain of deltas
   // has an anchor and cannot grow for ever.
   const checkpoint = seq % FULL_PACK_WINDOW === 0;
   const noBase = base === null;
-  const wantFull = noBase || membershipChanged || someoneBehind || checkpoint;
+  const wantFull = noBase || membershipChanged || checkpoint;
 
   // The snapshot builds only the pack that will travel.
   const snap = await snapshot({
@@ -173,6 +189,7 @@ export async function publish(
     commit: snap.commit,
     bytes: sealed.ciphertext.length,
     members: sealed.wrapped.length,
+    roster,
     manifestKey: moved.manifestKey ?? "",
     full: wantFull,
   };

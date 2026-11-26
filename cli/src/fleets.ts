@@ -19,7 +19,7 @@ import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetAgentServiceStatus, installFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
@@ -580,7 +580,7 @@ export async function syncFleetSpace(
     // The roster is part of the question: a member that joined, or that came
     // back with a new key, needs a snapshot sealed for it.
     const members = await fetchMemberKeys(creds, fleetId);
-    const roster = members.map((m) => m.deviceId + ":" + (m.pubkey ?? "").slice(0, 12)).join(",");
+    const roster = rosterOf(members);
     if (state.tree !== undefined && !force) {
       if (roster === (state.roster ?? "") && snap.tree === state.tree) {
         return "unchanged";
@@ -595,6 +595,7 @@ export async function syncFleetSpace(
       state.seq ?? 0,
       state.manifest,
       state.memberCount ?? 0,
+      state.roster,
     );
     writeFleetState(configPath, fleetId, spaceName, {
       ...state,
@@ -602,7 +603,7 @@ export async function syncFleetSpace(
       seq: result.seq,
       manifest: result.manifestKey,
       memberCount: result.members,
-      roster,
+      roster: result.roster,
       // Remember the tree, so the next round knows there is nothing to do.
       tree: snap.tree,
     });

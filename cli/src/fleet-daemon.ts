@@ -28,7 +28,7 @@ import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, publish, pull, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { NestedRepoCache, preserveLocalChange, settle, snapshot } from "./fleet-sync.ts";
 import { fetchHead, fetchMemberKeys, releaseLease, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
@@ -343,7 +343,7 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
     // sealed for it, so the membership is part of the question. The keys are
     // part of it too: a member that lost its key cannot open what was sealed
     // for the old one.
-    const roster = members.map((m) => m.deviceId + ":" + (m.pubkey ?? "").slice(0, 12)).join(",");
+    const roster = rosterOf(members);
     if (state.tree !== undefined && snap.tree === state.tree && roster === (state.roster ?? "")) {
       return;
     }
@@ -356,6 +356,7 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
       state.seq ?? 0,
       state.manifest,
       state.memberCount ?? 0,
+      state.roster,
     );
     loop.timing.publish = Date.now() - publishBegan;
     writeFleetState(loop.configPath, fleet, loop.name, {
@@ -364,7 +365,9 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
       seq: result.seq,
       manifest: result.manifestKey,
       memberCount: result.members,
-      roster,
+      // What the snapshot was sealed for, not what was asked a moment before:
+      // a member that joined in between is then still seen as new next round.
+      roster: result.roster,
       tree: snap.tree,
     });
     loop.lastPublish = Date.now();

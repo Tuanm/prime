@@ -100,6 +100,19 @@ every snapshot up to the head before it accepts a single write. A space in charg
 that starts behind the head would fork the fleet, and the fleet refuses it rather
 than trusting it.
 
+### A replica that fell behind
+
+Most snapshots carry only what changed. Every 32nd carries the whole tree, as an
+anchor. A replica that was away - however long - starts from the newest whole
+tree and applies the changes after it, which is at most 32 snapshots. How far
+behind one replica is changes nothing for the others: the space in charge goes
+on publishing small changes, and the gateway keeps the last 64 snapshots, enough
+for the newest whole tree and every change after it.
+
+A whole tree is also published when the members change - a space joins, leaves,
+or comes back with a new key (a swap of one space for another counts) - because
+a snapshot can only be opened by the members it was sealed for.
+
 ## Joining
 
 The operator makes the fleet - from `/admin`, or with `prime fleets create` where
@@ -279,7 +292,8 @@ it, and so does everything that is not a fleet.
 | members per fleet | 32 |
 | invite lifetime | ten minutes by default, one hour at most |
 | lease | fifteen seconds, renewed every five |
-| snapshot | a thin delta pack per head |
+| snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change |
+| snapshots kept | the last 64 |
 | a fleet nobody touches | cleaned up after a day |
 
 ## Where to read more
