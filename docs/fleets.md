@@ -377,12 +377,20 @@ with the same.
 - A clean shell changes nothing: what was saved stands. To go back to a default, name the
   variable empty (`PRIME_FLEET_REPLICA= prime fleets agent start`), or forget everything with
   `prime fleets agent reset`.
-- `agent start` with a setting that differs from the one the running agent has restarts it
-  (through the service, when it is installed - the service manager restarts it, nothing else
-  is started beside it). Commands that only need an agent running, like `prime spaces create`,
-  neither save what their shell exports nor restart it.
+- `agent start` with a setting that differs from the one the running agent has restarts it.
+  Commands that only need an agent running, like `prime spaces create`, neither save what their
+  shell exports nor restart it *for that*; they do restart it when the saved settings differ from
+  the running agent's (for example right after `agent install` saved new ones).
+- With the login service installed (macOS, Linux), the service manager is the only thing that
+  starts the agent: `agent start`, `spaces create` and a settings change ask it to start or
+  restart it, and never spawn one beside it. An agent that was started by hand and is running
+  when the service is installed (or found beside it later) is stopped first. `agent install`
+  does the same: it stops a running agent, waits for it to exit, then starts the service.
 - One agent runs per configuration: a second one that is started exits, saying who holds the
-  lock (`fleet-agent/agent.lock`). A stopping agent is given ten seconds to let go.
+  lock (`fleet-agent/agent.lock`, which the running agent touches every few seconds). A stopping
+  agent is given ten seconds to let go. Agents of builds from before the lock do not take part, so
+  upgrade by stopping the old agent (`prime fleets agent stop`) before starting the new one;
+  `agent install` does that for you.
 
 A member holds its place only while the gateway can see its device tunnel: a holder whose
 device is not connected is taken out of the running the next time anyone asks. Spaces always
