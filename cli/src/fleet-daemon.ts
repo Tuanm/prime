@@ -331,7 +331,6 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
       work: paths.work,
       gitDir: paths.gitDir,
       base: state.base ?? null,
-      seq: state.seq ?? 0,
       treeOnly: true,
       ...nestedOpt(paths),
     });
@@ -389,7 +388,6 @@ async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what:
       work: paths.work,
       gitDir: paths.gitDir,
       base: state.base ?? null,
-      seq: state.seq ?? 0,
       treeOnly: true,
       ...nestedOpt(paths),
     });

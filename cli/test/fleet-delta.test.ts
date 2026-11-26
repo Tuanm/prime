@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { readFileSync as readSource } from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -538,3 +539,17 @@ function lastPackKey(gateway: FakeGateway): string {
   const manifest = JSON.parse(gateway.payloads.get(gateway.head!.manifestKey)!.toString("utf8")) as { packKey: string };
   return manifest.packKey;
 }
+
+describe("the gateway keeps what the checkpoint interval needs", () => {
+  test("it keeps at least twice FULL_PACK_WINDOW snapshots", () => {
+    // The newest whole tree is at most FULL_PACK_WINDOW back and the deltas after
+    // it are all newer, so a member that fell behind finds its whole route only
+    // if the gateway keeps twice the window (one for the anchor's own interval,
+    // one for the interval being published). The two numbers live in different
+    // packages; this is what holds them together.
+    const source = readSource(join(import.meta.dir, "..", "..", "api", "src", "fleets.ts"), "utf8");
+    const kept = Number(/export const RECENT_SNAPSHOTS = (\d+);/.exec(source)?.[1]);
+    expect(Number.isInteger(kept)).toBe(true);
+    expect(kept).toBeGreaterThanOrEqual(2 * FULL_PACK_WINDOW);
+  });
+});

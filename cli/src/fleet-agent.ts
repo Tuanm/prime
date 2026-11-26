@@ -37,7 +37,6 @@ export interface MemberPaths {
   nested?: NestedRepoCache;
 }
 
-
 /**
  *  The member's key pair, created on first use.
  *
@@ -79,9 +78,9 @@ export interface PublishResult {
  *
  * It is the anchor of the chain of deltas. A member that is far behind does not
  * change what is published: it starts from the newest whole tree and applies
- * the deltas after it, so at most this many snapshots. The gateway keeps more
- * than twice this many (`RECENT_SNAPSHOTS`), so that anchor and the deltas
- * after it are always still there.
+ * the deltas after it, so at most this many snapshots. The gateway keeps twice
+ * this many (`RECENT_SNAPSHOTS` in api/src/fleets.ts; a test holds the two
+ * together), so that anchor and the deltas after it are always still there.
  */
 export const FULL_PACK_WINDOW = 32;
 
@@ -249,7 +248,7 @@ export async function planCatchUp(creds: FleetCredentials, fleet: string, lastSe
   // holds. Anything else means the checkpoint it needs is gone.
   if (!first.full && first.seq > lastSeq + 1) {
     throw new Error(
-      "this member is " + (first.seq - lastSeq) + " snapshots behind and the fleet has no whole tree for it; the primary has to publish one",
+      "this member is " + (first.seq - lastSeq) + " snapshots behind and the fleet no longer has a whole tree to start from; it gets one at the next checkpoint (every " + FULL_PACK_WINDOW + " snapshots) or when a member joins",
     );
   }
   return { head, chain };

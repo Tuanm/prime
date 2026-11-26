@@ -571,7 +571,9 @@ export async function syncFleetSpace(
   if (placed.primary) {
     // A snapshot is taken every round: it is what says whether there is
     // anything to publish at all.
-    const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base: state.base ?? null, seq: state.seq ?? 0 });
+    // Only the tree is wanted here; the ref of a published sequence is
+    // left to the publish that makes it.
+    const snap = await snapshot({ work: paths.work, gitDir: paths.gitDir, base: state.base ?? null, treeOnly: true });
 
     // Nothing changed in the workspace and nobody joined: publishing the
     // same tree again would cost a pack and a write for nothing. But a
@@ -612,7 +614,7 @@ export async function syncFleetSpace(
   // A mirror that was edited locally cannot be updated without losing the
   // edit, so the edit is moved aside first - the same rule the agent follows.
   if (state.tree !== undefined) {
-    const local = await snapshot({ work, gitDir: paths.gitDir, base: state.base ?? null, seq: state.seq ?? 0 });
+    const local = await snapshot({ work, gitDir: paths.gitDir, base: state.base ?? null, treeOnly: true });
     if (local.tree !== state.tree) {
       await preserveLocalChange(work, paths.gitDir, state.tree);
     }

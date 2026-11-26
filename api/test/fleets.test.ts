@@ -674,7 +674,7 @@ describe("head advance", () => {
 
 describe("what a member far behind needs is kept", () => {
   // The member publishes a whole tree every 32 snapshots (FULL_PACK_WINDOW in
-  // the CLI) and deltas in between, and a member that fell behind starts from
+  // the CLI, which has a test that RECENT_SNAPSHOTS is at least twice that) and deltas in between, and a member that fell behind starts from
   // the newest whole tree. So the gateway has to keep the newest checkpoint and
   // every delta after it, at any head.
   const CHECKPOINT_EVERY = 32;

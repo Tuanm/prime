@@ -396,8 +396,9 @@ export class FleetDO implements DurableObject {
       members: Object.values(members).map((m) => ({
         deviceId: m.deviceId,
         ...(m.pubkey ? { pubkey: m.pubkey } : {}),
-        // How far this member has got, so the publisher knows who needs a
-        // whole tree rather than a delta.
+        // How far this member has got. The admin page shows it; the publisher
+        // does not decide anything from it (a member that fell behind catches
+        // up from the newest checkpoint).
         applied: applied[m.deviceId] ?? 0,
       })),
     });
