@@ -449,7 +449,10 @@ with the same.
   does the same, except for the service's own agent, which the manager replaces. If the manager
   cannot be reached (no login session on a headless machine, no user bus, a service file left by an
   install that failed) the service counts for nothing: the agent is handled directly, as if it
-  were not installed. If the manager answers and will not restart a running agent, the command
+  were not installed - except that a settings change is refused while an agent is running (it may be
+  the service's own, and a spawned one would make the manager's restarts collide with it): the settings
+  are saved, the command says so, and they apply when the service restarts or from a shell that can
+  reach the manager. If the manager answers and will not restart a running agent, the command
   says so and the agent keeps the settings it has.
   For any other configuration (`--config`, `PRIME_CONFIG`) the service is not its own: its agent
   is started, stopped and restarted directly, `agent status` says which configuration the service

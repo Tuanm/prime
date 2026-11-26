@@ -581,6 +581,32 @@ describe("switching the replica mode of a running agent", () => {
     expect(asked).toBe(0);
   });
 
+  test("a settings change that cannot reach the manager of an installed service leaves the running agent alone, and says why", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    withMode("mirror");
+    let spawned = 0;
+    const service = {
+      ...agentServiceFor(configPath, () => ({ installed: true, reachable: false }), () => false),
+      spawnAgent: () => void spawned++,
+    };
+    let error: unknown;
+    try {
+      await ensureFleetAgent(configPath, { fromShell: true }, service);
+    } catch (err) {
+      error = err;
+    }
+    expect(String((error as Error)?.message)).toMatch(/manager cannot be reached/);
+    // Nothing was stopped or spawned, and the state of the agent that runs is still there.
+    expect(spawned).toBe(0);
+    expect(() => process.kill(mine.pid, 0)).not.toThrow();
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
+    // What was asked for is saved for the service's next restart.
+    expect(readAgentSettings(configPath).replica).toBe("mirror");
+  });
+
   test("a manager that answers and then will not restart the running agent leaves it and its state alone, and says so", async () => {
     const root = scratch();
     const configPath = join(root, "config.json");

@@ -342,6 +342,12 @@ export interface AgentServiceHooks {
   installed(): boolean;
   /** The pid the service manager runs the agent as, when it is running. */
   pid(): number | undefined;
+  /**
+   * Whether a service is installed for this configuration and its manager cannot be reached from
+   * here (no login session, no user bus): `installed()` is then false, but an agent that is
+   * running may well be the service's own.
+   */
+  unreachable?(): boolean;
   /** Ask the service manager to (re)start it; false when it would not. */
   restart(): boolean;
   /** How long a running agent is given to stop when it is replaced, or to come back (tests make it short). */
@@ -378,6 +384,15 @@ export function agentServiceFor(
         return status().pid;
       } catch {
         return undefined;
+      }
+    },
+    unreachable: () => {
+      if (process.platform !== "darwin" && process.platform !== "linux") return false;
+      try {
+        const answer = status();
+        return answer.installed && answer.reachable === false;
+      } catch {
+        return false;
       }
     },
     restart,
@@ -418,6 +433,16 @@ export async function ensureFleetAgent(
   }
   if (existing) {
     if (!settingsDiffer(existing, settings)) return existing;
+    // The settings are saved, but the agent that is running cannot be given them from here: its
+    // service is installed and its manager cannot be reached, so it may be the service's own.
+    // Stopping it and spawning another would have the manager's restarts collide with that one
+    // ("another fleet agent is already running") until a command that reaches it runs.
+    if (!managed && service.unreachable?.()) {
+      throw new CliError(
+        "the fleet agent (pid " + existing.pid + ") runs as a login service whose manager cannot be reached from here, so it cannot be restarted with the new settings",
+        "they are saved and apply the next time the service restarts; or run this from a login session (or stop the service) to apply them now",
+      );
+    }
     if (!managed) {
       await stopAndWait(configPath, existing, waitMs);
       existing = undefined;
