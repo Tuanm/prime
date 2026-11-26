@@ -28,7 +28,7 @@ charge is packed, sealed, and carried to the others.
 ## One is in charge
 
 At any moment exactly one space holds the lease. That one writes. The others are
-**replicas**: they mirror, and they never write.
+**replicas**: they keep a copy ready, and they never write.
 
 The lease is short - fifteen seconds - and the one holding it renews every five,
 so a space that goes quiet loses it quickly rather than locking the fleet.
@@ -58,7 +58,8 @@ instead of writing over the state the fleet has moved to.
 
 The space in charge watches its work tree. When something changes it builds a
 pack of what is different, seals it for the members' keys, and advances the head.
-A replica asks what the head is, and pulls what it is missing.
+A replica is told that the head moved, and fetches what it is missing into its own
+store in the background (see "A replica does not mirror all the time" below).
 
 ```mermaid
 sequenceDiagram
@@ -76,6 +77,41 @@ sequenceDiagram
 
 The gateway never opens a pack. It is sealed for the members' own keys, so the
 gateway carries boxes it cannot read.
+
+### A replica does not mirror all the time
+
+A replica does not write what the fleet publishes into its work tree as it arrives.
+When the head moves it **fetches**: it downloads the new snapshots, opens them with
+its own key, checks each against its manifest and keeps them in prime's object store
+beside the work tree. The work tree is written out - once, for however many snapshots
+it is behind - only when it has to be:
+
+- when the replica is about to **take over** (the fleet only gives the lease to a
+  member that has applied the head), so a replica that is promoted is current before
+  it accepts a write;
+- when a person runs **`prime fleets sync --space <name>`**, which fetches what is
+  missing and applies it;
+- the first time, so a member that joins has files to start from.
+
+**A lazy replica's work directory may be behind the fleet, and it is stale by design.**
+What it holds is always a snapshot the fleet really had (the last one applied), never
+a half-written mix. If something reads a replica's directory and must see the
+newest state, run `prime fleets sync`, or set `PRIME_FLEET_REPLICA=mirror` for the
+agent: it then writes every snapshot as it is fetched, as replicas did before.
+
+The member's state file records both positions: `seq`, `base` and `tree` are what the
+work tree holds, and `fetchedSeq`, `fetchedCommit` and `fetchedTree` the newest snapshot
+in the store, never behind it. `prime fleets agent status` shows what the agent last did
+("fetched 41", "applied 41", "took over at 41").
+
+Fetching is cheap: a replica that is up to date asks nothing, a socket that says "the
+head moved" starts one fetch, and the route to the head is the cheapest the replica can
+find (see "A replica that fell behind"). A replica takes its place in the fleet when the
+agent starts, when the fleet says the lease is free, and as a safety about once a minute
+(every fifteen seconds without a socket) - not on every round, and it does not renew a
+lease it does not hold. Replicas that hear "the lease is free" wait a little before asking,
+the ones that are further ahead first, and the one that loses finds the lease held and
+stays a replica, having written nothing.
 
 ### What a replica keeps
 
@@ -98,7 +134,8 @@ Two things are not "left alone", and they are not deleted either:
 - a file that is not ignored and that the fleet did not give the replica (a note
   someone wrote in the mirror) is a local change, like an edit to a file the fleet
   carries. Before the replica is brought up to date, the changed paths - only
-  those - are moved into `local-change-<time>` beside the work tree;
+  those - are moved into `local-change-<time>` beside the work tree. A lazy replica does
+  that when it is brought up to date (promotion or `prime fleets sync`), not on every head;
 - if the fleet turns a directory into a file, git cannot keep both: the ignored
   files inside that directory go with it.
 
@@ -134,9 +171,20 @@ is recorded as it is applied. A catch-up that fails part-way leaves a state that
 still describes the work tree, so nothing the fleet wrote is taken for a local
 change.
 
-A whole tree is also published when the members change - a space joins, leaves,
-or comes back with a new key (a swap of one space for another counts) - because
-a snapshot can only be opened by the members it was sealed for.
+A whole tree is also published when a member is added or comes back with a new key (a
+swap of one space for another counts), because a snapshot can only be opened by the
+members it was sealed for. A member that only left needs no whole tree: the next snapshot
+is not sealed for it, which is what keeps it out.
+
+**The route a replica takes is the cheapest it can find**, in bytes: either all the
+changes since what it holds, or a whole tree at some checkpoint and the changes after it.
+A checkpoint carries both - the whole tree, for a newcomer, and the change since the
+snapshot before it, sealed with the same key, for everyone who is up to date - so a
+replica that follows every snapshot never downloads a whole tree again. The gateway keeps
+an index of its snapshots (which are whole trees, how big the packs are), so a replica
+works the route out in one request, then fetches the manifests of the snapshots on it
+side by side; a gateway without an index is walked manifest by manifest. Older members
+ignore the second pack and take the whole tree, as before.
 
 ## Joining
 
@@ -196,7 +244,7 @@ agent stops holding the lease, so a call made in the gap fails with a plain
 
 `prime spaces enter` works on any space that is not in a fleet. In a fleet it
 works only on the space in charge: a fleet is several copies of one piece of
-work, and an edit made in a replica is thrown away the next time it mirrors.
+work, and an edit made in a replica is moved aside the next time it is brought up to date.
 
 The answer comes from the fleet, not from the configuration file, so a space that
 has just taken over can be entered at once.
@@ -257,14 +305,15 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | the name a fleet wants is a device's | refused: a fleet is reached under its own name, so the two must not collide |
 | two spaces would share a name | the second is refused when it asks to join, and told to pass `--name`; names are compared without case |
 | a member comes back with a new key | the fleet learns it when the member takes its place, and seals the next snapshot for it |
-| a replica's work tree was edited locally | the paths that differ from what the fleet gave it - and only those; ignored files and nested repositories are not touched - are moved aside into `local-change-<time>` beside the work tree, and the mirror is brought up to date: a replica that cannot catch up is a fleet that cannot promote it |
+| a replica's work tree was edited locally | the paths that differ from what the fleet gave it - and only those; ignored files and nested repositories are not touched - are moved aside into `local-change-<time>` beside the work tree when the replica is next brought up to date (a promotion, `prime fleets sync`, or every head in `mirror` mode): a replica that cannot catch up is a fleet that cannot promote it |
 | no member can be promoted | every member is behind the head (each one was edited and could not sync); the move above is what lets them catch up again |
 
 ## The agent belongs in a service
 
-The agent renews this machine's place in the fleet every few seconds. It is what
-keeps the fleet alive: while it runs, the space holds or mirrors; while it does
-not, the place lapses and the fleet waits for someone else to take it.
+The agent renews this machine's place in the fleet every few seconds while it holds
+the lease, and keeps a replica's copy fetched. It is what keeps the fleet alive: while
+it runs, the space holds the lease or has a copy ready to take it; while it does not,
+the place lapses and the fleet waits for someone else to take it.
 
 So it has to outlive the terminal that started it, and the reboot:
 
@@ -298,7 +347,22 @@ seconds:
 | paused, agents that listen | 4 | 0 |
 
 A running fleet still sends the requests that are its work: the primary renews the
-lease and publishes, the others pull what was published.
+lease and publishes, the others fetch what was published. An idle replica sends almost
+none: with a socket it looks at the head about every thirty seconds and takes its place
+about once a minute (about 4,000 requests a day, where it was about 11,500); without a
+socket, the head every second and a half and its place every fifteen seconds (about
+63,000, where it was about 132,000).
+
+What a snapshot costs on the wire (2,000 files, 3.9 MB, one file edited per snapshot, a
+replica that follows every one):
+
+| | before | now |
+|---|---|---|
+| a snapshot, up | 2.0 KB | 2.0 KB |
+| the checkpoint (every 32nd), up | 1.91 MB | 1.88 MB tree + 2 KB change |
+| the checkpoint, a replica that is up to date, down | 1.91 MB | 2.8 KB |
+| a snapshot while one member is far behind, up | 1.92 MB, each time | 2.0 KB |
+| a member 39 snapshots behind catches up, down | 1.92 MB | 58 KB |
 
 The gateway counts what it does - requests, how long each object was busy
 serving them, the objects stored and read - and prices them at Cloudflare's list prices with
@@ -319,6 +383,8 @@ it, and so does everything that is not a fleet.
 | lease | fifteen seconds, renewed every five |
 | snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change |
 | snapshots kept | the last 64 |
+| a member's object store | collected when it passes 32 MB (about hourly) and whenever it is over `PRIME_FLEET_CACHE_MB` (512 by default); it keeps the snapshot the work tree holds, the newest fetched and what its indexes name |
+| `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
 | a fleet nobody touches | cleaned up after a day |
 
 ## Where to read more

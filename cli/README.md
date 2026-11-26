@@ -213,7 +213,7 @@ A space can join as it is made:
 ```bash
 prime spaces create --name alpha --fleet acme
 prime spaces create --name beta --fleet acme --code <code>
-prime fleets sync --space beta                # one round: publish or catch up
+prime fleets sync --space beta                # one round: publish, or fetch and apply what is missing
 prime fleets sync --space beta --watch        # keep the spaces in step
 prime fleets leave acme
 ```
@@ -227,6 +227,12 @@ prime fleets agent install                    # starts at login, comes back if i
 prime fleets agent status                     # rounds, last action, and whether it is a service
 prime fleets agent uninstall                  # back to running it by hand
 ```
+
+A replica fetches what the fleet publishes in the background but does not write it into
+its work tree until it has to (when it takes over, or when you run `prime fleets sync`), so
+**a replica's directory may be behind the fleet**. `PRIME_FLEET_REPLICA=mirror` writes every
+snapshot as it arrives; `PRIME_FLEET_CACHE_MB` (512 by default) is where the member's object
+store is collected. See [docs/fleets.md](../docs/fleets.md).
 
 ```mermaid
 sequenceDiagram

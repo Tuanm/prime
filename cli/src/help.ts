@@ -426,7 +426,7 @@ USAGE
   prime fleets leave <fleet-id>                  Leave the fleet
   prime fleets revoke <fleet-id>                 Invalidate every outstanding invite
   prime fleets delete <fleet-id>                  Remove the fleet and everything in it
-  prime fleets sync <fleet-id> --space <name>     One round: publish if primary, pull if replica
+  prime fleets sync <fleet-id> --space <name>     One round: publish if primary; if replica, fetch and apply what is missing
   prime fleets sync ... --watch [--interval <s>]  Keep going, so the space stays in step on its own
   prime fleets agent status|start|stop          The agent that keeps the fleet in step
   prime fleets agent install                    Run the agent as a login service (it starts at login)
