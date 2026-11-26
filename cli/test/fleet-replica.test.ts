@@ -1454,6 +1454,48 @@ describe("a claim and the pace of the agent's rounds", () => {
     }
   });
 
+  test("what a refusal asked for is waited for through the real request, and forgotten once another outcome comes", async () => {
+    const loopSleepMs = await two();
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: false });
+      const orig = w.gateway.handle.bind(w.gateway);
+      let mode: "refuse" | "drop" | "ok" = "refuse";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (w.gateway as any).handle = async (creds: any, method: string, path: string, ...rest: any[]) => {
+        if (path.includes("/bootstrap")) {
+          if (mode === "refuse") return new Response(JSON.stringify({ error: "slow down" }), { status: 429, headers: { "retry-after": "90" } });
+          if (mode === "drop") throw new Error("connection reset");
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (orig as any)(creds, method, path, ...rest);
+      };
+      const askAgain = async (): Promise<void> => {
+        s.loop.claim = true;
+        s.loop.claimAt = 0;
+        await s.round().catch(() => undefined);
+      };
+      await askAgain();
+      expect(s.loop.refusedForMs).toBe(90_000);
+      s.loop.failures = 1;
+      expect(loopSleepMs(s.loop, 1500)).toBeGreaterThanOrEqual(90_000);
+      // The next request is lost on the way: the old retry-after no longer says anything about the gateway.
+      mode = "drop";
+      await askAgain();
+      expect(s.loop.refusedForMs).toBeUndefined();
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThan(30_000);
+      // And an answer that is not a refusal clears it too.
+      mode = "refuse";
+      await askAgain();
+      expect(s.loop.refusedForMs).toBe(90_000);
+      mode = "ok";
+      await askAgain();
+      expect(s.loop.refusedForMs).toBeUndefined();
+    } finally {
+      finish(w);
+    }
+  });
+
   test("a member that can never catch up asks a few times and stops claiming, and a healthy replica takes over", async () => {
     const loopSleepMs = await two();
     const w = await world();

@@ -1134,12 +1134,17 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
   loop.placing = true;
   try {
     const keys = loadOrCreateKeyPair(loop.paths.keyFile);
-    const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name);
+    const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name).catch((err: unknown) => {
+      // The request did not get an answer: what an earlier refusal asked for is history.
+      loop.refusedForMs = undefined;
+      throw err;
+    });
     loop.lastBootstrap = Date.now();
     if (placed.paused) {
       loop.paused = true;
       loop.primary = false;
       loop.retryAfterMs = placed.retryAfterMs;
+      loop.refusedForMs = undefined;
       return { primary: false, paused: true };
     }
     if (!placed.ok) {
