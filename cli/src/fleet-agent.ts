@@ -460,7 +460,13 @@ async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: nu
   if (route === null) return null;
 
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
-  const real = await mapLimit(route, 6, async (step) => fetchManifest(creds, fleet, manifestIdOf(bySeq.get(step.manifest.seq)!.manifestKey)));
+  // The newest snapshot first, on its own: if it is not sealed for this member no
+  // route reaches it, and nothing else need be read.
+  const newest = await fetchManifest(creds, fleet, manifestIdOf(tip.manifestKey));
+  if (newest.seq === tip.seq && !openableBy(newest, who)) throw new NotSealedYetError();
+  const real = await mapLimit(route, 6, async (step) =>
+    step.manifest.seq === newest.seq ? newest : fetchManifest(creds, fleet, manifestIdOf(bySeq.get(step.manifest.seq)!.manifestKey)),
+  );
   const chain: RouteStep[] = [];
   for (const [i, step] of route.entries()) {
     const m = real[i]!;
@@ -494,6 +500,11 @@ async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: nu
   let manifest: FleetManifest | null = await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey));
   while (manifest !== null && manifest.seq > lastSeq) {
     walked.push(manifest);
+    // The newest snapshot is not sealed for this member: no route reaches it.
+    if (walked.length === 1 && !openableBy(manifest, who)) throw new NotSealedYetError();
+    // A snapshot this member cannot open ends the walk: a route through it does not
+    // exist, and one that starts after it needs nothing older.
+    if (!openableBy(manifest, who)) break;
     // A whole tree with no change beside it ends the walk: no route goes back past it.
     if (manifest.full && !manifest.delta) break;
     if (manifest.parentManifest === undefined || walked.length >= WALK_LIMIT) break;
@@ -530,6 +541,19 @@ export async function openStep(
   const plain = openForMember(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey);
   if (!plain) throw new NotSealedError(m.seq);
   return plain;
+}
+
+/**
+ * The newest snapshot is not sealed for this member: it joined, or came back with
+ * a new key, after it was published. Nothing can be done until the primary
+ * publishes again, which it does as soon as it notices the roster changed.
+ */
+export class NotSealedYetError extends Error {
+  constructor() {
+    super(
+      "the fleet has no snapshot sealed for this member yet: it joined (or came back with a new key) after the newest one was published, and the primary publishes again as soon as it notices",
+    );
+  }
 }
 
 /** A snapshot this member cannot open: sealed before it joined, or for a key it no longer has. */

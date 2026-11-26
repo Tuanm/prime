@@ -933,3 +933,35 @@ describe("a member that came back with a new key", () => {
     expect(chooseRoute([m(4, undefined, { full: true, packBytes: 900 }), m(3, undefined), m(2, undefined)], 1, { memberId: "me", skipThrough: 3 })!.map((s) => s.manifest.seq)).toEqual([4]);
   });
 });
+
+describe("a member that joined and has nothing sealed for it yet", () => {
+  test("is told so after reading one manifest, not the whole retained history", async () => {
+    const w = await world(6);
+    try {
+      for (let i = 0; i < 36; i++) await w.publishNext(); // a checkpoint at 32, whole tree and change
+      const r = w.replica("newcomer");
+      w.gateway.requests.clear();
+      let message = "";
+      try {
+        await prefetch(credsFor("newcomer"), "x", r.paths, r.state, r.save);
+      } catch (err) {
+        message = String(err);
+      }
+      expect(message).toContain("no snapshot sealed for this member yet");
+      expect(w.gateway.requests.get("GET manifests") ?? 0).toBeLessThanOrEqual(2);
+
+      // The same without an index to start from.
+      w.gateway.indexEnabled = false;
+      w.gateway.requests.clear();
+      await expect(prefetch(credsFor("newcomer"), "x", r.paths, r.state, r.save)).rejects.toThrow("no snapshot sealed for this member yet");
+      expect(w.gateway.requests.get("GET manifests") ?? 0).toBe(1);
+
+      // The primary notices the roster and publishes again: now there is something.
+      await w.publishNext();
+      const got = await prefetch(credsFor("newcomer"), "x", r.paths, r.state, r.save);
+      expect(got.fetched.seq).toBe(37);
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+});
