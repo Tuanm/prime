@@ -79,15 +79,28 @@ gateway carries boxes it cannot read.
 
 ### What a replica keeps
 
-A replica mirrors what the fleet carries, and only that. The fleet carries the
-files the space in charge has in its work tree except what git ignores
-(`.gitignore`) and except nested git repositories, so those are never sent.
+The fleet carries the files in the primary's work tree, except what git ignores
+(`.gitignore`) and except nested git repositories - directories that have their
+own `.git`. Those two are never sent, and a directory that was synced and then
+became a repository is no longer published (the copies other replicas already
+have stay where they are).
 
 When a snapshot arrives, the replica writes the files it has and removes the
-files the *previous* snapshot had and this one does not - the ones the primary
-deleted. Anything else is left alone: a `.env`, `node_modules`, a build output,
-a note someone wrote in the mirror, a nested repository. The fleet never put those
-there, so it never takes them away.
+files the *previous* snapshot had and this one does not: the ones the primary
+deleted. A removal stays inside the work tree (a directory turned into a symlink
+is not followed) and only takes a file whose name matches exactly, so a rename
+that changes only the case keeps its file on a file system that folds case.
+
+What the fleet never carried is not removed by an apply: git-ignored files
+(`.env`, `node_modules`, build output) and nested repositories are untouched.
+Two things are not "left alone", and they are not deleted either:
+
+- a file that is not ignored and that the fleet did not give the replica (a note
+  someone wrote in the mirror) is a local change, like an edit to a file the fleet
+  carries. Before the replica is brought up to date, the changed paths - only
+  those - are moved into `local-change-<time>` beside the work tree;
+- if the fleet turns a directory into a file, git cannot keep both: the ignored
+  files inside that directory go with it.
 
 The first snapshot a replica applies has no previous one to compare with. It
 removes nothing: a stray file is better than a lost one, and from the second
@@ -103,11 +116,23 @@ than trusting it.
 ### A replica that fell behind
 
 Most snapshots carry only what changed. Every 32nd carries the whole tree, as an
-anchor. A replica that was away - however long - starts from the newest whole
-tree and applies the changes after it, which is at most 32 snapshots. How far
-behind one replica is changes nothing for the others: the space in charge goes
-on publishing small changes, and the gateway keeps the last 64 snapshots, enough
-for the newest whole tree and every change after it.
+anchor - the tree's own files, not the history before it, so its size follows the
+tree. A replica that was away starts from the newest whole tree and applies the
+changes after it, at most 32 snapshots, however far behind it is. How far behind
+one replica is changes nothing for the others: the space in charge goes on
+publishing small changes. The gateway keeps the last 64 snapshots, twice the
+interval, so the newest whole tree and every change after it are there.
+
+Each snapshot names the head it was built on, whoever published it, so the chain
+a replica walks stays whole when the space in charge changes hands. A snapshot
+can only be opened by the members it was sealed for; if the chain starts before a
+member joined (or before it came back with a new key), it waits for a snapshot
+sealed for it - the next change of members, or the next whole tree.
+
+The chain is downloaded and opened before the first step is applied, and each step
+is recorded as it is applied. A catch-up that fails part-way leaves a state that
+still describes the work tree, so nothing the fleet wrote is taken for a local
+change.
 
 A whole tree is also published when the members change - a space joins, leaves,
 or comes back with a new key (a swap of one space for another counts) - because
