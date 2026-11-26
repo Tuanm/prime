@@ -164,6 +164,51 @@ describe("writing it out when it matters", () => {
     }
   });
 
+  test("a note left by an apply that finished does not hide the replica's own edits", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      const firstCommit = r.state.base!;
+      const old = readFileSync(join(r.paths.work, "f1.txt"), "utf8");
+      await w.publishNext(); // f1.txt changes
+      await pull(credsFor("r1"), "x", r.paths, 1, firstCommit, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      expect(readFileSync(join(r.paths.work, "f1.txt"), "utf8")).not.toBe(old);
+      // The first apply was stopped between its sidecar and the removal of its note.
+      writeFileSync(join(r.paths.gitDir, "apply.target"), JSON.stringify({ from: null, to: firstCommit }));
+      // The member puts f1.txt back as it was in that first snapshot: an edit of its own now.
+      writeFileSync(join(r.paths.work, "f1.txt"), old);
+      await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      const done = await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(done!.kept?.moved).toBe(1);
+      expect(readFileSync(join(done!.kept!.to, "f1.txt"), "utf8")).toBe(old);
+      expect(existsSync(join(r.paths.gitDir, "apply.target"))).toBe(false);
+      rmSync(done!.kept!.to, { recursive: true, force: true });
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a note is removed when the sidecar says the apply it was for is done", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      await w.publishNext();
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      // As if the stop came right after the sidecar was written.
+      writeFileSync(join(r.paths.gitDir, "apply.target"), JSON.stringify({ from: null, to: got.fetched.commit }));
+      writeFileSync(join(r.paths.gitDir, "apply.commit"), got.fetched.commit + "\n");
+      await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(existsSync(join(r.paths.gitDir, "apply.target"))).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
+
   test("a catch-up on request uses what was fetched and downloads nothing again", async () => {
     const w = await world();
     try {

@@ -913,10 +913,31 @@ describe("an apply that was killed half way", () => {
       // Meanwhile the member had edited c.txt.
       writeFileSync(join(r.other, "c.txt"), "c1, edited by the member");
 
-      expect(await localChanges(r.other, r.otherGit, r.first.tree)).toEqual(["c.txt"]);
+      expect(await localChanges(r.other, r.otherGit, r.first.tree, { base: r.first.commit })).toEqual(["c.txt"]);
       // Without the note, the same work tree reads as four edits.
       rmSync(join(r.otherGit, "apply.target"));
       expect((await localChanges(r.other, r.otherGit, r.first.tree)).sort()).toEqual(["a.txt", "c.txt", "d.txt", "keep.txt"]);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a note that does not start from where the member is is not trusted", async () => {
+    const r = await replicaOf({ "a.txt": "a1", "b.txt": "b1" });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "a2");
+      writeFileSync(join(r.work, "b.txt"), "b2");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree });
+      await applyCommit(r.other, r.otherGit, second.commit, [], r.first.commit);
+      // The member's first apply (null -> first) left its note behind when it was stopped after the sidecar.
+      // Since then the member holds the second snapshot, and its owner puts b.txt back as the first one had it.
+      writeFileSync(join(r.otherGit, "apply.target"), JSON.stringify({ from: null, to: r.first.commit }));
+      writeFileSync(join(r.other, "b.txt"), "b1");
+      expect(await localChanges(r.other, r.otherGit, second.tree, { base: second.commit })).toEqual(["b.txt"]);
+      // The note of an apply that did start from where the member is still counts.
+      writeFileSync(join(r.otherGit, "apply.target"), JSON.stringify({ from: second.commit, to: r.first.commit }));
+      expect(await localChanges(r.other, r.otherGit, second.tree, { base: second.commit })).toEqual([]);
     } finally {
       rmSync(r.root, { recursive: true, force: true });
     }

@@ -14,7 +14,7 @@
 //            applied;
 //   head     what the fleet has, which the agent learns from its socket.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyFetched, fetchAhead, type HeadHint, type MemberPaths, type Position } from "./fleet-agent";
@@ -158,7 +158,11 @@ export async function applyReady(
   // one: looking at the work tree would take every file the fleet wrote for the
   // member's own edit. The sidecar of the apply says what was written last.
   let kept: ApplyReport["kept"];
-  if (!(await workTreeHolds(paths.gitDir, fetched.commit)) && state.tree !== undefined) {
+  const holds = await workTreeHolds(paths.gitDir, fetched.commit);
+  // The apply that wrote it finished; a note of what it was for that is still there
+  // (the stop came between the sidecar and its removal) is done with.
+  if (holds) rmSync(join(paths.gitDir, "apply.target"), { force: true });
+  if (!holds && state.tree !== undefined) {
     const local = await snapshot({
       work: paths.work,
       gitDir: paths.gitDir,
@@ -167,7 +171,10 @@ export async function applyReady(
       ...(paths.nested ? { nested: paths.nested } : {}),
     });
     if (local.tree !== state.tree) {
-      const moved = await preserveLocalChange(paths.work, paths.gitDir, state.tree, paths.nested ? { nested: paths.nested } : {});
+      const moved = await preserveLocalChange(paths.work, paths.gitDir, state.tree, {
+        base: state.base ?? null,
+        ...(paths.nested ? { nested: paths.nested } : {}),
+      });
       if (moved.moved > 0) kept = moved;
     }
   }

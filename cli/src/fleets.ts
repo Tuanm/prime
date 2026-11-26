@@ -620,7 +620,7 @@ export async function syncFleetSpace(
   if (state.tree !== undefined) {
     const local = await snapshot({ work, gitDir: paths.gitDir, base: state.base ?? null, treeOnly: true });
     if (local.tree !== state.tree) {
-      await preserveLocalChange(work, paths.gitDir, state.tree);
+      await preserveLocalChange(work, paths.gitDir, state.tree, { base: state.base ?? null });
     }
   }
   // What a lazy agent has already fetched is used, not downloaded again. The

@@ -771,11 +771,15 @@ async function waitForIndexLock(lock: string, waitMs = 15_000): Promise<void> {
 }
 
 // The tree an interrupted apply was writing, if one was: files of it in the work tree
-// are the fleet's, not the member's.
-async function interruptedTarget(gitDir: string, env: Record<string, string>): Promise<string | null> {
+// are the fleet's, not the member's. The note counts only for an apply that started from
+// where this member's state says it is (`base`): a note left by an apply that finished
+// (the stop came between its two last writes) describes some older move, and trusting
+// it would hide edits that happen to equal the old snapshot.
+async function interruptedTarget(gitDir: string, env: Record<string, string>, base: string | null): Promise<string | null> {
   try {
-    const target = JSON.parse(readFileSync(join(gitDir, "apply.target"), "utf8")) as { to?: unknown };
+    const target = JSON.parse(readFileSync(join(gitDir, "apply.target"), "utf8")) as { from?: unknown; to?: unknown };
     if (typeof target.to !== "string" || !OBJECT_ID.test(target.to)) return null;
+    if ((typeof target.from === "string" ? target.from : null) !== base) return null;
     return await gitText(gitDir, ["rev-parse", target.to + "^{tree}"], env);
   } catch {
     return null;
@@ -856,7 +860,12 @@ export async function localChanges(
   work: string,
   gitDir: string,
   tree: string,
-  opts: { exclude?: string[]; nested?: NestedRepoCache } = {},
+  opts: {
+    exclude?: string[];
+    nested?: NestedRepoCache;
+    /** The commit this member's state says it holds (null: none yet); an interrupted apply counts only from there. */
+    base?: string | null;
+  } = {},
 ): Promise<string[]> {
   if (!tree) return [];
   const indexFile = join(gitDir, "local-check.index");
@@ -881,7 +890,7 @@ export async function localChanges(
     // An apply that was stopped half way left files of the snapshot it was writing beside
     // those of the one before: a file that is the same as either is the fleet's. Only what is
     // like neither is the member's own.
-    const writing = await interruptedTarget(gitDir, env);
+    const writing = await interruptedTarget(gitDir, env, opts.base ?? null);
     if (writing !== null && writing !== tree) {
       const notTarget = new Set(await differing(writing));
       paths = paths.filter((p) => notTarget.has(p));
@@ -906,7 +915,7 @@ export async function preserveLocalChange(
   work: string,
   gitDir: string,
   tree: string,
-  opts: { exclude?: string[]; nested?: NestedRepoCache } = {},
+  opts: { exclude?: string[]; nested?: NestedRepoCache; base?: string | null } = {},
 ): Promise<{ moved: number; to: string }> {
   const changed = await localChanges(work, gitDir, tree, opts);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
