@@ -1349,6 +1349,27 @@ describe("a claim and the pace of the agent's rounds", () => {
     }
   });
 
+  test("a failed request while the lease is free does not put a replica with a socket to sleep for minutes", async () => {
+    const loopSleepMs = await two();
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      s.loop.claim = true;
+      s.loop.claimAt = Date.now() - 1000;
+      s.loop.failures = 1;
+      // Back-off from the poll's pace (3 s), not from the five minutes an idle replica with a socket sleeps.
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThanOrEqual(30_000);
+      s.loop.failures = 3;
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThanOrEqual(30_000);
+      expect(loopSleepMs(s.loop, 1500)).toBeGreaterThanOrEqual(10_000);
+      // Without a claim an idle replica with a socket sleeps long, as it should.
+      s.loop.claim = false;
+      expect(loopSleepMs(s.loop, 1500)).toBeGreaterThanOrEqual(60_000);
+    } finally {
+      finish(w);
+    }
+  });
+
   test("a failing round waits as the back-off says, claim pending or not", async () => {
     const loopSleepMs = await two();
     const { roundSleepMs } = await import("../src/fleet-events");
@@ -1360,8 +1381,9 @@ describe("a claim and the pace of the agent's rounds", () => {
       expect(loopSleepMs(s.loop, 1500)).toBeLessThanOrEqual(15_000);
       s.loop.failures = 4;
       const waits = loopSleepMs(s.loop, 1500);
-      expect(waits).toBeGreaterThanOrEqual(roundSleepMs({ paused: false, connected: false, pollMs: 15_000, failures: 4 }));
       expect(waits).toBeGreaterThanOrEqual(24_000);
+      // Not the 200 ms of a claim that is due, whatever failed; and bounded by the failing round's own maximum.
+      expect(waits).toBeLessThanOrEqual(roundSleepMs({ paused: false, connected: false, pollMs: 15_000, failures: 30 }));
     } finally {
       finish(w);
     }

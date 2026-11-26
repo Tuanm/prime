@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
-import { FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
+import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import {
   FETCHED_REPORT_MS,
@@ -396,8 +396,15 @@ export function loopSleepMs(loop: SpaceLoop, pollMs: number, now: number = Date.
     ...(idle.idleMs !== undefined ? { idleMs: idle.idleMs } : {}),
     failures: loop.failures,
   });
-  const waiting = loop.claim && !loop.primary && !loop.paused && (loop.failures ?? 0) === 0;
-  return waiting ? Math.min(sleepMs, Math.max(200, loop.claimAt - now)) : sleepMs;
+  if (loop.claim && !loop.primary && !loop.paused) {
+    const failures = Math.min(30, loop.failures ?? 0);
+    // A replica that is waiting to take the lease and whose round failed backs off from the
+    // poll's pace, not from the long wait of an idle replica with a socket: the lease is free,
+    // and one failed request must not put the only replica to sleep for minutes.
+    if (failures > 0) return Math.max(200, loop.claimAt - now, Math.min(FAILING_MAX_MS, pollMs * 2 ** failures));
+    return Math.min(sleepMs, Math.max(200, loop.claimAt - now));
+  }
+  return sleepMs;
 }
 
 /**
