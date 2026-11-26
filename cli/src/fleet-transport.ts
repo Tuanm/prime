@@ -63,6 +63,11 @@ export interface FleetManifest {
    */
   roster?: string;
   /**
+   * Which fleet of this name the snapshot belongs to (the gateway's `/role` says which it is now: `fetchRole`): sealed, so a
+   * snapshot of an earlier fleet that had the name does not pass for this one's.
+   */
+  incarnation?: string;
+  /**
    * The publisher's seal over what the manifest claims (see `SealFields` in
    * fleet-crypto.ts). Only a member that holds the snapshot key can make it, so a
    * manifest the gateway edited, or an old snapshot shown under a newer sequence,
@@ -290,11 +295,17 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
-  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number };
-  return { member: body.member === true, primary: body.primary === true, epoch: body.epoch ?? 0 };
+  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown };
+  return {
+    member: body.member === true,
+    primary: body.primary === true,
+    epoch: body.epoch ?? 0,
+    // Which fleet of this name it is: absent from a gateway that predates it.
+    ...(typeof body.incarnation === "string" && body.incarnation ? { incarnation: body.incarnation } : {}),
+  };
 }
 
 /** Renew the lease this device holds. */

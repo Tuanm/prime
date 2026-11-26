@@ -131,6 +131,8 @@ export interface SealFields {
   deltaHash: string | null;
   senderPublicKey: string;
   roster: string | null;
+  /** Which fleet of this name it is; null from a publisher that does not know. */
+  incarnation: string | null;
 }
 
 const SEAL_INFO = Buffer.from("prime-fleet-seal-v1");
@@ -145,8 +147,23 @@ function sealKeyOf(snapshotKey: Buffer): Buffer {
 
 function sealBytes(f: SealFields): Buffer {
   // A fixed order and no optional keys: the same fields always give the same bytes.
+  // The incarnation is appended only when there is one, so what a publisher that has none seals is what it always was.
   return Buffer.from(
-    JSON.stringify(["prime-fleet-seal-v1", f.fleet, f.seq, f.parentSeq, f.parentManifest, f.tipCommit, f.tree, f.full, f.packHash, f.deltaHash, f.senderPublicKey, f.roster]),
+    JSON.stringify([
+      "prime-fleet-seal-v1",
+      f.fleet,
+      f.seq,
+      f.parentSeq,
+      f.parentManifest,
+      f.tipCommit,
+      f.tree,
+      f.full,
+      f.packHash,
+      f.deltaHash,
+      f.senderPublicKey,
+      f.roster,
+      ...(f.incarnation !== null ? [f.incarnation] : []),
+    ]),
     "utf8",
   );
 }

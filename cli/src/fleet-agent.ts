@@ -22,6 +22,7 @@ import {
   fetchIndex,
   fetchManifest,
   fetchMemberKeys,
+  fetchRole,
   reportApplied,
   getPayload,
   payloadHash,
@@ -143,8 +144,13 @@ export async function publish(
   lastRoster?: string,
 ): Promise<PublishResult> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
-  const members = await fetchMemberKeys(creds, fleet);
-  const head = await fetchHead(creds, fleet).catch(() => null);
+  const [members, head, role] = await Promise.all([
+    fetchMemberKeys(creds, fleet),
+    fetchHead(creds, fleet).catch(() => null),
+    // Which fleet of this name it is, for the seal; a gateway that does not say, or does not answer, leaves it out.
+    fetchRole(creds, fleet).catch(() => undefined),
+  ]);
+  const incarnation = role?.member ? role.incarnation : undefined;
 
   // A member that took over has to fetch the state it is about to replace
   // before it publishes on top of it. Otherwise the fleet would lose
@@ -179,15 +185,15 @@ export async function publish(
   // has an anchor and cannot grow for ever.
   const checkpoint = seq % FULL_PACK_WINDOW === 0;
   const noBase = base === null;
-  // A snapshot built on one that has no seal, or none of the tags a sender makes for its members
-  // (an old member took over, or this fleet is mid-upgrade), is a whole tree: a replica that
+  // A snapshot built on one that has no seal, none of the tags a sender makes for its members, or no
+  // mark of its fleet (an old member took over, or this fleet is mid-upgrade), is a whole tree: a replica that
   // has seen them refuses that one, and a whole tree is the way around it - the replica starts
   // from this one and never needs the snapshot it refused. A head whose manifest cannot be read
   // is taken as one of those: the whole tree is the safe side of not knowing.
   const headUnsealed =
     head !== null && !(noBase || membershipChanged || checkpoint)
       ? await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey)).then(
-          (m) => m.seal === undefined || !m.wrapped.some((w) => w.mac !== undefined),
+          (m) => m.seal === undefined || !m.wrapped.some((w) => w.mac !== undefined) || (incarnation !== undefined && m.incarnation === undefined),
           () => true,
         )
       : false;
@@ -264,6 +270,7 @@ export async function publish(
     senderPublicKey: sealed.senderPublicKey,
     wrapped: sealed.wrapped,
     roster,
+    ...(incarnation !== undefined ? { incarnation } : {}),
     epoch: head?.epoch ?? 0,
     createdAt: Date.now(),
   };
@@ -278,6 +285,9 @@ export async function publish(
     // The fleet says this member has not applied the head, which it holds: the
     // report that said so was lost. Say it again, and publish once more.
     await reportApplied(creds, fleet, appliedSeq);
+    // The refusal may have taken what the manifest names with it (a gateway cleans up after a publish
+    // that did not move the head): the change pack is stored again before the manifest is sent again.
+    if (sealed.ciphertexts[1]) await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
     moved = await putSnapshot(creds, fleet, manifest, main);
   }
   if (!moved.ok) {
@@ -289,8 +299,8 @@ export async function publish(
   await reportApplied(creds, fleet, seq).catch(() => undefined);
   // This fleet has a snapshot with a seal now: from here an unsealed one that is newer is refused.
   const trust = FleetTrust.beside(paths.keyFile);
-  trust.noteSealed(seq);
-  if (sealed.wrapped.length > 0) trust.noteMac(seq);
+  trust.noteTakenIn(manifest, creds.deviceId);
+  trust.pin(incarnation);
   try {
     trust.save();
   } catch {

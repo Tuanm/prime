@@ -330,6 +330,7 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("meta");
     await this.state.storage.delete("members");
     await this.state.storage.delete("created");
+    await this.state.storage.delete("incarnation");
     await this.state.storage.delete("invites");
     await this.state.storage.delete("pending");
     await this.state.storage.delete("lease");
@@ -1313,6 +1314,19 @@ export class FleetDO implements DurableObject {
     return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
   }
 
+  // Which fleet this is, as opposed to another that was made under the same name after this one was
+  // deleted. A snapshot of the earlier one is sealed and signed all the same, and its key files
+  // are still on the members' disks: the members bind it into what they seal and check, so a
+  // replayed snapshot of an earlier fleet does not pass for one of this. Made when first asked
+  // (a fleet that predates it gets one then), and gone with the fleet.
+  private async incarnation(): Promise<string> {
+    const known = await this.state.storage.get<string>("incarnation");
+    if (known) return known;
+    const made = crypto.randomUUID();
+    await this.state.storage.put("incarnation", made);
+    return made;
+  }
+
   // What this device may do right now. The Worker asks before serving a
   // payload, so the answer has to be cheap and cannot involve the network.
   private async role(caller: Caller): Promise<Response> {
@@ -1326,6 +1340,7 @@ export class FleetDO implements DurableObject {
       primary: held !== null && held.holder === caller.deviceId,
       epoch: held ? held.epoch : 0,
       role: member.role,
+      incarnation: await this.incarnation(),
     });
   }
 

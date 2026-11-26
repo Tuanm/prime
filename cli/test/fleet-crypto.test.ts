@@ -96,7 +96,7 @@ describe("sealing for members", () => {
 describe("the seal of a manifest", () => {
   const fields = {
     fleet: "x", seq: 7, parentSeq: 6, parentManifest: "fleets/x/manifests/abc", tipCommit: "c".repeat(40), tree: "t".repeat(40),
-    full: false, packHash: "a".repeat(64), deltaHash: null as string | null, senderPublicKey: "", roster: "a:b" as string | null,
+    full: false, packHash: "a".repeat(64), deltaHash: null as string | null, senderPublicKey: "", roster: "a:b" as string | null, incarnation: "inc-1" as string | null,
   };
   const make = () => {
     const alice = generateMemberKeyPair();
@@ -117,9 +117,17 @@ describe("the seal of a manifest", () => {
     const { f, tag, opened } = make();
     const changed: Array<Partial<typeof f>> = [
       { fleet: "y" }, { seq: 8 }, { parentSeq: 5 }, { parentSeq: null as unknown as number }, { parentManifest: "other" }, { tipCommit: "d".repeat(40) },
-      { tree: "u".repeat(40) }, { full: true }, { packHash: "b".repeat(64) }, { deltaHash: "b".repeat(64) }, { roster: null }, { senderPublicKey: "other" },
+      { tree: "u".repeat(40) }, { full: true }, { packHash: "b".repeat(64) }, { deltaHash: "b".repeat(64) }, { roster: null }, { senderPublicKey: "other" }, { incarnation: "inc-2" }, { incarnation: null },
     ];
     for (const c of changed) expect(opened.sealMatches({ ...f, ...c }, tag)).toBe(false);
+  });
+
+  test("a publisher that does not know the incarnation seals what it always did", () => {
+    const { f, sealed, opened } = make();
+    const without = { ...f, incarnation: null };
+    expect(opened.sealMatches(without, sealed.seal(without))).toBe(true);
+    // And the seal says which fleet of the name it is, so one of an earlier fleet is not this one's.
+    expect(opened.sealMatches(without, sealed.seal(f))).toBe(false);
   });
 
   test("a seal made under another snapshot key does not match", () => {

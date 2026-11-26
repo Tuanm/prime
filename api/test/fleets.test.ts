@@ -478,6 +478,31 @@ describe("approval and removal", () => {
   });
 });
 
+describe("which fleet a name stands for", () => {
+  const role = (d: FleetDO, device: string) => call(d, "/role", { caller: "device", device, method: "GET" });
+
+  test("a member is told the fleet's incarnation, the same every time", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    const first = await role(doInstance, "dev-owner");
+    expect(typeof first.json.incarnation).toBe("string");
+    expect(first.json.incarnation.length).toBeGreaterThan(8);
+    expect((await role(doInstance, "dev-owner")).json.incarnation).toBe(first.json.incarnation);
+    // A stranger is told nothing of it.
+    expect((await role(doInstance, "dev-stranger")).json.incarnation).toBeUndefined();
+  });
+
+  test("a fleet made again under a deleted fleet's name is another incarnation", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    const before = (await role(doInstance, "dev-owner")).json.incarnation;
+    await call(doInstance, "/delete", { caller: "admin", device: "operator", body: {} });
+    await makeFleet(doInstance, "dev-owner");
+    const after = (await role(doInstance, "dev-owner")).json.incarnation;
+    expect(after).not.toBe(before);
+  });
+});
+
 describe("deleting a fleet", () => {
   test("the owner may delete it, and the name is free again", async () => {
     const { doInstance, state } = makeDo();

@@ -486,6 +486,65 @@ describe("the change pack that travels beside a whole tree", () => {
   });
 });
 
+describe("a publish that is refused once and sent again", () => {
+  test("sends the change pack again, so the head does not name one the gateway deleted", async () => {
+    const w = await world();
+    w.gateway.dropChangePackOnRefusal = true;
+    await w.next("one\n");
+    w.gateway.failApplied = 1; // the report that this member applied 1 is lost
+    w.gateway.applied.set("primary-device", 0);
+    w.gateway.seed("third-device", generateMemberKeyPair().publicKey); // the next snapshot is a whole tree with a change pack
+    const two = await w.next("two\n");
+    const m2 = w.manifest(two.manifestKey);
+    expect(m2.delta).toBeDefined();
+    expect(w.gateway.payloads.has(m2.delta!.packKey)).toBe(true);
+  });
+});
+
+describe("a fleet made again under the name of a deleted one", () => {
+  test("does not take a sealed snapshot of the earlier fleet, replayed from storage that survived it", async () => {
+    const w = await world();
+    await w.next("old fleet: secret project v2\n");
+    // The fleet is deleted and made again under the same name: the gateway says it is another incarnation,
+    // and the members' key files are still there. What the old one stored is replayed as the head.
+    w.gateway.incarnation = "incarnation-2";
+    await expect(w.pullReplica(0)).rejects.toThrow(/earlier fleet that had the name x/);
+    expect(existsSync(join(w.replica.work, "file.txt"))).toBe(false);
+  });
+
+  test("a member that learnt which fleet it is in refuses a snapshot that does not say, once one has", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    w.gateway.incarnation = undefined; // a publisher whose gateway does not say
+    await w.next("two\n");
+    await expect(w.pullReplica(1)).rejects.toThrow(/no mark of which fleet/);
+  });
+
+  test("a publisher that finds a head without the mark publishes a whole tree", async () => {
+    const w = await world();
+    w.gateway.incarnation = undefined;
+    await w.next("one\n");
+    w.gateway.incarnation = "incarnation-1";
+    const two = await w.next("two\n");
+    expect(w.manifest(two.manifestKey).full).toBe(true);
+    expect(w.manifest(two.manifestKey).incarnation).toBe("incarnation-1");
+  });
+
+  test("a member that joins forgets what an earlier membership under the name left beside its key", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    expect(existsSync(w.replica.keyFile + ".trust.json")).toBe(true);
+    FleetTrust.forget(w.replica.keyFile);
+    expect(existsSync(w.replica.keyFile + ".trust.json")).toBe(false);
+    // It learns again from what it is told, and the key itself is kept.
+    expect(existsSync(w.replica.keyFile)).toBe(true);
+    expect((await w.pullReplica(0)).seq).toBe(1);
+    expect(FleetTrust.beside(w.replica.keyFile).incarnation).toBe("incarnation-1");
+  });
+});
+
 describe("old readers and new publishers", () => {
   test("a reader that knows nothing of seals opens what a sealing publisher stored", async () => {
     const w = await world();

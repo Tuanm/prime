@@ -343,6 +343,8 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   const keys = loadOrCreateKeyPair(keyFile);
   const label = str(ctx.parsed, "label") ?? spaceName ?? "";
 
+  // A new membership starts knowing nothing of the fleet: what an earlier one under this name left beside the key is not this fleet's.
+  FleetTrust.forget(keyFile);
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/join", {
     code,
     ...(label ? { label } : {}),

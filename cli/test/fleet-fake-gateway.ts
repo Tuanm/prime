@@ -28,6 +28,10 @@ export class FakeGateway {
   stripRoster = false;
   /** Publishers that predate the seal over the manifest. */
   unsealed = false;
+  /** Which fleet of the name this is (what /role says); undefined for a gateway that predates it. */
+  incarnation: string | undefined = "incarnation-1";
+  /** A refused publish deletes the change pack its manifest names (the gateway's cleanup). */
+  dropChangePackOnRefusal = false;
   /** The next snapshots come from a publisher that seals but does not tag each entry (an earlier build). */
   noMacs = false;
   /** Publishers that predate the key fingerprint in wrapped keys. */
@@ -105,7 +109,8 @@ export class FakeGateway {
       return Response.json({ ok: true, role: "primary", ttlMs: 45_000, ...(current > 0 ? { catchUpTo: current } : {}) });
     }
     if (kind === "role" && method === "GET") {
-      return Response.json({ member: this.members.has(creds.deviceId), primary: creds.deviceId === this.primary, epoch: 1 });
+      const member = this.members.has(creds.deviceId);
+      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}) });
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()] });
@@ -167,6 +172,9 @@ export class FakeGateway {
       while (this.kept.length > this.retain) for (const key of this.kept.shift()!) this.payloads.delete(key);
       const current = this.head?.seq ?? 0;
       if ((this.applied.get(creds.deviceId) ?? 0) < current) {
+        // A gateway that cleans up after a refused publish takes the change pack the manifest names with it.
+        const gone = (manifest.delta as { packKey?: string } | undefined)?.packKey;
+        if (this.dropChangePackOnRefusal && gone) this.payloads.delete(gone);
         return Response.json({ error: "catch up first", required: current }, { status: 409 });
       }
       const seq = typeof manifest.seq === "number" ? manifest.seq : current + 1;

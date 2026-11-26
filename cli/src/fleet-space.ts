@@ -23,6 +23,7 @@ import { join } from "node:path";
 import type { Ctx } from "./context.ts";
 import { CliError } from "./errors.ts";
 import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
+import { FleetTrust } from "./fleet-trust.ts";
 import { fetchRole, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, writeFleetState } from "./fleets.ts";
 
@@ -97,6 +98,8 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   const already = await fleetCall(creds, "GET", "/fleets/" + encodeURIComponent(opts.fleet) + "/me", undefined);
   const isMember = already.status === 200 && already.json?.status === "member";
   if (!isMember) {
+    // A new membership starts knowing nothing of the fleet: what an earlier one under this name left beside the key is not this fleet's.
+    FleetTrust.forget(paths.keyFile);
     if (opts.create) {
       const created = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet), {
         pubkey: keys.publicKey,

@@ -30,11 +30,11 @@
 //
 // What this does not do is told in docs/fleets.md ("What the gateway can still do").
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { SEAL_PREFIX, type OpenedPayload, type SealFields } from "./fleet-crypto";
-import { fetchRosterKeys, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
+import { fetchRole, fetchRosterKeys, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
 export class TamperedSnapshotError extends Error {
@@ -65,6 +65,8 @@ function protectionOf(m: FleetManifest, memberId: string): 0 | 1 | 2 {
 interface TrustFile {
   sealedFrom?: number;
   macFrom?: number;
+  incarnation?: string;
+  incarnationFrom?: number;
   peers: Map<string, number>;
 }
 
@@ -77,6 +79,10 @@ export class FleetTrust {
   sealedFrom: number | undefined;
   /** The same for a snapshot whose entry for this member carries its sender's own tag. */
   macFrom: number | undefined;
+  /** Which fleet of this name this member belongs to (see `ensureIncarnation`); undefined until it has learnt. */
+  incarnation: string | undefined;
+  /** The lowest sequence of a snapshot taken in that names its fleet's incarnation. */
+  incarnationFrom: number | undefined;
   /**
    * The public keys the roster has listed, each with the highest sequence a roster that listed it
    * was read for (see `trusts`).
@@ -94,7 +100,14 @@ export class FleetTrust {
     const none: TrustFile = { peers: new Map() };
     try {
       if (!existsSync(this.file)) return none;
-      const raw = JSON.parse(readFileSync(this.file, "utf8")) as { sealedFrom?: unknown; macFrom?: unknown; boundSeq?: unknown; peers?: unknown };
+      const raw = JSON.parse(readFileSync(this.file, "utf8")) as {
+        sealedFrom?: unknown;
+        macFrom?: unknown;
+        incarnation?: unknown;
+        incarnationFrom?: unknown;
+        boundSeq?: unknown;
+        peers?: unknown;
+      };
       // `boundSeq` is what an earlier build wrote (the highest one seen): the nearest thing it knew.
       const from = typeof raw.sealedFrom === "number" ? raw.sealedFrom : raw.boundSeq;
       const peers = new Map<string, number>();
@@ -107,6 +120,8 @@ export class FleetTrust {
       return {
         ...(typeof from === "number" && from >= 0 ? { sealedFrom: from } : {}),
         ...(typeof raw.macFrom === "number" && raw.macFrom >= 0 ? { macFrom: raw.macFrom } : {}),
+        ...(typeof raw.incarnation === "string" && raw.incarnation ? { incarnation: raw.incarnation } : {}),
+        ...(typeof raw.incarnationFrom === "number" && raw.incarnationFrom >= 0 ? { incarnationFrom: raw.incarnationFrom } : {}),
         peers,
       };
     } catch {
@@ -119,6 +134,9 @@ export class FleetTrust {
   private merge(other: TrustFile): void {
     if (other.sealedFrom !== undefined && (this.sealedFrom === undefined || other.sealedFrom < this.sealedFrom)) this.sealedFrom = other.sealedFrom;
     if (other.macFrom !== undefined && (this.macFrom === undefined || other.macFrom < this.macFrom)) this.macFrom = other.macFrom;
+    // What is on disk was learnt of the fleet this member is in: it fills in what is not known, never replaces it.
+    this.incarnation ??= other.incarnation;
+    if (other.incarnationFrom !== undefined && (this.incarnationFrom === undefined || other.incarnationFrom < this.incarnationFrom)) this.incarnationFrom = other.incarnationFrom;
     for (const [key, seq] of other.peers) if (seq > (this.peers.get(key) ?? -1)) this.peers.set(key, seq);
   }
 
@@ -151,7 +169,9 @@ export class FleetTrust {
         ? "no seal, but snapshot " + this.sealedFrom + " did"
         : level < 2 && this.macFrom !== undefined && m.seq >= this.macFrom
           ? "no tag from its sender for this member, but snapshot " + this.macFrom + " did"
-          : null;
+          : m.incarnation === undefined && this.incarnationFrom !== undefined && m.seq >= this.incarnationFrom
+            ? "no mark of which fleet of this name it belongs to, but snapshot " + this.incarnationFrom + " did"
+            : null;
     if (what === null) return;
     throw new TamperedSnapshotError(
       m.seq,
@@ -167,6 +187,10 @@ export class FleetTrust {
     const level = protectionOf(m, memberId);
     if (level >= 1) this.noteSealed(m.seq);
     if (level >= 2) this.noteMac(m.seq);
+    if (m.incarnation !== undefined && (this.incarnationFrom === undefined || m.seq < this.incarnationFrom)) {
+      this.incarnationFrom = m.seq;
+      this.dirty = true;
+    }
   }
 
   /** Write what has been learnt, merged with what another process wrote meanwhile. */
@@ -187,6 +211,8 @@ export class FleetTrust {
       JSON.stringify({
         ...(this.sealedFrom !== undefined ? { sealedFrom: this.sealedFrom } : {}),
         ...(this.macFrom !== undefined ? { macFrom: this.macFrom } : {}),
+        ...(this.incarnation !== undefined ? { incarnation: this.incarnation } : {}),
+        ...(this.incarnationFrom !== undefined ? { incarnationFrom: this.incarnationFrom } : {}),
         peers,
       }) + "\n",
       { mode: 0o600 },
@@ -205,8 +231,51 @@ export class FleetTrust {
     const was = trust.sealedFrom;
     trust.sealedFrom = undefined;
     trust.macFrom = undefined;
+    trust.incarnationFrom = undefined;
     trust.write();
     return was;
+  }
+
+  /**
+   * Forget everything learnt of a fleet: a member that joins starts as one that knows nothing, whatever
+   * an earlier membership under the same name left beside its key (the key itself is kept).
+   */
+  static forget(keyFile: string): void {
+    rmSync(keyFile + ".trust.json", { force: true });
+  }
+
+  /** Take `incarnation` as the fleet this member is in, if it has not learnt one (a publisher was just told by the gateway). */
+  pin(incarnation: string | undefined): void {
+    if (incarnation !== undefined && this.incarnation === undefined) {
+      this.incarnation = incarnation;
+      this.dirty = true;
+    }
+  }
+
+  private learning: Promise<void> | undefined;
+
+  /**
+   * Learn which fleet of this name this member is in, from the gateway, the first time it is needed:
+   * it is kept, and a snapshot that names another is refused (see `verifySnapshot`). A member joins
+   * a fleet by name, and a fleet that is deleted frees its name, so the name alone does not say it.
+   * Returns it, or undefined for a gateway that does not say.
+   */
+  async ensureIncarnation(creds: FleetCredentials, fleet: string): Promise<string | undefined> {
+    if (this.incarnation !== undefined) return this.incarnation;
+    this.learning ??= (async () => {
+      try {
+        const role = await fetchRole(creds, fleet);
+        if (role.member && role.incarnation !== undefined) {
+          this.incarnation = role.incarnation;
+          this.dirty = true;
+          this.save();
+        }
+      } finally {
+        this.learning = undefined;
+      }
+    })();
+    await this.learning;
+    return this.incarnation;
   }
 
   /** Where this member keeps it, beside its key file. */
@@ -281,6 +350,7 @@ export function sealFieldsOf(m: FleetManifest, packHash: string, deltaHash: stri
     deltaHash,
     senderPublicKey: m.senderPublicKey,
     roster: m.roster ?? null,
+    incarnation: m.incarnation ?? null,
   };
 }
 
@@ -304,6 +374,14 @@ export async function verifySnapshot(
   trust: FleetTrust | undefined,
 ): Promise<void> {
   if (m.fleet !== fleet) throw new TamperedSnapshotError(m.seq, "it belongs to fleet " + m.fleet + ", not " + fleet);
+  if (trust && m.seal !== undefined) {
+    // A fleet that is deleted frees its name, and a snapshot of the one that had it is sealed and
+    // sent by members all the same: which fleet of the name this member is in is what tells them apart.
+    const mine = await trust.ensureIncarnation(creds, fleet);
+    if (mine !== undefined && m.incarnation !== undefined && m.incarnation !== mine) {
+      throw new TamperedSnapshotError(m.seq, "it belongs to an earlier fleet that had the name " + fleet + ", not to this one");
+    }
+  }
 
   if (m.seal !== undefined) {
     if (!m.seal.startsWith(SEAL_PREFIX)) throw new TamperedSnapshotError(m.seq, "its seal is of a kind this version does not know");

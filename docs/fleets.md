@@ -238,7 +238,10 @@ checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
 1. **The seal.** The publisher makes a tag (an HMAC, derived from the snapshot key) over the
    fleet, the sequence, the snapshot it follows (the hash its manifest is stored under), the
    commit, the tree, whether the pack is a whole tree, the hash of each sealed pack, its own
-   key and the roster, and puts it in the manifest (`seal`). Only a holder of the snapshot
+   key, the roster and which fleet of that name it is (an id the gateway makes when a fleet is
+   created; a fleet that is deleted frees its name, and a sealed snapshot of the earlier one that
+   is replayed into a new fleet of the same name names the other id), and puts it in the manifest
+   (`seal`). Only a holder of the snapshot
    key can make it, and the snapshot key is only ever wrapped for members. A replica checks
    the manifest against it after it opens the pack, and the pack against the hash in it. A
    manifest the gateway edited, an old snapshot shown under a newer sequence, a tree or pack
@@ -578,6 +581,10 @@ What is deliberately not done, so that nobody has to find it out:
   and then left before this replica read the roster is refused ("not any member's"). The replica goes
   around it, by the next whole tree, when there is one: a current member publishing a whole tree (every
   32nd snapshot, or when a member joins) ends it.
+- **Which fleet of a name it is is learnt from the gateway the first time it is needed.** A member
+  that joins forgets what an earlier membership under the name left beside its key and learns the id
+  then; one that joined before this existed learns it at its first check, so a replay of an older
+  fleet's snapshot is refused from then on, not before. A gateway that does not say leaves the check out.
 - **Unsealed snapshots are taken until the first sealed one is seen.** And a replica that has seen a
   sealed one refuses an unsealed one at or above it, so an old member that is promoted stalls the new
   replicas on the snapshot before it, until an upgraded member publishes (a whole tree) or the
