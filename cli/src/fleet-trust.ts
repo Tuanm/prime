@@ -200,12 +200,22 @@ export class FleetTrust {
     if (m.seal === undefined && hash !== undefined && this.accepted.has(hash)) return;
     const level = protectionOf(m, memberId);
     if (level < 1 && this.sealedFrom !== undefined && m.seq >= this.sealedFrom) {
+      // What accepting means, for either wording below: it is a decision to trust the gateway.
+      const accept =
+        "prime fleets trust accept <fleet> --space <space> --manifest " +
+        (hash ?? "<hash>") +
+        "' on this member. That trusts the gateway for this one snapshot (manifest " +
+        (hash ?? "unknown") +
+        "): the gateway can show an old snapshot under this name, and if this member is then promoted it republishes that snapshot to everyone. Do it only if you know that member published exactly that one";
       if (this.gated === true) {
-        // A gateway that has the gate never moves the head from a sealed snapshot to one that is not, so
-        // this is not what a member of an old build that was promoted leaves: it is an old snapshot shown as new.
+        // A gateway that has the gate does not move the head from a sealed snapshot to one that is not, so this is
+        // almost certainly an old snapshot shown as new. (A head written before the gate was deployed is the exception.)
         throw new TamperedSnapshotError(
           m.seq,
-          "it carries no seal, but snapshot " + this.sealedFrom + " did, and this fleet's gateway does not move the head from a sealed snapshot to one that is not: it was not published through the gateway as it is now (it is tampered with)",
+          "it carries no seal, but snapshot " +
+            this.sealedFrom +
+            " did, and this fleet's gateway does not move the head from a sealed snapshot to one that is not: it was not published through the gateway as it is now (it is tampered with). Only if the fleet's own operator knows this is a snapshot written before the gateway had that rule, the way on is '" +
+            accept,
           true,
         );
       }
@@ -215,11 +225,8 @@ export class FleetTrust {
         "it carries no seal, but snapshot " +
           this.sealedFrom +
           " did: either the gateway swapped in an old snapshot, or a member that has not been upgraded published it. Upgrade that member." +
-          " If it is gone and nobody else can take over, the only way on is 'prime fleets trust accept <fleet> --space <space> --manifest " +
-          (hash ?? "<hash>") +
-          "' on this member. That trusts the gateway for this one snapshot (manifest " +
-          (hash ?? "unknown") +
-          "): the gateway can show an old snapshot under this name, and if this member is then promoted it republishes that snapshot to everyone. Do it only if you know that member published exactly that one",
+          " If it is gone and nobody else can take over, the only way on is '" +
+          accept,
         true,
       );
     }

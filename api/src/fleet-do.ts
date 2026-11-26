@@ -159,8 +159,11 @@ interface IndexEntry {
   full: boolean;
   packBytes?: number;
   deltaBytes?: number;
-  /** The publisher sealed the manifest (members check it). */
-  sealed?: true;
+  /**
+   * Whether the publisher sealed the manifest (members check it). Absent on an entry written before
+   * this was recorded: `advance` reads the manifest then, once, and fills it in.
+   */
+  sealed?: boolean;
 }
 
 /** How long a member that published without a seal after sealed snapshots is kept from the lease. */
@@ -462,7 +465,10 @@ export class FleetDO implements DurableObject {
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();
     const after = Math.max(0, Math.floor(Number(new URL(request.url).searchParams.get("after") ?? 0)) || 0);
-    const entries = ((await this.state.storage.get<IndexEntry[]>("index")) ?? []).filter((e) => e.seq > after);
+    // `sealed: false` is this object's own note (that the manifest was looked at); a member is told of a seal, not of its absence.
+    const entries = ((await this.state.storage.get<IndexEntry[]>("index")) ?? [])
+      .filter((e) => e.seq > after)
+      .map(({ sealed, ...rest }) => (sealed === true ? { ...rest, sealed: true as const } : rest));
     return Response.json({ entries });
   }
 
@@ -1188,8 +1194,10 @@ export class FleetDO implements DurableObject {
       // One more than the last grant, not than the last publish: a holder that published nothing
       // would hand its epoch to the next one, and the epoch would stop saying who held the lease.
       // (The head's epoch is the floor, so a fleet whose object storage was lost does not go back.)
-      const epoch = Math.max((await this.state.storage.get<number>("epoch")) ?? 0, head.epoch) + 1;
-      const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs, since: now };
+      // A holder that asks again while its lease lives keeps it as it is (its epoch, and since when it has held it):
+      // only a grant to another holder, or a new one after the lease lapsed, is a new epoch.
+      const epoch = held && held.holder === caller.deviceId ? held.epoch : Math.max((await this.state.storage.get<number>("epoch")) ?? 0, head.epoch) + 1;
+      const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs, since: held && held.holder === caller.deviceId ? (held.since ?? now) : now };
       await this.state.storage.put("lease", lease);
       await this.state.storage.put("epoch", epoch);
       await this.state.storage.delete("claim");
@@ -1301,6 +1309,15 @@ export class FleetDO implements DurableObject {
     // kept from taking the lease back for a while, so that an upgraded member has it.
     const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
     const tip = index[index.length - 1];
+    if (tip && tip.seq === currentHead.seq && tip.sealed === undefined && meta.sealed !== true) {
+      // Written through a gateway that did not record whether it was sealed: its manifest says, once.
+      this.meter.r2("read");
+      const sealedTip = await this.manifestIsSealed(tip.manifestKey);
+      if (sealedTip !== undefined) {
+        tip.sealed = sealedTip;
+        await this.state.storage.put("index", index);
+      }
+    }
     if (tip && tip.seq === currentHead.seq && tip.sealed === true && meta.sealed !== true) {
       await this.state.storage.delete("lease");
       const bar = (await this.state.storage.get<Record<string, number>>("unsealedBar")) ?? {};
@@ -1378,7 +1395,7 @@ export class FleetDO implements DurableObject {
     const evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
     await this.state.storage.put("recent", recent);
     const kept = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
-    kept.push({ seq: next.seq, manifestKey, ...meta });
+    kept.push({ seq: next.seq, manifestKey, ...meta, sealed: meta.sealed === true });
     await this.state.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
     for (const entry of evicted) {
       for (const key of entry.split("\n")) {
@@ -1407,6 +1424,19 @@ export class FleetDO implements DurableObject {
     const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
     const kept = new Set(recent.flatMap((entry) => entry.split("\n")));
     return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
+  }
+
+  // Whether a stored manifest carries a seal; undefined when it cannot be read (the gate then does not fire:
+  // it is a rule about availability, and a manifest nobody can read is one nobody can take in either).
+  private async manifestIsSealed(manifestKey: string): Promise<boolean | undefined> {
+    try {
+      const obj = await this.bucket().get(manifestKey);
+      if (!obj) return undefined;
+      const manifest = (await obj.json()) as { seal?: unknown };
+      return typeof manifest.seal === "string" && manifest.seal !== "";
+    } catch {
+      return undefined;
+    }
   }
 
   // The keys of members that have left, each with the sequence the head was at when it did. A member

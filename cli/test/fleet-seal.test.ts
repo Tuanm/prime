@@ -344,7 +344,7 @@ describe("a fleet that is upgraded one member at a time", () => {
     expect(refused.message).not.toMatch(/prime fleets status/);
   });
 
-  test("against a gateway that has the gate, a snapshot without a seal is tampering, and no command is offered", async () => {
+  test("against a gateway that has the gate, a snapshot without a seal is tampering, and the hash and what accepting means are still printed", async () => {
     const w = await world();
     await w.next("one\n");
     await w.pullReplica(0);
@@ -354,7 +354,10 @@ describe("a fleet that is upgraded one member at a time", () => {
     const refused = (await w.pullReplica(1).catch((e: unknown) => e)) as Error;
     expect(refused.message).toMatch(/does not move the head from a sealed snapshot to one that is not/);
     expect(refused.message).toMatch(/tampered/);
-    expect(refused.message).not.toMatch(/trust accept/);
+    // It still names the manifest and what accepting it means: a head written before the gate existed can look like this.
+    expect(refused.message).toMatch(/manifest [0-9a-f]{64}/);
+    expect(refused.message).toMatch(/trust accept <fleet> --space <space> --manifest [0-9a-f]{64}/);
+    expect(refused.message).toMatch(/trusts the gateway for this one snapshot/);
     // Asked once, for the refusal; a member that is not refused is not asked.
     expect(w.gateway.requests.get("GET role") ?? 0).toBeGreaterThanOrEqual(1);
   });

@@ -672,6 +672,104 @@ describe("the lease's epoch", () => {
   });
 });
 
+describe("the lease's epoch, for a holder that asks again", () => {
+  async function held() {
+    const made = makeDo();
+    await makeFleet(made.doInstance, "dev-a");
+    const inv = await call(made.doInstance, "/invite", { caller: "device", device: "dev-a", body: { autoApprove: true } });
+    await call(made.doInstance, "/join", { caller: "device", device: "dev-b", body: { code: inv.json.code, pubkey: "B".repeat(43) + "=" } });
+    await call(made.doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-b" } });
+    const first = await call(made.doInstance, "/bootstrap", { caller: "device", device: "dev-a" });
+    return { ...made, first };
+  }
+
+  test("a holder's own bootstrap and renewals keep its epoch, and since when it has held it", async () => {
+    const { doInstance, state, first } = await held();
+    const since = (state.data.get("lease") as { since: number }).since;
+    await new Promise((r) => setTimeout(r, 3));
+    for (let i = 0; i < 5; i++) {
+      const again = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-a" });
+      expect([again.json.role, again.json.epoch]).toEqual(["primary", first.json.epoch]);
+      const renewed = await call(doInstance, "/lease/renew", { caller: "device", device: "dev-a", body: {} });
+      expect(renewed.json.epoch).toBe(first.json.epoch);
+    }
+    expect((state.data.get("lease") as { since: number; epoch: number }).since).toBe(since);
+    expect((await call(doInstance, "/role", { caller: "device", device: "dev-a", method: "GET" })).json.epoch).toBe(first.json.epoch);
+  });
+
+  test("a publish started under an epoch is not refused because the holder asked again meanwhile", async () => {
+    const { doInstance } = await held();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-a" });
+    const published = await call(doInstance, "/head/advance", { caller: "device", device: "dev-a", body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1" } });
+    expect(published.status).toBe(200);
+    expect(published.json.head.epoch).toBe(1);
+  });
+
+  test("a handover is a new epoch, and so is a grant after the lease lapsed, even to the same member", async () => {
+    const { doInstance, state, first } = await held();
+    await call(doInstance, "/lease/release", { caller: "device", device: "dev-a" });
+    const handed = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-b" });
+    expect(handed.json.epoch).toBe(first.json.epoch + 1);
+    (state.data.get("lease") as { expiresAt: number }).expiresAt = Date.now() - 1000;
+    const again = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-b" });
+    expect(again.json.epoch).toBe(first.json.epoch + 2);
+  });
+});
+
+describe("a sealed tip that was written before the index said so", () => {
+  async function fleet(manifest: object | null) {
+    const made = makeDo();
+    await makeFleet(made.doInstance, "dev-old");
+    const inv = await call(made.doInstance, "/invite", { caller: "admin", device: "dev-old", body: {} });
+    await call(made.doInstance, "/join", { caller: "device", device: "dev-new", body: { code: inv.json.code } });
+    await call(made.doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-new" } });
+    await call(made.doInstance, "/bootstrap", { caller: "device", device: "dev-old" });
+    // The head moves through the gateway as it was before the index noted seals.
+    expect((await call(made.doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 0, manifestKey: "fleets/acme/manifests/t1", manifestHash: "h1", meta: { full: true } } })).status).toBe(200);
+    const index = made.state.data.get("index") as Array<{ sealed?: boolean }>;
+    delete index[0]!.sealed;
+    if (manifest) made.bucket.objects.set("fleets/acme/manifests/t1", { body: JSON.stringify(manifest), etag: "m" });
+    return made;
+  }
+  const unsealed = (d: FleetDO) => call(d, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2", meta: { full: false } } });
+
+  test("is read once from its manifest, so the gate fires, and the flag is filled in", async () => {
+    const { doInstance, state } = await fleet({ seq: 1, seal: "v1:abc" });
+    const refused = await unsealed(doInstance);
+    expect(refused.status).toBe(409);
+    expect(refused.json.upgrade).toBe(true);
+    expect((state.data.get("index") as Array<{ sealed?: boolean }>)[0]!.sealed).toBe(true);
+  });
+
+  test("a tip whose manifest has no seal does not trip the gate, and is marked so that it is not read again", async () => {
+    const { doInstance, state, bucket } = await fleet({ seq: 1 });
+    expect((await unsealed(doInstance)).status).toBe(200);
+    const index = state.data.get("index") as Array<{ sealed?: boolean }>;
+    expect(index[0]!.sealed).toBe(false);
+    expect(index[1]!.sealed).toBe(false);
+    const get = bucket.get;
+    let manifestReads = 0;
+    bucket.get = async (key: string) => {
+      if (key.includes("/manifests/")) manifestReads++;
+      return get.call(bucket, key);
+    };
+    await call(doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 2, manifestKey: "m/3", manifestHash: "h3", meta: { full: false } } });
+    expect(manifestReads).toBe(0);
+  });
+
+  test("a manifest that cannot be read does not fire the gate (it is a rule about availability)", async () => {
+    const { doInstance } = await fleet(null);
+    expect((await unsealed(doInstance)).status).toBe(200);
+  });
+
+  test("the index a member reads says a snapshot was sealed, and says nothing when it was not", async () => {
+    const { doInstance } = await fleet({ seq: 1, seal: "v1:abc" });
+    await unsealed(doInstance);
+    const listed = await call(doInstance, "/index", { caller: "device", device: "dev-new", method: "GET" });
+    expect(listed.json.entries).toEqual([{ seq: 1, manifestKey: "fleets/acme/manifests/t1", full: true, sealed: true }]);
+  });
+});
+
 describe("a member that is barred for publishing without a seal", () => {
   async function barred() {
     const made = makeDo();

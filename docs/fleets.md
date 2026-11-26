@@ -312,10 +312,11 @@ What the gateway can still do, whatever a member checks:
   minutes, and ends when it asks for its place as a build that seals (the bootstrap says so); a sealed
   fleet whose only members are old builds does not move until one is upgraded.
   A gateway with the gate says so (`/role`), and then a snapshot without a seal is reported as
-  tampering and no command is offered: it cannot be an old member's. Against one that does not say, a
-  head written before the gate existed can be one. When that member was then lost and no upgraded
-  member can take over (the catch-up to that head is what is refused), the refusal prints the
-  manifest's hash and the operator of the member that cannot go on may run
+  tampering: an old member cannot have published it through that gateway, except for a head that
+  was written before the gateway had the gate (it reads the sealed tip's manifest once if the index
+  did not say, so only a tip that was not sealed at all escapes). Either way the refusal names the
+  manifest's hash, and when that member was lost and no upgraded member can take over (the catch-up
+  to that head is what is refused), the operator of the member that cannot go on may run
   `prime fleets trust accept <fleet> --space <name> --manifest <hash>`. **That trusts the gateway for
   that one snapshot**: the member cannot tell it from an old snapshot the gateway made up (a rollback
   of the whole fleet to it), and if the member is promoted its next publish, a whole tree, republishes
