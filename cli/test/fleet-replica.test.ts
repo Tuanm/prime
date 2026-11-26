@@ -295,6 +295,13 @@ describe("when a replica asks the fleet anything", () => {
     expect(placeDue({ ...base, now: 1_000_000 + 16_000, eventsConnected: false })).toBe(true);
   });
 
+  test("without a socket and without being told the lease, it assumes the fleet's forty-five seconds", () => {
+    const { leaseMs: _told, ...unknown } = base;
+    void _told;
+    expect(placeDue({ ...unknown, now: 1_000_000 + 10_000, eventsConnected: false })).toBe(false);
+    expect(placeDue({ ...unknown, now: 1_000_000 + 16_000, eventsConnected: false })).toBe(true);
+  });
+
   test("it asks when the first look has not happened yet, and when it was told the lease is free", () => {
     expect(placeDue({ ...base, lastBootstrap: 0, now: 5, eventsConnected: true })).toBe(true);
     expect(placeDue({ ...base, wanted: true, now: 1_000_001, eventsConnected: true })).toBe(true);

@@ -549,7 +549,12 @@ export async function fetchAhead(
     downloads[i] = undefined; // let the bytes go
     start(i + DOWNLOADS_AT_ONCE);
     const m = step.manifest;
-    await ingestPack(paths.work, paths.gitDir, m.tipCommit, pack, { tree: m.tree, seq: m.seq });
+    // Only the newest one is named by a ref: it is what the member goes on from,
+    // and one ref (one more git process) per step is cost for nothing.
+    await ingestPack(paths.work, paths.gitDir, m.tipCommit, pack, {
+      tree: m.tree,
+      ...(i === plan.chain.length - 1 ? { seq: m.seq } : {}),
+    });
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree };
     await onFetched?.(fetched);
   }

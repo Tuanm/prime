@@ -183,6 +183,10 @@ export function promotionDelayMs(deviceId: string, behind: boolean, random: () =
   return (behind ? 1500 : 0) + (h % 8) * 250 + Math.floor(random() * 200);
 }
 
+// How long the fleet's lease lasts, when this member has not been told: a replica
+// is only told by a socket, and the fleet's lease is forty-five seconds.
+const DEFAULT_LEASE_MS = 45_000;
+
 /** Whether it is time to take (or renew) this member's place in the fleet. */
 export function placeDue(a: {
   primary: boolean;
@@ -201,5 +205,5 @@ export function placeDue(a: {
   // A replica has nothing to renew. It only looks now and then, in case a
   // message was missed: rarely when the fleet tells it, about as often as the
   // lease is renewed when it has to ask.
-  return since > (a.eventsConnected ? 60_000 : Math.max(5_000, Math.floor((a.leaseMs ?? 15_000) / 3)));
+  return since > (a.eventsConnected ? 60_000 : Math.max(5_000, Math.floor((a.leaseMs ?? DEFAULT_LEASE_MS) / 3)));
 }
