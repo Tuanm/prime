@@ -103,10 +103,17 @@ const LEASE_TTL_MS = 45_000;
 /** How long the first replica to ask for a free lease has to catch up before another may. */
 const CLAIM_MS = 30_000;
 
+/** The most a claim lasts in all, however often its holder asks again. */
+const CLAIM_MAX_MS = 60_000;
+
 /** A replica that is catching up to take a free lease. */
 interface Claim {
   device: string;
+  /** When it was first made: a claim does not outlive this by more than CLAIM_MAX_MS. */
+  since: number;
   until: number;
+  /** A holder whose claim ran its whole life, and may not claim again until then. */
+  barred?: { device: string; until: number };
 }
 
 /** One snapshot the fleet keeps, as the index lists it. */
@@ -1035,19 +1042,43 @@ export class FleetDO implements DurableObject {
         // as ever - by who has applied the head when it asks - so a claim that
         // lapses (its holder died half way) costs the others its length at most.
         const claim = await this.state.storage.get<Claim>("claim");
-        if (claim && claim.until > now && claim.device !== caller.deviceId && members[claim.device]) {
-          out = Response.json({
-            ok: true,
-            role: "replica",
-            reason: "claimed",
-            holder: claim.device,
-            head,
-            epoch: head.epoch,
-            retryAfterMs: Math.max(1000, claim.until - now),
-          });
+        const live = claim !== undefined && claim.until > now && members[claim.device] !== undefined;
+        const wait = (holder: string, ms: number): Response =>
+          Response.json({ ok: true, role: "replica", reason: "claimed", holder, head, epoch: head.epoch, retryAfterMs: Math.max(1000, ms) });
+        if (claim && live && claim.device !== caller.deviceId) {
+          out = wait(claim.device, claim.until - now);
           return;
         }
-        await this.state.storage.put("claim", { device: caller.deviceId, until: now + CLAIM_MS } satisfies Claim);
+        if (claim && live) {
+          // The holder asks again. A claim is renewed while it is working, but not
+          // for ever: a member that is alive and cannot catch up (nothing sealed for
+          // it, a work tree it cannot write) asks again and again, and would keep
+          // the others waiting as long as it lives. Past its total life the claim
+          // lapses, and the member may not take the next one for a window - which
+          // the others, asking when they were told to, will have used.
+          if (now - claim.since >= CLAIM_MAX_MS) {
+            await this.state.storage.put("claim", {
+              device: claim.device,
+              since: claim.since,
+              until: now,
+              barred: { device: claim.device, until: now + CLAIM_MS },
+            } satisfies Claim);
+            out = wait(claim.device, CLAIM_MS);
+            return;
+          }
+          await this.state.storage.put("claim", {
+            device: claim.device,
+            since: claim.since,
+            until: Math.min(now + CLAIM_MS, claim.since + CLAIM_MAX_MS),
+          } satisfies Claim);
+        } else {
+          const barred = claim?.barred;
+          if (barred && barred.device === caller.deviceId && barred.until > now) {
+            out = wait(barred.device, barred.until - now);
+            return;
+          }
+          await this.state.storage.put("claim", { device: caller.deviceId, since: now, until: now + CLAIM_MS } satisfies Claim);
+        }
         out = Response.json({
           ok: true,
           role: "replica",

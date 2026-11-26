@@ -664,6 +664,40 @@ describe("replicas racing for a free lease", () => {
     expect(state.data.has("claim")).toBe(false);
   });
 
+  test("a holder that is alive and never catches up cannot hold the claim for ever, whatever asks it makes", async () => {
+    const { doInstance, state } = await three();
+    // dev-two asks every round, as a client that ignores the answer does, and never applies.
+    for (let i = 0; i < 40; i++) expect(["not-caught-up", "claimed"]).toContain((await ask(doInstance, "dev-two")).json.reason);
+    const claim = state.data.get("claim") as { since: number; until: number };
+    // The claim's total life is bounded however often it was renewed.
+    expect(claim.until).toBeLessThanOrEqual(claim.since + 60_000);
+
+    // A minute in, it is still asking: the claim lapses, and it may not take it again at once.
+    state.data.set("claim", { ...claim, since: Date.now() - 61_000, until: Date.now() + 25_000 });
+    const lapsed = await ask(doInstance, "dev-two");
+    expect(lapsed.json.reason).toBe("claimed");
+    expect(lapsed.json.holder).toBe("dev-two");
+    expect(lapsed.json.retryAfterMs).toBeGreaterThan(0);
+    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
+
+    // The next replica to ask is given it, and can catch up and take the lease.
+    expect((await ask(doInstance, "dev-three")).json.reason).toBe("not-caught-up");
+    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
+    await call(doInstance, "/applied", { caller: "device", device: "dev-three", body: { seq: 1 } });
+    expect((await ask(doInstance, "dev-three")).json.role).toBe("primary");
+  });
+
+  test("the one that was barred may claim again once its window has gone", async () => {
+    const { doInstance, state } = await three();
+    await ask(doInstance, "dev-two");
+    const claim = state.data.get("claim") as { since: number; until: number };
+    state.data.set("claim", { ...claim, since: Date.now() - 61_000, until: Date.now() + 25_000 });
+    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
+    const barred = state.data.get("claim") as { barred: { device: string; until: number } };
+    state.data.set("claim", { ...barred, barred: { ...barred.barred, until: Date.now() - 1 } });
+    expect((await ask(doInstance, "dev-two")).json.reason).toBe("not-caught-up");
+  });
+
   test("a claim that lapses (its holder died half way) lets the next ask take over the catching up", async () => {
     const { doInstance, state } = await three();
     await ask(doInstance, "dev-two");
