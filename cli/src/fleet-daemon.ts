@@ -113,6 +113,15 @@ export function writeAgentState(configPath: string, state: FleetAgentState): voi
   renameSync(file + ".tmp", file);
 }
 
+/**
+ * Whether the state file is this process's to write or remove: it is not there, it names this
+ * pid, or it names an agent that is gone. One that names another live pid is that agent's.
+ */
+export function ownsAgentState(configPath: string, pid: number = process.pid): boolean {
+  const state = readFleetAgentState(configPath);
+  return state === undefined || state.pid === pid || !pidAlive(state.pid);
+}
+
 export function readFleetAgentState(configPath: string): FleetAgentState | undefined {
   try {
     const parsed = JSON.parse(readFileSync(fleetAgentStatePath(configPath), "utf8")) as FleetAgentState;
@@ -1252,7 +1261,8 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   const lock = await acquireAgentLock(fleetAgentDir(configPath), {
     waitMs: options.lockWaitMs ?? 10_000,
     // Another agent has the lock: two took a dead one at the same moment. This one stops, and its
-    // manager (or the next command) starts it again behind the lock.
+    // manager (or the next command) starts it again behind the lock. It finishes its current round
+    // first, so the two overlap for up to one touch interval plus that round.
     onLost: () => {
       process.stderr.write("the fleet agent's lock was taken by another agent; this one stops\n");
       process.exitCode = 1;
@@ -1323,7 +1333,8 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       ...(timing ? { timing } : {}),
       ...pushState(),
     };
-    writeAgentState(configPath, state);
+    // An agent that lost its lock must not overwrite the one that won it (it runs for a moment more).
+    if (ownsAgentState(configPath)) writeAgentState(configPath, state);
   };
 
   const loops = new Map<string, SpaceLoop>();
@@ -1529,5 +1540,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   for (const task of running.values()) await task.catch(() => {});
 
   for (const watcher of watchers.values()) watcher.stop();
-  rmSync(fleetAgentStatePath(configPath), { force: true });
+  // Only this agent's own state: one that lost its lock to another is leaving, and the state
+  // that is there is the other's.
+  if (ownsAgentState(configPath)) rmSync(fleetAgentStatePath(configPath), { force: true });
 }

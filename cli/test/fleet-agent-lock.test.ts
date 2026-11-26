@@ -12,6 +12,7 @@ import {
   fleetAgentStatePath,
   fleetAgentStatus,
   installFleetAgent,
+  ownsAgentState,
   readAgentSettings,
   runFleetAgent,
   stopFleetAgent,
@@ -308,6 +309,23 @@ describe("one fleet agent per configuration", () => {
     writeFileSync(agentLockPath(dir), process.pid + "\n");
     expect(isFleetAgentProcess(process.pid, dir, () => probe(10))).toBe(true);
     expect(isFleetAgentProcess(process.pid, dir, () => probe(20))).toBe(false);
+  });
+
+  test("the state file is an agent's own to write or remove only if it names that agent or nobody alive", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    mkdirp(fleetAgentDir(configPath));
+    const winner = await fakeAgent();
+    const state = (pid: number) => writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath }));
+    // No file: ours to write.
+    expect(ownsAgentState(configPath, 4242)).toBe(true);
+    // It names the agent that won the lock: the one that lost must leave it alone.
+    state(winner.pid);
+    expect(ownsAgentState(configPath, 4242)).toBe(false);
+    expect(ownsAgentState(configPath, winner.pid)).toBe(true);
+    // It names an agent that is gone (a crash): the next agent takes it over.
+    state(999999);
+    expect(ownsAgentState(configPath, 4242)).toBe(true);
   });
 
   test("the agent's state is replaced, not rewritten in place: a reader never finds it empty", () => {
