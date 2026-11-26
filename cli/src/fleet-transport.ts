@@ -350,10 +350,27 @@ export async function fetchMemberKeys(
  * looked at (see fleet-trust.ts).
  */
 export async function fetchRosterKeys(creds: FleetCredentials, fleet: string): Promise<string[]> {
+  return (await fetchRoster(creds, fleet)).keys;
+}
+
+/** The keys of the members that have left, each with the sequence the head was at when it did. */
+export interface LeftKey {
+  pubkey: string;
+  until: number;
+}
+
+/** The roster's keys, and those of members that have left (a gateway that predates the history says none). */
+export async function fetchRoster(creds: FleetCredentials, fleet: string): Promise<{ keys: string[]; left: LeftKey[] }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/members");
   if (!res.ok) throw new FleetTransportError("could not read the roster: " + res.status);
-  const body = (await res.json()) as { members?: Array<{ pubkey?: unknown }> };
+  const body = (await res.json()) as { members?: Array<{ pubkey?: unknown }>; left?: unknown };
   const keys: string[] = [];
   for (const m of body.members ?? []) if (typeof m.pubkey === "string" && m.pubkey) keys.push(m.pubkey);
-  return keys;
+  const left: LeftKey[] = [];
+  if (Array.isArray(body.left)) {
+    for (const k of body.left as Array<{ pubkey?: unknown; until?: unknown }>) {
+      if (typeof k?.pubkey === "string" && k.pubkey && typeof k.until === "number" && k.until >= 0) left.push({ pubkey: k.pubkey, until: k.until });
+    }
+  }
+  return { keys, left };
 }

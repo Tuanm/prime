@@ -52,6 +52,17 @@ export class FakeGateway {
   legacyManifests = false;
   private kept: string[][] = [];
 
+  /** The keys of members that have been removed, with the head's sequence when they were (what the fleet says). */
+  left: Array<{ pubkey: string; until: number }> = [];
+
+  /** Remove a member as the fleet does: its key is remembered with the head's sequence, and it gives up the lease. */
+  remove(deviceId: string): void {
+    const member = this.members.get(deviceId);
+    this.members.delete(deviceId);
+    if (member?.pubkey) this.left.push({ pubkey: member.pubkey, until: this.head?.seq ?? 0 });
+    if (this.primary === deviceId) this.primary = "";
+  }
+
   seed(deviceId: string, pubkey: string): void {
     this.members.set(deviceId, { deviceId, role: "member", pubkey });
     if (!this.primary) this.primary = deviceId;
@@ -113,7 +124,7 @@ export class FakeGateway {
       return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}) });
     }
     if (kind === "members" && method === "GET") {
-      return Response.json({ members: [...this.members.values()] });
+      return Response.json({ members: [...this.members.values()], left: this.left });
     }
     if (kind === "keys" && method === "GET") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });

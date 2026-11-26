@@ -86,6 +86,12 @@ interface Lease {
   expiresAt: number;
 }
 
+/** A key that has left the fleet, and the sequence the head was at when it did. */
+interface LeftKey {
+  pubkey: string;
+  until: number;
+}
+const LEFT_KEYS_KEPT = 16;
 const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 };
 
 /**
@@ -331,6 +337,7 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("members");
     await this.state.storage.delete("created");
     await this.state.storage.delete("incarnation");
+    await this.state.storage.delete("left");
     await this.state.storage.delete("invites");
     await this.state.storage.delete("pending");
     await this.state.storage.delete("lease");
@@ -900,6 +907,9 @@ export class FleetDO implements DurableObject {
       }
       delete members[deviceId];
       wasMember = true;
+      // What the fleet's snapshots were when this member's key stopped being a member's: it made the
+      // ones up to there, and a member that was away has still to take them in.
+      if (member.pubkey) await this.recordLeft(member.pubkey, request.headers.get("x-prime-fleet") ?? "");
       // A member that leaves gives up the lease, so the fleet is not held by
       // somebody who is no longer there.
       const held = await this.lease();
@@ -946,18 +956,18 @@ export class FleetDO implements DurableObject {
 
   private async listMembers(caller: Caller): Promise<Response> {
     const members = await this.members();
-    if (caller.kind === "admin") return Response.json({ ok: true, members: Object.values(members) });
+    if (caller.kind === "admin") return Response.json({ ok: true, members: Object.values(members), left: await this.leftKeys() });
     // The owner runs the fleet: it admits and removes members, so it needs
     // their ids in full. Any other member sees the other ids cut short:
     // knowing a member's full id is not something a member needs, and the
     // primary gets the keys it needs from the dedicated route instead.
     if (caller.kind === "device" && members[caller.deviceId]) {
       const self = members[caller.deviceId]!;
-      if (self.role === "owner") return Response.json({ ok: true, members: Object.values(members) });
+      if (self.role === "owner") return Response.json({ ok: true, members: Object.values(members), left: await this.leftKeys() });
       const redacted = Object.values(members).map((m) =>
         m.deviceId === self.deviceId ? m : { ...m, deviceId: m.deviceId.slice(0, 8) + "…" },
       );
-      return Response.json({ ok: true, members: redacted });
+      return Response.json({ ok: true, members: redacted, left: await this.leftKeys() });
     }
     // A device may see the roster only if it is in it.
     if (!members[caller.deviceId]) return this.deny();
@@ -967,7 +977,7 @@ export class FleetDO implements DurableObject {
       role: m.role,
       addedAt: m.addedAt,
     }));
-    return Response.json({ ok: true, members: redacted });
+    return Response.json({ ok: true, members: redacted, left: await this.leftKeys() });
   }
 
   private async listPending(caller: Caller): Promise<Response> {
@@ -1312,6 +1322,22 @@ export class FleetDO implements DurableObject {
     const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
     const kept = new Set(recent.flatMap((entry) => entry.split("\n")));
     return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
+  }
+
+  // The keys of members that have left, each with the sequence the head was at when it did. A member
+  // that was asleep while the primary published and then left (a machine that is retired for another)
+  // still has those snapshots to take in, and they are made with a key that is no longer on the roster:
+  // it is a member's for the snapshots up to there, and for none after.
+  private async recordLeft(pubkey: string, fleetId: string): Promise<void> {
+    const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    const tip = index.length > 0 ? index[index.length - 1]!.seq : (await this.readHead(fleetId)).seq;
+    const left = ((await this.state.storage.get<LeftKey[]>("left")) ?? []).filter((k) => k.pubkey !== pubkey && k.until >= tip - 2 * RECENT_SNAPSHOTS);
+    left.push({ pubkey, until: tip });
+    await this.state.storage.put("left", left.slice(-LEFT_KEYS_KEPT));
+  }
+
+  private async leftKeys(): Promise<LeftKey[]> {
+    return (await this.state.storage.get<LeftKey[]>("left")) ?? [];
   }
 
   // Which fleet this is, as opposed to another that was made under the same name after this one was

@@ -806,8 +806,6 @@ async function ingestRoute(
 ): Promise<Position> {
   const downloads: Array<Promise<{ plain: Buffer }> | undefined> = [];
   const trust = FleetTrust.beside(paths.keyFile);
-  // A roster read while this route is taken stands for every snapshot on it.
-  trust.horizon = plan.chain[plan.chain.length - 1]?.manifest.seq;
   const start = (i: number): void => {
     if (i < plan.chain.length && downloads[i] === undefined) {
       const p = downloadStep(creds, fleet, keys, plan.chain[i]!, trust);

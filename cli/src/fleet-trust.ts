@@ -34,7 +34,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname } from "node:path";
 
 import { SEAL_PREFIX, type OpenedPayload, type SealFields } from "./fleet-crypto";
-import { fetchRole, fetchRosterKeys, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
+import { fetchRole, fetchRoster, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
 export class TamperedSnapshotError extends Error {
@@ -88,8 +88,6 @@ export class FleetTrust {
    * was read for (see `trusts`).
    */
   readonly peers = new Map<string, number>();
-  /** The newest sequence this member is about to take in: a roster read now stands for snapshots up to it. */
-  horizon: number | undefined;
   private dirty = false;
 
   constructor(private readonly file: string) {
@@ -289,48 +287,34 @@ export class FleetTrust {
     return known !== undefined && seq <= known;
   }
 
-  private reading: Promise<void> | undefined;
-  private readFor = -1;
+  private roster: Promise<{ keys: Set<string>; left: Map<string, number> }> | undefined;
 
   /**
    * Make sure a snapshot at `seq` may be from `key`, reading the roster when what is kept does not
-   * say so (packs are opened side by side: they share one read). The roster that is read lists
-   * who is a member now, so each key on it is known for snapshots up to the newest this member is
-   * taking in (`horizon`, or `seq`); a key that is not on it keeps what it had, and so is not
-   * known for any later snapshot.
+   * say so (packs are opened side by side, and a route is taken in one go: they share one read). A
+   * key that is on the roster is known for the sequence of the snapshot that was checked with it, and
+   * no further: nothing credits a key for snapshots that have not been looked at. A key that has left
+   * is known up to where the fleet says the head was when it did.
    */
   async ensureTrusts(creds: FleetCredentials, fleet: string, key: string, seq: number): Promise<boolean> {
-    for (let round = 0; round < 3 && !this.trusts(key, seq); round++) {
-      if (this.reading) {
-        await this.reading;
-        continue;
+    if (this.trusts(key, seq)) return true;
+    this.roster ??= fetchRoster(creds, fleet).then(
+      ({ keys, left }) => ({ keys: new Set(keys), left: new Map(left.map((k) => [k.pubkey, k.until])) }),
+      (err: unknown) => {
+        this.roster = undefined; // not a roster: asked again next time
+        throw err;
+      },
+    );
+    const { keys, left } = await this.roster;
+    const known = keys.has(key) ? seq : left.get(key);
+    if (known !== undefined && known > (this.peers.get(key) ?? -1)) {
+      this.peers.set(key, known);
+      this.dirty = true;
+      // A key that left and is older than anything the gateway still holds is of no use.
+      for (const [k, at] of this.peers) {
+        if (!keys.has(k) && !left.has(k) && at < seq - KEEP_LEFT_KEYS) this.peers.delete(k);
       }
-      // What a roster read now stands for: only a roster read for this sequence or a later one settles it.
-      const upTo = Math.max(this.horizon ?? 0, seq);
-      if (this.readFor >= seq) break;
-      this.reading = (async () => {
-        try {
-          const keys = await fetchRosterKeys(creds, fleet);
-          for (const k of keys) {
-            if (upTo > (this.peers.get(k) ?? -1)) {
-              this.peers.set(k, upTo);
-              this.dirty = true;
-            }
-          }
-          // A key that left and is older than anything the gateway still holds is of no use.
-          for (const [k, known] of this.peers) {
-            if (!keys.includes(k) && known < upTo - KEEP_LEFT_KEYS) {
-              this.peers.delete(k);
-              this.dirty = true;
-            }
-          }
-          this.readFor = upTo;
-          this.save();
-        } finally {
-          this.reading = undefined;
-        }
-      })();
-      await this.reading;
+      this.save();
     }
     return this.trusts(key, seq);
   }

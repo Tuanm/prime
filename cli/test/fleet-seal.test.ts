@@ -440,6 +440,32 @@ describe("a member that was removed", () => {
     expect(readFileSync(join(w.replica.work, "file.txt"), "utf8")).toBe("price = 101\n");
   });
 
+  test("a primary that leaves while a replica is behind does not strand the fleet: the replica takes in what the primary made and takes over", async () => {
+    const w = await world();
+    await w.next("one\n");
+    const got = await w.pullReplica(0); // the replica reads the roster, with the primary on it
+    await w.next("two\n");
+    await w.next("three - the last edits on the desktop\n");
+    w.gateway.remove("primary-device"); // the desktop is decommissioned
+    w.gateway.primary = "replica-device";
+    const out = await publish(credsFor("replica-device"), "x", w.replica, got.commit, got.seq, 2);
+    expect(out.seq).toBe(4);
+    expect(readFileSync(join(w.replica.work, "file.txt"), "utf8")).toBe("three - the last edits on the desktop\n");
+  });
+
+  test("a key that left is trusted up to where the head was when it did, and for nothing after", async () => {
+    const { w, ex } = await withExMember();
+    // withExMember removed it with members.delete: the fleet says nothing of it. Now as the fleet does.
+    const exKey = loadOrCreateKeyPair(ex.keyFile).publicKey;
+    w.gateway.left.push({ pubkey: exKey, until: 2 });
+    writeFileSync(join(ex.work, "file.txt"), "published by the removed member after it left\n");
+    w.gateway.primary = "ex-device";
+    w.gateway.applied.set("ex-device", 2);
+    await publish(credsFor("ex-device"), "x", ex, null, 2, 2); // snapshot 3
+    w.gateway.primary = "primary-device";
+    await expect(w.pullReplica(2)).rejects.toThrow(/not any member's/);
+  });
+
   test("a tag that does not match is refused, and so is a snapshot without one after snapshots that had them", async () => {
     const w = await world();
     const one = await w.next("one\n");

@@ -257,10 +257,14 @@ checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
    other member. (It is an added manifest field: older replicas ignore it.)
    And the key the snapshot was made with has to be one the roster lists. The roster is read once for
    a catch-up and kept in `<space>.key.trust.json` beside the key file, each key with the highest
-   sequence it was read for; a snapshot above that sequence makes the roster be read again. So a key
-   that has left the roster is accepted for the snapshots it made while it was on it, and for no
-   later one: a removed member cannot publish with its own key. Otherwise the gateway could make a
-   key pair of its own, wrap a snapshot key of its own for each member and seal its forgery itself.
+   sequence of a snapshot that was checked with it while it was on the roster: nothing credits a key
+   for snapshots that were not looked at. A member that leaves is remembered by the fleet with the
+   sequence the head was at when it did (the roster lists it as `left`, with `until`), so a member
+   that was away while the primary published and then left still takes in what it made, and takes over;
+   and the key is trusted for no snapshot after that sequence. So a removed member cannot publish with
+   its own key, provided the gateway was honest about the roster while it was a member. Otherwise the
+   gateway could make a key pair of its own, wrap a snapshot key of its own for each member and seal
+   its forgery itself.
 3. **No going back.** Publishers older than this have no seal (or, for the tag above, no tag), and
    their snapshots are still accepted - but once a member has taken in a snapshot with a seal (in
    order, and only once it is taken in: not one that was merely downloaded ahead), an unsealed one at
@@ -274,7 +278,8 @@ Whose word this rests on: **the roster**. The operator admits the members, and t
 roster says which key each has. The checks hold against anyone who can read and write what
 the gateway stores - a bucket, a backup, a replay of old storage, a bug - against a gateway
 that edits or reorders manifests, and against a removed member that is helped by the gateway
-to serve what it makes. They do not hold against a gateway that also lies about the roster:
+to serve what it makes - provided the gateway was honest about the roster, and about when a member
+left, while that member was in the fleet. They do not hold against a gateway that also lies about the roster:
 one that adds a key of its own to the list it serves, or swaps a member's key for its own, can then
 author snapshots (for the members that read that roster). That is visible only to someone who compares:
 `prime fleets members` prints a fingerprint of each member's key (the KEY column), and a swapped key
@@ -576,11 +581,10 @@ What is deliberately not done, so that nobody has to find it out:
   (`prime fleets members` shows it) would close it. See "What the gateway can still do".
 - **Rollback and split views are not detected.** A member cannot know about a newer head it was never
   shown. Sizes in a manifest (`packBytes`) are not sealed: they steer the route, not the content.
-- **A snapshot from a member that has left is refused by a replica that had not taken it in.** A replica
-  accepts a key for the sequences a roster that listed it was read for; a snapshot a member published
-  and then left before this replica read the roster is refused ("not any member's"). The replica goes
-  around it, by the next whole tree, when there is one: a current member publishing a whole tree (every
-  32nd snapshot, or when a member joins) ends it.
+- **The sequence a member left at is the gateway's word.** A replica trusts the key of a member that
+  has left for the snapshots up to where the fleet says the head was when it did. A gateway that was
+  malicious while that member was in the fleet can say a later sequence, as it can say the roster is
+  anything; nothing here checks it outside the gateway.
 - **Which fleet of a name it is is learnt from the gateway the first time it is needed.** A member
   that joins forgets what an earlier membership under the name left beside its key and learns the id
   then; one that joined before this existed learns it at its first check, so a replay of an older

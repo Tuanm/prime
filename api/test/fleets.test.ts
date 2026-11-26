@@ -504,6 +504,38 @@ describe("whether a primary is taken to be gone", () => {
   });
 });
 
+describe("the keys of members that have left", () => {
+  const PUB_B = "B".repeat(43) + "=";
+  async function twoMembers() {
+    const made = makeDo();
+    await makeFleet(made.doInstance, "dev-owner");
+    const inv = await call(made.doInstance, "/invite", { caller: "device", device: "dev-owner", body: { autoApprove: true } });
+    await call(made.doInstance, "/join", { caller: "device", device: "dev-two", body: { code: inv.json.code, pubkey: PUB_B } });
+    await call(made.doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    return made;
+  }
+  const roster = (d: FleetDO, device: string) => call(d, "/members", { caller: "device", device, method: "GET" });
+
+  test("a member that leaves is listed with the sequence the head was at, for the members that took in less", async () => {
+    const { doInstance, state } = await twoMembers();
+    state.data.set("index", [{ seq: 2, manifestKey: "m2", full: false }, { seq: 3, manifestKey: "m3", full: false }]);
+    const gone = await call(doInstance, "/remove", { caller: "device", device: "dev-two", body: { deviceId: "dev-two" } });
+    expect(gone.status).toBe(200);
+    const seen = await roster(doInstance, "dev-owner");
+    expect(seen.json.members.map((m: { pubkey?: string }) => m.pubkey)).not.toContain(PUB_B);
+    expect(seen.json.left).toEqual([{ pubkey: PUB_B, until: 3 }]);
+  });
+
+  test("removed by the operator it is the same, and it goes with the fleet", async () => {
+    const { doInstance, state } = await twoMembers();
+    state.data.set("index", [{ seq: 5, manifestKey: "m5", full: true }]);
+    await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    expect((await roster(doInstance, "dev-owner")).json.left).toEqual([{ pubkey: PUB_B, until: 5 }]);
+    await call(doInstance, "/delete", { caller: "admin", device: "operator", body: {} });
+    expect(state.data.get("left")).toBeUndefined();
+  });
+});
+
 describe("which fleet a name stands for", () => {
   const role = (d: FleetDO, device: string) => call(d, "/role", { caller: "device", device, method: "GET" });
 
