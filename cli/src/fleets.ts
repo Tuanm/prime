@@ -566,33 +566,32 @@ export async function fleetsRevoke(ctx: Ctx): Promise<void> {
 }
 
 /**
- * `prime fleets trust reset <fleet> --space <name>`: take again a snapshot that carries no seal.
+ * `prime fleets trust accept <fleet> --space <name> --manifest <hash>`: take one snapshot that carries no seal.
  *
  * A member that has taken in sealed snapshots refuses an unsealed one that follows them (see
  * fleet-trust.ts). When the member that published it was an old build that is now gone, and
  * nobody else can publish, that refusal is all there is between the fleet and a primary. The
- * operator who knows the snapshot is the fleet's own says so here: this member forgets that it
- * has seen seals, takes the snapshot, and its next publish is a whole tree, sealed again.
+ * operator who knows the snapshot is the fleet's own says so here, by the hash the refusal printed:
+ * that one manifest is taken, and nothing else is let through by it. A snapshot that lacks a tag or
+ * the mark of its fleet has no such way: it was made by someone who cannot make them.
  */
 export async function fleetsTrust(ctx: Ctx): Promise<void> {
   const what = ctx.parsed.positionals[2] ?? "";
-  if (what !== "reset") throw new UsageError("unknown trust command \"" + what + "\"", "Usage: prime fleets trust reset <fleet-id> --space <name>");
+  if (what !== "accept") throw new UsageError("unknown trust command \"" + what + "\"", "Usage: prime fleets trust accept <fleet-id> --space <name> --manifest <hash>");
   const fleetId = requireFleetId(ctx.parsed.positionals[3] ?? "");
   const spaceName = spaceArg(ctx);
   if (!spaceName) throw new UsageError("missing --space", "Name the space that belongs to the fleet.");
+  const hash = str(ctx.parsed, "manifest");
+  if (!hash || !/^[0-9a-f]{64}$/.test(hash)) throw new UsageError("missing or malformed --manifest", "The hash of the manifest, as the refusal printed it: 64 hexadecimal characters.");
   const space = ctx.config.spaces[spaceName];
   if (!space) throw new UsageError("unknown space \"" + spaceName + "\"", "Run 'prime spaces list' to see the spaces.");
   if (space.fleet !== fleetId) throw new UsageError("the space \"" + spaceName + "\" is not in the fleet " + fleetId);
-  const was = FleetTrust.reset(fleetKeyFile(ctx.configPath, fleetId, spaceName));
+  FleetTrust.accept(fleetKeyFile(ctx.configPath, fleetId, spaceName), hash);
   if (ctx.json) {
-    printJson({ fleet: fleetId, space: spaceName, reset: true, ...(was !== undefined ? { sealedFrom: was } : {}) });
+    printJson({ fleet: fleetId, space: spaceName, accepted: hash });
     return;
   }
-  ctx.out(
-    was === undefined
-      ? dim("this member had not seen a sealed snapshot of " + fleetId + ": nothing to forget")
-      : green("this member will take a snapshot without a seal again") + dim(" (it had seen seals from snapshot " + was + "); the next sealed one it takes in turns the check back on"),
-  );
+  ctx.out(green("this member will take the snapshot whose manifest is " + hash) + dim(" (that one only; nothing else is let through)"));
 }
 
 export async function fleetsStatus(ctx: Ctx): Promise<void> {

@@ -298,15 +298,22 @@ What the gateway can still do, whatever a member checks:
   find out when they take over and publish on a head the others do not have.
 - **Roll out slowly**: until every publisher has the seal, a replica that has not yet seen a
   sealed snapshot takes unsealed ones, so an unsealed old snapshot of an old publisher can be
-  shown as a new one to a member that never saw a sealed one. And once one is seen, an old
-  member that is promoted and publishes without a seal is refused by the new replicas
-  ("it carries no seal ..."). They stay on the snapshot before it until an upgraded member
-  publishes: that snapshot is a whole tree, which they go to. If the old member is gone and no
-  upgraded member can take over (the catch-up to the unsealed head is what is refused), the
-  operator of that member runs `prime fleets trust reset <fleet> --space <name>`: it takes the
-  unsealed snapshot, and its own next publish is a whole tree, sealed. That is a decision to
-  trust that snapshot, and it is the operator's to make: the member cannot tell it from an old
-  snapshot the gateway made up.
+  shown as a new one to a member that never saw a sealed one. Once the fleet has a sealed snapshot,
+  the gateway does not move the head to one without a seal ("this fleet's snapshots are sealed: upgrade
+  prime on this member"): an old member that was promoted is told so, its lease goes to another member
+  (an upgraded one takes it), and it carries on as a replica, which it can, since older builds read
+  sealed snapshots. (Deploy the gateway before the members.) That is a rule of the gateway about
+  availability, not a check a member relies on: a member that has seen a sealed snapshot refuses an
+  unsealed one at or above it whatever the gateway lets through ("it carries no seal ..."), and goes
+  around it by the next whole tree. When the old member published before the gateway had the rule, was
+  then lost, and no upgraded member can take over (the catch-up to that head is what is refused), the
+  refusal prints the manifest's hash and the operator of the member that cannot go on runs
+  `prime fleets trust accept <fleet> --space <name> --manifest <hash>`. That takes that one snapshot -
+  the member cannot tell it from an old snapshot the gateway made up, so it is the operator's decision,
+  and the hash is to be checked with the member that published it - and its own next publish is a whole
+  tree, sealed. It lowers nothing the member has seen, and it is only offered for a snapshot without a
+  seal: a snapshot with a seal and no sender's tag, or no mark of its fleet, after ones that had them
+  is refused as tampering, and there is no command to take it.
   Older replicas read sealed snapshots as they did before (the packs are unchanged; the tag is
   an added manifest field), so mixed fleets keep working in that direction.
 - **Know who is in the fleet, how big the work tree is, and when it changes.**
@@ -592,8 +599,8 @@ What is deliberately not done, so that nobody has to find it out:
 - **Unsealed snapshots are taken until the first sealed one is seen.** And a replica that has seen a
   sealed one refuses an unsealed one at or above it, so an old member that is promoted stalls the new
   replicas on the snapshot before it, until an upgraded member publishes (a whole tree) or the
-  operator runs `prime fleets trust reset`. The trust file (`<space>.key.trust.json`) is not
-  tamper-evident: deleting it, or the reset, opens the same window again.
+  operator accepts that snapshot (`prime fleets trust accept`). The trust file (`<space>.key.trust.json`) is not
+  tamper-evident: deleting it opens the same window again.
 - **Objects can still be left in storage** when a publisher dies after uploading a checkpoint's change
   pack and before the snapshot request, or when the gateway itself fails between storing and asking
   the fleet object. A refused publish cleans up after itself.

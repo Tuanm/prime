@@ -34,7 +34,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname } from "node:path";
 
 import { SEAL_PREFIX, type OpenedPayload, type SealFields } from "./fleet-crypto";
-import { fetchRole, fetchRoster, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
+import { fetchRole, fetchRoster, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
 export class TamperedSnapshotError extends Error {
@@ -67,6 +67,7 @@ interface TrustFile {
   macFrom?: number;
   incarnation?: string;
   incarnationFrom?: number;
+  accepted: string[];
   peers: Map<string, number>;
 }
 
@@ -84,6 +85,11 @@ export class FleetTrust {
   /** The lowest sequence of a snapshot taken in that names its fleet's incarnation. */
   incarnationFrom: number | undefined;
   /**
+   * Manifests (by hash) that the operator has said to take though they carry no seal. Each is one
+   * snapshot: nothing else is let through by it, and no bound above is changed.
+   */
+  readonly accepted = new Set<string>();
+  /**
    * The public keys the roster has listed, each with the highest sequence a roster that listed it
    * was read for (see `trusts`).
    */
@@ -95,7 +101,7 @@ export class FleetTrust {
   }
 
   private read(): TrustFile {
-    const none: TrustFile = { peers: new Map() };
+    const none: TrustFile = { peers: new Map(), accepted: [] };
     try {
       if (!existsSync(this.file)) return none;
       const raw = JSON.parse(readFileSync(this.file, "utf8")) as {
@@ -103,6 +109,7 @@ export class FleetTrust {
         macFrom?: unknown;
         incarnation?: unknown;
         incarnationFrom?: unknown;
+        accepted?: unknown;
         boundSeq?: unknown;
         peers?: unknown;
       };
@@ -120,6 +127,7 @@ export class FleetTrust {
         ...(typeof raw.macFrom === "number" && raw.macFrom >= 0 ? { macFrom: raw.macFrom } : {}),
         ...(typeof raw.incarnation === "string" && raw.incarnation ? { incarnation: raw.incarnation } : {}),
         ...(typeof raw.incarnationFrom === "number" && raw.incarnationFrom >= 0 ? { incarnationFrom: raw.incarnationFrom } : {}),
+        accepted: Array.isArray(raw.accepted) ? raw.accepted.filter((h): h is string => typeof h === "string" && /^[0-9a-f]{64}$/.test(h)) : [],
         peers,
       };
     } catch {
@@ -135,6 +143,7 @@ export class FleetTrust {
     // What is on disk was learnt of the fleet this member is in: it fills in what is not known, never replaces it.
     this.incarnation ??= other.incarnation;
     if (other.incarnationFrom !== undefined && (this.incarnationFrom === undefined || other.incarnationFrom < this.incarnationFrom)) this.incarnationFrom = other.incarnationFrom;
+    for (const hash of other.accepted) this.accepted.add(hash);
     for (const [key, seq] of other.peers) if (seq > (this.peers.get(key) ?? -1)) this.peers.set(key, seq);
   }
 
@@ -161,23 +170,41 @@ export class FleetTrust {
    * downloaded side by side.
    */
   checkNotDowngrade(m: FleetManifest, memberId: string): void {
+    const hash = manifestHashOf(m);
+    // One manifest without a seal that the operator said to take: nothing else, and no other kind.
+    if (m.seal === undefined && hash !== undefined && this.accepted.has(hash)) return;
     const level = protectionOf(m, memberId);
-    const what =
-      level < 1 && this.sealedFrom !== undefined && m.seq >= this.sealedFrom
-        ? "no seal, but snapshot " + this.sealedFrom + " did"
-        : level < 2 && this.macFrom !== undefined && m.seq >= this.macFrom
-          ? "no tag from its sender for this member, but snapshot " + this.macFrom + " did"
-          : m.incarnation === undefined && this.incarnationFrom !== undefined && m.seq >= this.incarnationFrom
-            ? "no mark of which fleet of this name it belongs to, but snapshot " + this.incarnationFrom + " did"
-            : null;
-    if (what === null) return;
-    throw new TamperedSnapshotError(
-      m.seq,
-      "it carries " +
-        what +
-        ": either the gateway swapped in an old snapshot, or a member that has not been upgraded published it. Upgrade that member; if it is gone and nobody else can take over, run 'prime fleets trust reset <fleet> --space <space>' on this member to accept it",
-      true,
-    );
+    if (level < 1 && this.sealedFrom !== undefined && m.seq >= this.sealedFrom) {
+      // The one refusal that has an honest cause: a member of an old build that was promoted publishes this way.
+      throw new TamperedSnapshotError(
+        m.seq,
+        "it carries no seal, but snapshot " +
+          this.sealedFrom +
+          " did: either the gateway swapped in an old snapshot, or a member that has not been upgraded published it. Upgrade that member. If it is gone and nobody else can take over, and you know this snapshot is the fleet's own" +
+          (hash !== undefined ? " (manifest " + hash + ": compare it with what that member's own 'prime fleets status' says it published)" : "") +
+          ", run 'prime fleets trust accept <fleet> --space <space> --manifest " +
+          (hash ?? "<hash>") +
+          "' on this member to take that one snapshot",
+        true,
+      );
+    }
+    // The others are not made by any build that was released: a snapshot with a seal and no tag for this
+    // member, or none that names the fleet, after ones that had them, is made by someone who cannot make
+    // them. There is nothing to accept.
+    if (level < 2 && this.macFrom !== undefined && m.seq >= this.macFrom) {
+      throw new TamperedSnapshotError(
+        m.seq,
+        "it carries no tag from its sender for this member, but snapshot " + this.macFrom + " did: it was not made by a member of this fleet (it is tampered with)",
+        true,
+      );
+    }
+    if (m.incarnation === undefined && this.incarnationFrom !== undefined && m.seq >= this.incarnationFrom) {
+      throw new TamperedSnapshotError(
+        m.seq,
+        "it carries no mark of which fleet of this name it belongs to, but snapshot " + this.incarnationFrom + " did: it was not made by a member of this fleet (it is tampered with)",
+        true,
+      );
+    }
   }
 
   /** A snapshot has been taken in: what it showed is now known of this fleet. */
@@ -211,6 +238,7 @@ export class FleetTrust {
         ...(this.macFrom !== undefined ? { macFrom: this.macFrom } : {}),
         ...(this.incarnation !== undefined ? { incarnation: this.incarnation } : {}),
         ...(this.incarnationFrom !== undefined ? { incarnationFrom: this.incarnationFrom } : {}),
+        ...(this.accepted.size > 0 ? { accepted: [...this.accepted].slice(-16) } : {}),
         peers,
       }) + "\n",
       { mode: 0o600 },
@@ -219,19 +247,18 @@ export class FleetTrust {
   }
 
   /**
-   * Forget that this fleet has shown seals, so that a snapshot without one is taken again
-   * (until the next sealed one is). It is for the operator to ask for when the member that
-   * published without a seal is gone and the fleet cannot go on without taking its snapshot.
-   * What the roster's keys are is kept. Returns the lowest sealed sequence it had seen.
+   * Take one snapshot that carries no seal, by the hash its manifest is stored under. It is for the
+   * operator to ask for when the member that published it (an old build that was promoted) is gone and
+   * the fleet cannot go on without it. Only that manifest is let through: no bound this member keeps
+   * is lowered, so the next snapshot without a seal, a tag or a mark of the fleet is refused as before.
+   * What is on disk is added to, never replaced, so an agent that saves at the same moment loses nothing.
    */
-  static reset(keyFile: string): number | undefined {
+  static accept(keyFile: string, manifestHash: string): void {
+    if (!/^[0-9a-f]{64}$/.test(manifestHash)) throw new Error("a manifest is named by its hash: 64 hexadecimal characters");
     const trust = FleetTrust.beside(keyFile);
-    const was = trust.sealedFrom;
-    trust.sealedFrom = undefined;
-    trust.macFrom = undefined;
-    trust.incarnationFrom = undefined;
-    trust.write();
-    return was;
+    trust.accepted.add(manifestHash);
+    trust.dirty = true;
+    trust.save(); // merged with what is on disk now
   }
 
   /**

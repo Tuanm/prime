@@ -298,7 +298,7 @@ describe("a fleet that is upgraded one member at a time", () => {
     expect(read(w)).toBe("four\n");
   });
 
-  test("a member whose catch-up is refused only because the head is unsealed can be told to take it", async () => {
+  test("a member whose catch-up is refused only because the head is unsealed can be told to take that one snapshot", async () => {
     const w = await world();
     await w.next("one\n");
     const got = await w.pullReplica(0);
@@ -306,15 +306,51 @@ describe("a fleet that is upgraded one member at a time", () => {
     await w.next("two\n"); // the old member, and then it is gone
     w.gateway.primary = "replica-device";
     const take = (): ReturnType<typeof publish> => publish(credsFor("replica-device"), "x", w.replica, got.commit, got.seq, 2);
-    // The refusal says what to do about it.
-    await expect(take()).rejects.toThrow(/prime fleets trust reset/);
-    expect(FleetTrust.reset(w.replica.keyFile)).toBe(1);
+    // The refusal names the snapshot, and what to do about it.
+    const refused = (await take().catch((e: unknown) => e)) as Error;
+    expect(refused.message).toMatch(/prime fleets trust accept <fleet> --space <space> --manifest [0-9a-f]{64}/);
+    const hash = /--manifest ([0-9a-f]{64})/.exec(refused.message)![1]!;
+    FleetTrust.accept(w.replica.keyFile, hash);
     w.gateway.unsealed = false;
     const out = await take();
     expect(out.seq).toBe(3);
     expect(out.full).toBe(true); // the snapshot is sealed again, whole
     expect(read(w)).toBe("two\n");
-    expect(FleetTrust.beside(w.replica.keyFile).sealedFrom).toBe(3);
+    // What the member has seen of seals, tags and marks is not lowered by taking it.
+    const trust = FleetTrust.beside(w.replica.keyFile);
+    expect(trust.sealedFrom).toBe(1);
+    expect(trust.macFrom).toBe(1);
+    expect(trust.incarnationFrom).toBe(1);
+  });
+
+  test("accepting one snapshot does not let another through", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    w.gateway.unsealed = true;
+    await w.next("two\n");
+    const first = (await w.pullReplica(1).catch((e: unknown) => e)) as Error;
+    FleetTrust.accept(w.replica.keyFile, /--manifest ([0-9a-f]{64})/.exec(first.message)![1]!);
+    expect((await w.pullReplica(1)).seq).toBe(2);
+    await w.next("three\n"); // the old member goes on publishing
+    const second = (await w.pullReplica(2).catch((e: unknown) => e)) as Error;
+    expect(second.message).toMatch(/carries no seal/);
+    expect(/--manifest ([0-9a-f]{64})/.exec(second.message)![1]).not.toBe(/--manifest ([0-9a-f]{64})/.exec(first.message)![1]);
+    expect(read(w)).toBe("two\n");
+  });
+
+  test("a manifest with a seal but no tag cannot be accepted: it is refused as tampering, with no way offered", async () => {
+    const w = await world();
+    await w.next("one\n");
+    await w.pullReplica(0);
+    w.gateway.noMacs = true;
+    const two = await w.next("two\n");
+    const refused = (await w.pullReplica(1).catch((e: unknown) => e)) as Error;
+    expect(refused.message).toMatch(/tampered/);
+    expect(refused.message).not.toMatch(/trust accept|reset/);
+    // Naming it does not help.
+    FleetTrust.accept(w.replica.keyFile, createHash("sha256").update(w.gateway.payloads.get(two.manifestKey)!).digest("hex"));
+    await expect(w.pullReplica(1)).rejects.toThrow(/tampered/);
   });
 
   test("a snapshot downloaded ahead of the one before it does not raise the guard", async () => {
@@ -486,8 +522,7 @@ describe("a member that was removed", () => {
     w.gateway.noMacs = true; // an earlier build
     await w.next("two\n");
     await expect(w.pullReplica(1)).rejects.toThrow(/no tag from its sender/);
-    expect(FleetTrust.reset(w.replica.keyFile)).toBe(1);
-    expect((await w.pullReplica(1)).seq).toBe(2);
+    expect(readFileSync(join(w.replica.work, "file.txt"), "utf8")).toBe("one\n");
   });
 
   test("a publisher that finds a head without those tags publishes a whole tree", async () => {

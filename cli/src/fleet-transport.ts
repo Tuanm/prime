@@ -154,6 +154,15 @@ export async function putPayload(
 }
 
 /** Fetch a manifest by the id it is stored under. */
+// The id a manifest was fetched under (the hash of its bytes), for the manifests that were. Kept beside
+// the manifest rather than in it: it is not part of what the publisher made or sealed.
+const fetchedAs = new WeakMap<FleetManifest, string>();
+
+/** The id (hash) a manifest was fetched under, if it was fetched. */
+export function manifestHashOf(m: FleetManifest): string | undefined {
+  return fetchedAs.get(m);
+}
+
 export async function fetchManifest(creds: FleetCredentials, fleet: string, id: string): Promise<FleetManifest> {
   const bytes = await getPayload(creds, fleet, "manifests", id);
   // A manifest is stored under the hash of its bytes: what came back is what the
@@ -161,7 +170,10 @@ export async function fetchManifest(creds: FleetCredentials, fleet: string, id: 
   if (/^[0-9a-f]{64}$/.test(id) && payloadHash(bytes) !== id) {
     throw new FleetTransportError("the manifest the gateway returned is not the one that was asked for");
   }
-  return JSON.parse(bytes.toString("utf8")) as FleetManifest;
+  const manifest = JSON.parse(bytes.toString("utf8")) as FleetManifest;
+  // The hash it was stored under: of the bytes that came back, which is what the id says when it is a hash.
+  fetchedAs.set(manifest, payloadHash(bytes));
+  return manifest;
 }
 
 /** Fetch a stored payload. */

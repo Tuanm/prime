@@ -150,7 +150,12 @@ interface IndexEntry {
   full: boolean;
   packBytes?: number;
   deltaBytes?: number;
+  /** The publisher sealed the manifest (members check it). */
+  sealed?: true;
 }
+
+/** How long a member that published without a seal after sealed snapshots is kept from the lease. */
+const UNSEALED_BAR_MS = 10 * 60_000;
 
 export class FleetDO implements DurableObject {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
@@ -338,6 +343,7 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("created");
     await this.state.storage.delete("incarnation");
     await this.state.storage.delete("left");
+    await this.state.storage.delete("unsealedBar");
     await this.state.storage.delete("invites");
     await this.state.storage.delete("pending");
     await this.state.storage.delete("lease");
@@ -1055,6 +1061,21 @@ export class FleetDO implements DurableObject {
         });
         return;
       }
+      // A member that published without a seal on a fleet whose snapshots are sealed is not given the
+      // lease back for a while: an upgraded member has it (see `advance`). It carries on as a replica.
+      const bar = (await this.state.storage.get<Record<string, number>>("unsealedBar")) ?? {};
+      if ((bar[caller.deviceId] ?? 0) > now) {
+        out = Response.json({
+          ok: true,
+          role: "replica",
+          reason: "upgrade-required",
+          holder: held?.holder ?? null,
+          head,
+          epoch: head.epoch,
+          error: "this fleet's snapshots are sealed: upgrade prime on this member",
+        });
+        return;
+      }
       // A member without a public key can never open a snapshot, so it can
       // never catch up. It may not hold the lease: it would publish on top
       // of state it cannot read.
@@ -1233,6 +1254,7 @@ export class FleetDO implements DurableObject {
     const size = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
     const meta = {
       full: rawMeta.full === true,
+      ...(rawMeta.sealed === true ? { sealed: true as const } : {}),
       ...(size(rawMeta.packBytes) !== undefined ? { packBytes: size(rawMeta.packBytes)! } : {}),
       ...(size(rawMeta.deltaBytes) !== undefined ? { deltaBytes: size(rawMeta.deltaBytes)! } : {}),
     };
@@ -1248,6 +1270,26 @@ export class FleetDO implements DurableObject {
     const currentHead = current ? ((await current.json()) as Head) : { ...EMPTY_HEAD };
     if (currentHead.seq !== expectedSeq) {
       return Response.json({ error: "stale sequence", current: currentHead.seq }, { status: 409 });
+    }
+    // A fleet whose snapshots are sealed does not go back to ones that are not. The members check the
+    // seal, and one that has seen it refuses a snapshot without; an old build that was promoted would
+    // publish those and leave the fleet with no primary that anyone could replace. Its lease is handed
+    // on instead (it opens sealed snapshots as it always did, and carries on as a replica), and it is
+    // kept from taking the lease back for a while, so that an upgraded member has it.
+    const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    const tip = index[index.length - 1];
+    if (tip && tip.seq === currentHead.seq && tip.sealed === true && meta.sealed !== true) {
+      await this.state.storage.delete("lease");
+      const bar = (await this.state.storage.get<Record<string, number>>("unsealedBar")) ?? {};
+      const now = Date.now();
+      for (const [device, until] of Object.entries(bar)) if (until <= now) delete bar[device];
+      bar[caller.deviceId] = now + UNSEALED_BAR_MS;
+      await this.state.storage.put("unsealedBar", bar);
+      this.broadcast({ type: "lease-free" }, caller.deviceId);
+      return Response.json(
+        { error: "this fleet's snapshots are sealed: upgrade prime on this member (it stays a replica until then)", upgrade: true },
+        { status: 409 },
+      );
     }
     // A member that took over has to have applied the state it is about to
     // replace. Without this, a new primary could publish on top of state it
@@ -1292,9 +1334,9 @@ export class FleetDO implements DurableObject {
     recent.push([manifestKey, packKey, ...extraKeys].filter(Boolean).join("\n"));
     const evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
     await this.state.storage.put("recent", recent);
-    const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
-    index.push({ seq: next.seq, manifestKey, ...meta });
-    await this.state.storage.put("index", index.slice(-RECENT_SNAPSHOTS));
+    const kept = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    kept.push({ seq: next.seq, manifestKey, ...meta });
+    await this.state.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
     for (const entry of evicted) {
       for (const key of entry.split("\n")) {
         if (!key) continue;

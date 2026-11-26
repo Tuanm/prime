@@ -131,6 +131,7 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
     packHash?: string;
     full?: unknown;
     packBytes?: unknown;
+    seal?: unknown;
     delta?: { packKey?: unknown; bytes?: unknown };
   };
   try {
@@ -184,6 +185,8 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
       // What a member needs to choose its route without opening every manifest.
       meta: {
         full: manifest.full === true,
+        // Whether the publisher sealed the manifest: the fleet does not move from sealed to unsealed.
+        ...(typeof manifest.seal === "string" && manifest.seal !== "" ? { sealed: true } : {}),
         ...(typeof manifest.packBytes === "number" ? { packBytes: manifest.packBytes } : {}),
         ...(typeof manifest.delta?.bytes === "number" ? { deltaBytes: manifest.delta.bytes } : {}),
       },

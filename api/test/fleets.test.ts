@@ -654,6 +654,80 @@ describe("bootstrap", () => {
   });
 });
 
+describe("a fleet whose snapshots are sealed", () => {
+  async function sealedFleet() {
+    const made = makeDo();
+    const { doInstance } = made;
+    await makeFleet(doInstance, "dev-old");
+    const invite = await call(doInstance, "/invite", { caller: "admin", device: "dev-old", body: {} });
+    await call(doInstance, "/join", { caller: "device", device: "dev-new", body: { code: invite.json.code } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-new" } });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-old" });
+    // The old member is the primary; an upgraded member's snapshot was sealed.
+    const sealed = await call(doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1", meta: { full: true, sealed: true } } });
+    expect(sealed.status).toBe(200);
+    return made;
+  }
+
+  test("is not moved to a snapshot without a seal, and the member that tried is given no lease until it is upgraded", async () => {
+    const { doInstance } = await sealedFleet();
+    const refused = await call(doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2", meta: { full: false } } });
+    expect(refused.status).toBe(409);
+    expect(refused.json.error).toMatch(/upgrade prime/);
+    // Its lease is handed on: the upgraded member that has applied the head takes it, and the old one cannot take it back.
+    await call(doInstance, "/applied", { caller: "device", device: "dev-new", body: { seq: 1 } });
+    const old = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-old" });
+    expect(old.json.role).toBe("replica");
+    expect(old.json.reason).toBe("upgrade-required");
+    const upgraded = await call(doInstance, "/bootstrap", { caller: "device", device: "dev-new" });
+    expect(upgraded.json.role).toBe("primary");
+    // And the head is where it was.
+    const next = await call(doInstance, "/head/advance", { caller: "device", device: "dev-new", body: { expectedSeq: 1, manifestKey: "m/3", manifestHash: "h3", meta: { full: false, sealed: true } } });
+    expect(next.status).toBe(200);
+  });
+
+  test("a fleet that has had no sealed snapshot takes an unsealed one, as it always did", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-old");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-old" });
+    const first = await call(doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1", meta: { full: true } } });
+    const second = await call(doInstance, "/head/advance", { caller: "device", device: "dev-old", body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2", meta: { full: false } } });
+    expect([first.status, second.status]).toEqual([200, 200]);
+  });
+
+  test("the Worker says whether a snapshot was sealed", async () => {
+    const advances: Array<Record<string, any>> = [];
+    const stub = {
+      async fetch(input: Request | string, init?: RequestInit) {
+        const url = typeof input === "string" ? input : input.url;
+        if (url.endsWith("/role")) return Response.json({ member: true, primary: true, epoch: 1 });
+        if (url.endsWith("/head/advance")) {
+          advances.push(JSON.parse(String(init?.body ?? "{}")));
+          return Response.json({ ok: true, head: { seq: 1 } });
+        }
+        return Response.json({ ok: true });
+      },
+    };
+    const env = { BUCKET: { put: async () => undefined, delete: async () => undefined }, FLEET: { idFromName: (n: string) => n, get: () => stub } } as never;
+    for (const manifest of [{ seq: 1, full: true, seal: "v1:abc" }, { seq: 2, full: true }]) {
+      const bytes = Buffer.from(JSON.stringify(manifest));
+      const header = Buffer.alloc(4);
+      header.writeUInt32BE(bytes.length, 0);
+      const url = new URL("https://gateway/fleets/acme/snapshot");
+      await handleFleetRoutes({
+        request: new Request(url, { method: "POST", headers: { "x-prime-device": "dev-a", "x-device-token": "t" }, body: Buffer.concat([header, bytes, Buffer.from("pack")]) }),
+        env,
+        url,
+        cfg: { gatewayToken: "op-secret" } as never,
+        authorizeDevice: async () => ({ ok: true as const }),
+        unauthorized: () => new Response(null, { status: 401 }),
+      });
+    }
+    expect(advances[0]!.meta.sealed).toBe(true);
+    expect(advances[1]!.meta.sealed).toBeUndefined();
+  });
+});
+
 describe("catch up before promoting", () => {
   test("a member that takes over must apply the state it replaces", async () => {
     const { doInstance } = makeDo();
