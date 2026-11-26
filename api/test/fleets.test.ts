@@ -616,6 +616,64 @@ describe("catch up before promoting", () => {
   });
 });
 
+describe("replicas racing for a free lease", () => {
+  async function three() {
+    const made = makeDo();
+    const d = made.doInstance;
+    await makeFleet(d, "dev-one");
+    await call(d, "/bootstrap", { caller: "device", device: "dev-one" });
+    await call(d, "/head/advance", { caller: "device", device: "dev-one", body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1" } });
+    for (const dev of ["dev-two", "dev-three"]) {
+      const invite = await call(d, "/invite", { caller: "admin", device: "dev-one", body: {} });
+      await call(d, "/join", { caller: "device", device: dev, body: { code: invite.json.code } });
+      await call(d, "/approve", { caller: "admin", device: "operator", body: { deviceId: dev } });
+    }
+    await call(d, "/lease/release", { caller: "device", device: "dev-one" });
+    return made;
+  }
+  const ask = (d: FleetDO, dev: string) => call(d, "/bootstrap", { caller: "device", device: dev });
+
+  test("the first to ask is told to catch up, and the others to wait", async () => {
+    const { doInstance } = await three();
+    const first = await ask(doInstance, "dev-two");
+    expect(first.json.reason).toBe("not-caught-up");
+    const second = await ask(doInstance, "dev-three");
+    expect(second.json.reason).toBe("claimed");
+    expect(second.json.holder).toBe("dev-two");
+    expect(second.json.retryAfterMs).toBeGreaterThan(0);
+    expect(second.json.retryAfterMs).toBeLessThanOrEqual(30_000);
+    // The one that holds the claim is asked the same again: it goes on.
+    expect((await ask(doInstance, "dev-two")).json.reason).toBe("not-caught-up");
+  });
+
+  test("the claim is only about who writes a work tree: who gets the lease is as it was", async () => {
+    const { doInstance } = await three();
+    await ask(doInstance, "dev-two");
+    // The member that is current takes the lease whatever the claim.
+    const old = await ask(doInstance, "dev-one");
+    expect(old.json.role).toBe("primary");
+    // And with the lease held, nobody is asked to catch up for it.
+    expect((await ask(doInstance, "dev-three")).json.reason).toBe("lease-held");
+  });
+
+  test("a claimant that caught up takes the lease, and the claim goes with it", async () => {
+    const { doInstance, state } = await three();
+    await ask(doInstance, "dev-two");
+    await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1 } });
+    expect((await ask(doInstance, "dev-two")).json.role).toBe("primary");
+    expect(state.data.has("claim")).toBe(false);
+  });
+
+  test("a claim that lapses (its holder died half way) lets the next ask take over the catching up", async () => {
+    const { doInstance, state } = await three();
+    await ask(doInstance, "dev-two");
+    const claim = state.data.get("claim") as { until: number };
+    state.data.set("claim", { ...claim, until: Date.now() - 1 });
+    expect((await ask(doInstance, "dev-three")).json.reason).toBe("not-caught-up");
+    expect((await ask(doInstance, "dev-two")).json.reason).toBe("claimed");
+  });
+});
+
 describe("head advance", () => {
   test("the lease holder advances the head, and a stale sequence is refused", async () => {
     const { doInstance, bucket } = makeDo();

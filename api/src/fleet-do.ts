@@ -100,6 +100,15 @@ const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 }
  */
 const LEASE_TTL_MS = 45_000;
 
+/** How long the first replica to ask for a free lease has to catch up before another may. */
+const CLAIM_MS = 30_000;
+
+/** A replica that is catching up to take a free lease. */
+interface Claim {
+  device: string;
+  until: number;
+}
+
 /** One snapshot the fleet keeps, as the index lists it. */
 interface IndexEntry {
   seq: number;
@@ -298,6 +307,7 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("lease");
     await this.state.storage.delete("epoch");
     await this.state.storage.delete("applied");
+    await this.state.storage.delete("claim");
     await this.state.storage.delete("fetched");
     await this.state.storage.delete("index");
     await this.state.storage.delete("ownerSeenAt");
@@ -1018,6 +1028,26 @@ export class FleetDO implements DurableObject {
       // itself. It catches up first, and takes the lease on a later round.
       const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
       if (head.seq > 0 && (applied[caller.deviceId] ?? 0) < head.seq) {
+        // Every replica that is behind is told the same while the lease is free,
+        // and each would write its whole work tree to catch up. The first to ask
+        // is given a short claim on doing so (renewed whenever it asks again):
+        // the others are told to wait and ask later. The lease itself is decided
+        // as ever - by who has applied the head when it asks - so a claim that
+        // lapses (its holder died half way) costs the others its length at most.
+        const claim = await this.state.storage.get<Claim>("claim");
+        if (claim && claim.until > now && claim.device !== caller.deviceId && members[claim.device]) {
+          out = Response.json({
+            ok: true,
+            role: "replica",
+            reason: "claimed",
+            holder: claim.device,
+            head,
+            epoch: head.epoch,
+            retryAfterMs: Math.max(1000, claim.until - now),
+          });
+          return;
+        }
+        await this.state.storage.put("claim", { device: caller.deviceId, until: now + CLAIM_MS } satisfies Claim);
         out = Response.json({
           ok: true,
           role: "replica",
@@ -1037,6 +1067,7 @@ export class FleetDO implements DurableObject {
       const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs };
       await this.state.storage.put("lease", lease);
       await this.state.storage.put("epoch", epoch);
+      await this.state.storage.delete("claim");
       await this.scheduleLeaseAlarm(lease.expiresAt);
       out = Response.json({
         ok: true,
