@@ -1,0 +1,52 @@
+// The flags each `prime fleets <subcommand>` accepts.
+
+import { flag, type FlagSpec } from "./args.ts";
+
+const FLEET_FLAGS: FlagSpec[] = [
+  flag("gateway", "string", "Gateway origin", { placeholder: "<url>" }),
+  flag("gateway-token", "string", "Gateway credential (operator authority)", { placeholder: "<token>" }),
+  flag("device", "string", "Device id this call speaks as", { placeholder: "<id>" }),
+  flag("token", "string", "Device token (X-Device-Token)", { placeholder: "<token>" }),
+  flag("space", "string", "Take the device credentials from this space", { placeholder: "<name>" }),
+  flag("timeout", "number", "Per-request timeout in milliseconds", { placeholder: "<ms>" }),
+];
+
+const FLEET_INVITE_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("ttl", "number", "How long the invite stays valid, in seconds", { placeholder: "<s>" }),
+];
+
+const FLEET_JOIN_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("code", "string", "Invite code from the operator", { placeholder: "<code>" }),
+  flag("label", "string", "A name for this machine, shown to the operator", { placeholder: "<label>" }),
+];
+
+const FLEET_APPROVE_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("member", "string", "The member to approve or remove", { placeholder: "<id>" }),
+];
+
+const FLEET_SYNC_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("space", "string", "The space that belongs to the fleet", { placeholder: "<name>" }),
+  flag("watch", "boolean", "Keep going: publish when primary, pull when replica"),
+  flag("interval", "number", "Seconds between rounds when watching", { placeholder: "<s>" }),
+  flag("force", "boolean", "Publish even when the workspace has not changed"),
+];
+
+/** `prime fleets agent ...`: the common flags, and `--force` for `uninstall`. */
+const FLEET_AGENT_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("force", "boolean", "With `uninstall`: remove the service although it runs another configuration"),
+];
+
+/** The flags that `prime fleets <sub>` is parsed with. */
+export function fleetFlagsFor(sub: string | undefined): FlagSpec[] {
+  if (sub === "invite") return FLEET_INVITE_FLAGS;
+  if (sub === "join") return FLEET_JOIN_FLAGS;
+  if (sub === "approve" || sub === "remove") return FLEET_APPROVE_FLAGS;
+  if (sub === "sync") return FLEET_SYNC_FLAGS;
+  if (sub === "agent") return FLEET_AGENT_FLAGS;
+  return FLEET_FLAGS;
+}

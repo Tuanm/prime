@@ -13,6 +13,7 @@
 // Aliases: `prime` (bare) shows help; `prime call ...` === `prime tools call ...`.
 
 import { bool, flag, parseArgs, str, type FlagSpec } from "./args.ts";
+import { fleetFlagsFor } from "./fleet-flags.ts";
 import { runCodeMcp } from "./code-mcp-host.ts";
 import { serviceInstall, serviceStatusCommand, serviceUninstall } from "./service-command.ts";
 import { connectCommand } from "./connect.ts";
@@ -109,39 +110,6 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("allow-no-limits", "boolean", "Start even if cpu/memory limits cannot be enforced"),
   flag("runtime", "string", "Runtime: apple|podman|docker", { placeholder: "<runtime>" }),
   flag("allow-rootful", "boolean", "Permit rootful docker (not recommended)"),
-];
-
-const FLEET_FLAGS: FlagSpec[] = [
-  flag("gateway", "string", "Gateway origin", { placeholder: "<url>" }),
-  flag("gateway-token", "string", "Gateway credential (operator authority)", { placeholder: "<token>" }),
-  flag("device", "string", "Device id this call speaks as", { placeholder: "<id>" }),
-  flag("token", "string", "Device token (X-Device-Token)", { placeholder: "<token>" }),
-  flag("space", "string", "Take the device credentials from this space", { placeholder: "<name>" }),
-  flag("timeout", "number", "Per-request timeout in milliseconds", { placeholder: "<ms>" }),
-];
-
-const FLEET_INVITE_FLAGS: FlagSpec[] = [
-  ...FLEET_FLAGS,
-  flag("ttl", "number", "How long the invite stays valid, in seconds", { placeholder: "<s>" }),
-];
-
-const FLEET_JOIN_FLAGS: FlagSpec[] = [
-  ...FLEET_FLAGS,
-  flag("code", "string", "Invite code from the operator", { placeholder: "<code>" }),
-  flag("label", "string", "A name for this machine, shown to the operator", { placeholder: "<label>" }),
-];
-
-const FLEET_APPROVE_FLAGS: FlagSpec[] = [
-  ...FLEET_FLAGS,
-  flag("member", "string", "The member to approve or remove", { placeholder: "<id>" }),
-];
-
-const FLEET_SYNC_FLAGS: FlagSpec[] = [
-  ...FLEET_FLAGS,
-  flag("space", "string", "The space that belongs to the fleet", { placeholder: "<name>" }),
-  flag("watch", "boolean", "Keep going: publish when primary, pull when replica"),
-  flag("interval", "number", "Seconds between rounds when watching", { placeholder: "<s>" }),
-  flag("force", "boolean", "Publish even when the workspace has not changed; with `agent uninstall`, remove the service although it runs another configuration"),
 ];
 
 const VAULTS_FLAGS: FlagSpec[] = [
@@ -515,11 +483,7 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     return [];
   }
   if (topic === "fleets") {
-    if (sub === "invite") return FLEET_INVITE_FLAGS;
-    if (sub === "join") return FLEET_JOIN_FLAGS;
-    if (sub === "approve" || sub === "remove") return FLEET_APPROVE_FLAGS;
-    if (sub === "sync") return FLEET_SYNC_FLAGS;
-    return FLEET_FLAGS;
+    return fleetFlagsFor(sub);
   }
   if (topic === "vaults") return VAULTS_FLAGS;
   if (topic === "update") return UPDATE_FLAGS;
