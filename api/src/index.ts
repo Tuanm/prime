@@ -34,7 +34,7 @@ import { SECURITY_HTML } from "./security-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleFleetRoutes, markSeen } from "./fleets-routes";
-import { validFleetId } from "./fleets";
+import { onlineNow, validFleetId } from "./fleets";
 import { sendUsage, takeFleetR2 } from "./usage";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
@@ -496,8 +496,15 @@ async function vacateInFleets(env: Env, deviceId: string): Promise<string[]> {
  * can reach, and the fleet should not wait the rest of its lease to say so.
  */
 async function deviceOnline(env: Env, deviceId: string): Promise<boolean> {
-  const snap = await effectiveSnapshot(env);
-  return snap.online.has(deviceId);
+  return onlineNow(
+    deviceId,
+    async () => (await effectiveSnapshot(env)).online,
+    async () => {
+      const snap = await freshSnapshot(env);
+      mapCache = { at: Date.now(), snap };
+      return snap.online;
+    },
+  );
 }
 
 /**

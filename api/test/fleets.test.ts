@@ -12,6 +12,7 @@ import {
   OWNER_SILENCE_MS,
   RECENT_SNAPSHOTS,
   newInviteCode,
+  onlineNow,
   validFleetId,
 } from "../src/fleets";
 import { FleetDO } from "../src/fleet-do";
@@ -475,6 +476,31 @@ describe("approval and removal", () => {
     const revoked = await call(doInstance, "/revoke", { caller: "admin", device: "dev-owner", body: {} });
     expect(revoked.json.revoked).toBe(1);
     expect((await call(doInstance, "/join", { caller: "device", device: "dev-z", body: { code: inv.json.code } })).status).toBe(403);
+  });
+});
+
+describe("whether a primary is taken to be gone", () => {
+  test("a tunnel that came up after the snapshot was read is found, so the lease it just took is not taken away", async () => {
+    let fresh = 0;
+    const stale = async () => new Set<string>(); // read before the primary's tunnel opened
+    const now = async () => {
+      fresh++;
+      return new Set(["dev-primary"]);
+    };
+    expect(await onlineNow("dev-primary", stale, now)).toBe(true);
+    expect(fresh).toBe(1);
+  });
+
+  test("one the snapshot lists is not asked about again, and one nobody lists is gone", async () => {
+    let fresh = 0;
+    const now = async () => {
+      fresh++;
+      return new Set<string>();
+    };
+    expect(await onlineNow("dev-primary", async () => new Set(["dev-primary"]), now)).toBe(true);
+    expect(fresh).toBe(0);
+    expect(await onlineNow("dev-primary", async () => new Set<string>(), now)).toBe(false);
+    expect(fresh).toBe(1);
   });
 });
 

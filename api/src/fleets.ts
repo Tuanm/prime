@@ -181,3 +181,17 @@ export interface FleetAuth {
   deviceId?: string;
 }
 
+
+/**
+ * Whether a device holds a tunnel right now, when the answer is to be acted on (a lease is taken
+ * from a primary that is not).
+ *
+ * The registry's snapshot is kept for a couple of seconds, and a tunnel that came up since it was
+ * read is not in it: a primary that took the lease the moment its tunnel opened would be found
+ * "not connected" by the first replica that asked, and lose the lease it had taken a second ago. So
+ * a snapshot that says yes is believed, and one that says no is checked against a fresh one.
+ */
+export async function onlineNow(deviceId: string, cached: () => Promise<Set<string>>, fresh: () => Promise<Set<string>>): Promise<boolean> {
+  if ((await cached()).has(deviceId)) return true;
+  return (await fresh()).has(deviceId);
+}
