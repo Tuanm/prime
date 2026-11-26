@@ -157,6 +157,12 @@ deleted. A removal stays inside the work tree (a directory turned into a symlink
 is not followed) and only takes a file whose name matches exactly, so a rename
 that changes only the case keeps its file on a file system that folds case.
 
+A name is carried as git stores it. On macOS a folder written with a decomposed
+accent (`Cafe` plus U+0301, the form HFS+ and some tools produce) reaches the
+replicas as the composed `Café` (U+00E9): git's `core.precomposeunicode` makes
+that choice for every name it records. Nothing is lost (the files and their
+content arrive, in one folder), but the name's bytes on a replica are not always the primary's.
+
 What the fleet never carried is not removed by an apply: git-ignored files
 (`.env`, `node_modules`, build output) and nested repositories are untouched.
 Two things are not "left alone", and they are not deleted either:
@@ -377,7 +383,9 @@ with the same.
 - A clean shell changes nothing: what was saved stands. To go back to a default, name the
   variable empty (`PRIME_FLEET_REPLICA= prime fleets agent start`), or forget everything with
   `prime fleets agent reset`.
-- `agent start` with a setting that differs from the one the running agent has restarts it.
+- `agent start` with a setting that differs from the one the running agent has restarts it. Several
+  `agent start`s at the same time are fine: each writes its own temporary file, the lock lets one
+  agent through, and the ones that lose it exit at once (they are started without waiting for the lock).
   Commands that only need an agent running, like `prime spaces create`, neither save what their
   shell exports nor restart it *for that*; they do restart it when the saved settings differ from
   the running agent's (for example right after `agent install` saved new ones).
