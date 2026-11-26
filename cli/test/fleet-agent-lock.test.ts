@@ -483,6 +483,51 @@ describe("switching the replica mode of a running agent", () => {
     expect(isFleetAgentProcess(state.pid, fleetAgentDir(configPath))).toBe(true);
   });
 
+  test("a service file whose manager cannot be reached manages nothing: the healthy agent is neither stopped nor replaced", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    let asked = 0;
+    // Bound to this configuration, but launchctl / systemctl could not be reached (pid unknown too).
+    const service = agentServiceFor(
+      configPath,
+      () => ({ installed: true, reachable: false }),
+      () => {
+        asked++;
+        return false;
+      },
+    );
+    for (let i = 0; i < 3; i++) expect((await ensureFleetAgent(configPath, {}, service)).pid).toBe(mine.pid);
+    expect(() => process.kill(mine.pid, 0)).not.toThrow();
+    expect(asked).toBe(0);
+  });
+
+  test("a manager that answers and then will not restart the running agent leaves it and its state alone, and says so", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const own = await fakeAgent();
+    running(configPath, own.pid, "lazy");
+    withMode("mirror");
+    let spawned = 0;
+    let error: unknown;
+    try {
+      await ensureFleetAgent(configPath, { fromShell: true }, {
+        installed: () => true,
+        pid: () => own.pid,
+        restart: () => false,
+        spawnAgent: () => void spawned++,
+        stopWaitMs: 300,
+      });
+    } catch (err) {
+      error = err;
+    }
+    expect(String(error)).toContain("would not restart the running fleet agent");
+    expect(spawned).toBe(0);
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
+    expect(() => process.kill(own.pid, 0)).not.toThrow();
+  });
+
   test("the service of another configuration is not this one's: its agent is left alone and the manager is never asked", async () => {
     const root = scratch();
     const configPath = join(root, "config.json");

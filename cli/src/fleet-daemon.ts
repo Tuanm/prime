@@ -337,7 +337,7 @@ export interface AgentServiceHooks {
  */
 export function agentServiceFor(
   configPath: string,
-  status: () => { installed: boolean; pid?: number } = () => fleetAgentServiceStatus(configPath),
+  status: () => { installed: boolean; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
   restart: () => boolean = restartFleetAgentService,
 ): AgentServiceHooks {
   return {
@@ -345,7 +345,10 @@ export function agentServiceFor(
       // Only where the manager can be asked to restart it: elsewhere the agent is started as it always was.
       if (process.platform !== "darwin" && process.platform !== "linux") return false;
       try {
-        return status().installed;
+        // A service file with nothing to run it (no login session, no user bus) manages nothing:
+        // the agent is handled as if there were no service, which is what it would be.
+        const answer = status();
+        return answer.installed && answer.reachable !== false;
       } catch {
         return false;
       }
@@ -411,9 +414,17 @@ export async function ensureFleetAgent(
       await Bun.sleep(100);
     }
   }
-  // No service, or its manager cannot be reached (a service file is there, and nothing to run it:
-  // a headless login, an install that stopped half way): the agent is started directly. If the
-  // manager did start one meanwhile, the lock makes this one exit and that one's state is returned.
+  if (managed && existing) {
+    // The manager answered, and then would not restart the agent that is running: it keeps the
+    // settings it has. Its state is not deleted and nothing is spawned for it to refuse.
+    throw new CliError(
+      "the service manager would not restart the running fleet agent (pid " + existing.pid + "), which keeps its old settings",
+      "try again, or run 'prime fleets agent install' to set the service up again",
+    );
+  }
+  // No service for this configuration, or the manager has no agent to restart and would not start
+  // one: the agent is started directly. If the manager did start one meanwhile, the lock makes this
+  // one exit and that one's state is returned.
   rmSync(fleetAgentStatePath(configPath), { force: true });
   mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
   const agentEnv = buildAgentEnv(configPath, options, process.env, shell);

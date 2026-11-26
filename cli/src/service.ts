@@ -34,6 +34,12 @@ export interface ServiceStatus {
   detail?: string;
   /** The process the manager is running for it, when it says. */
   pid?: number;
+  /**
+   * Whether the manager answered at all. A service file can be there with nothing to run it (a
+   * headless login, no user bus, an install that stopped half way); false says so. Left out where
+   * there is no manager to ask.
+   */
+  reachable?: boolean;
 }
 
 export interface ServiceSpec {
@@ -395,11 +401,20 @@ export function serviceStatus(
   const label = identity.label ?? LAUNCHD_LABEL;
   if (platform === "linux") {
     const where = systemdUnitPath(process.env, homedir(), name);
-    if (!Bun.which("systemctl")) return { installed: existsSync(where), running: false, where, detail: "systemctl not found" };
+    if (!Bun.which("systemctl")) return { installed: existsSync(where), running: false, where, detail: "systemctl not found", reachable: false };
     const active = run(["systemctl", "--user", "is-active", name + ".service"]).out.trim();
-    // `show -p` prints MainPID=123 on every systemd; `--value` only exists from 230.
-    const main = Number.parseInt(/MainPID=(\d+)/.exec(run(["systemctl", "--user", "show", "-p", "MainPID", name + ".service"]).out)?.[1] ?? "", 10);
-    return { installed: existsSync(where), running: active === "active", where, detail: active || undefined, ...(main > 0 ? { pid: main } : {}) };
+    // `show -p` prints MainPID=123 on every systemd; `--value` only exists from 230. It exits 0 for
+    // any unit it can look up, and non-zero when the user manager cannot be reached.
+    const shown = run(["systemctl", "--user", "show", "-p", "MainPID", name + ".service"]);
+    const main = Number.parseInt(/MainPID=(\d+)/.exec(shown.out)?.[1] ?? "", 10);
+    return {
+      installed: existsSync(where),
+      running: active === "active",
+      where,
+      detail: active || undefined,
+      reachable: shown.code === 0,
+      ...(main > 0 ? { pid: main } : {}),
+    };
   }
   if (platform === "darwin") {
     const where = launchdPlistPath(homedir(), label);
@@ -411,6 +426,8 @@ export function serviceStatus(
       running: printed.code === 0 && state === "running",
       where,
       detail: printed.code === 0 ? state : "not loaded",
+      // Not loaded into the user's session (or no session to load it into): nothing runs it.
+      reachable: printed.code === 0,
       ...(pid > 0 ? { pid } : {}),
     };
   }
