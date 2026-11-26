@@ -415,6 +415,74 @@ export interface AppliedStep {
   tree: string;
 }
 
+/** A snapshot a member holds: its sequence, the commit that names it and its tree. */
+export interface Position {
+  seq: number;
+  commit: string | null;
+  tree?: string;
+}
+
+// How many packs are downloaded at the same time while earlier ones are taken in.
+const DOWNLOADS_AT_ONCE = 4;
+
+/**
+ * Bring the snapshots up to the head into this member's object store.
+ *
+ * It only downloads, opens and keeps: the work tree is not touched, so a
+ * member can do this in the background and apply later (or never). The route is
+ * the cheapest the planner finds from `from`, which is the newest snapshot the
+ * member holds in its store - applied or only fetched. Packs are downloaded a few
+ * at a time and taken in in order; each one is reported to `onFetched` as it is
+ * kept, so a failure part-way loses nothing already fetched.
+ */
+export async function fetchAhead(
+  creds: FleetCredentials,
+  fleet: string,
+  paths: MemberPaths,
+  from: Position,
+  onFetched?: (fetched: Position) => void | Promise<void>,
+): Promise<{ head: FleetHead; fetched: Position; steps: number }> {
+  const plan = await planCatchUp(creds, fleet, from.seq);
+  if (plan.chain.length === 0) return { head: plan.head, fetched: from, steps: 0 };
+  const keys = loadOrCreateKeyPair(paths.keyFile);
+
+  const downloads: Array<Promise<Buffer> | undefined> = [];
+  const start = (i: number): void => {
+    if (i < plan.chain.length && downloads[i] === undefined) {
+      const p = openStep(creds, fleet, keys, plan.chain[i]!);
+      // A failure is reported where it is awaited, in order.
+      p.catch(() => undefined);
+      downloads[i] = p;
+    }
+  };
+  for (let i = 0; i < DOWNLOADS_AT_ONCE; i++) start(i);
+
+  let fetched = from;
+  for (const [i, step] of plan.chain.entries()) {
+    const pack = await downloads[i]!;
+    downloads[i] = undefined; // let the bytes go
+    start(i + DOWNLOADS_AT_ONCE);
+    const m = step.manifest;
+    await ingestPack(paths.work, paths.gitDir, m.tipCommit, pack, { tree: m.tree, seq: m.seq });
+    fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree };
+    await onFetched?.(fetched);
+  }
+  return { head: plan.head, fetched, steps: plan.chain.length };
+}
+
+/**
+ * Write what has been fetched over the work tree.
+ *
+ * One apply covers every snapshot between `applied` and `fetched`: the work
+ * tree only sees the difference. Directories the fleet leaves alone are not
+ * mirrored, so they survive untouched.
+ */
+export async function applyFetched(paths: MemberPaths, applied: Position, fetched: Position): Promise<void> {
+  if (fetched.commit === null) throw new Error("nothing has been fetched to apply");
+  const exclude = paths.nested ? paths.nested.get() : findNestedRepos(paths.work);
+  await applyCommit(paths.work, paths.gitDir, fetched.commit, exclude, applied.commit);
+}
+
 /**
  *  Fetch the fleet's current state and apply it to this member's work tree.
  *
@@ -424,12 +492,14 @@ export interface AppliedStep {
  *  `lastCommit` is the snapshot commit the member holds now (the one its state
  *  file records). It tells the apply what the fleet itself wrote, so that only
  *  what the fleet dropped is removed; with none, nothing is removed.
+ *  `fetched` is a newer snapshot the member has already taken into its store
+ *  without applying it: the route starts from there, and its packs are not
+ *  downloaded again.
  *
- *  The whole chain is downloaded and opened before the first step is applied,
- *  so a chain that cannot be fetched or opened touches nothing. Each step is
- *  reported to `onStep` as soon as it is applied: the caller records it then,
- *  so a failure part-way leaves a state that still describes the work tree
- *  (otherwise the next round would take the applied files for local edits).
+ *  Everything is fetched and opened before anything is written, so a chain that
+ *  cannot be fetched or opened touches nothing. The work tree is then written
+ *  once, for the whole lag, and `onStep` hears about it when it has the newest
+ *  snapshot: the caller records the state right then.
  *
  */
 export async function pull(
@@ -439,42 +509,20 @@ export async function pull(
   lastSeq: number,
   lastCommit?: string | null,
   onStep?: (step: AppliedStep) => void | Promise<void>,
+  fetched?: Position,
 ): Promise<PullResult> {
-  const plan = await planCatchUp(creds, fleet, lastSeq);
-  if (plan.chain.length === 0) return { seq: plan.head.seq, commit: "", applied: false, upToDate: true };
-  const keys = loadOrCreateKeyPair(paths.keyFile);
-
-  // Everything is fetched and opened first. Memory holds the chain: a whole
-  // tree at most, and up to 31 deltas after it.
-  const packs: Buffer[] = [];
-  for (const step of plan.chain) packs.push(await openStep(creds, fleet, keys, step));
-
-  // Directories the fleet leaves alone are not mirrored, so they must survive
-  // the apply untouched.
-  const exclude = paths.nested ? paths.nested.get() : findNestedRepos(paths.work);
-
-  let lastSeqApplied = lastSeq;
-  let lastCommitApplied = "";
-  let lastTree: string | undefined;
-  let previous: string | null = lastCommit ?? null;
-  try {
-    for (const [i, step] of plan.chain.entries()) {
-      const m = step.manifest;
-      await ingestPack(paths.work, paths.gitDir, m.tipCommit, packs[i]!, { tree: m.tree, seq: m.seq });
-      await applyCommit(paths.work, paths.gitDir, m.tipCommit, exclude, previous);
-      previous = m.tipCommit;
-      lastSeqApplied = m.seq;
-      lastCommitApplied = m.tipCommit;
-      lastTree = m.tree;
-      await onStep?.({ seq: m.seq, commit: m.tipCommit, tree: m.tree });
-    }
-  } catch (err) {
-    // What was applied is real; say so before failing, so the fleet knows.
-    if (lastSeqApplied > lastSeq) await reportApplied(creds, fleet, lastSeqApplied).catch(() => false);
-    throw err;
+  const applied: Position = { seq: lastSeq, commit: lastCommit ?? null };
+  const from = fetched && fetched.seq > lastSeq ? fetched : applied;
+  const got = await fetchAhead(creds, fleet, paths, from);
+  if (got.fetched.seq <= lastSeq || got.fetched.commit === null) {
+    return { seq: got.head.seq, commit: "", applied: false, upToDate: true };
   }
-  await reportApplied(creds, fleet, lastSeqApplied);
-  return { seq: lastSeqApplied, commit: lastCommitApplied, applied: true, upToDate: false, ...(lastTree ? { tree: lastTree } : {}) };
+  const tip = got.fetched;
+  await applyFetched(paths, applied, tip);
+  const step: AppliedStep = { seq: tip.seq, commit: tip.commit!, tree: tip.tree ?? "" };
+  await onStep?.(step);
+  await reportApplied(creds, fleet, tip.seq);
+  return { seq: tip.seq, commit: tip.commit!, applied: true, upToDate: false, ...(tip.tree ? { tree: tip.tree } : {}) };
 }
 
 /** The storage id at the end of a payload key. */

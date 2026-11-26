@@ -515,7 +515,7 @@ describe("incremental snapshots", () => {
     }
   }, 60_000);
 
-  test("every step of a catch-up is reported as it is applied", async () => {
+  test("a catch-up writes the work tree once, for the whole lag, and says so", async () => {
     const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
     const gateway = new FakeGateway();
     try {
@@ -537,9 +537,10 @@ describe("incremental snapshots", () => {
       }
       const seen: Array<{ seq: number; commit: string; tree: string }> = [];
       const done = await pull(credsFor("replica-device"), "x", replicaPaths, first.seq, first.commit, (step) => void seen.push(step));
-      expect(seen.map((s) => s.seq)).toEqual([2, 3, 4]);
-      expect(seen[2]!.commit).toBe(done.commit);
-      expect(seen[2]!.tree).toBe(done.tree!);
+      // Three snapshots came in; the work tree saw one change, to the newest.
+      expect(seen.map((s) => s.seq)).toEqual([4]);
+      expect(seen[0]!.commit).toBe(done.commit);
+      expect(seen[0]!.tree).toBe(done.tree!);
     } finally {
       (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
       rmSync(root, { recursive: true, force: true });
