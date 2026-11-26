@@ -51,7 +51,7 @@ import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
-import { fleetKeyFile, fleetStateDir, readFleetState, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
+import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
 export interface FleetAgentState {
   pid: number;
@@ -1414,6 +1414,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
         gitDir: fleetStateDir(configPath, fleet, name),
         keyFile: fleetKeyFile(configPath, fleet, name),
         nested: new NestedRepoCache(work),
+        recorded: recordedPosition(configPath, fleet, name),
       },
       dirty: false,
       claim: false,

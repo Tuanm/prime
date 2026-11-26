@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, type NestedRepoCache } from "./fleet-sync";
+import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
 import { FleetTrust, TamperedSnapshotError, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
@@ -41,6 +41,12 @@ export interface MemberPaths {
   keyFile: string;
   /** Remembered nested repositories of the work tree, to spare the walk. */
   nested?: NestedRepoCache;
+  /**
+   * Where the member's state file says the work tree is, read fresh. The agent, `prime fleets
+   * sync` and a takeover all write the work tree, each from a position it read some time ago:
+   * with this, an apply asks again once it holds the work tree's lock (see `applyAndRecord`).
+   */
+  recorded?: () => Position;
 }
 
 /**
@@ -809,6 +815,35 @@ async function ingestRoute(
 }
 
 /**
+ * Write `fetched` over the work tree and record it, as one step nobody else's can come between.
+ *
+ * The work tree has one lock, taken here. Inside it the recorded position is read again: if
+ * another writer has already brought the work tree to `fetched` or beyond, nothing is written (its
+ * state is the truth, and writing an older snapshot over a newer one is exactly what must not
+ * happen); if it has brought it part of the way, the apply starts from there. `record` runs before
+ * the lock is let go, so the state always says what the work tree holds. Returns what the work
+ * tree holds now, and whether this call wrote it.
+ */
+export async function applyAndRecord(
+  paths: MemberPaths,
+  applied: Position,
+  fetched: Position,
+  record: () => void | Promise<void>,
+  /** Run inside the lock, once the position the apply starts from is known (before anything is written). */
+  prepare?: (from: Position) => void | Promise<void>,
+): Promise<{ position: Position; wrote: boolean }> {
+  return withApplyLock(paths.gitDir, async () => {
+    const now = paths.recorded?.();
+    if (now && now.seq >= fetched.seq && now.commit !== null) return { position: now, wrote: false };
+    const from = now && now.seq > applied.seq ? now : applied;
+    await prepare?.(from);
+    await applyFetched(paths, from, fetched);
+    await record();
+    return { position: fetched, wrote: true };
+  });
+}
+
+/**
  * Write what has been fetched over the work tree.
  *
  * One apply covers every snapshot between `applied` and `fetched`: the work
@@ -856,9 +891,14 @@ export async function pull(
     return { seq: got.head.seq, commit: "", applied: false, upToDate: true };
   }
   const tip = got.fetched;
-  await applyFetched(paths, applied, tip);
   const step: AppliedStep = { seq: tip.seq, commit: tip.commit!, tree: tip.tree ?? "", ...(tip.roster !== undefined ? { roster: tip.roster } : {}) };
-  await onStep?.(step);
+  const done = await applyAndRecord(paths, applied, tip, () => onStep?.(step));
+  if (!done.wrote) {
+    // Another writer has the work tree at this snapshot or a newer one already: that is where it is.
+    const at = done.position;
+    await reportApplied(creds, fleet, at.seq);
+    return { seq: at.seq, commit: at.commit ?? "", applied: true, upToDate: false, ...(at.tree ? { tree: at.tree } : {}) };
+  }
   await reportApplied(creds, fleet, tip.seq);
   return {
     seq: tip.seq,

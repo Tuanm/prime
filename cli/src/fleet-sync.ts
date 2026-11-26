@@ -22,6 +22,8 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, sep } from "node:path";
 
+import { withDirLock } from "./dir-lock";
+
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 export interface Snapshot {
@@ -798,6 +800,17 @@ export function finishedApply(gitDir: string, base: string | null): string | nul
   // With no base there is no record to be out of date: an apply from nothing removes nothing, as ever.
   if (done === null || base === null || done.commit === base) return null;
   return done.from === base ? done.commit : null;
+}
+
+/**
+ * Run `fn` as the only one writing this member's work tree (the agent, `prime fleets sync` and a
+ * takeover all do, from separate processes). What the work tree holds and what the member's
+ * state says it holds are only the same if nobody else writes between the two.
+ */
+export function withApplyLock<T>(gitDir: string, fn: () => Promise<T> | T): Promise<T> {
+  mkdirSync(gitDir, { recursive: true });
+  // An apply of a very large tree takes minutes; a holder whose process is gone is not waited for.
+  return withDirLock(join(gitDir, "apply.lock"), fn, { waitMs: 5 * 60_000, staleMs: 60 * 60_000 });
 }
 
 /** A lock this old is a git that died: nothing writes an index for ten minutes. */

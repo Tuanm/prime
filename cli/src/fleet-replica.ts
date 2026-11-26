@@ -18,7 +18,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyFetched, fetchAhead, type HeadHint, type MemberPaths, type Position } from "./fleet-agent";
-import { hasCommit, preserveLocalChange, readApplySidecar, snapshot } from "./fleet-sync";
+import { hasCommit, preserveLocalChange, readApplySidecar, snapshot, withApplyLock } from "./fleet-sync";
 import { reportApplied, type FleetCredentials, type FleetHead } from "./fleet-transport";
 
 /** `lazy` fetches ahead and applies on demand; `mirror` applies after every fetch. */
@@ -147,57 +147,75 @@ export async function applyReady(
    */
   opts: { report?: boolean } = {},
 ): Promise<ApplyReport | null> {
-  const { applied, fetched } = positions(state);
-  if (fetched.seq <= applied.seq || fetched.commit === null) {
-    if (opts.report && applied.seq > 0) await reportApplied(creds, fleet, applied.seq);
+  const { applied: seen, fetched } = positions(state);
+  if (fetched.seq <= seen.seq || fetched.commit === null) {
+    if (opts.report && seen.seq > 0) await reportApplied(creds, fleet, seen.seq);
     return null;
   }
+  // The work tree is written by one at a time (the agent, `prime fleets sync`), and what is written is
+  // recorded before the next one starts: so the position is read again once it is this one's turn.
+  const report = await withApplyLock(paths.gitDir, async (): Promise<ApplyReport | number> => {
+    let current = state;
+    const fresh = paths.recorded?.();
+    if (fresh && fresh.seq > (state.seq ?? 0)) {
+      current = { ...state, seq: fresh.seq, ...(fresh.commit ? { base: fresh.commit } : {}), ...(fresh.tree ? { tree: fresh.tree } : {}) };
+    }
+    const { applied } = positions(current);
+    // Another writer has brought the work tree to this snapshot, or past it, already.
+    if (fetched.seq <= applied.seq || fetched.commit === null) return applied.seq;
 
-  // A member that was stopped after it wrote the work tree and before it recorded
-  // that holds the newest snapshot already, and its state says it holds an older
-  // one: looking at the work tree would take every file the fleet wrote for the
-  // member's own edit. The sidecar of the apply says what was written last.
-  let kept: ApplyReport["kept"];
-  const holds = await workTreeHolds(paths.gitDir, fetched.commit);
-  // The apply that wrote it finished; a note of what it was for that is still there
-  // (the stop came between the sidecar and its removal) is done with.
-  if (holds) rmSync(join(paths.gitDir, "apply.target"), { force: true });
-  if (!holds && state.tree !== undefined) {
-    const local = await snapshot({
-      work: paths.work,
-      gitDir: paths.gitDir,
-      base: state.base ?? null,
-      treeOnly: true,
-      ...(paths.nested ? { nested: paths.nested } : {}),
-    });
-    if (local.tree !== state.tree) {
-      const moved = await preserveLocalChange(paths.work, paths.gitDir, state.tree, {
-        base: state.base ?? null,
+    // A member that was stopped after it wrote the work tree and before it recorded
+    // that holds the newest snapshot already, and its state says it holds an older
+    // one: looking at the work tree would take every file the fleet wrote for the
+    // member's own edit. The sidecar of the apply says what was written last.
+    let kept: ApplyReport["kept"];
+    const holds = await workTreeHolds(paths.gitDir, fetched.commit);
+    // The apply that wrote it finished; a note of what it was for that is still there
+    // (the stop came between the sidecar and its removal) is done with.
+    if (holds) rmSync(join(paths.gitDir, "apply.target"), { force: true });
+    if (!holds && current.tree !== undefined) {
+      const local = await snapshot({
+        work: paths.work,
+        gitDir: paths.gitDir,
+        base: current.base ?? null,
+        treeOnly: true,
         ...(paths.nested ? { nested: paths.nested } : {}),
       });
-      if (moved.moved > 0) kept = moved;
+      if (local.tree !== current.tree) {
+        const moved = await preserveLocalChange(paths.work, paths.gitDir, current.tree, {
+          base: current.base ?? null,
+          ...(paths.nested ? { nested: paths.nested } : {}),
+        });
+        if (moved.moved > 0) kept = moved;
+      }
     }
-  }
-  if (!(await workTreeHolds(paths.gitDir, fetched.commit))) await applyFetched(paths, applied, fetched);
-  const now: Position = { seq: fetched.seq, commit: fetched.commit, ...(fetched.tree ? { tree: fetched.tree } : {}) };
-  // The state is recorded right after the work tree has it, so the next look
-  // can tell a change made here from what the fleet gave.
-  save({
-    seq: now.seq,
-    base: now.commit!,
-    ...(now.tree ? { tree: now.tree } : {}),
-    fetchedSeq: now.seq,
-    fetchedCommit: now.commit!,
-    ...(now.tree ? { fetchedTree: now.tree } : {}),
-    // The roster the snapshot stands on: the member takes it as its own, so that
-    // when it takes over it can tell a change of members from no change.
-    // When the snapshot does not say, the member does not know either (the empty roster:
-    // a whole tree is published when it takes over, as it always was).
-    roster: fetched.roster ?? "",
-    fetchedRoster: fetched.roster ?? "",
+    if (!(await workTreeHolds(paths.gitDir, fetched.commit))) await applyFetched(paths, applied, fetched);
+    const now: Position = { seq: fetched.seq, commit: fetched.commit, ...(fetched.tree ? { tree: fetched.tree } : {}) };
+    // The state is recorded right after the work tree has it, so the next look
+    // can tell a change made here from what the fleet gave.
+    save({
+      seq: now.seq,
+      base: now.commit!,
+      ...(now.tree ? { tree: now.tree } : {}),
+      fetchedSeq: now.seq,
+      fetchedCommit: now.commit!,
+      ...(now.tree ? { fetchedTree: now.tree } : {}),
+      // The roster the snapshot stands on: the member takes it as its own, so that
+      // when it takes over it can tell a change of members from no change.
+      // When the snapshot does not say, the member does not know either (the empty roster:
+      // a whole tree is published when it takes over, as it always was).
+      roster: fetched.roster ?? "",
+      fetchedRoster: fetched.roster ?? "",
+    });
+    return { applied: now, ...(kept ? { kept } : {}) };
   });
-  await reportApplied(creds, fleet, now.seq);
-  return { applied: now, ...(kept ? { kept } : {}) };
+  if (typeof report === "number") {
+    // Nothing to write: the work tree is already there, and what is left to say is where it is.
+    if (opts.report && report > 0) await reportApplied(creds, fleet, report);
+    return null;
+  }
+  await reportApplied(creds, fleet, report.applied.seq);
+  return report;
 }
 
 /** What the fleet said when this member asked for its place. */

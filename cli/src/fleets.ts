@@ -19,10 +19,10 @@ import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths, type Position } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { FleetTrust } from "./fleet-trust.ts";
-import { preserveLocalChange, snapshot } from "./fleet-sync.ts";
+import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
@@ -614,6 +614,7 @@ export async function syncFleetSpace(
     work,
     gitDir: fleetStateDir(configPath, fleetId, spaceName),
     keyFile: fleetKeyFile(configPath, fleetId, spaceName),
+    recorded: recordedPosition(configPath, fleetId, spaceName),
   };
   const role = await fetchRole(creds, fleetId);
   if (!role.member) throw new CliError("this device is not a member of the fleet " + fleetId);
@@ -668,11 +669,17 @@ export async function syncFleetSpace(
 
   // A mirror that was edited locally cannot be updated without losing the
   // edit, so the edit is moved aside first - the same rule the agent follows.
+  // (Under the work tree's lock, and against the state as it is now: an apply by the agent that
+  // finished since the state was read above is the fleet's own write, not an edit.)
   if (state.tree !== undefined) {
-    const local = await snapshot({ work, gitDir: paths.gitDir, base: state.base ?? null, treeOnly: true });
-    if (local.tree !== state.tree) {
-      await preserveLocalChange(work, paths.gitDir, state.tree, { base: state.base ?? null });
-    }
+    await withApplyLock(paths.gitDir, async () => {
+      const now = readFleetState(configPath, fleetId, spaceName);
+      if (now.tree === undefined) return;
+      const local = await snapshot({ work, gitDir: paths.gitDir, base: now.base ?? null, treeOnly: true });
+      if (local.tree !== now.tree) {
+        await preserveLocalChange(work, paths.gitDir, now.tree, { base: now.base ?? null });
+      }
+    });
   }
   // What a lazy agent has already fetched is used, not downloaded again. The
   // state is recorded when the work tree has the newest snapshot, so a failure
@@ -831,6 +838,11 @@ export interface FleetMemberState {
   fetchedCommit?: string;
   fetchedTree?: string;
   fetchedRoster?: string;
+}
+
+/** Where the member's state file says its work tree is, read when asked (see `MemberPaths.recorded`). */
+export function recordedPosition(configPath: string, fleetId: string, spaceName: string): () => Position {
+  return () => positions(readFleetState(configPath, fleetId, spaceName)).applied;
 }
 
 /** The member's own record of how far it has got. */

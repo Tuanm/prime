@@ -24,7 +24,7 @@ import type { Ctx } from "./context.ts";
 import { CliError } from "./errors.ts";
 import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
 import { fetchRole, type FleetCredentials } from "./fleet-transport.ts";
-import { fleetKeyFile, fleetStateDir, readFleetState, writeFleetState } from "./fleets.ts";
+import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, writeFleetState } from "./fleets.ts";
 
 export interface FleetSpaceSetup {
   /** The device identity the space uses with the gateway. */
@@ -84,6 +84,7 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     work: workDir,
     gitDir: fleetStateDir(ctx.configPath, opts.fleet, opts.spaceName),
     keyFile: fleetKeyFile(ctx.configPath, opts.fleet, opts.spaceName),
+    recorded: recordedPosition(ctx.configPath, opts.fleet, opts.spaceName),
   };
 
   // The member's key pair exists before it joins, so the roster already
