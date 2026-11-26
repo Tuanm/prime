@@ -638,7 +638,8 @@ export async function syncFleetSpace(
         fetchedSeq: step.seq,
         fetchedCommit: step.commit,
         fetchedTree: step.tree,
-        ...(step.roster !== undefined ? { roster: step.roster, fetchedRoster: step.roster } : {}),
+        roster: step.roster ?? "",
+        fetchedRoster: step.roster ?? "",
       });
     },
     positions(state).fetched,

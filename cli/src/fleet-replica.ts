@@ -96,7 +96,10 @@ export async function prefetch(
         fetchedSeq: p.seq,
         ...(p.commit ? { fetchedCommit: p.commit } : {}),
         ...(p.tree ? { fetchedTree: p.tree } : {}),
-        ...(p.roster !== undefined ? { fetchedRoster: p.roster } : {}),
+        // "Unknown" is the empty roster, not the roster of an earlier snapshot: a snapshot
+        // from a publisher that does not say who it was sealed for must not be taken for
+        // one that does.
+        fetchedRoster: p.roster ?? "",
       });
     },
     hint,
@@ -180,7 +183,10 @@ export async function applyReady(
     ...(now.tree ? { fetchedTree: now.tree } : {}),
     // The roster the snapshot stands on: the member takes it as its own, so that
     // when it takes over it can tell a change of members from no change.
-    ...(fetched.roster !== undefined ? { roster: fetched.roster, fetchedRoster: fetched.roster } : {}),
+    // When the snapshot does not say, the member does not know either (the empty roster:
+    // a whole tree is published when it takes over, as it always was).
+    roster: fetched.roster ?? "",
+    fetchedRoster: fetched.roster ?? "",
   });
   await reportApplied(creds, fleet, now.seq);
   return { applied: now, ...(kept ? { kept } : {}) };

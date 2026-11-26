@@ -1076,6 +1076,49 @@ describe("a replica that takes over knows who the fleet was sealed for", () => {
   });
 });
 
+describe("a look at the head that gets no answer", () => {
+  test("is not taken for another member having won", async () => {
+    const w = await world();
+    try {
+      await w.publishNext();
+      w.replica("late"); // the next snapshot is a whole tree with a change beside it
+      let heads = 0;
+      const handle = w.gateway.handle.bind(w.gateway);
+      w.gateway.handle = async (creds, method, path, body, search) => {
+        // The look just before the upload fails, and so does the second try.
+        if (method === "GET" && path.endsWith("/head") && ++heads >= 2 && heads <= 3) return new Response("{}", { status: 503 });
+        return handle(creds, method, path, body, search);
+      };
+      const next = await w.publishNext();
+      expect(next.seq).toBe(2);
+      expect(next.full).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("one failed look is asked again, and a real mismatch still refuses", async () => {
+    const w = await world();
+    try {
+      await w.publishNext();
+      w.replica("late");
+      let heads = 0;
+      const handle = w.gateway.handle.bind(w.gateway);
+      w.gateway.handle = async (creds, method, path, body, search) => {
+        if (method === "GET" && path.endsWith("/head")) {
+          heads++;
+          if (heads === 2) return new Response("{}", { status: 503 });
+          if (heads === 3 && w.gateway.head) return Response.json({ head: { ...w.gateway.head, seq: w.gateway.head.seq + 1 } });
+        }
+        return handle(creds, method, path, body, search);
+      };
+      await expect(w.publishNext()).rejects.toThrow("head moved while publishing");
+    } finally {
+      finish(w);
+    }
+  });
+});
+
 describe("a publish that is refused", () => {
   test("does not leave a change pack behind when the head moved before it was uploaded", async () => {
     const w = await world();
@@ -1382,6 +1425,34 @@ describe("the heartbeat against the lease", () => {
       s.loop.lastBootstrap = 1;
       const bad = await heartbeat(s.loop as never, () => undefined, 20_000_000);
       expect(bad).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("a snapshot from a publisher that does not say who it was sealed for", () => {
+  test("leaves the member not knowing, not holding the roster of an earlier snapshot", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree, roster: s.roster ?? "" }));
+      expect(r.state.roster).not.toBe("");
+      // The next publisher is an older one.
+      w.gateway.stripRoster = true;
+      await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(r.state.fetchedRoster).toBe("");
+      await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(r.state.roster).toBe("");
+
+      // Taking over, it cannot say nothing changed: it publishes a whole tree, as it always did.
+      w.gateway.primary = "";
+      await fetch("http://fake/fleets/x/bootstrap", { method: "POST", headers: { "x-prime-device": "r1" }, body: "{}" } as RequestInit);
+      writeFileSync(join(r.paths.work, "new.txt"), "x");
+      const next = await publish(credsFor("r1"), "x", r.paths, r.state.base!, r.state.seq!, 2, r.state.roster);
+      expect(next.full).toBe(true);
     } finally {
       finish(w);
     }

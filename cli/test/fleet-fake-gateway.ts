@@ -24,6 +24,8 @@ export class FakeGateway {
   indexEntries: Array<{ seq: number; manifestKey: string; full: boolean; packBytes?: number; deltaBytes?: number }> = [];
   /** Who is catching up to take the free lease, and until when. */
   claim: { device: string; since: number; until: number; barred?: { device: string; until: number } } | null = null;
+  /** Publishers that predate the roster in manifests. */
+  stripRoster = false;
   /** Publishers that predate the key fingerprint in wrapped keys. */
   stripKeyIds = false;
   /** How many of the next /applied reports fail with a 503. */
@@ -127,6 +129,8 @@ export class FakeGateway {
         delete manifest.packBytes;
         delete manifest.delta;
       }
+      // An older publisher does not say who a snapshot was sealed for.
+      if (this.stripRoster) delete manifest.roster;
       // An older publisher does not say which key a snapshot was wrapped for.
       if (this.stripKeyIds && Array.isArray(manifest.wrapped)) {
         for (const w of manifest.wrapped as Array<{ keyId?: string }>) delete w.keyId;

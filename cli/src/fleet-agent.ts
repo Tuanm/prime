@@ -207,8 +207,12 @@ export async function publish(
     // takes it away if the publish then fails (a gateway that predates this does
     // not know it belongs to a snapshot). So the head is looked at once more
     // first: a publish that is going to be refused is refused before the upload.
-    const again = await fetchHead(creds, fleet).catch(() => null);
-    if ((again?.seq ?? 0) !== (head?.seq ?? 0)) {
+    // A look that did not get an answer says nothing about the head: it is asked
+    // once more, and if there is still none the check is left out (the publish is
+    // refused by the fleet if the head did move, as it always was).
+    let again = await fetchHead(creds, fleet).catch(() => null);
+    if (again === null) again = await fetchHead(creds, fleet).catch(() => null);
+    if (again !== null && again.seq !== (head?.seq ?? 0)) {
       throw new Error("the fleet head moved while publishing: another member won");
     }
     const stored = await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);

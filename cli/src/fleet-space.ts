@@ -203,7 +203,7 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
       seq: pulled.seq,
       base: pulled.commit,
       ...(pulled.tree ? { tree: pulled.tree } : {}),
-      ...(pulled.roster !== undefined ? { roster: pulled.roster } : {}),
+      roster: pulled.roster ?? "",
     });
   }
   return {
