@@ -167,7 +167,8 @@ export async function applyReady(
       ...(paths.nested ? { nested: paths.nested } : {}),
     });
     if (local.tree !== state.tree) {
-      kept = await preserveLocalChange(paths.work, paths.gitDir, state.tree, paths.nested ? { nested: paths.nested } : {});
+      const moved = await preserveLocalChange(paths.work, paths.gitDir, state.tree, paths.nested ? { nested: paths.nested } : {});
+      if (moved.moved > 0) kept = moved;
     }
   }
   if (!(await workTreeHolds(paths.gitDir, fetched.commit))) await applyFetched(paths, applied, fetched);

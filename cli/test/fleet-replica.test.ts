@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { chooseRoute } from "../src/fleet-agent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1514,4 +1514,45 @@ describe("what a person sets for the agent", () => {
       cleanup();
     }
   });
+});
+
+describe("an agent killed while it writes the work tree", () => {
+  test("is not taken, next time, for a member whose files are all edited", async () => {
+    const w = await world(1200);
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      // The fleet changes every file.
+      for (let i = 0; i < 1200; i++) writeFileSync(join(w.primaryWork, "f" + i + ".txt"), "version 2 of " + i);
+      await w.publishNext("version 2 of 0"); // seq 2 carries them all
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      const { fetched, applied } = positions(r.state);
+      expect(fetched.seq).toBe(2);
+
+      // The write is run by a process of its own, which is killed once it has begun.
+      const child = Bun.spawn(["bun", join(import.meta.dir, "helpers", "apply-child.ts"), r.paths.work, r.paths.gitDir, fetched.commit!, applied.commit!], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      const written = (): number => readdirSync(r.paths.work).filter((n) => n.endsWith(".txt") && readFileSync(join(r.paths.work, n), "utf8").startsWith("version 2")).length;
+      const until = Date.now() + 20_000;
+      while (written() < 20 && Date.now() < until) await new Promise((res) => setTimeout(res, 5));
+      process.kill(child.pid, "SIGKILL");
+      await child.exited;
+      // Its git goes on writing for a moment, as the one in the field did; it is let finish.
+      const lock = join(r.paths.gitDir, "apply.index.lock");
+      const waitUntil = Date.now() + 20_000;
+      while (Date.now() < waitUntil && (existsSync(lock) || written() < 1200)) await new Promise((res) => setTimeout(res, 50));
+      expect(r.state.seq).toBe(1); // nothing was recorded
+
+      const done = await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(done!.applied.seq).toBe(2);
+      expect(done!.kept).toBeUndefined();
+      expect(readdirSync(join(r.paths.work, "..")).filter((n) => n.startsWith("local-change-"))).toEqual([]);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  }, 120_000);
 });

@@ -809,6 +809,55 @@ describe("a case-only rename on the primary", () => {
   });
 });
 
+describe("an apply that was killed half way", () => {
+  test("the files it had written are the fleet's, and only the member's own edit is reported", async () => {
+    const r = await replicaOf({ "a.txt": "a1", "b.txt": "b1", "c.txt": "c1", "keep.txt": "k" });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "a2");
+      writeFileSync(join(r.work, "b.txt"), "b2");
+      writeFileSync(join(r.work, "d.txt"), "d2");
+      rmSync(join(r.work, "keep.txt"));
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree });
+
+      // The apply began (it wrote down what it was for), wrote a.txt and d.txt, took keep.txt away, and was killed.
+      writeFileSync(join(r.otherGit, "apply.target"), JSON.stringify({ from: r.first.commit, to: second.commit }));
+      writeFileSync(join(r.other, "a.txt"), "a2");
+      writeFileSync(join(r.other, "d.txt"), "d2");
+      rmSync(join(r.other, "keep.txt"));
+      // Meanwhile the member had edited c.txt.
+      writeFileSync(join(r.other, "c.txt"), "c1, edited by the member");
+
+      expect(await localChanges(r.other, r.otherGit, r.first.tree)).toEqual(["c.txt"]);
+      // Without the note, the same work tree reads as four edits.
+      rmSync(join(r.otherGit, "apply.target"));
+      expect((await localChanges(r.other, r.otherGit, r.first.tree)).sort()).toEqual(["a.txt", "c.txt", "d.txt", "keep.txt"]);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("an apply that finishes leaves no note, and one that waits for a lock left by a killed git gets through", async () => {
+    const r = await replicaOf({ "a.txt": "a1", "b.txt": "b1" });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "a2");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree });
+      // A git that was left running holds the index lock for a moment.
+      const lock = join(r.otherGit, "apply.index.lock");
+      writeFileSync(lock, "");
+      setTimeout(() => rmSync(lock, { force: true }), 400);
+      const began = Date.now();
+      await applyCommit(r.other, r.otherGit, second.commit, [], r.first.commit);
+      expect(Date.now() - began).toBeGreaterThanOrEqual(300);
+      expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("a2");
+      expect(existsSync(join(r.otherGit, "apply.target"))).toBe(false);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("what changed locally", () => {
   test("only the edited file is reported, and only it is moved aside", async () => {
     const r = await replicaOf({ "a.txt": "alpha", "b.txt": "beta", "sub/c.txt": "gamma" });

@@ -695,7 +695,14 @@ export async function applyCommit(
   mkdirSync(gitDir, { recursive: true });
   const env = gitEnv(gitDir, work, join(gitDir, "apply.index"));
   await ensureStore(gitDir, work, env);
+  // An earlier apply that was killed may still be writing (git is its own process
+  // and outlives its parent): its lock on the index says so. Wait for it.
+  await waitForIndexLock(join(gitDir, "apply.index.lock"));
   const keep = (exclude ?? []).map((p) => p.replace(/\/$/, ""));
+  // What this apply is for is written down before the work tree is touched. An apply
+  // that is killed half way leaves files of both snapshots in the work tree, and the
+  // next look needs to know that those are the fleet's: see `localChanges`.
+  writeFileSync(join(gitDir, "apply.target"), JSON.stringify({ from: previous ?? null, to: commit }));
   await alignApplyIndex(gitDir, env, previous, keep);
   // What goes is worked out from the two trees, and goes first: git's own
   // order is removals, then writes. A name that only changes case is then
@@ -710,6 +717,39 @@ export async function applyCommit(
   rmSync(join(gitDir, "apply.commit"), { force: true });
   await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
   writeFileSync(join(gitDir, "apply.commit"), commit + "\n");
+  rmSync(join(gitDir, "apply.target"), { force: true });
+}
+
+// Wait until a lock file is gone (a git that was left running by an agent that was
+// killed lets go of it when it finishes), and take away one that has been there so
+// long that nothing holds it.
+async function waitForIndexLock(lock: string, waitMs = 15_000): Promise<void> {
+  const until = Date.now() + waitMs;
+  while (existsSync(lock)) {
+    let age = 0;
+    try {
+      age = Date.now() - statSync(lock).mtimeMs;
+    } catch {
+      return;
+    }
+    if (age > 60_000 || Date.now() > until) {
+      rmSync(lock, { force: true });
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// The tree an interrupted apply was writing, if one was: files of it in the work tree
+// are the fleet's, not the member's.
+async function interruptedTarget(gitDir: string, env: Record<string, string>): Promise<string | null> {
+  try {
+    const target = JSON.parse(readFileSync(join(gitDir, "apply.target"), "utf8")) as { to?: unknown };
+    if (typeof target.to !== "string" || !OBJECT_ID.test(target.to)) return null;
+    return await gitText(gitDir, ["rev-parse", target.to + "^{tree}"], env);
+  } catch {
+    return null;
+  }
 }
 
 // Apply a pack to a work tree: take it into the store, then write it out.
@@ -805,12 +845,19 @@ export async function localChanges(
     const pathspec = ["."];
     for (const path of left) pathspec.push(":(exclude)" + path);
     await gitText(gitDir, ["add", "-A", "--"].concat(pathspec), env);
-    const out = await gitRun(gitDir, ["diff-index", "--cached", "--name-only", "--no-renames", "-z", tree], env);
+    const differing = async (against: string): Promise<string[]> =>
+      (await gitRun(gitDir, ["diff-index", "--cached", "--name-only", "--no-renames", "-z", against], env)).toString("utf8").split("\u0000").filter((p) => p !== "");
+    let paths = await differing(tree);
+    // An apply that was stopped half way left files of the snapshot it was writing beside
+    // those of the one before: a file that is the same as either is the fleet's. Only what is
+    // like neither is the member's own.
+    const writing = await interruptedTarget(gitDir, env);
+    if (writing !== null && writing !== tree) {
+      const notTarget = new Set(await differing(writing));
+      paths = paths.filter((p) => notTarget.has(p));
+    }
     const keep = [...left];
-    return out
-      .toString("utf8")
-      .split("\u0000")
-      .filter((path) => path !== "" && !isLeftAlone(path, keep));
+    return paths.filter((path) => !isLeftAlone(path, keep));
   } finally {
     rmSync(indexFile, { force: true });
   }
