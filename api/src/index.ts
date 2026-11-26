@@ -495,15 +495,20 @@ async function vacateInFleets(env: Env, deviceId: string): Promise<string[]> {
  * this costs nothing: a primary whose tunnel is gone is not a primary anybody
  * can reach, and the fleet should not wait the rest of its lease to say so.
  */
+const offlineAt = new Map<string, number>();
 async function deviceOnline(env: Env, deviceId: string): Promise<boolean> {
   return onlineNow(
     deviceId,
     async () => (await effectiveSnapshot(env)).online,
     async () => {
+      // A snapshot read a moment ago is as fresh as one read now.
+      if (mapCache && Date.now() - mapCache.at < 250) return mapCache.snap.online;
       const snap = await freshSnapshot(env);
       mapCache = { at: Date.now(), snap };
       return snap.online;
     },
+    offlineAt,
+    MAP_CACHE_TTL_MS,
   );
 }
 

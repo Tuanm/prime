@@ -491,6 +491,24 @@ describe("whether a primary is taken to be gone", () => {
     expect(fresh).toBe(1);
   });
 
+  test("a device found offline is not looked for again, in a registry read of everything, for a moment", async () => {
+    let fresh = 0;
+    const now = async () => {
+      fresh++;
+      return new Set<string>();
+    };
+    const offlineAt = new Map<string, number>();
+    let clock = 1_000;
+    const at = () => clock;
+    for (let i = 0; i < 50; i++) expect(await onlineNow("dev-primary", async () => new Set<string>(), now, offlineAt, 2_000, at)).toBe(false);
+    expect(fresh).toBe(1);
+    // Then it is looked for again, and a tunnel that opened since is found.
+    clock += 2_500;
+    expect(await onlineNow("dev-primary", async () => new Set<string>(), async () => new Set(["dev-primary"]), offlineAt, 2_000, at)).toBe(true);
+    // And once found online it is no longer remembered as offline.
+    expect(offlineAt.has("dev-primary")).toBe(false);
+  });
+
   test("one the snapshot lists is not asked about again, and one nobody lists is gone", async () => {
     let fresh = 0;
     const now = async () => {

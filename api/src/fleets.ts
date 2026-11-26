@@ -189,9 +189,27 @@ export interface FleetAuth {
  * The registry's snapshot is kept for a couple of seconds, and a tunnel that came up since it was
  * read is not in it: a primary that took the lease the moment its tunnel opened would be found
  * "not connected" by the first replica that asked, and lose the lease it had taken a second ago. So
- * a snapshot that says yes is believed, and one that says no is checked against a fresh one.
+ * a snapshot that says yes is believed, and one that says no is checked against a fresh one - once
+ * for `negativeTtlMs`: a device that is really offline is not worth a read of the whole registry (one
+ * object for the gateway) on every call that is addressed to its fleet.
  */
-export async function onlineNow(deviceId: string, cached: () => Promise<Set<string>>, fresh: () => Promise<Set<string>>): Promise<boolean> {
+export async function onlineNow(
+  deviceId: string,
+  cached: () => Promise<Set<string>>,
+  fresh: () => Promise<Set<string>>,
+  /** When each device was last found offline by a fresh read; the caller keeps it between calls. */
+  offlineAt: Map<string, number> = new Map(),
+  negativeTtlMs = 2_000,
+  now: () => number = Date.now,
+): Promise<boolean> {
   if ((await cached()).has(deviceId)) return true;
-  return (await fresh()).has(deviceId);
+  const known = offlineAt.get(deviceId);
+  if (known !== undefined && now() - known < negativeTtlMs) return false;
+  const online = (await fresh()).has(deviceId);
+  if (online) offlineAt.delete(deviceId);
+  else {
+    if (offlineAt.size >= 256) offlineAt.clear(); // devices come and go: the map is a cache, not a record
+    offlineAt.set(deviceId, now());
+  }
+  return online;
 }
