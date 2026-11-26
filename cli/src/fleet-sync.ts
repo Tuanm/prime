@@ -664,9 +664,7 @@ async function alignApplyIndex(
     return;
   }
   let trusted = false;
-  try {
-    trusted = existsSync(indexFile) && readFileSync(sidecar, "utf8").trim() === previous;
-  } catch {}
+  trusted = existsSync(indexFile) && readApplySidecar(gitDir)?.commit === previous;
   if (!trusted) {
     rmSync(indexFile, { force: true });
     rmSync(sidecar, { force: true });
@@ -746,6 +744,9 @@ export async function applyCommit(
   mkdirSync(gitDir, { recursive: true });
   const env = gitEnv(gitDir, work, join(gitDir, "apply.index"));
   await ensureStore(gitDir, work, env);
+  // An apply that finished writing the work tree and was stopped before the member recorded
+  // it: the work tree holds that snapshot, whatever the member's state says it held.
+  previous = finishedApply(gitDir, previous ?? null) ?? previous;
   // An earlier apply that was killed may still be writing (git is its own process
   // and outlives its parent): its lock on the index says so. Wait for it.
   await waitForIndexLock(join(gitDir, "apply.index.lock"));
@@ -767,8 +768,36 @@ export async function applyCommit(
   // apply is whole, so an apply that dies half way is rebuilt next time.
   rmSync(join(gitDir, "apply.commit"), { force: true });
   await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env);
-  writeFileSync(join(gitDir, "apply.commit"), commit + "\n");
+  // What the work tree holds, and what it was brought from: see `finishedApply`.
+  writeFileSync(join(gitDir, "apply.commit"), commit + "\nfrom " + (previous ?? "none") + "\n");
   rmSync(join(gitDir, "apply.target"), { force: true });
+}
+
+/** What the last finished apply wrote, and what it started from (`none` when it started from nothing, empty in a sidecar of an older build). */
+export function readApplySidecar(gitDir: string): { commit: string; from: string } | null {
+  try {
+    const [commit, from] = readFileSync(join(gitDir, "apply.commit"), "utf8").split("\n");
+    if (!commit || !OBJECT_ID.test(commit.trim())) return null;
+    return { commit: commit.trim(), from: from?.startsWith("from ") ? from.slice(5).trim() : "" };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The snapshot the work tree holds when a finished apply has not been recorded.
+ *
+ * An apply writes the work tree, then the sidecar, and only after that does the member save its
+ * state. A stop in between leaves the state at the snapshot the apply started from while the
+ * work tree holds the one it wrote. The sidecar says both: it names what was written and what it
+ * started from, so when that start is the member's recorded base, the base is out of date and the
+ * written commit is what the work tree holds. Null when there is no such apply.
+ */
+export function finishedApply(gitDir: string, base: string | null): string | null {
+  const done = readApplySidecar(gitDir);
+  // With no base there is no record to be out of date: an apply from nothing removes nothing, as ever.
+  if (done === null || base === null || done.commit === base) return null;
+  return done.from === base ? done.commit : null;
 }
 
 /** A lock this old is a git that died: nothing writes an index for ten minutes. */
@@ -918,6 +947,14 @@ export async function localChanges(
     const differing = async (against: string): Promise<string[]> =>
       (await gitRun(gitDir, ["diff-index", "--cached", "--name-only", "--no-renames", "-z", against], env)).toString("utf8").split("\u0000").filter((p) => p !== "");
     let paths = await differing(tree);
+    // An apply that finished and was not recorded: the work tree holds its snapshot, and nothing
+    // of the one before is the fleet's any more (an edit that puts a file back as it was then is the member's).
+    const finished = finishedApply(gitDir, opts.base ?? null);
+    if (finished !== null) {
+      const held = await gitText(gitDir, ["rev-parse", finished + "^{tree}"], env);
+      const keep = [...left];
+      return (await differing(held)).filter((path) => !isLeftAlone(path, keep));
+    }
     // An apply that was stopped half way left files of the snapshot it was writing beside
     // those of the one before: a file that is the same as either is the fleet's. Only what is
     // like neither is the member's own.

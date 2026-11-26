@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import {
   EMPTY_TREE,
+  finishedApply,
   foldsCase,
   waitForIndexLock,
   applyCommit,
@@ -960,6 +961,58 @@ describe("an apply that was killed half way", () => {
       expect(Date.now() - began).toBeGreaterThanOrEqual(300);
       expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("a2");
       expect(existsSync(join(r.otherGit, "apply.target"))).toBe(false);
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("an apply that finished and was stopped before the member recorded it", () => {
+  test("the work tree holds the snapshot it wrote: a file put back as the old one had it is the member's edit, and what the new one added goes with the next", async () => {
+    const r = await replicaOf({ "a.txt": "a1", "b.txt": "b1" });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "a2");
+      writeFileSync(join(r.work, "n.txt"), "added by the second");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      rmSync(join(r.work, "n.txt"));
+      writeFileSync(join(r.work, "b.txt"), "b3");
+      const third = await snapshot({ work: r.work, gitDir: r.gitDir, base: second.commit, wantFull: false });
+      await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree });
+      await ingestPack(r.other, r.otherGit, third.commit, third.delta!, { tree: third.tree });
+
+      // The second is written and the sidecar is down; the member's state was never saved, so it still says "first".
+      await applyCommit(r.other, r.otherGit, second.commit, [], r.first.commit);
+      expect(readFileSync(join(r.other, "n.txt"), "utf8")).toBe("added by the second");
+      // Its owner puts a.txt back as the first snapshot had it.
+      writeFileSync(join(r.other, "a.txt"), "a1");
+
+      // Compared with what the state says (first), that is no change at all; compared with what the work tree holds, it is.
+      expect(await localChanges(r.other, r.otherGit, r.first.tree, { base: r.first.commit })).toEqual(["a.txt"]);
+      // Once the state has caught up with the work tree the answer is the same.
+      expect(await localChanges(r.other, r.otherGit, second.tree, { base: second.commit })).toEqual(["a.txt"]);
+
+      // The next apply starts from what is there: n.txt, which the second added and the third dropped, goes.
+      await applyCommit(r.other, r.otherGit, third.commit, [], r.first.commit);
+      expect(existsSync(join(r.other, "n.txt"))).toBe(false);
+      expect(readFileSync(join(r.other, "b.txt"), "utf8")).toBe("b3");
+    } finally {
+      rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a member that published since (its base is not where the apply started) is not taken for one that did not record", async () => {
+    const r = await replicaOf({ "a.txt": "a1" });
+    try {
+      writeFileSync(join(r.work, "a.txt"), "a2");
+      const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: false });
+      await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree });
+      await applyCommit(r.other, r.otherGit, second.commit, [], r.first.commit);
+      // A snapshot of its own, made as primary: the base is that one now, and the sidecar belongs to an older apply.
+      expect(finishedApply(r.otherGit, "f".repeat(40))).toBeNull();
+      expect(finishedApply(r.otherGit, second.commit)).toBeNull();
+      expect(finishedApply(r.otherGit, r.first.commit)).toBe(second.commit);
+      // An apply from nothing is "none".
+      expect(finishedApply(r.otherGit, null)).toBeNull();
     } finally {
       rmSync(r.root, { recursive: true, force: true });
     }

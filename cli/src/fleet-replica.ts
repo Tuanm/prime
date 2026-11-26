@@ -14,11 +14,11 @@
 //            applied;
 //   head     what the fleet has, which the agent learns from its socket.
 
-import { readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyFetched, fetchAhead, type HeadHint, type MemberPaths, type Position } from "./fleet-agent";
-import { hasCommit, preserveLocalChange, snapshot } from "./fleet-sync";
+import { hasCommit, preserveLocalChange, readApplySidecar, snapshot } from "./fleet-sync";
 import { reportApplied, type FleetCredentials, type FleetHead } from "./fleet-transport";
 
 /** `lazy` fetches ahead and applies on demand; `mirror` applies after every fetch. */
@@ -111,7 +111,7 @@ export async function prefetch(
 async function workTreeHolds(gitDir: string, commit: string | null): Promise<boolean> {
   if (commit === null) return false;
   try {
-    return readFileSync(join(gitDir, "apply.commit"), "utf8").trim() === commit;
+    return readApplySidecar(gitDir)?.commit === commit;
   } catch {
     return false;
   }
