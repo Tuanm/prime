@@ -1159,6 +1159,12 @@ export class FleetDO implements DurableObject {
     // CAS losing the race, not an error.
     if (!written) return Response.json({ error: "head changed" }, { status: 409 });
     await this.state.storage.put("epoch", next.epoch);
+    // The publisher holds the state it has just published: it needs no report to
+    // say so. Without this a member whose own report was lost (a timeout, a 503)
+    // would be refused its next publish as "catch up first", with nothing it
+    // could catch up to.
+    applied[caller.deviceId] = next.seq;
+    await this.state.storage.put("applied", applied);
     // The members that listen pull now instead of at their next look; the one that
     // published already has it.
     this.broadcast({ type: "head", seq: next.seq, manifestKey }, caller.deviceId);

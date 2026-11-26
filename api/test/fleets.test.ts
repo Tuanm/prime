@@ -614,23 +614,6 @@ describe("catch up before promoting", () => {
     });
     expect(ok.status).toBe(200);
   });
-
-  test("a member that has not applied the head cannot publish over it", async () => {
-    const { doInstance } = makeDo();
-    await makeFleet(doInstance, "dev-one");
-    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-one" });
-    await call(doInstance, "/head/advance", {
-      caller: "device",
-      device: "dev-one",
-      body: { expectedSeq: 0, manifestKey: "m/1", manifestHash: "h1" },
-    });
-    const blocked = await call(doInstance, "/head/advance", {
-      caller: "device",
-      device: "dev-one",
-      body: { expectedSeq: 1, manifestKey: "m/2", manifestHash: "h2" },
-    });
-    expect(blocked.status).toBe(409);
-  });
 });
 
 describe("head advance", () => {
@@ -830,6 +813,22 @@ describe("what a replica reports and what the index says", () => {
     expect(listed.length).toBe(RECENT_SNAPSHOTS);
     expect(listed[0]!.seq).toBe(5);
     expect(listed[listed.length - 1]!.seq).toBe(RECENT_SNAPSHOTS + 4);
+  });
+});
+
+describe("the publisher is applied to what it publishes", () => {
+  test("a publish needs no report afterwards: the next one is not refused as 'catch up first'", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "dev-owner", body: {} });
+    for (let seq = 1; seq <= 3; seq++) {
+      const res = await call(doInstance, "/head/advance", {
+        caller: "device",
+        device: "dev-owner",
+        body: { expectedSeq: seq - 1, manifestKey: "m" + seq, manifestHash: "h" + seq },
+      });
+      expect(res.status).toBe(200); // no /applied call in between: the one a client sends may be lost
+    }
   });
 });
 
