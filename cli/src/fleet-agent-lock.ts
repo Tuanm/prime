@@ -48,14 +48,18 @@ const psProbe: ProcessProbe = (pid) => {
 };
 
 // Linux says it without a process to run (and in containers that have no ps).
-const procProbe: ProcessProbe = (pid) => {
-  try {
-    const line = readFileSync("/proc/" + pid + "/cmdline", "utf8").replace(/\0/g, " ").trim();
-    return line === "" ? null : { status: 0, stdout: line };
-  } catch {
-    return null;
-  }
-};
+export function procProbeWith(read: (file: string) => string): ProcessProbe {
+  return (pid) => {
+    try {
+      const line = read("/proc/" + pid + "/cmdline").replace(/\0/g, " ").trim();
+      return line === "" ? null : { status: 0, stdout: line };
+    } catch {
+      return null;
+    }
+  };
+}
+
+const procProbe = procProbeWith((file) => readFileSync(file, "utf8"));
 
 const defaultProbe: ProcessProbe = (pid) => (process.platform === "linux" ? procProbe(pid) : null) ?? psProbe(pid);
 

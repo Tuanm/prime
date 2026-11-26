@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireAgentLock, agentLockPath, isFleetAgentProcess } from "../src/fleet-agent-lock";
+import { acquireAgentLock, agentLockPath, isFleetAgentProcess, procProbeWith } from "../src/fleet-agent-lock";
 import { bindServiceStatus } from "../src/fleet-service";
 import {
   agentServiceFor,
@@ -16,6 +16,7 @@ import {
   runFleetAgent,
   stopFleetAgent,
   uninstallFleetAgent,
+  writeAgentState,
 } from "../src/fleet-daemon";
 
 const cleanups: Array<() => void> = [];
@@ -284,6 +285,42 @@ describe("one fleet agent per configuration", () => {
     expect(stopFleetAgent(configPath)).toBe(true);
     await Bun.sleep(100);
     expect(() => process.kill(old.pid, 0)).toThrow();
+  });
+
+  test("/proc says what a pid is where it can: a command line is an answer, and anything else is not", () => {
+    const dir = scratch();
+    const files: Record<string, string> = {
+      "/proc/10/cmdline": "/usr/bin/bun\0/opt/prime/cli.ts\0__fleet-agent\0--config\0/h/c.yaml\0",
+      "/proc/20/cmdline": "vim\0notes.md\0",
+      "/proc/30/cmdline": "",
+    };
+    const probe = procProbeWith((file) => {
+      const text = files[file];
+      if (text === undefined) throw new Error("ENOENT");
+      return text;
+    });
+    expect(probe(10)).toEqual({ status: 0, stdout: "/usr/bin/bun /opt/prime/cli.ts __fleet-agent --config /h/c.yaml" });
+    expect(probe(20)?.stdout).toBe("vim notes.md");
+    // A kernel thread (empty) and a pid that is not there say nothing.
+    expect(probe(30)).toBeNull();
+    expect(probe(40)).toBeNull();
+    // Through the check, on this process, which is alive: the named command decides, whatever the lock says.
+    writeFileSync(agentLockPath(dir), process.pid + "\n");
+    expect(isFleetAgentProcess(process.pid, dir, () => probe(10))).toBe(true);
+    expect(isFleetAgentProcess(process.pid, dir, () => probe(20))).toBe(false);
+  });
+
+  test("the agent's state is replaced, not rewritten in place: a reader never finds it empty", () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    mkdirp(fleetAgentDir(configPath));
+    const state = { pid: 1, started_at: "x", config_path: configPath } as const;
+    writeAgentState(configPath, state);
+    const first = statSync(fleetAgentStatePath(configPath)).ino;
+    writeAgentState(configPath, { ...state, rounds: 2 });
+    expect(JSON.parse(readFileSync(fleetAgentStatePath(configPath), "utf8")).rounds).toBe(2);
+    expect(statSync(fleetAgentStatePath(configPath)).ino).not.toBe(first);
+    expect(readdirSync(fleetAgentDir(configPath)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
   });
 
   test("a holder keeps its lock fresh while it lives, whatever else it writes: a stopping agent is not mistaken for a dead one", async () => {

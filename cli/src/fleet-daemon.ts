@@ -103,6 +103,16 @@ export function fleetAgentStatePath(configPath: string): string {
   return join(fleetAgentDir(configPath), "state.json");
 }
 
+/**
+ * Write the agent's state so that a reader sees the old one or the new one, never half of it
+ * (a reader that finds it empty takes the agent for gone): written beside it, then renamed over it.
+ */
+export function writeAgentState(configPath: string, state: FleetAgentState): void {
+  const file = fleetAgentStatePath(configPath);
+  writeFileSync(file + ".tmp", JSON.stringify(state), { mode: 0o600 });
+  renameSync(file + ".tmp", file);
+}
+
 export function readFleetAgentState(configPath: string): FleetAgentState | undefined {
   try {
     const parsed = JSON.parse(readFileSync(fleetAgentStatePath(configPath), "utf8")) as FleetAgentState;
@@ -1313,7 +1323,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       ...(timing ? { timing } : {}),
       ...pushState(),
     };
-    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify(state), { mode: 0o600 });
+    writeAgentState(configPath, state);
   };
 
   const loops = new Map<string, SpaceLoop>();
