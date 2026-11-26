@@ -1535,7 +1535,17 @@ describe("an agent killed while it writes the work tree", () => {
         stdout: "ignore",
         stderr: "ignore",
       });
-      const written = (): number => readdirSync(r.paths.work).filter((n) => n.endsWith(".txt") && readFileSync(join(r.paths.work, n), "utf8").startsWith("version 2")).length;
+      // Counted while git is replacing the files, so one may be gone for a moment (git unlinks
+      // and writes a new one): that is not a file written yet, and not an error.
+      const written = (): number =>
+        readdirSync(r.paths.work).filter((n) => {
+          if (!n.endsWith(".txt")) return false;
+          try {
+            return readFileSync(join(r.paths.work, n), "utf8").startsWith("version 2");
+          } catch {
+            return false;
+          }
+        }).length;
       const until = Date.now() + 20_000;
       while (written() < 20 && Date.now() < until) await new Promise((res) => setTimeout(res, 5));
       process.kill(child.pid, "SIGKILL");
