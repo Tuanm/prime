@@ -20,7 +20,7 @@
 import { createHash, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -240,6 +240,78 @@ async function ensureStore(gitDir: string, work: string, env: Record<string, str
   }
   await gitText(gitDir, ["config", "core.bare", "false"], env);
   await gitText(gitDir, ["config", "core.worktree", work], env);
+  // git sets core.ignorecase on a file system that folds case (macOS, Windows), and
+  // then a file renamed from Notes.md to NOTES.md is the same file to it: the snapshot
+  // sees no change, the fleet keeps the old spelling, and the primary's disk drifts
+  // from the fleet's tree. The store follows the names on disk exactly instead (see
+  // `reconcileCase` for the one thing that costs).
+  await gitText(gitDir, ["config", "core.ignorecase", "false"], env);
+}
+
+const foldsCaseCache = new Map<string, boolean>();
+
+/** Whether this directory is on a file system that finds `Name` when asked for `NAME`. */
+export function foldsCase(dir: string): boolean {
+  const known = foldsCaseCache.get(dir);
+  if (known !== undefined) return known;
+  let folds = false;
+  try {
+    const name = basename(dir);
+    const swapped = name === name.toLowerCase() ? name.toUpperCase() : name.toLowerCase();
+    if (swapped !== name) {
+      const same = statSync(join(dir, "..", swapped));
+      const own = statSync(dir);
+      folds = same.ino === own.ino && same.dev === own.dev;
+    }
+  } catch {
+    folds = false;
+  }
+  foldsCaseCache.set(dir, folds);
+  return folds;
+}
+
+// On a file system that folds case, `git add -A` after a case-only rename finds the old
+// spelling still "there" (asking for it finds the renamed file) and the new one as a new
+// path: the index holds both. The old spelling is not a file on disk any more - the
+// directory listing says so - and goes.
+async function reconcileCase(work: string, gitDir: string, env: Record<string, string>): Promise<void> {
+  const listed = (await gitRun(gitDir, ["ls-files", "-z"], env)).toString("utf8").split("\u0000").filter(Boolean);
+  const byFolded = new Map<string, string[]>();
+  for (const path of listed) {
+    const key = path.toLowerCase();
+    const group = byFolded.get(key);
+    if (group) group.push(path);
+    else byFolded.set(key, [path]);
+  }
+  const names = new Map<string, Set<string>>();
+  const here = (dir: string): Set<string> => {
+    let set = names.get(dir);
+    if (!set) {
+      try {
+        set = new Set(readdirSync(dir));
+      } catch {
+        set = new Set();
+      }
+      names.set(dir, set);
+    }
+    return set;
+  };
+  const exact = (path: string): boolean => {
+    let dir = work;
+    for (const part of path.split("/")) {
+      if (!here(dir).has(part)) return false;
+      dir = join(dir, part);
+    }
+    return true;
+  };
+  const stale: string[] = [];
+  for (const group of byFolded.values()) {
+    if (group.length < 2) continue;
+    for (const path of group) if (!exact(path)) stale.push(path);
+  }
+  if (stale.length > 0) {
+    await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, stale.join("\u0000") + "\u0000");
+  }
 }
 
 /** Whether prime's object store has this commit (and so its tree and what it needs to build on it). */
@@ -312,6 +384,8 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
     opts.nested.invalidate();
     await stage();
   }
+  if (foldsCase(work)) await reconcileCase(work, gitDir, env);
+
   // A repository that arrived since the cache last looked, and has a commit,
   // is added as a gitlink: a pointer to history this fleet does not carry. It
   // is taken out again here, whatever the cache knew, and the cache is told.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -762,6 +762,49 @@ describe("a snapshot that goes out as a whole tree", () => {
       expect(readFileSync(join(next, "b.txt"), "utf8")).toBe("beta, edited by the old member".repeat(200));
     } finally {
       rmSync(r.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a case-only rename on the primary", () => {
+  test("is published: the fleet's tree follows the names on disk", async () => {
+    const root = scratch();
+    try {
+      const work = join(root, "work");
+      const gitDir = join(root, "meta");
+      mkdirSync(join(work, "docs"), { recursive: true });
+      writeFileSync(join(work, "Notes.md"), "notes v1");
+      writeFileSync(join(work, "docs", "a.txt"), "a");
+      writeFileSync(join(work, "keep.txt"), "k");
+      const first = await snapshot({ work, gitDir });
+      // Needs a file system that folds case (macOS, Windows); elsewhere the two names are two files.
+      writeFileSync(join(work, "Probe.tmp"), "x");
+      const folds = existsSync(join(work, "probe.tmp"));
+      rmSync(join(work, "Probe.tmp"));
+      if (!folds) return;
+
+      renameSync(join(work, "Notes.md"), join(work, "tmp-name"));
+      renameSync(join(work, "tmp-name"), join(work, "NOTES.md"));
+      renameSync(join(work, "docs"), join(work, "tmp-dir"));
+      renameSync(join(work, "tmp-dir"), join(work, "Docs"));
+      const second = await snapshot({ work, gitDir, base: first.commit, wantFull: false });
+      const names = execFileSync("git", ["--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", second.commit], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
+      expect(names).toEqual(["Docs/a.txt", "NOTES.md", "keep.txt"]);
+      expect(second.tree).not.toBe(first.tree);
+
+      // And the next snapshot, with nothing changed, is the same tree: nothing flaps.
+      const third = await snapshot({ work, gitDir, base: second.commit, wantFull: false });
+      expect(third.tree).toBe(second.tree);
+
+      // A replica that held the old spelling ends with the new one and nothing else.
+      const other = join(root, "other");
+      mkdirSync(other);
+      await applyPack(other, join(root, "other-meta"), first.commit, first.pack, [], null);
+      await applyPack(other, join(root, "other-meta"), second.commit, second.delta!, [], first.commit);
+      expect(readdirSync(other).sort()).toEqual(["Docs", "NOTES.md", "keep.txt"]);
+      expect(readFileSync(join(other, "NOTES.md"), "utf8")).toBe("notes v1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
