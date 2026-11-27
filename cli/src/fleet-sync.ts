@@ -972,9 +972,41 @@ export async function applyPack(
   await applyCommit(work, gitDir, commit, exclude, previous);
 }
 
-/** Wait until the work tree stops changing, so a half-written file is not captured. */
-export async function settle(work: string, settleMs = 120): Promise<void> {
-  const stamp = (): string => {
+/** Where to look when waiting for a work tree to settle: the store, and what the fleet leaves alone. */
+export interface SettleOptions {
+  /** The member's store. With it, only the files a snapshot would take are watched; without it, the whole tree is. */
+  gitDir?: string;
+  /** Directories the fleet leaves alone (nested repositories among them): nothing in them is waited for. */
+  left?: string[];
+}
+
+// The files a snapshot of this work tree would take, as git names them: what is tracked in the last
+// snapshot's index and what is untracked and not ignored, without the directories that are left alone.
+// git does not descend into an ignored directory, so a `node_modules` costs nothing. null: git could
+// not say (no store yet), and the caller looks at everything.
+async function capturedFiles(work: string, gitDir: string, left: string[]): Promise<string[] | null> {
+  try {
+    const env = gitEnv(gitDir, work, join(gitDir, "snapshot.index"));
+    const out = await gitRun(
+      gitDir,
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."].concat(left.map((p) => ":(exclude)" + p)),
+      env,
+    );
+    return out.toString("utf8").split("\u0000").filter((p) => p !== "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wait until the work tree stops changing, so a half-written file is not captured.
+ *
+ * It is only the files a snapshot would take that matter: a build running in an ignored folder, or
+ * an IDE writing inside a nested repository's `.git`, has no effect on what is published, and
+ * neither costs a look at its files nor makes this wait.
+ */
+export async function settle(work: string, settleMs = 120, opts: SettleOptions = {}): Promise<void> {
+  const walked = (): string => {
     const parts: string[] = [];
     const walk = (dir: string): void => {
       let entries: string[];
@@ -995,10 +1027,22 @@ export async function settle(work: string, settleMs = 120): Promise<void> {
     walk(work);
     return parts.sort().join("|");
   };
-  let previous = stamp();
+  const stamp = async (): Promise<string> => {
+    const files = opts.gitDir ? await capturedFiles(work, opts.gitDir, opts.left ?? []) : null;
+    if (files === null) return walked();
+    const parts: string[] = [];
+    for (const rel of files) {
+      try {
+        const st = lstatSync(join(work, rel));
+        parts.push(rel + ":" + st.size + ":" + st.mtimeMs);
+      } catch {}
+    }
+    return parts.sort().join("|");
+  };
+  let previous = await stamp();
   for (let attempt = 0; attempt < 20; attempt++) {
     await new Promise((r) => setTimeout(r, settleMs));
-    const next = stamp();
+    const next = await stamp();
     if (next === previous) return;
     previous = next;
   }

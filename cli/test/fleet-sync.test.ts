@@ -22,6 +22,7 @@ import {
   preserveLocalChange,
   removedBetween,
   seal,
+  settle,
   snapshot,
   unseal,
 } from "../src/fleet-sync";
@@ -1437,5 +1438,65 @@ describe("the lock on the apply index", () => {
     utimesSync(lock, old, old);
     await waitForIndexLock(lock, 250);
     expect(existsSync(lock)).toBe(false);
+  });
+});
+
+describe("settling the work tree", () => {
+  // A build that never stops writing into an ignored folder is not part of any snapshot: waiting for it
+  // would hold up every publish for as long as it runs.
+  test("does not wait for files a snapshot would not take", async () => {
+    const root = scratch();
+    const work = join(root, "work");
+    const gitDir = join(root, "store");
+    mkdirSync(join(work, "node_modules", "pkg"), { recursive: true });
+    mkdirSync(join(work, "nested", ".git"), { recursive: true });
+    writeFileSync(join(work, ".gitignore"), "node_modules/\n");
+    writeFileSync(join(work, "a.txt"), "a");
+    try {
+      await snapshot({ work, gitDir, base: null, treeOnly: true });
+      let n = 0;
+      const noise = setInterval(() => {
+        n++;
+        writeFileSync(join(work, "node_modules", "pkg", "out.js"), "x".repeat(n));
+        writeFileSync(join(work, "nested", ".git", "index"), "y".repeat(n));
+      }, 5);
+      const began = Date.now();
+      await settle(work, 40, { gitDir, left: ["nested"] });
+      const took = Date.now() - began;
+      clearInterval(noise);
+      // Two looks: the walk would see the noise at every one of twenty.
+      expect(took).toBeLessThan(400);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("still waits for a file a snapshot would take", async () => {
+    const root = scratch();
+    const work = join(root, "work");
+    const gitDir = join(root, "store");
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "a.txt"), "a");
+    try {
+      await snapshot({ work, gitDir, base: null, treeOnly: true });
+      let n = 0;
+      const writing = setInterval(() => writeFileSync(join(work, "a.txt"), "x".repeat(++n)), 5);
+      setTimeout(() => clearInterval(writing), 250);
+      const began = Date.now();
+      await settle(work, 40, { gitDir });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(240);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("looks at the whole tree when there is no store to ask", async () => {
+    const root = scratch();
+    try {
+      writeFileSync(join(root, "a.txt"), "a");
+      await settle(root, 10, { gitDir: join(root, "no-such-store") });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

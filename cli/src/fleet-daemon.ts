@@ -937,7 +937,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     // A file that is still being written must not be captured half-written.
     // It only matters when something changed: otherwise there is nothing to
     // capture.
-    if (changed) await settle(paths.work, options.settleMs ?? 250);
+    if (changed) await settle(paths.work, options.settleMs ?? 250, { gitDir: paths.gitDir, left: paths.nested?.get() ?? [] });
     const snapBegan = Date.now();
     const snap = await snapshot({
       work: paths.work,

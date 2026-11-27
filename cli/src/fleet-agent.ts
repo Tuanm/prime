@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyCommit, findNestedRepos, ingestPack, settle, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
+import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
 import { FleetTrust, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
@@ -942,10 +942,4 @@ export async function pull(
 export function manifestIdOf(key: string): string {
   const parts = key.split("/");
   return parts[parts.length - 1] ?? key;
-}
-
-/** Wait until the work tree stops changing, then snapshot it. */
-export async function snapshotNow(work: string, gitDir: string, base: string | null) {
-  await settle(work);
-  return snapshot({ work, gitDir, base });
 }
