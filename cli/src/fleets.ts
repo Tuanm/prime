@@ -935,7 +935,7 @@ export function updateFleetState(
     const disk = readFleetState(configPath, fleetId, spaceName);
     const wanted = { ...disk, ...patch };
     const next = opts.rewind ? wanted : mergeFleetState(disk, wanted);
-    writeFileAtomic(join(dir, "state.json"), JSON.stringify(next, null, 2));
+    writeFileAtomic(join(dir, "state.json"), JSON.stringify(next, null, 2), 0o600, { durable: true });
     return next;
   });
 }
@@ -955,6 +955,6 @@ export function writeFleetState(configPath: string, fleetId: string, spaceName: 
     const next = opts.replace ? state : mergeFleetState(readFleetState(configPath, fleetId, spaceName), state);
     // A pointer that older builds wrote to the last manifest: nothing reads it, and it goes when the file is next written.
     delete (next as Record<string, unknown>).manifest;
-    writeFileAtomic(file, JSON.stringify(next, null, 2));
+    writeFileAtomic(file, JSON.stringify(next, null, 2), 0o600, { durable: true });
   });
 }

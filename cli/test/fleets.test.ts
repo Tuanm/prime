@@ -262,3 +262,55 @@ describe("what a member knows of a fleet, when it joins", () => {
     }
   });
 });
+
+describe("writing a file so that nobody sees half of it", () => {
+  const busy = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+
+  test("a rename that Windows refuses while the file is open is tried again, and goes through", async () => {
+    const { writeFileAtomic } = await import("../src/atomic-write");
+    const { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "atomic-"));
+    try {
+      const file = join(dir, "state.json");
+      let refused = 0;
+      writeFileAtomic(file, "one", 0o600, {
+        durable: true,
+        rename: (from, to) => {
+          if (refused++ < 2) throw busy("EPERM");
+          renameSync(from, to);
+        },
+      });
+      expect(refused).toBe(3);
+      expect(readFileSync(file, "utf8")).toBe("one");
+      expect(readdirSync(dir)).toEqual(["state.json"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("one that keeps being refused, or fails for another reason, throws and leaves no temporary file", async () => {
+    const { writeFileAtomic } = await import("../src/atomic-write");
+    const { mkdtempSync, readdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "atomic-"));
+    try {
+      let tries = 0;
+      expect(() =>
+        writeFileAtomic(join(dir, "a"), "x", 0o600, {
+          rename: () => {
+            tries++;
+            throw busy("EBUSY");
+          },
+        }),
+      ).toThrow();
+      expect(tries).toBe(7); // the first and six more
+      expect(() => writeFileAtomic(join(dir, "b"), "x", 0o600, { rename: () => { throw busy("ENOSPC"); } })).toThrow();
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
