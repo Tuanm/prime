@@ -111,6 +111,17 @@ export interface PublishResult {
   full: boolean;
 }
 
+/** What a snapshot's manifest and framing add to its pack, at most, for the check against the gateway's limit. */
+const MANIFEST_ALLOWANCE_BYTES = 256 * 1024;
+
+function snapshotTooBigMessage(bytes: number, limit: number): string {
+  const mb = (n: number): number => Math.ceil(n / (1024 * 1024));
+  return (
+    "this snapshot is " + mb(bytes) + " MB, and the gateway takes at most " + mb(limit) +
+    " MB for one: the work tree is too big to publish (keep what is not the work's, such as build output, out of it with .gitignore)"
+  );
+}
+
 /**
  * How often the fleet publishes a whole tree, in snapshots.
  *
@@ -225,6 +236,13 @@ export async function publish(
     keys.publicKey,
   );
   const main = sealed.ciphertexts[0]!;
+  // What the gateway would refuse is not uploaded in part: the change pack of a checkpoint goes up before
+  // the snapshot that names it, and one that is then refused leaves it stored, one more for every attempt.
+  const limit = role?.snapshotLimit;
+  if (limit !== undefined) {
+    const biggest = Math.max(...sealed.ciphertexts.map((c) => c.length)) + MANIFEST_ALLOWANCE_BYTES;
+    if (biggest > limit) throw new Error(snapshotTooBigMessage(biggest, limit));
+  }
 
   // The change travels first and on its own: the gateway stores it and the
   // manifest names it, as it names the pack.

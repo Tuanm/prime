@@ -286,10 +286,10 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
-  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown };
+  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown };
   return {
     member: body.member === true,
     primary: body.primary === true,
@@ -298,6 +298,8 @@ export async function fetchRole(
     ...(typeof body.incarnation === "string" && body.incarnation ? { incarnation: body.incarnation } : {}),
     // Whether the gateway refuses to move the head from a sealed snapshot to one that is not.
     ...(body.sealGate === true ? { sealGate: true as const } : {}),
+    // The most one upload may be: said by a gateway that has a limit.
+    ...(typeof body.snapshotLimit === "number" && body.snapshotLimit > 0 ? { snapshotLimit: body.snapshotLimit } : {}),
   };
 }
 

@@ -183,6 +183,32 @@ describe("a snapshot the gateway will not take for its size", () => {
   });
 });
 
+describe("a checkpoint the gateway will not take for its size", () => {
+  test("leaves nothing stored: the change pack is not sent up ahead of a snapshot that is refused", async () => {
+    const w = await world();
+    const one = await w.next("one\n");
+    writeFileSync(join(w.work, "file.txt"), "two\n");
+    w.gateway.snapshotLimit = 1000;
+    w.gateway.advertiseLimit = true;
+    const before = w.gateway.payloads.size;
+    // A member joined since: the snapshot is a whole tree built on the one before, which also carries the change.
+    const failed = (await publish(credsFor("primary-device"), "x", w.primary, w.manifest(one.manifestKey).tipCommit, one.seq, 1).catch((e: unknown) => e)) as Error;
+    expect(failed.message).toMatch(/is \d+ MB, and the gateway takes at most \d+ MB/);
+    expect(failed.message).not.toMatch(/head moved/);
+    expect(w.gateway.payloads.size).toBe(before);
+    expect(w.gateway.requests.get("POST snapshot") ?? 0).toBe(1); // the first publish only
+  });
+
+  test("a gateway that does not say its limit is asked, and its refusal is reported as that", async () => {
+    const w = await world();
+    const one = await w.next("one\n");
+    writeFileSync(join(w.work, "file.txt"), "two\n");
+    w.gateway.snapshotLimit = 1000;
+    const failed = (await publish(credsFor("primary-device"), "x", w.primary, w.manifest(one.manifestKey).tipCommit, one.seq, 1).catch((e: unknown) => e)) as Error;
+    expect(failed.message).toMatch(/bigger than the gateway takes/);
+  });
+});
+
 describe("a manifest stored under a hash", () => {
   test("is the one asked for, or it is refused", async () => {
     const w = await world();

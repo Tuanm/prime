@@ -18,6 +18,8 @@ export class FakeGateway {
   primary = "";
   /** The most one snapshot upload may be (the gateway answers 413 above it). */
   snapshotLimit: number | undefined = undefined;
+  /** Whether /role says what the limit is (the gateway now does; an earlier one did not). */
+  advertiseLimit = false;
   /** How many snapshots are kept; older packs and manifests are deleted, as the real gateway does. */
   retain = Infinity;
   /** Whether the gateway has an index (an older one answers 404). */
@@ -125,7 +127,7 @@ export class FakeGateway {
     }
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);
-      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}) });
+      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}) });
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });
@@ -203,6 +205,9 @@ export class FakeGateway {
     if ((kind === "packs" || kind === "manifests") && method === "POST") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
+      if (kind === "packs" && this.snapshotLimit !== undefined && bytes.length > this.snapshotLimit) {
+        return Response.json({ error: "this change pack is bigger than the gateway takes", limit: this.snapshotLimit }, { status: 413 });
+      }
       const hash = createHash("sha256").update(bytes).digest("hex");
       const key = "fleets/x/" + kind + "/" + hash;
       this.payloads.set(key, bytes);
