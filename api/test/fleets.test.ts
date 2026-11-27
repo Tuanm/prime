@@ -21,6 +21,8 @@ import {
   validFleetId,
 } from "../src/fleets";
 import { FleetDO } from "../src/fleet-do";
+// The CLI makes the proofs the object checks: the one test that runs both ends of it together.
+import { proveKeyChange } from "../../cli/src/fleet-crypto";
 import { handleFleetRoutes } from "../src/fleets-routes";
 
 // ---- helpers -------------------------------------------------------------
@@ -260,6 +262,15 @@ describe("a member that comes back with a new key", () => {
     expect(keyOf()).toBe(last.publicKey);
     const left = ((await call(doInstance, "/members", { caller: "admin", device: "operator", method: "GET" })).json.left as Array<{ pubkey: string }>).map((k) => k.pubkey);
     expect(left).toEqual([old.publicKey, mid.publicKey]);
+  });
+
+  test("the proof the CLI makes is the one the object accepts, byte for byte", async () => {
+    const { doInstance, old, objectKey, keyOf } = await fleetWithKeyedMember();
+    const pem = old.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const proof = proveKeyChange(pem, objectKey, NEW, "acme", "member-1");
+    const res = await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW, keyProof: proof } });
+    expect(res.status).toBe(200);
+    expect(keyOf()).toBe(NEW);
   });
 
   test("a proof is for one key, one fleet, one device, a few minutes and one use", async () => {
