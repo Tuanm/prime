@@ -632,6 +632,39 @@ describe("a member that goes while its publish is in flight, or is re-keyed", ()
     expect((await roster(doInstance, "dev-two")).json.left).toEqual([{ pubkey: TEST_PUBKEY, until: 2 }]);
   });
 
+  test("what a publish is in the middle of storing is not offered for deletion, and what a refused one stored is", async () => {
+    const bucket = fakeBucket();
+    const { doInstance } = await fleetOfTwo(bucket);
+    const hex = (c: string) => c.repeat(64);
+    const manifest = "fleets/acme/manifests/" + hex("a");
+    const pack = "fleets/acme/packs/" + hex("b");
+    const unreferenced = async (keys: string[]) => (await call(doInstance, "/unreferenced", { caller: "device", device: "dev-owner", body: { keys } })).json.keys as string[];
+    const realPut = bucket.put;
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const arrived = new Promise<void>((r) => (reached = r));
+    bucket.put = async (...args: Parameters<typeof realPut>) => {
+      reached();
+      await gate;
+      return realPut.apply(bucket, args);
+    };
+    const inflight = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: manifest, manifestHash: hex("a"), packKey: pack, meta: { full: true } } });
+    await arrived;
+    // The head is being written; a retry of the same publish asks whether its objects are anyone's.
+    expect(await unreferenced([manifest, pack])).toEqual([]);
+    release();
+    expect((await inflight).status).toBe(200);
+    expect(await unreferenced([manifest, pack])).toEqual([]);
+
+    // A publish that lost: what it stored is nobody's once it has said so.
+    bucket.put = async () => null; // the head is not the one it expected
+    const lost = "fleets/acme/manifests/" + hex("c");
+    const refused = await call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 1, manifestKey: lost, manifestHash: hex("c"), meta: { full: true } } });
+    expect(refused.status).toBe(409);
+    expect(await unreferenced([lost])).toEqual([lost]);
+  });
+
   test("a key that left is credited up to the head in storage, which can be ahead of the index", async () => {
     const bucket = fakeBucket();
     const { doInstance, state } = await fleetOfTwo(bucket);

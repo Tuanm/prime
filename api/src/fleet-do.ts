@@ -389,6 +389,7 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("fetched");
     await this.state.storage.delete("index");
     await this.state.storage.delete("recent");
+    await this.state.storage.delete("pending");
     await this.state.storage.delete("ownerSeenAt");
     await this.deleteStored(fleetId);
     // The fleet is gone, so the registry should stop listing it.
@@ -1370,16 +1371,25 @@ export class FleetDO implements DurableObject {
       );
     }
     const next: Head = { seq: currentHead.seq + 1, manifestKey, manifestHash, epoch: held.epoch };
+    // From the moment the head can name these objects until they are in `recent`, a request for the
+    // objects no snapshot names (`unreferenced`) must not see them as that: the head is written to R2
+    // first, and R2 is outside this object, so other requests run in between. A publish that is sent
+    // again after it was already accepted names the same objects.
+    await this.state.storage.put("pending", [manifestKey, packKey, ...extraKeys].filter(Boolean));
     let written: R2Object | null;
     try {
       this.meter.r2("write");
       written = await this.bucket().put(key, JSON.stringify(next), etag ? { onlyIf: { etagMatches: etag } } : { onlyIf: { etagDoesNotMatch: "*" } });
     } catch {
+      await this.state.storage.delete("pending");
       return Response.json({ error: "head write refused" }, { status: 409 });
     }
     // A failed conditional write returns null rather than throwing: that is the
     // CAS losing the race, not an error.
-    if (!written) return Response.json({ error: "head changed" }, { status: 409 });
+    if (!written) {
+      await this.state.storage.delete("pending");
+      return Response.json({ error: "head changed" }, { status: 409 });
+    }
     // The write above gave other requests room to run, and one of them may have removed this member. Its
     // key is recorded as left up to the head as that request saw it, which does not have this snapshot;
     // it is a member's up to this one, which the member made while it was one.
@@ -1420,6 +1430,7 @@ export class FleetDO implements DurableObject {
     const kept = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
     kept.push({ seq: next.seq, manifestKey, ...meta, sealed: meta.sealed === true });
     await this.state.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
+    await this.state.storage.delete("pending");
     for (const entry of evicted) {
       for (const key of entry.split("\n")) {
         if (!key) continue;
@@ -1445,7 +1456,7 @@ export class FleetDO implements DurableObject {
     const own = new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/(packs|manifests)/[0-9a-f]{64}$");
     const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, 8) : [];
     const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
-    const kept = new Set(recent.flatMap((entry) => entry.split("\n")));
+    const kept = new Set([...recent.flatMap((entry) => entry.split("\n")), ...((await this.state.storage.get<string[]>("pending")) ?? [])]);
     return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
   }
 
