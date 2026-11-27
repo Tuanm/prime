@@ -246,15 +246,18 @@ describe("the lock on a member's state file", () => {
 
   test("a lock that a running process holds is not written around: the writer fails and leaves the state as it was", () => {
     const { cfg, dir, done } = stateDir();
+    // Another process that is running: a lock with this process's own pid and no hold on it is its leftover.
+    const other = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdout: "ignore", stderr: "ignore" });
     try {
       writeFleetState(cfg, "x", "s", { seq: 1 }, { replace: true });
       mkdirSync(join(dir, "state.lock"));
-      writeFileSync(join(dir, "state.lock", "owner"), JSON.stringify({ pid: process.pid, token: "somebody else" }));
+      writeFileSync(join(dir, "state.lock", "owner"), JSON.stringify({ pid: other.pid, token: "somebody else" }));
       expect(() => updateFleetState(cfg, "x", "s", { seq: 9 })).toThrow(LockBusyError);
       expect(readFleetState(cfg, "x", "s").seq).toBe(1);
       // And the other's lock is still there: it was not this writer's to remove.
       expect(existsSync(join(dir, "state.lock"))).toBe(true);
     } finally {
+      other.kill();
       done();
     }
   });
