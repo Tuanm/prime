@@ -37,6 +37,9 @@ import {
   windowsQuote,
   type ServiceSpec,
 } from "../src/service.ts";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 describe("code-mcp config section", () => {
   test("is parsed: strings, numbers as text, booleans", () => {
@@ -354,7 +357,7 @@ describe("which configuration a service runs", () => {
       const dir = join(home, ".config", "systemd", "user");
       mkdirSync(join(dir, FLEET_AGENT_NAME + ".service.d"), { recursive: true });
       writeFileSync(join(dir, FLEET_AGENT_NAME + ".service"), unit);
-      expect(readServiceDefinition("linux", identity, home, {})).toEqual({ config: "/cfg/a.yaml" });
+      expect(readServiceDefinition("linux", identity, home, {})).toEqual({ config: resolve("/cfg/a.yaml") });
       writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", "override.conf"), '[Service]\nExecStart=\nExecStart="/bin/prime" "__fleet-agent" "--config" "/cfg/b.yaml"\n');
       writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", "notes.txt"), '[Service]\nExecStart="/bin/x" "--config" "/ignored.yaml"\n');
       expect(readServiceDefinition("linux", identity, home, {})).toEqual({ config: "/cfg/b.yaml" });
