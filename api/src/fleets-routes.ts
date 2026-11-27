@@ -414,11 +414,15 @@ function adminOnly(cfg: GatewayConfig, request: Request, url: URL): boolean {
   return !!t && timingSafeEq(t, cfg.fleetOperatorToken);
 }
 
-/** Whether the request carries the gateway token, which used to be (and no longer is) the operator's. */
+/**
+ * Whether the request carries the gateway token (which used to be, and no longer is, the operator's), or the
+ * shared device token while FLEET_OPERATOR_TOKEN is set to that same value and so not accepted.
+ */
 function carriesGatewayToken(cfg: GatewayConfig, request: Request, url: URL): boolean {
-  if (!cfg.gatewayToken) return false;
   const t = extractToken(request, url, "auth");
-  return !!t && timingSafeEq(t, cfg.gatewayToken);
+  if (!t) return false;
+  if (cfg.gatewayToken && timingSafeEq(t, cfg.gatewayToken)) return true;
+  return !!cfg.fleetOperatorTokenRefused && !!cfg.deviceToken && timingSafeEq(t, cfg.deviceToken);
 }
 
 // Creating a fleet is open to a proven device as well as to the operator:

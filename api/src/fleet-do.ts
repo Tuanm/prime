@@ -944,7 +944,13 @@ export class FleetDO implements DurableObject {
         }
         // A device that asks for a key does not approve it: whoever holds its credential has it too.
         if (caller.kind === "device" && caller.deviceId === deviceId) {
-          out = this.deny();
+          out = Response.json(
+            {
+              error: "forbidden",
+              hint: "a device does not approve its own new key: the operator does, from the admin page or with the fleet operator token (prime fleets approve <fleet> --member <id> --key <fingerprint>, with PRIME_FLEET_OPERATOR_TOKEN or --operator-token)",
+            },
+            { status: 403 },
+          );
           return;
         }
         if (typeof body.key !== "string" || body.key === "") {

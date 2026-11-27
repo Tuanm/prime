@@ -395,7 +395,11 @@ describe("a member that comes back with a new key", () => {
     await makeFleet(doInstance, "owner-1");
     await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { pubkey: NEW } });
     const key = await keyFingerprint(NEW);
-    expect((await call(doInstance, "/approve", { caller: "device", device: "owner-1", body: { deviceId: "owner-1", key } })).status).toBe(403);
+    const self = await call(doInstance, "/approve", { caller: "device", device: "owner-1", body: { deviceId: "owner-1", key } });
+    expect(self.status).toBe(403);
+    expect(self.json.hint).toContain("operator");
+    expect(self.json.hint).toContain("admin page");
+    expect(self.json.hint).toContain("operator token");
     expect((state.data.get("members") as Record<string, { pubkey?: string }>)["owner-1"]!.pubkey).toBe(TEST_PUBKEY);
     expect((await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "owner-1", key } })).status).toBe(200);
     expect((state.data.get("members") as Record<string, { pubkey?: string }>)["owner-1"]!.pubkey).toBe(NEW);
@@ -1829,6 +1833,16 @@ describe("who runs fleets as the operator", () => {
     const res = (await answer)!;
     expect(res.status).toBe(403);
     expect(((await res.json()) as { hint: string }).hint).toContain("must differ");
+  });
+
+  test("an operator token equal to the shared device token is answered with the same hint, not a bare 401", async () => {
+    const { answer } = ask({ cfg: { deviceToken: "shared", fleetOperatorTokenRefused: true }, bearer: "shared", path: "/fleets/acme/invite" });
+    const res = (await answer)!;
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { hint: string }).hint).toContain("must differ");
+    // Without that setting the shared token is nothing to this route: still the plain refusal.
+    const plain = ask({ cfg: { deviceToken: "shared" }, bearer: "shared", path: "/fleets/acme/invite" });
+    expect((await plain.answer)!.status).toBe(401);
   });
 
   test("it may create a fleet no more than it may run one", async () => {
