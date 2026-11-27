@@ -37,6 +37,22 @@ describe("the lock between processes, with several of them writing in turn", () 
     }
   }, 60_000);
 
+  test("a clock that a test has frozen does not make a writer wait for ever for the lock it let go of", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dir-lock-frozen-"));
+    try {
+      const script =
+        "import { withDirLockSync } from " + JSON.stringify(join(import.meta.dir, "../src/dir-lock.ts")) + ";" +
+        "Date.now = () => 1_000_000; const lock = process.argv[1];" +
+        "for (let k = 0; k < 3; k++) withDirLockSync(lock, () => undefined, { waitMs: 2000 }); console.log('done');";
+      // In a process of its own, with a limit: a wait that never ends cannot be stopped from inside.
+      const child = Bun.spawn([process.execPath, "-e", script, join(root, "the.lock")], { stdout: "pipe", stderr: "pipe", timeout: 10_000, killSignal: "SIGKILL" });
+      const [code, out] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+      expect({ code, out: out.trim() }).toEqual({ code: 0, out: "done" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("a writer that comes back after the lock was let go of waits for nobody when nobody is waiting", () => {
     const root = mkdtempSync(join(tmpdir(), "dir-lock-alone-"));
     try {

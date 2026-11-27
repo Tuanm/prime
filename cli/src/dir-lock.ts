@@ -67,11 +67,12 @@ function running(pid: number): boolean {
 const HANDOFF_MS = 30;
 const letGoAt = new Map<string, number>();
 
-// Whether the lock was let go of a moment ago, and nobody has taken it yet.
+// Whether the lock was let go of a moment ago, and nobody has taken it yet. (Timed by the monotonic clock,
+// which a test that sets the date does not move: a wait on a frozen clock would never end.)
 function handingOver(lock: string): boolean {
   const at = letGoAt.get(lock);
   if (at === undefined) return false;
-  if (Date.now() - at >= HANDOFF_MS || existsSync(lock)) {
+  if (performance.now() - at >= HANDOFF_MS || existsSync(lock)) {
     letGoAt.delete(lock);
     return false;
   }
@@ -160,7 +161,7 @@ function release(lock: string, token: string): void {
   if (readOwner(lock)?.token !== token) return;
   rmSync(lock, { recursive: true, force: true });
   if (letGoAt.size > 64) letGoAt.clear();
-  letGoAt.set(lock, Date.now());
+  letGoAt.set(lock, performance.now());
 }
 
 /** Run `fn` holding the lock `lock` (a path that does not exist yet). Never holds it past `fn`. */
