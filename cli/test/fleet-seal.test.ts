@@ -13,6 +13,9 @@ import { snapshot } from "../src/fleet-sync";
 import { FleetTransportError, payloadHash, fetchManifest, type FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 interface World {
   root: string;

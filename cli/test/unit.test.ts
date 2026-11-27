@@ -21,6 +21,9 @@ import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } fro
 import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
 import { DEFAULT_GATEWAY, normalizeGateway, resolveGateway, resolveTarget, assertDeviceId } from "../src/target.ts";
+import { applyTestTimeout, testTimeoutMs } from "./setup";
+
+applyTestTimeout();
 
 describe("config", () => {
   test("round-trips through YAML", () => {
@@ -676,5 +679,15 @@ describe("spaces", () => {
       hint = (err as { hint?: string }).hint ?? "";
     }
     expect(hint).toContain("dev");
+  });
+});
+
+describe("the time limit of a test", () => {
+  test("is a minute on Windows, the runner's own elsewhere, and PRIME_TEST_TIMEOUT_MS decides on any", () => {
+    expect(testTimeoutMs({}, "win32")).toBe(60_000);
+    expect(testTimeoutMs({}, "linux")).toBeUndefined();
+    expect(testTimeoutMs({}, "darwin")).toBeUndefined();
+    expect(testTimeoutMs({ PRIME_TEST_TIMEOUT_MS: "9000" }, "linux")).toBe(9000);
+    expect(testTimeoutMs({ PRIME_TEST_TIMEOUT_MS: "nope" }, "win32")).toBe(60_000);
   });
 });

@@ -18,6 +18,9 @@ import {
 import { COLLECT_GRACE_MS, storeBytes } from "../src/fleet-store";
 import { reportApplied, reportBackoff } from "../src/fleet-transport";
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 interface World {
   root: string;

@@ -10,6 +10,9 @@ import { applyPack } from "../src/fleet-sync";
 import type { FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 describe("incremental snapshots", () => {
   test("a change travels as a delta, and the replica still ends up with the same tree", async () => {

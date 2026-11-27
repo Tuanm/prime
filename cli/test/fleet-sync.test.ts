@@ -24,6 +24,9 @@ import {
   settle,
   snapshot,
 } from "../src/fleet-sync";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), "fleet-sync-"));

@@ -13,6 +13,9 @@ import { localChanges } from "../src/fleet-sync";
 import { applyReady } from "../src/fleet-replica";
 
 import { FakeGateway, credsFor, useFakeGateway } from "./fleet-fake-gateway";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 const roots: string[] = [];
 afterEach(() => {

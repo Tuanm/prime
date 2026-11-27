@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig, type Config } from "../src/config";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 describe("the fleet fields of a space survive a save", () => {
   test("a space in a fleet keeps its fleet, its role and its work directory", () => {

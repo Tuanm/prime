@@ -24,6 +24,9 @@ import { GATEWAY_TOKEN_ENV, PARENT_PID_ENV, RAW_ENV, codeMcpArgv, processAlive, 
 import { codeMcpLaunch } from "../src/connect.ts";
 import { GatewayClient } from "../src/client.ts";
 import { fileURLToPath } from "node:url";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 // fileURLToPath, not URL.pathname: on Windows the latter is "/D:/a/..." -
 // not a path any API accepts.

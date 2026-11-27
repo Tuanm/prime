@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { LockBusyError } from "../src/dir-lock";
 import { bootstrap, fleetKeyFile, fleetStateDir, fleetsJoin, memberRows, readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
 import type { Config } from "../src/config";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 function config(over: Partial<Config> = {}): Config {
   return {

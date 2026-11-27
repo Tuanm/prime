@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { bool, parseArgs, str } from "../src/args";
 import { fleetFlagsFor } from "../src/fleet-flags";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 // The argv `prime fleets <sub> ...` is parsed with, as the entry point parses it.
 const parse = (sub: string, ...rest: string[]) => parseArgs(["fleets", sub, ...rest], fleetFlagsFor(sub));

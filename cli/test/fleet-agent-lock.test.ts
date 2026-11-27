@@ -24,6 +24,9 @@ import {
   uninstallFleetAgent,
   writeAgentState,
 } from "../src/fleet-daemon";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {

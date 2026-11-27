@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { generateMemberKeyPair, openForMember, openPayload, sealForMembers, sealManyForMembers } from "../src/fleet-crypto";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 describe("member keys", () => {
   test("are X25519 pairs whose public half is 32 bytes", () => {

@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pull, publish, type MemberPaths } from "../src/fleet-agent";
 import { type FleetCredentials } from "../src/fleet-transport";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 /**
  *  A gateway that stores bytes and never reads them.

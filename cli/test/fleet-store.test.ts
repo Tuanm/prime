@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyCommit, ingestPack, snapshot } from "../src/fleet-sync";
 import { COLLECT_GRACE_MS, cacheLimitMb, collectStore, storeBytes } from "../src/fleet-store";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 const git = (gitDir: string, args: string[], input?: string): string =>
   execFileSync("git", ["--git-dir=" + gitDir].concat(args), { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();

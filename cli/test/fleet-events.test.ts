@@ -17,6 +17,9 @@ import {
   type FleetEvent,
   type FleetEventsOptions,
 } from "../src/fleet-events.ts";
+import { applyTestTimeout } from "./setup";
+
+applyTestTimeout();
 
 interface Fake {
   url: string;
