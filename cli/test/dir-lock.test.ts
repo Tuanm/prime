@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withDirLockSync } from "../src/dir-lock";
+import { LockBusyError, withDirLockSync } from "../src/dir-lock";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -61,6 +61,64 @@ describe("the lock between processes, with several of them writing in turn", () 
       for (let k = 0; k < 5; k++) withDirLockSync(lock, () => undefined);
       // It gives the others a moment each time (at most 30 ms), and not more than that.
       expect(Date.now() - started).toBeLessThan(5 * 60);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // What Windows answers when the name of a lock that was just removed is made again while it is still open.
+  const refusal = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code + ": operation not permitted"), { code });
+
+  test("a lock whose name is still being removed is waited for, not failed on", () => {
+    const root = mkdtempSync(join(tmpdir(), "dir-lock-pending-"));
+    try {
+      const lock = join(root, "the.lock");
+      let refused = 2;
+      const mkdir = (p: string): void => {
+        if (refused-- > 0) throw refusal("EPERM");
+        mkdirSync(p);
+      };
+      expect(withDirLockSync(lock, () => "took it", { mkdir })).toBe("took it");
+      expect(refused).toBeLessThan(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a refusal that does not stop is reported with what the file system said, when the wait is over", () => {
+    const root = mkdtempSync(join(tmpdir(), "dir-lock-refused-"));
+    try {
+      const mkdir = (): void => {
+        throw refusal("EACCES");
+      };
+      let caught: unknown;
+      try {
+        withDirLockSync(join(root, "the.lock"), () => "no", { mkdir, waitMs: 60 });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LockBusyError);
+      expect((caught as LockBusyError).message).toContain("EACCES");
+      // Any other error is not waited for.
+      expect(() => withDirLockSync(join(root, "x"), () => "no", { mkdir: () => { throw refusal("ENOSPC"); }, waitMs: 60 })).toThrow(/ENOSPC/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a lock that is refused its removal for a moment is removed, and one that is refused for good does not fail what was done under it", () => {
+    const root = mkdtempSync(join(tmpdir(), "dir-lock-remove-"));
+    try {
+      let busy = 3;
+      const remove = (p: string): void => {
+        if (busy-- > 0) throw refusal("EBUSY");
+        rmSync(p, { recursive: true, force: true });
+      };
+      const lock = join(root, "the.lock");
+      expect(withDirLockSync(lock, () => "done", { remove })).toBe("done");
+      expect(existsSync(lock)).toBe(false);
+      const stuck = join(root, "stuck.lock");
+      expect(withDirLockSync(stuck, () => "done too", { remove: () => { throw refusal("EPERM"); } })).toBe("done too");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

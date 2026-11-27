@@ -24,14 +24,27 @@ export interface DirLockOptions {
   staleMs?: number;
   /** How long a lock with no note of its holder is left to be written before it is judged (default 2 s). */
   graceMs?: number;
+  /** Replaced in tests: make the directory that is the lock. */
+  mkdir?: (path: string) => void;
+  /** Replaced in tests: remove the lock and what is in it. */
+  remove?: (path: string) => void;
 }
 
 /** The lock could not be taken in time. */
 export class LockBusyError extends Error {
-  constructor(readonly lock: string) {
-    super("another process holds " + lock + " and did not let go in time");
+  constructor(
+    readonly lock: string,
+    /** What the file system last refused with while the lock could not be made (see `BUSY`), if it did. */
+    readonly refused?: NodeJS.ErrnoException,
+  ) {
+    super("another process holds " + lock + " and did not let go in time" + (refused ? " (" + (refused.code ?? "error") + ": " + refused.message + ")" : ""));
   }
 }
+
+// What Windows says, instead of "it exists", to making a directory whose name another process has just
+// removed and still has open (it is deleted when the last handle is closed): the lock is as good as held,
+// and it is waited for like one. A refusal that keeps on is reported when the wait is over.
+const BUSY = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 interface Owner {
   pid: number;
@@ -124,12 +137,17 @@ function breakLock(lock: string, judged: { token: string | null }, opts: DirLock
 
 // One try at taking the lock: true when it is held now, false when somebody holds it (a stale lock is
 // broken, and taken at once if that frees it).
-function tryTake(lock: string, token: string, opts: DirLockOptions): boolean {
+function tryTake(lock: string, token: string, opts: DirLockOptions, last: { refused?: NodeJS.ErrnoException }): boolean {
   for (;;) {
     try {
-      mkdirSync(lock);
+      (opts.mkdir ?? ((p) => mkdirSync(p)))(lock);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (BUSY.has(code)) {
+        last.refused = err as NodeJS.ErrnoException;
+        return false;
+      }
+      if (code !== "EEXIST") throw err;
       const stale = staleOwner(lock, opts);
       if (stale === null) return false;
       // A lock that is gone by now is nobody's: it is not broken (what stands there next may be somebody's
@@ -157,25 +175,45 @@ function tryTake(lock: string, token: string, opts: DirLockOptions): boolean {
 }
 
 // Only a lock that is still this one's: one that was broken and taken by another is theirs.
-function release(lock: string, token: string): void {
+function release(lock: string, token: string, opts: DirLockOptions): void {
   if (readOwner(lock)?.token !== token) return;
-  rmSync(lock, { recursive: true, force: true });
+  removeLock(lock, opts);
   if (letGoAt.size > 64) letGoAt.clear();
   letGoAt.set(lock, performance.now());
+}
+
+// Removing the lock while another process is reading the note in it is refused on Windows for as long as that
+// takes (EPERM, EBUSY, ENOTEMPTY): it is tried again a few times. A lock that cannot be removed is not a reason
+// to fail what was done under it; it is left, and goes with this process (a lock whose holder is gone is broken).
+function removeLock(lock: string, opts: DirLockOptions): void {
+  const remove = opts.remove ?? ((p) => rmSync(p, { recursive: true, force: true }));
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      remove(lock);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (!BUSY.has(code) && code !== "ENOTEMPTY") throw err;
+      if (attempt >= 10) return;
+      Atomics.wait(nap, 0, 0, 5 * (attempt + 1));
+    }
+  }
 }
 
 /** Run `fn` holding the lock `lock` (a path that does not exist yet). Never holds it past `fn`. */
 export async function withDirLock<T>(lock: string, fn: () => Promise<T> | T, opts: DirLockOptions = {}): Promise<T> {
   const until = Date.now() + (opts.waitMs ?? 5000);
   const token = randomBytes(8).toString("hex");
-  while (!tryTake(lock, token, opts)) {
-    if (Date.now() > until) throw new LockBusyError(lock);
+  const last: { refused?: NodeJS.ErrnoException } = {};
+  while (!tryTake(lock, token, opts, last)) {
+    if (Date.now() > until) throw new LockBusyError(lock, last.refused);
     await new Promise((r) => setTimeout(r, 10 + Math.floor(Math.random() * 20)));
   }
   try {
     return await fn();
   } finally {
-    release(lock, token);
+    release(lock, token, opts);
   }
 }
 
@@ -189,13 +227,14 @@ export function withDirLockSync<T>(lock: string, fn: () => T, opts: DirLockOptio
   const token = randomBytes(8).toString("hex");
   const nap = new Int32Array(new SharedArrayBuffer(4));
   while (handingOver(lock)) Atomics.wait(nap, 0, 0, 2);
-  while (!tryTake(lock, token, opts)) {
-    if (Date.now() > until) throw new LockBusyError(lock);
+  const last: { refused?: NodeJS.ErrnoException } = {};
+  while (!tryTake(lock, token, opts, last)) {
+    if (Date.now() > until) throw new LockBusyError(lock, last.refused);
     Atomics.wait(nap, 0, 0, 5);
   }
   try {
     return fn();
   } finally {
-    release(lock, token);
+    release(lock, token, opts);
   }
 }
