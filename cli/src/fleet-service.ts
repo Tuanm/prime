@@ -17,6 +17,7 @@ import {
   restartService,
   serviceDefinitionPath,
   serviceStatus,
+  stopService,
   uninstallService,
   type Platform,
   type ServiceSpec,
@@ -128,4 +129,9 @@ export function fleetAgentServiceStatus(
 /** Restart the installed service through its manager. Returns whether the manager did. */
 export function restartFleetAgentService(): boolean {
   return restartService(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+}
+
+/** Stop the installed service through its manager (it stays installed). Returns whether the manager did. */
+export function stopFleetAgentService(): boolean {
+  return stopService(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
 }

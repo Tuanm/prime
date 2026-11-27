@@ -28,7 +28,7 @@ import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from
 import { writeFileAtomic } from "./atomic-write.ts";
 import { withDirLockSync } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
-import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgent, uninstallFleetAgent } from "./fleet-daemon.ts";
+import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgentManaged, uninstallFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
 
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -472,12 +472,18 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
     return;
   }
   if (what === "stop") {
-    const stopped = stopFleetAgent(ctx.configPath);
+    const { stopped, via, restarts } = await stopFleetAgentManaged(ctx.configPath);
     if (ctx.json) {
-      printJson({ stopped });
+      printJson({ stopped, via, ...(restarts ? { restarts: true } : {}) });
       return;
     }
-    ctx.out(stopped ? green("stopped the fleet agent") : dim("the fleet agent was not running"));
+    if (!stopped) {
+      ctx.out(dim("the fleet agent was not running"));
+      return;
+    }
+    ctx.out(green("stopped the fleet agent"));
+    if (via === "service") ctx.out(dim("  its service is stopped with it, and starts again at the next login; 'prime fleets agent start' starts it now"));
+    if (restarts) ctx.out(yellow("  its service's manager would not stop it, so the manager starts another: 'prime fleets agent uninstall' removes the service"));
     return;
   }
   if (what === "reset") {

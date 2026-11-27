@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, procProbeWith } from "../src/fleet-agent-lock";
 import { bindServiceStatus, fleetAgentServiceStatus } from "../src/fleet-service";
+import { launchdAnswered } from "../src/service";
 import {
   SettingsPendingError,
   agentCommand,
@@ -18,6 +19,7 @@ import {
   readAgentSettings,
   runFleetAgent,
   stopFleetAgent,
+  stopFleetAgentManaged,
   uninstallFleetAgent,
   writeAgentState,
 } from "../src/fleet-daemon";
@@ -941,5 +943,103 @@ describe("asking the service manager", () => {
     service.restart();
     service.installed();
     expect(asked).toBe(2);
+  });
+});
+
+describe("stopping an agent that a service runs", () => {
+  function running(configPath: string, pid: number): void {
+    mkdirSync(fleetAgentDir(configPath), { recursive: true });
+    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath, replica: "lazy", settings: { replica: "lazy", cacheMb: 512, pollMs: 1500, heartbeatMs: 15000 } }));
+    writeFileSync(agentLockPath(fleetAgentDir(configPath)), pid + "\n");
+  }
+  const gone = async (pid: number): Promise<boolean> => {
+    for (let i = 0; i < 60; i++) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await Bun.sleep(25);
+    }
+    return false;
+  };
+
+  test("the manager is asked to stop it: killing the process only has the manager start another", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const agent = await fakeAgent();
+    running(configPath, agent.pid);
+    let stops = 0;
+    const service = {
+      installed: () => true,
+      pid: () => agent.pid,
+      restart: () => false,
+      // What the manager does: it stops the process and does not start it again.
+      stop: () => {
+        stops++;
+        process.kill(agent.pid, "SIGTERM");
+        return true;
+      },
+    };
+    const result = await stopFleetAgentManaged(configPath, service);
+    expect(result).toEqual({ stopped: true, via: "service", restarts: false });
+    expect(stops).toBe(1);
+    expect(await gone(agent.pid)).toBe(true);
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(false);
+  });
+
+  test("a manager that will not stop it leaves the process stopped, and says the service starts another", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const agent = await fakeAgent();
+    running(configPath, agent.pid);
+    const result = await stopFleetAgentManaged(configPath, { installed: () => true, pid: () => agent.pid, restart: () => false, stop: () => false });
+    expect(result).toEqual({ stopped: true, via: "process", restarts: true });
+    expect(await gone(agent.pid)).toBe(true);
+  });
+
+  test("with no service the process is stopped, as it always was, and the manager is not asked", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const agent = await fakeAgent();
+    running(configPath, agent.pid);
+    let stops = 0;
+    const result = await stopFleetAgentManaged(configPath, {
+      installed: () => false,
+      pid: () => undefined,
+      restart: () => false,
+      stop: () => {
+        stops++;
+        return true;
+      },
+    });
+    expect(result).toEqual({ stopped: true, via: "process", restarts: false });
+    expect(stops).toBe(0);
+    expect(await gone(agent.pid)).toBe(true);
+  });
+
+  test("an agent that is not running is not a reason to stop a service", async () => {
+    const root = scratch();
+    let stops = 0;
+    const result = await stopFleetAgentManaged(join(root, "config.json"), {
+      installed: () => true,
+      pid: () => undefined,
+      restart: () => false,
+      stop: () => {
+        stops++;
+        return true;
+      },
+    });
+    expect(result.stopped).toBe(false);
+    expect(stops).toBe(0);
+  });
+
+  test("a service the manager has unloaded is still its manager answering", () => {
+    // launchd, asked about a service that was stopped on purpose.
+    expect(launchdAnswered({ code: 113, out: "", err: 'Bad request.\nCould not find service "dev.prime.fleet-agent" in domain for user gui: 501\n' })).toBe(true);
+    expect(launchdAnswered({ code: 0, out: "state = running", err: "" })).toBe(true);
+    // No session to ask: not an answer.
+    expect(launchdAnswered({ code: 113, out: "", err: "Could not find domain for user gui: 501" })).toBe(false);
+    expect(launchdAnswered({ code: 1, out: "", err: "launchctl: command not found" })).toBe(false);
   });
 });

@@ -46,7 +46,7 @@ import {
   type PlaceAnswer,
   type ReplicaMode,
 } from "./fleet-replica.ts";
-import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
+import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -350,6 +350,8 @@ export interface AgentServiceHooks {
   unreachable?(): boolean;
   /** Ask the service manager to (re)start it; false when it would not. */
   restart(): boolean;
+  /** Ask the service manager to stop it (it stays installed); false when it would not. */
+  stop?(): boolean;
   /** How long a running agent is given to stop when it is replaced, or to come back (tests make it short). */
   stopWaitMs?: number;
   /** Start a detached agent with this environment; replaced in tests. */
@@ -365,6 +367,7 @@ export function agentServiceFor(
   configPath: string,
   probe: () => { installed: boolean; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
   restart: () => boolean = restartFleetAgentService,
+  stop: () => boolean = stopFleetAgentService,
 ): AgentServiceHooks {
   // The manager is asked once for what the hooks below want to know together (is it installed, which
   // pid, can it be reached): each is a process spawned to the manager. What it said is good for a moment.
@@ -405,6 +408,10 @@ export function agentServiceFor(
     restart: () => {
       asked = undefined; // whatever it said before is not what it says after
       return restart();
+    },
+    stop: () => {
+      asked = undefined;
+      return stop();
     },
   };
 }
@@ -597,6 +604,32 @@ export function uninstallFleetAgent(
     );
   }
   return (deps.uninstall ?? (() => uninstallFleetAgentService(configPath)))();
+}
+
+/**
+ * Stop the agent the way it can be stopped. When a login service runs it, signalling the process
+ * only has the service manager start another a few seconds later, so the manager is asked to stop
+ * the service (it stays installed: it starts again at the next login, and `prime fleets agent start`
+ * starts it now). Without a service, or when its manager will not, the process is stopped as before.
+ */
+export async function stopFleetAgentManaged(
+  configPath: string,
+  service: AgentServiceHooks = agentServiceFor(configPath),
+  waitMs: number = service.stopWaitMs ?? STOP_WAIT_MS,
+): Promise<{ stopped: boolean; via: "service" | "process"; restarts: boolean }> {
+  const existing = runningAgent(configPath);
+  const managed = existing !== undefined && service.installed();
+  if (existing && managed && service.stop?.()) {
+    const gone = Date.now() + waitMs;
+    while (pidAlive(existing.pid) && Date.now() < gone) await Bun.sleep(50);
+    if (pidAlive(existing.pid)) {
+      throw new CliError("the service was asked to stop, and the fleet agent (pid " + existing.pid + ") has not stopped yet", "it may be finishing a round: try again in a moment");
+    }
+    rmSync(fleetAgentStatePath(configPath), { force: true });
+    return { stopped: true, via: "service", restarts: false };
+  }
+  // The process is stopped; if a service is there to start another (its manager would not stop it), it will.
+  return { stopped: stopFleetAgent(configPath), via: "process", restarts: managed };
 }
 
 /** Stop the agent. Returns true when one was running. */

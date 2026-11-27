@@ -508,6 +508,11 @@ with the same.
   are saved, the command says so, and they apply when the service restarts or from a shell that can
   reach the manager. If the manager answers and will not restart a running agent, the command
   says so and the agent keeps the settings it has.
+  `agent stop` goes through the manager too: signalling the process of a service only has the manager
+  start another a few seconds later, so it asks the manager to stop the service (`systemctl --user stop`,
+  `launchctl bootout`). The service stays installed; it starts again at the next login, and `agent start`
+  starts it now. If the manager will not stop it, the process is stopped and the command says that the
+  service starts another (`agent uninstall` removes the service).
   For any other configuration (`--config`, `PRIME_CONFIG`) the service is not its own: its agent
   is started, stopped and restarted directly, `agent status` says which configuration the service
   runs, `agent install` is refused while it runs another, and `agent uninstall` is refused too

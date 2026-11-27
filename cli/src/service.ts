@@ -504,6 +504,15 @@ function must(result: RunResult, what: string, hint?: string): RunResult {
   return result;
 }
 
+/**
+ * Whether `launchctl print` of a service reached the manager of the user's session. A service that
+ * is not loaded (stopped on purpose with `bootout`) is answered with "Could not find service" - the
+ * manager is there and says it is not running it - while a session with no manager to ask is not.
+ */
+export function launchdAnswered(printed: { code: number; out: string; err: string }): boolean {
+  return printed.code === 0 || /Could not find service/i.test(printed.out + "\n" + printed.err);
+}
+
 function uid(): number {
   return typeof process.getuid === "function" ? process.getuid() : userInfo().uid;
 }
@@ -545,7 +554,7 @@ export function serviceStatus(
       where,
       detail: printed.code === 0 ? state : "not loaded",
       // Not loaded into the user's session (or no session to load it into): nothing runs it.
-      reachable: printed.code === 0,
+      reachable: launchdAnswered(printed),
       ...(pid > 0 ? { pid } : {}),
     };
   }
@@ -579,8 +588,33 @@ export function restartService(
     return run(["systemctl", "--user", "restart", (identity.name ?? SERVICE_NAME) + ".service"]).code === 0;
   }
   if (platform === "darwin") {
+    const label = identity.label ?? LAUNCHD_LABEL;
     // -k: kill the running instance first; it is started again at once.
-    return run(["launchctl", "kickstart", "-k", "gui/" + uid() + "/" + (identity.label ?? LAUNCHD_LABEL)]).code === 0;
+    if (run(["launchctl", "kickstart", "-k", "gui/" + uid() + "/" + label]).code === 0) return true;
+    // A service that was stopped (see `stopService`) is not loaded: load it again, which starts it.
+    const plist = launchdPlistPath(homedir(), label);
+    return existsSync(plist) && run(["launchctl", "bootstrap", "gui/" + uid(), plist]).code === 0;
+  }
+  return false;
+}
+
+/**
+ * Stop an installed service through its manager, so that the manager (which restarts what dies)
+ * does not start it again behind the person's back. The service stays installed: it starts again at
+ * the next login, and `restartService` starts it now. Returns whether the manager did; Windows has no
+ * equivalent that its watchdog would not undo, and says no.
+ */
+export function stopService(
+  platform: Platform = process.platform as Platform,
+  identity: { name?: string; label?: string } = {},
+): boolean {
+  if (platform === "linux") {
+    if (!Bun.which("systemctl")) return false;
+    return run(["systemctl", "--user", "stop", (identity.name ?? SERVICE_NAME) + ".service"]).code === 0;
+  }
+  if (platform === "darwin") {
+    // Not `stop` or `kill`: a KeepAlive job is started again at once. Unloading it is what stops it.
+    return run(["launchctl", "bootout", "gui/" + uid() + "/" + (identity.label ?? LAUNCHD_LABEL)]).code === 0;
   }
   return false;
 }
