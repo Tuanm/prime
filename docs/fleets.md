@@ -617,9 +617,11 @@ What is deliberately not done, so that nobody has to find it out:
   malicious while that member was in the fleet can say a later sequence, as it can say the roster is
   anything; nothing here checks it outside the gateway.
 - **Which fleet of a name it is is the gateway's word, taken on first use.** A member learns the id
-  from the gateway the first time it checks a snapshot, and keeps it: a replay of an older fleet's
-  snapshot from storage (a bucket, a backup) is refused from then on. A gateway that lies about it
-  once, to a member that has not yet learnt it, is believed. A member that joins forgets what an
+  from the gateway when it is admitted (`prime spaces create`, `prime fleets join`; a member of before
+  that was recorded learns it the first time it checks a snapshot), and keeps it: a replay of an older
+  fleet's snapshot from storage (a bucket, a backup) is refused from then on. A gateway that lies about
+  it once, to a member that has not yet learnt it - at the moment of joining - is believed, and
+  nothing a member holds at that moment can say otherwise. A member that joins forgets what an
   earlier membership under the name left beside its key, once the join has been made (a join that
   failed changes nothing). It does not take a new key pair for the new membership, so snapshots sealed
   for its old key are still ones it could open. A gateway that does not say leaves the check out (and is

@@ -677,6 +677,22 @@ describe("a fleet made again under the name of a deleted one", () => {
     expect(w.manifest(two.manifestKey).incarnation).toBe("incarnation-1");
   });
 
+  test("a member that learnt which fleet it joined at the moment it joined is not told otherwise by a gateway later", async () => {
+    const w = await world();
+    // The snapshots are the earlier fleet's (incarnation-1), replayed; the member joined the fleet made after it.
+    await w.next("old fleet: secret project v2\n");
+    FleetTrust.forget(w.replica.keyFile);
+    FleetTrust.pinAtJoin(w.replica.keyFile, "incarnation-2");
+    // The gateway now says the earlier incarnation is the fleet (it lies, or serves the replay as current).
+    w.gateway.incarnation = "incarnation-1";
+    await expect(w.pullReplica(0)).rejects.toThrow(/earlier fleet that had the name x/);
+    expect(existsSync(join(w.replica.work, "file.txt"))).toBe(false);
+    // A gateway that says nothing at join leaves the member to learn it later, as before.
+    FleetTrust.forget(w.replica.keyFile);
+    FleetTrust.pinAtJoin(w.replica.keyFile, undefined);
+    expect(FleetTrust.beside(w.replica.keyFile).incarnation).toBeUndefined();
+  });
+
   test("a member that joins forgets what an earlier membership under the name left beside its key", async () => {
     const w = await world();
     await w.next("one\n");

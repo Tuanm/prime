@@ -138,6 +138,8 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   if (!role.member) {
     return { deviceId: opts.deviceId, deviceToken: opts.deviceToken, role: "pending", workDir, caughtUp: false, seq: 0 };
   }
+  // Which fleet of this name this is, learnt now that the member is in it (see `FleetTrust.pinAtJoin`).
+  FleetTrust.pinAtJoin(paths.keyFile, role.incarnation);
 
   // Take a place in the fleet. The fleet decides: the first member with no
   // state becomes the primary, any other member becomes a replica.

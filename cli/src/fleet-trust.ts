@@ -338,6 +338,19 @@ export class FleetTrust {
     rmSync(keyFile + ".trust.json", { force: true });
   }
 
+  /**
+   * Learn which fleet of this name this member is in at the moment it becomes a member, from the answer the
+   * gateway gives to a member that has just been admitted, rather than the first time a snapshot is checked
+   * (which may be long after, and is when a replayed snapshot of an earlier fleet would be shown). It is still
+   * the gateway's word, taken once; a member that has learnt one keeps it.
+   */
+  static pinAtJoin(keyFile: string, incarnation: string | undefined): void {
+    if (incarnation === undefined) return;
+    const trust = FleetTrust.beside(keyFile);
+    trust.pin(incarnation);
+    trust.save();
+  }
+
   /** Take `incarnation` as the fleet this member is in, if it has not learnt one (a publisher was just told by the gateway). */
   pin(incarnation: string | undefined): void {
     if (incarnation !== undefined && this.incarnation === undefined) {
