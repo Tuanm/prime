@@ -1,0 +1,3 @@
+[test]
+# Windows runs git, spawns and file writes several times slower than the other platforms; see test/setup.ts.
+preload = ["./test/setup.ts"]
