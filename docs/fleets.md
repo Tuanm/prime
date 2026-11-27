@@ -52,13 +52,13 @@ sequenceDiagram
   participant B as beta
   A->>F: take the lease
   F-->>A: yours, epoch 3
-  loop every five seconds
-    A->>F: renew
+  loop every fifteen seconds
+    A->>F: renew (still epoch 3)
   end
   Note over A: alpha stops answering
-  B->>F: who is in charge?
-  F-->>B: nobody, alpha is not connected
-  B->>F: take the lease
+  Note over F: forty-five seconds after its last renewal the lease runs out
+  F-->>B: the lease is free (over the socket)
+  B->>F: take the lease (beta has applied the head)
   F-->>B: yours, epoch 4
 ```
 
