@@ -15,10 +15,16 @@
 
 import {
   type Invite,
+  type KeyProof,
   type Member,
   type PendingRequest,
+  cleanKeyProof,
   cleanLabel,
   cleanPubkey,
+  keyChangeMessage,
+  keyFingerprint,
+  KEY_PROOF_INFO,
+  KEY_PROOF_WINDOW_MS,
   clampTtl,
   hashCode,
   inviteShape,
@@ -540,11 +546,17 @@ export class FleetDO implements DurableObject {
   // How far this member has got. The Durable Object uses it to fence a
   // member that took over: it may not publish until it has applied the state
   // it is about to replace.
-  private async applied(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+  private async applied(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();
-    const seq = typeof body.seq === "number" && body.seq >= 0 ? Math.floor(body.seq) : 0;
+    // What a member says it has applied or fetched is a position in the chain, so it cannot be past the
+    // head: a member that claimed any number would have the lease without catching up. The head is read
+    // from where it is kept; a read that fails is not "no head", and nothing is recorded on it.
+    const head = await this.readHeadOrNull(request.headers.get("x-prime-fleet") ?? "");
+    if (head === null) return Response.json({ error: "the fleet's head could not be read" }, { status: 503 });
+    const upTo = (v: unknown): number | undefined => (typeof v === "number" && v >= 0 ? Math.min(Math.floor(v), head.seq) : undefined);
+    const seq = upTo(body.seq) ?? 0;
     const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
     if (seq > (applied[caller.deviceId] ?? 0)) applied[caller.deviceId] = seq;
     await this.state.storage.put("applied", applied);
@@ -552,9 +564,10 @@ export class FleetDO implements DurableObject {
     // how far it has applied: only `applied` gates the lease. Members that do
     // not say have nothing recorded.
     let fetchedSeq: number | undefined;
-    if (typeof body.fetched === "number" && body.fetched >= 0) {
+    const fetchedAsked = upTo(body.fetched);
+    if (fetchedAsked !== undefined) {
       const fetched = (await this.state.storage.get<Record<string, number>>("fetched")) ?? {};
-      fetchedSeq = Math.max(fetched[caller.deviceId] ?? 0, Math.floor(body.fetched));
+      fetchedSeq = Math.max(fetched[caller.deviceId] ?? 0, fetchedAsked);
       fetched[caller.deviceId] = fetchedSeq;
       await this.state.storage.put("fetched", fetched);
     }
@@ -651,7 +664,7 @@ export class FleetDO implements DurableObject {
       await this.touch();
       return this.join(caller, body, request);
     }
-    if (path === "/approve" && request.method === "POST") return this.approve(caller, body);
+    if (path === "/approve" && request.method === "POST") return this.approve(caller, body, request.headers.get("x-prime-fleet") ?? "");
     if (path === "/remove" && request.method === "POST") return this.remove(caller, body, request);
     if (path === "/revoke" && request.method === "POST") return this.revoke(caller, body);
     if (path === "/members" && request.method === "GET") return this.listMembers(caller);
@@ -675,7 +688,7 @@ export class FleetDO implements DurableObject {
     if (path === "/index" && request.method === "GET") return this.index(caller, request);
     if (path === "/applied" && request.method === "POST") {
       await this.touch();
-      return this.applied(caller, body);
+      return this.applied(caller, body, request);
     }
     if (path === "/unreferenced" && request.method === "POST") return this.unreferenced(caller, body, request);
     if (path === "/delete" && request.method === "POST") return this.delete(caller, request);
@@ -826,17 +839,10 @@ export class FleetDO implements DurableObject {
 
       const existing = members[caller.deviceId];
       if (existing) {
-        // Idempotent re-join: already a member is not an error.
-        // A member that comes back with a new key takes the new key: it is
-        // proving itself, and the snapshots it cannot open are its own.
-        if (pubkey && existing.pubkey !== pubkey) {
-          // The old key made snapshots a replica may not have taken in yet: it is a member's key up to there.
-          if (existing.pubkey) await this.recordLeft(existing.pubkey, request.headers.get("x-prime-fleet") ?? "", caller.deviceId);
-          existing.pubkey = pubkey;
-          members[caller.deviceId] = existing;
-          await this.state.storage.put("members", members);
-        }
-        out = Response.json({ ok: true, status: "member", member: existing });
+        // Idempotent re-join: already a member is not an error. A key that is not the one the fleet
+        // holds does not replace it on the strength of the device's credential: see `changeKey`.
+        const changed = pubkey ? await this.changeKey(members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), request.headers.get("x-prime-fleet") ?? "") : "same";
+        out = changed === "pending" ? this.keyPending(pubkey!) : Response.json({ ok: true, status: "member", member: members[caller.deviceId] });
         return;
       }
 
@@ -905,7 +911,7 @@ export class FleetDO implements DurableObject {
     return out;
   }
 
-  private async approve(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+  private async approve(caller: Caller, body: Record<string, unknown>, fleetId: string): Promise<Response> {
     const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
@@ -921,6 +927,27 @@ export class FleetDO implements DurableObject {
       const members = await this.members();
       if (Object.keys(members).length >= MAX_MEMBERS) {
         out = Response.json({ error: "fleet is full" }, { status: 409 });
+        return;
+      }
+      // A device that is a member asks for another key: approving it is what replaces the key. The
+      // operator may say which key it means (`key`: its fingerprint, as the list shows it), so that a
+      // request that was replaced since it was read is not approved by mistake.
+      if (request.keyChange) {
+        const member = members[deviceId];
+        if (!member || !request.pubkey) {
+          delete pending[deviceId];
+          await this.state.storage.put("pending", pending);
+          out = Response.json({ error: "no such request" }, { status: 404 });
+          return;
+        }
+        if (typeof body.key === "string" && body.key !== (await keyFingerprint(request.pubkey))) {
+          out = Response.json({ error: "the key waiting is not the one named", hint: "read the list of requests again" }, { status: 409 });
+          return;
+        }
+        delete pending[deviceId];
+        await this.replaceKey(members, deviceId, request.pubkey, fleetId);
+        await this.state.storage.put("pending", pending);
+        out = Response.json({ ok: true, member: members[deviceId], keyChanged: true });
         return;
       }
       delete pending[deviceId];
@@ -958,11 +985,17 @@ export class FleetDO implements DurableObject {
     await this.state.blockConcurrencyWhile(async () => {
       const members = await this.members();
       const pending = await this.joinRequests();
-      if (pending[deviceId]) {
+      // A request for another key from a device that is a member is declined with `keyChange`; without
+      // it, the member is what is removed (and its request with it).
+      if (pending[deviceId] && (!members[deviceId] || body.keyChange === true)) {
         delete pending[deviceId];
         await this.state.storage.put("pending", pending);
         out = Response.json({ ok: true, removed: "pending" });
         return;
+      }
+      if (pending[deviceId]) {
+        delete pending[deviceId];
+        await this.state.storage.put("pending", pending);
       }
       const member = members[deviceId];
       if (!member) {
@@ -1089,21 +1122,20 @@ export class FleetDO implements DurableObject {
     const members = await this.members();
     if (!members[caller.deviceId]) return this.deny();
 
-    // A member that comes back with a new key takes the new key: it is
-    // proving itself, and the snapshots sealed for the old key are of no use
-    // to it.
     const pubkey = cleanPubkey(body.pubkey);
     const label = cleanLabel(body.label);
+    // A key other than the one the fleet holds is not taken on the strength of the device's credential
+    // (see `changeKey`): without the old key's proof it is a request for the operator, and the member
+    // does not take a place until it is decided.
+    let membersChanged = false;
+    if (pubkey) {
+      const changed = await this.changeKey(members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), fleetId);
+      if (changed === "pending") return this.keyPending(pubkey);
+    }
     // A space that is renamed, or an identity that was taken over by another
     // space, says what it is called now. The name is only for the operator to
     // read, but it is read on every round of the agent, so a stale one is
     // corrected the next time the space takes its place.
-    let membersChanged = false;
-    if (pubkey && members[caller.deviceId]!.pubkey !== pubkey) {
-      if (members[caller.deviceId]!.pubkey) await this.recordLeft(members[caller.deviceId]!.pubkey!, fleetId, caller.deviceId);
-      members[caller.deviceId]!.pubkey = pubkey;
-      membersChanged = true;
-    }
     if (label !== undefined && members[caller.deviceId]!.label !== label) {
       // A name another member already uses is not taken on: the list would
       // then show two spaces that cannot be told apart.
@@ -1606,6 +1638,139 @@ export class FleetDO implements DurableObject {
     return ((await this.state.storage.get<LeftKey[]>("left")) ?? []).map(({ pubkey, until }) => ({ pubkey, until }));
   }
 
+  // ---- a member's key ----
+  //
+  // The roster's key is what every later snapshot is sealed for, so whoever can change it can read what
+  // the fleet publishes next. A device's credential (which a 6-character code can be, and which a space
+  // keeps in its environment) is not enough for that: a key other than the one the fleet holds is taken
+  // only on one of two proofs.
+  //
+  //   - the member shows it holds the old key. The object has an X25519 key pair of its own (made when
+  //     first asked, kept in its storage, gone with the fleet); the member sends
+  //     HMAC(HKDF(DH(oldPrivate, objectPublic)), the new key, the fleet, the device, a time and a nonce),
+  //     and the object checks it with DH(objectPrivate, oldPublic). Only the holder of the old private
+  //     key (or of the object's) can make it, and it is no use for any other key, fleet, device or time.
+  //   - the operator or the owner approves it, as it approves a join: the request waits in `pending`.
+
+  private proofKeyMemo?: Promise<{ publicKey: string; privateKey: CryptoKey } | null>;
+
+  /** The object's own key pair for key-change proofs, made on first use; null where the runtime cannot make one. */
+  private proofKey(): Promise<{ publicKey: string; privateKey: CryptoKey } | null> {
+    this.proofKeyMemo ??= (async () => {
+      try {
+        // "X25519" is a WebCrypto algorithm in the Workers runtime and in Bun; the lib types predate it.
+        const algo = { name: "X25519" } as never;
+        const stored = await this.state.storage.get<{ publicKey: string; privateKey: string }>("proofKey");
+        const b64 = (b: ArrayBuffer): string => btoa(String.fromCharCode(...new Uint8Array(b)));
+        const raw = (t: string): ArrayBuffer => Uint8Array.from(atob(t), (c) => c.charCodeAt(0)).buffer as ArrayBuffer;
+        if (stored) {
+          const privateKey = await crypto.subtle.importKey("pkcs8", raw(stored.privateKey), algo, false, ["deriveBits"]);
+          return { publicKey: stored.publicKey, privateKey };
+        }
+        const pair = (await crypto.subtle.generateKey(algo, true, ["deriveBits"])) as CryptoKeyPair;
+        const publicKey = b64(await crypto.subtle.exportKey("raw", pair.publicKey));
+        await this.state.storage.put("proofKey", { publicKey, privateKey: b64(await crypto.subtle.exportKey("pkcs8", pair.privateKey)) });
+        return { publicKey, privateKey: pair.privateKey };
+      } catch {
+        return null;
+      }
+    })();
+    return this.proofKeyMemo;
+  }
+
+  /** Whether `proof` shows that its sender holds the private half of `oldPubkey` and means `newPubkey` for this device. */
+  private async keyProofHolds(oldPubkey: string, newPubkey: string, fleetId: string, deviceId: string, proof: KeyProof): Promise<boolean> {
+    try {
+      const now = Date.now();
+      if (Math.abs(now - proof.ts) > KEY_PROOF_WINDOW_MS) return false;
+      const seen = (await this.state.storage.get<Record<string, number>>("proofNonces")) ?? {};
+      for (const [n, at] of Object.entries(seen)) if (now - at > 2 * KEY_PROOF_WINDOW_MS) delete seen[n];
+      if (seen[proof.nonce] !== undefined) return false;
+      const mine = await this.proofKey();
+      if (!mine) return false;
+      const unb64 = (t: string): ArrayBuffer => Uint8Array.from(atob(t.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)).buffer as ArrayBuffer;
+      const algo = { name: "X25519" } as never;
+      const peer = await crypto.subtle.importKey("raw", unb64(oldPubkey), algo, false, []);
+      const shared = await crypto.subtle.deriveBits({ name: "X25519", public: peer } as never, mine.privateKey, 256);
+      const hkdf = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveBits"]);
+      const macKey = await crypto.subtle.importKey(
+        "raw",
+        await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: new ArrayBuffer(32), info: new TextEncoder().encode(KEY_PROOF_INFO) }, hkdf, 256),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["verify"],
+      );
+      const ok = await crypto.subtle.verify("HMAC", macKey, unb64(proof.mac), new TextEncoder().encode(keyChangeMessage(newPubkey, fleetId, deviceId, proof.ts, proof.nonce)));
+      if (!ok) return false;
+      seen[proof.nonce] = now;
+      await this.state.storage.put("proofNonces", seen);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Put a member's key in its place. The old key made snapshots a replica may not have taken in yet: it is a member's key up to there. */
+  private async replaceKey(members: Members, deviceId: string, pubkey: string, fleetId: string): Promise<void> {
+    const member = members[deviceId]!;
+    if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId);
+    member.pubkey = pubkey;
+    await this.state.storage.put("members", members);
+  }
+
+  /**
+   * What a member that says its key is `pubkey` gets of it.
+   *
+   * "same": it is the key the fleet holds (nothing to do). "changed": the old key's proof held, and the
+   * key is replaced. "pending": it could not prove it, and the fleet has no old key to ask it for (a
+   * member without one) or the proof was missing, stale or wrong: the key waits as a request for the
+   * operator or the owner to approve, and the roster is as it was.
+   */
+  private async changeKey(members: Members, deviceId: string, pubkey: string, proof: KeyProof | undefined, fleetId: string): Promise<"same" | "changed" | "pending"> {
+    const member = members[deviceId]!;
+    const pending = await this.joinRequests();
+    if (member.pubkey === pubkey) {
+      // It is back to the key the fleet holds: a request for another one is moot.
+      if (pending[deviceId]?.keyChange) {
+        delete pending[deviceId];
+        await this.state.storage.put("pending", pending);
+      }
+      return "same";
+    }
+    if (member.pubkey && proof && (await this.keyProofHolds(member.pubkey, pubkey, fleetId, deviceId, proof))) {
+      await this.replaceKey(members, deviceId, pubkey, fleetId);
+      if (pending[deviceId]?.keyChange) {
+        delete pending[deviceId];
+        await this.state.storage.put("pending", pending);
+      }
+      return "changed";
+    }
+    if (pending[deviceId]?.pubkey !== pubkey) {
+      if (!pending[deviceId] && Object.keys(pending).length >= MAX_PENDING) return "pending";
+      pending[deviceId] = {
+        deviceId,
+        ...(member.label ? { label: member.label } : {}),
+        pubkey,
+        requestedAt: Date.now(),
+        keyChange: true,
+      };
+      await this.state.storage.put("pending", pending);
+    }
+    return "pending";
+  }
+
+  /** The answer to a member whose key is not the fleet's: its request waits, and what it does is says so. */
+  private keyPending(_pubkey: string): Response {
+    return Response.json(
+      {
+        error: "this member's key is not the one the fleet holds, and it could not show that it holds the old one: the new key waits for the operator (or the fleet's owner) to approve it",
+        keyChange: "pending",
+        retryAfterMs: PAUSED_RETRY_MS,
+      },
+      { status: 409, headers: { "retry-after": String(Math.ceil(PAUSED_RETRY_MS / 1000)) } },
+    );
+  }
+
   // Which fleet this is, as opposed to another that was made under the same name after this one was
   // deleted. A snapshot of the earlier one is sealed and signed all the same, and its key files
   // are still on the members' disks: the members bind it into what they seal and check, so a
@@ -1637,6 +1802,8 @@ export class FleetDO implements DurableObject {
       sealGate: true,
       // The most one upload may be: a member says so before it sends what the gateway would refuse.
       snapshotLimit: MAX_SNAPSHOT_BYTES,
+      // The key a member proves that it holds its old key with, when it changes its own (see `changeKey`).
+      ...((await this.proofKey()) ? { keyProofKey: (await this.proofKey())!.publicKey } : {}),
     });
   }
 
@@ -1644,8 +1811,8 @@ export class FleetDO implements DurableObject {
     if (caller.kind !== "device") return this.deny();
     const members = await this.members();
     const member = members[caller.deviceId];
-    if (member) return Response.json({ ok: true, status: "member", member });
     const pending = await this.joinRequests();
+    if (member) return Response.json({ ok: true, status: "member", member, ...(pending[caller.deviceId]?.keyChange ? { keyChange: "pending" } : {}) });
     if (pending[caller.deviceId]) return Response.json({ ok: true, status: "pending" });
     return Response.json({ ok: true, status: "none" });
   }

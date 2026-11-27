@@ -1213,17 +1213,19 @@ ${UI_CSS}    </style>
           var nameInput = document.createElement("input");
           nameInput.className = "id-input";
           nameInput.readOnly = true;
-          nameInput.value = p.label || "a device";
-          nameInput.title = "waiting to be admitted";
+          nameInput.value = p.keyChange ? (p.label || "a member") + " (new key)" : p.label || "a device";
+          nameInput.title = p.keyChange
+            ? "asks to replace its key with " + (p.key || "another one") + ": compare it with what the member's own machine prints before admitting"
+            : "waiting to be admitted";
 
           // The answers the operator has to give are shown, not tucked away.
           var answers = document.createElement("span");
           answers.className = "fleet-actions";
           answers.appendChild(fleetBtn("Admit", function () {
-            fleetAction(fleet, "approve", { deviceId: p.deviceId }, "admitted " + (p.label || p.deviceId));
+            fleetAction(fleet, "approve", p.keyChange ? { deviceId: p.deviceId, key: p.key } : { deviceId: p.deviceId }, (p.keyChange ? "replaced the key of " : "admitted ") + (p.label || p.deviceId));
           }, "primary"));
           answers.appendChild(fleetBtn("Decline", function () {
-            fleetAction(fleet, "remove", { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
+            fleetAction(fleet, "remove", p.keyChange ? { deviceId: p.deviceId, keyChange: true } : { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
           }, "danger"));
 
           box.appendChild(nameInput);

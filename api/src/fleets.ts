@@ -129,6 +129,41 @@ export interface PendingRequest {
   /** The member's public key for content encryption, when it offered one. */
   pubkey?: string;
   requestedAt: number;
+  /**
+   * Set when the device is already a member and this is the key it asks to have instead of the one
+   * the fleet holds (it could not prove it held the old one). Approving it replaces the key.
+   */
+  keyChange?: true;
+}
+
+/** What a member sends to change its key without the operator: the old key's proof (see `keyChangeMessage`). */
+export interface KeyProof {
+  ts: number;
+  nonce: string;
+  mac: string;
+}
+
+/** The label that domain-separates a key-change proof, for the HKDF and the message alike. */
+export const KEY_PROOF_INFO = "prime-fleet-key-change-v1";
+/** How far a proof's own clock may be from the object's. */
+export const KEY_PROOF_WINDOW_MS = 10 * 60_000;
+
+/**
+ * What a key-change proof is a MAC of: the key it asks for, the fleet and the device it is for, and
+ * when and once. A JSON array, so no field can run into the next.
+ */
+export function keyChangeMessage(newPubkey: string, fleetId: string, deviceId: string, ts: number, nonce: string): string {
+  return JSON.stringify([KEY_PROOF_INFO, newPubkey, fleetId, deviceId, ts, nonce]);
+}
+
+/** A proof as a request carries it, or undefined when it is not shaped like one. */
+export function cleanKeyProof(raw: unknown): KeyProof | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.ts !== "number" || !Number.isFinite(r.ts)) return undefined;
+  if (typeof r.nonce !== "string" || !/^[A-Za-z0-9+/_=-]{16,64}$/.test(r.nonce)) return undefined;
+  if (typeof r.mac !== "string" || !/^[A-Za-z0-9+/_=-]{43,88}$/.test(r.mac)) return undefined;
+  return { ts: r.ts, nonce: r.nonce, mac: r.mac };
 }
 
 export interface Invite {

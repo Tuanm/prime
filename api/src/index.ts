@@ -682,12 +682,17 @@ async function adminFleets(env: Env): Promise<Response> {
     // The spaces that asked to join and are waiting for the operator.
     const waiting = await stub.fetch("https://fleet/pending", { method: "GET", headers }).catch(() => null);
     const waitingBody = waiting && waiting.ok ? ((await waiting.json()) as { pending?: Array<Record<string, unknown>> }) : {};
-    const pending = (waitingBody.pending ?? []).map((p) => ({
-      deviceId: String(p.deviceId ?? ""),
-      label: typeof p.label === "string" ? p.label : undefined,
-      requestedAt: typeof p.requestedAt === "number" ? p.requestedAt : 0,
-      online: online.has(String(p.deviceId ?? "")),
-    }));
+    const pending = await Promise.all(
+      (waitingBody.pending ?? []).map(async (p) => ({
+        deviceId: String(p.deviceId ?? ""),
+        label: typeof p.label === "string" ? p.label : undefined,
+        requestedAt: typeof p.requestedAt === "number" ? p.requestedAt : 0,
+        online: online.has(String(p.deviceId ?? "")),
+        // A member that asks to have another key: the fingerprint of the key it offers, to compare with
+        // what the member's own machine prints, which the operator approves or declines.
+        ...(p.keyChange === true ? { keyChange: true, ...(typeof p.pubkey === "string" && p.pubkey ? { key: await keyFingerprint(p.pubkey) } : {}) } : {}),
+      })),
+    );
     const members = await Promise.all(
       (rosterBody.members ?? []).map(async (m) => ({
         deviceId: String(m.deviceId ?? ""),
@@ -1190,12 +1195,12 @@ export default {
           return await adminFleetAction(env, fleetId, "invite", {});
         }
         if (request.method === "POST" && step === "approve") {
-          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown };
-          return await adminFleetAction(env, fleetId, "approve", { deviceId: String(body.deviceId ?? "") });
+          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown; key?: unknown };
+          return await adminFleetAction(env, fleetId, "approve", { deviceId: String(body.deviceId ?? ""), ...(typeof body.key === "string" ? { key: body.key } : {}) });
         }
         if (request.method === "POST" && step === "remove") {
-          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown };
-          return await adminFleetAction(env, fleetId, "remove", { deviceId: String(body.deviceId ?? "") });
+          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown; keyChange?: unknown };
+          return await adminFleetAction(env, fleetId, "remove", { deviceId: String(body.deviceId ?? ""), ...(body.keyChange === true ? { keyChange: true } : {}) });
         }
         if (request.method === "POST" && step === "reap") {
           return await adminFleetAction(env, fleetId, "reap", {});

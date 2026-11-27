@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes } from "node:crypto";
 import {
   cleanLabel,
   clampTtl,
@@ -6,6 +7,8 @@ import {
   INVITE_DEFAULT_TTL_MS,
   INVITE_MAX_TTL_MS,
   inviteShape,
+  keyChangeMessage,
+  KEY_PROOF_INFO,
   keyFingerprint,
   FleetCreationAllowance,
   MAX_FLEETS_PER_DEVICE,
@@ -152,29 +155,252 @@ async function call(
   return { status: response.status, json: (await response.json()) as Record<string, any> };
 }
 
+/** A member's X25519 key pair, as the CLI makes one: the raw public key in base64, and the private key object. */
+function memberKey() {
+  const pair = generateKeyPairSync("x25519");
+  const der = pair.publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  return { publicKey: der.subarray(der.length - 32).toString("base64"), privateKey: pair.privateKey };
+}
+
+/** The proof the CLI sends to change a key it holds: a MAC under the DH of its old key and the fleet object's. */
+function keyProof(
+  old: ReturnType<typeof memberKey>,
+  objectKey: string,
+  next: string,
+  opts: { fleet?: string; device?: string; ts?: number; nonce?: string } = {},
+) {
+  const ts = opts.ts ?? Date.now();
+  const nonce = opts.nonce ?? randomBytes(16).toString("base64");
+  const spki = Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from(objectKey, "base64")]);
+  const shared = diffieHellman({ privateKey: old.privateKey, publicKey: createPublicKey({ key: spki, format: "der", type: "spki" }) });
+  const macKey = Buffer.from(hkdfSync("sha256", shared, Buffer.alloc(32), Buffer.from(KEY_PROOF_INFO), 32));
+  const mac = createHmac("sha256", macKey).update(keyChangeMessage(next, opts.fleet ?? "acme", opts.device ?? "member-1", ts, nonce)).digest("base64");
+  return { ts, nonce, mac };
+}
+
+/** An owner and a member whose key is a real X25519 key, so that it can prove it holds it. */
+async function fleetWithKeyedMember() {
+  const made = makeDo();
+  await makeFleet(made.doInstance, "owner-1");
+  const old = memberKey();
+  const invite = await call(made.doInstance, "/invite", { caller: "device", device: "owner-1", body: {} });
+  await call(made.doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: old.publicKey, label: "laptop" } });
+  await call(made.doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
+  const objectKey = (await call(made.doInstance, "/role", { caller: "device", device: "member-1", method: "GET" })).json.keyProofKey as string;
+  const keyOf = () => (made.state.data.get("members") as Record<string, { pubkey?: string }>)["member-1"]?.pubkey;
+  return { ...made, old, objectKey, keyOf };
+}
+
 describe("a member that comes back with a new key", () => {
-  test("the fleet learns the new key when it joins again", async () => {
+  const NEW = "B".repeat(43) + "=";
+
+  test("the fleet tells a member the key it proves the old one with", async () => {
+    const { objectKey } = await fleetWithKeyedMember();
+    expect(Buffer.from(objectKey, "base64").length).toBe(32);
+  });
+
+  test("the key is the same every time it is asked, and survives the object being woken again", async () => {
+    const { doInstance, state, objectKey, bucket } = await fleetWithKeyedMember();
+    expect((await call(doInstance, "/role", { caller: "device", device: "member-1", method: "GET" })).json.keyProofKey).toBe(objectKey);
+    const woken = new FleetDO({ storage: state.storage, blockConcurrencyWhile: state.blockConcurrencyWhile } as never, { BUCKET: bucket } as never);
+    expect((await call(woken, "/role", { caller: "device", device: "member-1", method: "GET" })).json.keyProofKey).toBe(objectKey);
+  });
+
+  test("a device's credential alone does not replace the key: taking its place with another key is refused and waits for approval", async () => {
+    const { doInstance, old, keyOf } = await fleetWithKeyedMember();
+    const refused = await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    expect(refused.status).toBe(409);
+    expect(refused.json.keyChange).toBe("pending");
+    expect(keyOf()).toBe(old.publicKey);
+    // Nor does it take the lease: the member is told to wait.
+    expect((await call(doInstance, "/role", { caller: "device", device: "member-1", method: "GET" })).json.primary).toBe(false);
+  });
+
+  test("a stolen device credential cannot swap the key, claim a head it never applied, take the lease and publish", async () => {
+    const { doInstance, state, old, keyOf } = await fleetWithKeyedMember();
+    // The owner takes the lease, publishes seq 1, and its lease lapses.
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { pubkey: TEST_PUBKEY } })).json.role).toBe("primary");
+    const first = "fleets/acme/manifests/" + "1".repeat(64);
+    expect((await call(doInstance, "/head/advance", { caller: "device", device: "owner-1", body: { expectedSeq: 0, manifestKey: first, manifestHash: "1".repeat(64), meta: { full: true } } })).status).toBe(200);
+    state.data.set("lease", { ...(state.data.get("lease") as object), expiresAt: Date.now() - 1 });
+
+    // Whoever holds member-1's device token, and nothing else.
+    const lied = await call(doInstance, "/applied", { caller: "device", device: "member-1", body: { seq: 1_000_000_000 } });
+    expect(lied.json.applied).toBe(1);
+    const took = await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    expect(took.status).toBe(409);
+    expect(took.json.role).toBeUndefined();
+    expect(keyOf()).toBe(old.publicKey);
+    const second = "fleets/acme/manifests/" + "2".repeat(64);
+    const published = await call(doInstance, "/head/advance", { caller: "device", device: "member-1", body: { expectedSeq: 1, manifestKey: second, manifestHash: "2".repeat(64), meta: { full: true, sealed: true } } });
+    expect(published.status).toBe(409);
+    // What the primary would seal the next snapshot for is unchanged.
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { pubkey: TEST_PUBKEY } })).json.role).toBe("primary");
+    const keys = (await call(doInstance, "/keys", { caller: "device", device: "owner-1", method: "GET" })).json.members as Array<{ deviceId: string; pubkey?: string }>;
+    expect(keys.find((m) => m.deviceId === "member-1")?.pubkey).toBe(old.publicKey);
+  });
+
+  test("joining again with another key and any code-shaped string does not replace it either", async () => {
+    const { doInstance, old, keyOf } = await fleetWithKeyedMember();
+    const refused = await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: "pf1_" + "x".repeat(32), pubkey: NEW } });
+    expect(refused.status).toBe(409);
+    expect(refused.json.keyChange).toBe("pending");
+    expect(keyOf()).toBe(old.publicKey);
+  });
+
+  test("a proof of the old key replaces it, by taking its place and by joining again, and the old key is recorded as left", async () => {
+    const { doInstance, old, objectKey, keyOf } = await fleetWithKeyedMember();
+    const mid = memberKey();
+    const viaBootstrap = await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: mid.publicKey, keyProof: keyProof(old, objectKey, mid.publicKey) } });
+    expect(viaBootstrap.status).toBe(200);
+    expect(keyOf()).toBe(mid.publicKey);
+    const last = memberKey();
+    const viaJoin = await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: "pf1_" + "x".repeat(32), pubkey: last.publicKey, keyProof: keyProof(mid, objectKey, last.publicKey) } });
+    expect(viaJoin.status).toBe(200);
+    expect(keyOf()).toBe(last.publicKey);
+    const left = ((await call(doInstance, "/members", { caller: "admin", device: "operator", method: "GET" })).json.left as Array<{ pubkey: string }>).map((k) => k.pubkey);
+    expect(left).toEqual([old.publicKey, mid.publicKey]);
+  });
+
+  test("a proof is for one key, one fleet, one device, a few minutes and one use", async () => {
+    const { doInstance, old, objectKey, keyOf } = await fleetWithKeyedMember();
+    const other = memberKey();
+    const attempts: Array<[string, ReturnType<typeof keyProof>, string]> = [
+      ["another key", keyProof(old, objectKey, other.publicKey), NEW],
+      ["another fleet", keyProof(old, objectKey, NEW, { fleet: "other" }), NEW],
+      ["another device", keyProof(old, objectKey, NEW, { device: "member-2" }), NEW],
+      ["a stale time", keyProof(old, objectKey, NEW, { ts: Date.now() - 3_600_000 }), NEW],
+      ["a key that is not the old one's", keyProof(memberKey(), objectKey, NEW), NEW],
+      ["another object's key", keyProof(old, memberKey().publicKey, NEW), NEW],
+    ];
+    for (const [what, proof, key] of attempts) {
+      const res = await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: key, keyProof: proof } });
+      expect([what, res.status]).toEqual([what, 409]);
+      expect(keyOf()).toBe(old.publicKey);
+    }
+    // A proof that holds is used up: the same one for the same key is not taken again.
+    const good = keyProof(old, objectKey, NEW);
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW, keyProof: good } })).status).toBe(200);
+    expect(keyOf()).toBe(NEW);
+    const mid = memberKey();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: mid.publicKey, keyProof: keyProof({ publicKey: NEW, privateKey: old.privateKey }, objectKey, mid.publicKey) } });
+    expect(keyOf()).toBe(NEW);
+  });
+
+  test("the key it already has needs no proof, and a member that sends nothing is not affected", async () => {
+    const { doInstance, old, keyOf } = await fleetWithKeyedMember();
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: old.publicKey } })).status).toBe(200);
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: undefined } })).status).toBe(200);
+    expect(keyOf()).toBe(old.publicKey);
+  });
+
+  test("a key that cannot be proved (the old one is lost) waits as a request, and the operator's approval replaces it", async () => {
+    const { doInstance, old, keyOf } = await fleetWithKeyedMember();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    expect((await call(doInstance, "/me", { caller: "device", device: "member-1", method: "GET" })).json.keyChange).toBe("pending");
+    const waiting = (await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" })).json.pending as Array<Record<string, unknown>>;
+    expect(waiting).toEqual([expect.objectContaining({ deviceId: "member-1", pubkey: NEW, keyChange: true, label: "laptop" })]);
+    // The one that approves says which key it means; a request that changed since is not approved by mistake.
+    const wrong = await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1", key: "nope" } });
+    expect(wrong.status).toBe(409);
+    expect(keyOf()).toBe(old.publicKey);
+    const approved = await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1", key: await keyFingerprint(NEW) } });
+    expect(approved.status).toBe(200);
+    expect(keyOf()).toBe(NEW);
+    expect((await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" })).json.pending).toEqual([]);
+    // The member's next ask is the key the fleet holds now.
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } })).status).toBe(200);
+    const left = (await call(doInstance, "/members", { caller: "admin", device: "operator", method: "GET" })).json.left as Array<{ pubkey: string }>;
+    expect(left.map((k) => k.pubkey)).toEqual([old.publicKey]);
+  });
+
+  test("the owner may approve it too, and a member may not", async () => {
+    const { doInstance, keyOf } = await fleetWithKeyedMember();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    expect((await call(doInstance, "/approve", { caller: "device", device: "member-1", body: { deviceId: "member-1" } })).status).toBe(403);
+    expect(keyOf()).not.toBe(NEW);
+    expect((await call(doInstance, "/approve", { caller: "device", device: "owner-1", body: { deviceId: "member-1" } })).status).toBe(200);
+    expect(keyOf()).toBe(NEW);
+  });
+
+  test("declining it keeps the member and its key; removing the member removes the request with it", async () => {
+    const { doInstance, old, state, keyOf } = await fleetWithKeyedMember();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    const declined = await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "member-1", keyChange: true } });
+    expect(declined.json.removed).toBe("pending");
+    expect(keyOf()).toBe(old.publicKey);
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    const removed = await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
+    expect(removed.json.removed).toBe("member");
+    expect(keyOf()).toBeUndefined();
+    expect(Object.keys((state.data.get("pending") ?? {}) as object)).toEqual([]);
+  });
+
+  test("a member that asks for its old key back withdraws the request", async () => {
+    const { doInstance, old } = await fleetWithKeyedMember();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: old.publicKey } });
+    expect((await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" })).json.pending).toEqual([]);
+  });
+
+  test("a member without a key has nothing to prove with: the key it offers waits as well", async () => {
     const { doInstance, state } = makeDo();
     await makeFleet(doInstance, "owner-1");
     const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: {} });
-    await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
-    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
-    const joined = await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: "B".repeat(43) + "=" } });
-    expect(joined.status).toBe(200);
-    // The key it came back with is the key the fleet seals for.
-    const members = state.data.get("members") as Record<string, { pubkey?: string }>;
-    expect(members["member-1"]?.pubkey).toBe("B".repeat(43) + "=");
+    await call(doInstance, "/join", { caller: "device", device: "keyless", body: { code: invite.json.code, pubkey: undefined } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "keyless" } });
+    const res = await call(doInstance, "/bootstrap", { caller: "device", device: "keyless", body: { pubkey: NEW } });
+    expect(res.status).toBe(409);
+    expect((state.data.get("members") as Record<string, { pubkey?: string }>).keyless?.pubkey).toBeUndefined();
   });
 
-  test("the fleet learns the new key when it takes its place", async () => {
-    const { doInstance, state } = makeDo();
-    await makeFleet(doInstance, "owner-1");
-    const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: { autoApprove: true } });
-    await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: TEST_PUBKEY } });
-    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
-    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: "C".repeat(43) + "=" } });
-    const members = state.data.get("members") as Record<string, { pubkey?: string }>;
-    expect(members["member-1"]?.pubkey).toBe("C".repeat(43) + "=");
+  test("a device that is not a member is refused, as it was", async () => {
+    const { doInstance } = await fleetWithKeyedMember();
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "stranger", body: { pubkey: NEW } })).status).toBe(403);
+  });
+});
+
+describe("what a member says it has applied", () => {
+  async function fleetAtSeq(seq: number) {
+    const made = await fleetWithKeyedMember();
+    await call(made.doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { pubkey: TEST_PUBKEY } });
+    for (let n = 1; n <= seq; n++) {
+      const res = await call(made.doInstance, "/head/advance", { caller: "device", device: "owner-1", body: { expectedSeq: n - 1, manifestKey: "m" + n, manifestHash: "h" + n } });
+      expect(res.status).toBe(200);
+    }
+    return made;
+  }
+
+  test("it is not past the head: a member that claims any number is held to the head", async () => {
+    const { doInstance, state } = await fleetAtSeq(2);
+    const lied = await call(doInstance, "/applied", { caller: "device", device: "member-1", body: { seq: 1_000_000_000, fetched: 1e300 } });
+    expect(lied.json).toEqual({ ok: true, applied: 2, fetched: 2 });
+    expect((state.data.get("applied") as Record<string, number>)["member-1"]).toBe(2);
+  });
+
+  test("a report within the head is taken as it was, and never goes backwards", async () => {
+    const { doInstance } = await fleetAtSeq(3);
+    expect((await call(doInstance, "/applied", { caller: "device", device: "member-1", body: { seq: 2, fetched: 3 } })).json).toEqual({ ok: true, applied: 2, fetched: 3 });
+    expect((await call(doInstance, "/applied", { caller: "device", device: "member-1", body: { seq: 1 } })).json.applied).toBe(2);
+  });
+
+  test("the head that cannot be read records nothing", async () => {
+    const { doInstance, state, bucket } = await fleetAtSeq(1);
+    const get = bucket.get;
+    bucket.get = async () => { throw new Error("R2 is down"); };
+    const res = await call(doInstance, "/applied", { caller: "device", device: "member-1", body: { seq: 1 } });
+    bucket.get = get;
+    expect(res.status).toBe(503);
+    expect((state.data.get("applied") as Record<string, number>)["member-1"]).toBeUndefined();
+  });
+
+  test("a member that never applied the head, and says it did to take the lease, is stopped by the cap on a head it has not got", async () => {
+    // The member claims far past the head, takes the lease once it has lapsed and publishes on a head it never applied:
+    // with the cap it has "applied" what the head is, and so can no more than a member that has, which needs a key the fleet holds.
+    const { doInstance, state } = await fleetAtSeq(1);
+    state.data.set("lease", { ...(state.data.get("lease") as object), expiresAt: Date.now() - 1 });
+    await call(doInstance, "/applied", { caller: "device", device: "member-1", body: { seq: 99 } });
+    expect((state.data.get("applied") as Record<string, number>)["member-1"]).toBe(1);
   });
 });
 
@@ -894,14 +1120,15 @@ describe("a member that goes while its publish is in flight, or is re-keyed", ()
     expect((await roster(doInstance, "dev-two")).json.left).toEqual([{ pubkey: TEST_PUBKEY, until: 3 }]);
   });
 
-  test("a key a member replaces, when it joins again or takes its place, is recorded as left", async () => {
+  test("a key a member replaces, when the operator approves a new one, is recorded as left", async () => {
     const { doInstance } = await fleetOfTwo();
     await publish(doInstance, "dev-owner", 0);
-    const code = (await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} })).json.code;
     const C = "C".repeat(43) + "=";
     const D = "D".repeat(43) + "=";
-    await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code, pubkey: C } });
+    await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: "pf1_" + "x".repeat(32), pubkey: C } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
     await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two", body: { pubkey: D } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
     const left = (await roster(doInstance, "dev-owner")).json.left as Array<{ pubkey: string; until: number }>;
     expect(left).toEqual([{ pubkey: PUB_B, until: 1 }, { pubkey: C, until: 1 }]);
   });
@@ -1850,6 +2077,14 @@ describe("what a replica reports and what the index says", () => {
   test("how far a replica has fetched is recorded apart from how far it has applied", async () => {
     const { doInstance } = await fleetWithTwo();
     await advance(doInstance, 1);
+    await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq: 1 } });
+    await advance(doInstance, 2);
+    await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq: 2 } });
+    await advance(doInstance, 3);
+    await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq: 3 } });
+    await advance(doInstance, 4);
+    await call(doInstance, "/applied", { caller: "device", device: "dev-owner", body: { seq: 4 } });
+    await advance(doInstance, 5);
     // An older client says only what it applied.
     const old = await call(doInstance, "/applied", { caller: "device", device: "dev-two", body: { seq: 1 } });
     expect(old.json).toEqual({ ok: true, applied: 1 });
