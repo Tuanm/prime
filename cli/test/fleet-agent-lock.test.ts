@@ -12,6 +12,7 @@ import {
   agentCommand,
   agentServiceFor,
   agentSettingsPath,
+  type AgentRestartOptions,
   ensureFleetAgent,
   fleetAgentDir,
   fleetAgentStatePath,
@@ -41,6 +42,10 @@ function scratch(): string {
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+/** An update's restart, as it is on the platforms where an agent can be stopped gracefully (Windows has its own test). */
+const restartAgent = (configPath: string, service: Parameters<typeof restartFleetAgentAfterUpdate>[1], opts: AgentRestartOptions = {}) =>
+  restartFleetAgentAfterUpdate(configPath, service, { platform: "linux", ...opts });
 
 /** A process that looks like a fleet agent to the process list (and does nothing). */
 function plainAgent(): { pid: number } {
@@ -625,7 +630,7 @@ describe("switching the replica mode of a running agent", () => {
     running(configPath, mine.pid, "lazy");
     running(other, theirs.pid, "lazy");
     const restarts = { n: 0 };
-    const result = await restartFleetAgentAfterUpdate(configPath, hooks(restarts, configPath, "lazy", 512, mine.pid));
+    const result = await restartAgent(configPath, hooks(restarts, configPath, "lazy", 512, mine.pid));
     expect(restarts.n).toBe(1);
     expect(result.restarted && result.via).toBe("service");
     expect(result.restarted && result.pid).not.toBe(mine.pid);
@@ -660,7 +665,7 @@ describe("switching the replica mode of a running agent", () => {
     const seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } } = { envs: [] };
     let oldAliveWhenStarted: boolean | undefined;
     const spawn = newAgentHook(seen);
-    const result = await restartFleetAgentAfterUpdate(
+    const result = await restartAgent(
       configPath,
       {
         installed: () => false,
@@ -688,7 +693,8 @@ describe("switching the replica mode of a running agent", () => {
     expect(() => process.kill(seen.child!.pid, 0)).not.toThrow();
   });
 
-  test("an agent that finishes its round for longer than the update waits is not left without a successor, and its state stays until it is gone", async () => {
+  // A signal that a process can catch and finish its round for: not a thing on Windows, where it is stopped at once.
+  test.skipIf(process.platform === "win32")("an agent that finishes its round for longer than the update waits is not left without a successor, and its state stays until it is gone", async () => {
     const root = scratch();
     const configPath = join(root, "config.json");
     // Exits 1.5 s after it is asked to stop (a round of an apply that outlives the wait).
@@ -697,7 +703,7 @@ describe("switching the replica mode of a running agent", () => {
     running(configPath, child.pid, "lazy");
     await Bun.sleep(200);
     const seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } } = { envs: [] };
-    const result = await restartFleetAgentAfterUpdate(
+    const result = await restartAgent(
       configPath,
       { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 500, spawnAgent: newAgentHook(seen) },
       { startCheckMs: 100 },
@@ -720,7 +726,7 @@ describe("switching the replica mode of a running agent", () => {
     running(configPath, old.pid, "lazy");
     // What the replaced program does when it is not a prime: it exits at once.
     await expect(
-      restartFleetAgentAfterUpdate(
+      restartAgent(
         configPath,
         {
           installed: () => false,
@@ -746,7 +752,7 @@ describe("switching the replica mode of a running agent", () => {
     writeFileSync(here, "");
     writeFileSync(elsewhere, "");
     let spawned = 0;
-    const direct = await restartFleetAgentAfterUpdate(
+    const direct = await restartAgent(
       configPath,
       { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: () => void spawned++ },
       { command: [here], target: elsewhere },
@@ -755,7 +761,7 @@ describe("switching the replica mode of a running agent", () => {
     expect(!direct.restarted && direct.reason).toMatch(/not the program of the fleet agent/);
     // A service that runs another program: the manager is not asked.
     let asked = 0;
-    const managed = await restartFleetAgentAfterUpdate(
+    const managed = await restartAgent(
       configPath,
       { installed: () => true, pid: () => mine.pid, restart: () => (asked++, true), runs: () => false, stopWaitMs: 300 },
       { target: elsewhere },
@@ -767,7 +773,7 @@ describe("switching the replica mode of a running agent", () => {
     expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
     // The one that is the agent's program is restarted.
     const seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } } = { envs: [] };
-    const same = await restartFleetAgentAfterUpdate(
+    const same = await restartAgent(
       configPath,
       { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: newAgentHook(seen) },
       { command: [here], target: here, startCheckMs: 50 },
@@ -803,7 +809,7 @@ describe("switching the replica mode of a running agent", () => {
     };
     let error: unknown;
     try {
-      await restartFleetAgentAfterUpdate(configPath, service, { startCheckMs: 50 });
+      await restartAgent(configPath, service, { startCheckMs: 50 });
     } catch (err) {
       error = err;
     }
@@ -822,7 +828,7 @@ describe("switching the replica mode of a running agent", () => {
     const mine = await fakeAgent();
     running(configPath, mine.pid, "lazy");
     const asked: Array<boolean | undefined> = [];
-    const result = await restartFleetAgentAfterUpdate(configPath, {
+    const result = await restartAgent(configPath, {
       installed: () => true,
       pid: () => mine.pid,
       restart: (gentle) => (asked.push(gentle), true),
@@ -836,7 +842,7 @@ describe("switching the replica mode of a running agent", () => {
     cleanups.push(() => dead.kill("SIGKILL"));
     running(configPath, dead.pid, "lazy");
     await expect(
-      restartFleetAgentAfterUpdate(configPath, {
+      restartAgent(configPath, {
         installed: () => true,
         pid: () => dead.pid,
         restart: () => (dead.kill("SIGKILL"), true),
@@ -851,7 +857,7 @@ describe("switching the replica mode of a running agent", () => {
     const mine = await fakeAgent();
     running(configPath, mine.pid, "lazy");
     let spawned = 0;
-    const result = await restartFleetAgentAfterUpdate(
+    const result = await restartAgent(
       configPath,
       { installed: () => false, pid: () => undefined, restart: () => false, spawnAgent: () => void spawned++ },
       { platform: "win32" },
@@ -876,7 +882,7 @@ describe("switching the replica mode of a running agent", () => {
     const configPath = join(root, "config.json");
     let spawned = 0;
     const restarts = { n: 0 };
-    const result = await restartFleetAgentAfterUpdate(configPath, { ...hooks(restarts, configPath, "lazy"), spawnAgent: () => void spawned++ });
+    const result = await restartAgent(configPath, { ...hooks(restarts, configPath, "lazy"), spawnAgent: () => void spawned++ });
     expect(result).toEqual({ restarted: false });
     expect(spawned).toBe(0);
     expect(restarts.n).toBe(0);
@@ -888,7 +894,7 @@ describe("switching the replica mode of a running agent", () => {
     const mine = await fakeAgent();
     running(configPath, mine.pid, "lazy");
     await expect(
-      restartFleetAgentAfterUpdate(configPath, { installed: () => true, pid: () => mine.pid, restart: () => false, stopWaitMs: 300 }),
+      restartAgent(configPath, { installed: () => true, pid: () => mine.pid, restart: () => false, stopWaitMs: 300 }),
     ).rejects.toThrow(/would not restart/);
     expect(() => process.kill(mine.pid, 0)).not.toThrow();
   });
