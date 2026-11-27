@@ -1221,9 +1221,20 @@ ${UI_CSS}    </style>
           // The answers the operator has to give are shown, not tucked away.
           var answers = document.createElement("span");
           answers.className = "fleet-actions";
-          answers.appendChild(fleetBtn("Admit", function () {
+          // The key a member asks to have is written out where it is read, not tucked in a tooltip: it is what
+          // the operator compares with what the member's own machine prints before saying yes.
+          if (p.keyChange) {
+            var offered = document.createElement("span");
+            offered.className = "fleet-key";
+            offered.textContent = "new key " + (p.key || "(unreadable)");
+            answers.appendChild(offered);
+          }
+          var admit = fleetBtn("Admit", function () {
             fleetAction(fleet, "approve", p.keyChange ? { deviceId: p.deviceId, key: p.key } : { deviceId: p.deviceId }, (p.keyChange ? "replaced the key of " : "admitted ") + (p.label || p.deviceId));
-          }, "primary"));
+          }, "primary");
+          // A key that cannot be named cannot be approved: the gateway would refuse it.
+          if (p.keyChange && !p.key) admit.disabled = true;
+          answers.appendChild(admit);
           answers.appendChild(fleetBtn("Decline", function () {
             fleetAction(fleet, "remove", p.keyChange ? { deviceId: p.deviceId, keyChange: true } : { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
           }, "danger"));

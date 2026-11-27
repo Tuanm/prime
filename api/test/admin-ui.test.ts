@@ -319,6 +319,37 @@ describe("the fleets in the admin interface", () => {
     expect(titles.some((t) => t.includes("a member of the fleet") && !t.includes("key"))).toBe(true);
   });
 
+  test("a member's request for a new key shows the key as text, and approving it names that key", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        members: [{ deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true }],
+        primary: "d1",
+        pending: [
+          { deviceId: "d2", label: "beta", requestedAt: 5, online: true, keyChange: true, key: "Zk3Q9wPq1Xc=" },
+          { deviceId: "d3", label: "gamma", requestedAt: 6, online: true },
+        ],
+      },
+    ]);
+    await page.settle();
+    const texts: string[] = [];
+    const buttons: El[] = [];
+    const walk = (el: El): void => {
+      if (el.textContent) texts.push(el.textContent);
+      if (el.tagName === "button") buttons.push(el);
+      el.children.forEach(walk);
+    };
+    page.list().forEach(walk);
+    // Visible text, once: the plain request for a place shows none.
+    expect(texts.filter((t) => t.includes("new key Zk3Q9wPq1Xc="))).toHaveLength(1);
+    expect(texts.filter((t) => t.startsWith("new key"))).toHaveLength(1);
+    const admit = buttons.filter((b) => b.textContent === "Admit")[0]!;
+    admit.listeners["click"]![0]!({ preventDefault() {}, stopPropagation() {} });
+    await page.settle();
+    const sent = page.calls.find((c) => c.path.endsWith("/approve"));
+    expect(sent?.body).toEqual({ deviceId: "d2", key: "Zk3Q9wPq1Xc=" });
+  });
+
   test("a fleet is a cloud, and it offers Save and Deactivate", async () => {
     const page = loadPage([
       {
