@@ -33,7 +33,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { knownSealKind, type OpenedPayload, type SealFields } from "./fleet-crypto";
+import { keyIdOf, knownSealKind, type OpenedPayload, type SealFields } from "./fleet-crypto";
 import { fetchRole, fetchRoster, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
@@ -200,6 +200,15 @@ export class FleetTrust {
     if (m.seal === undefined && hash !== undefined && this.accepted.has(hash)) return;
     const level = protectionOf(m, memberId);
     if (level < 1 && this.sealedFrom !== undefined && m.seq >= this.sealedFrom) {
+      // What the manifest itself says of who made it and when. With no seal there is nothing that
+      // authenticates it (the gateway can write what it likes), but a member that really published it
+      // has a fingerprint (`prime fleets members`) and a time to compare with.
+      const claims =
+        "The manifest says it was made " +
+        (Number.isFinite(m.createdAt) && m.createdAt > 0 ? "at " + new Date(m.createdAt).toISOString() : "at an unknown time") +
+        " with the key " +
+        (typeof m.senderPublicKey === "string" && m.senderPublicKey !== "" ? keyIdOf(m.senderPublicKey) : "(none)") +
+        " (its fingerprint, as 'prime fleets members' prints it; nothing proves it, since the snapshot has no seal). ";
       // What accepting means, for either wording below: it is a decision to trust the gateway.
       const accept =
         "prime fleets trust accept <fleet> --space <space> --manifest " +
@@ -214,7 +223,9 @@ export class FleetTrust {
           m.seq,
           "it carries no seal, but snapshot " +
             this.sealedFrom +
-            " did, and this fleet's gateway does not move the head from a sealed snapshot to one that is not: it was not published through the gateway as it is now (it is tampered with). Only if the fleet's own operator knows this is a snapshot written before the gateway had that rule, the way on is '" +
+            " did, and this fleet's gateway does not move the head from a sealed snapshot to one that is not: it was not published through the gateway as it is now (it is tampered with). " +
+            claims +
+            "Only if the fleet's own operator knows this is a snapshot written before the gateway had that rule, the way on is '" +
             accept,
           true,
         );
@@ -224,8 +235,9 @@ export class FleetTrust {
         m.seq,
         "it carries no seal, but snapshot " +
           this.sealedFrom +
-          " did: either the gateway swapped in an old snapshot, or a member that has not been upgraded published it. Upgrade that member." +
-          " If it is gone and nobody else can take over, the only way on is '" +
+          " did: either the gateway swapped in an old snapshot, or a member that has not been upgraded published it. Upgrade that member. " +
+          claims +
+          "If it is gone and nobody else can take over, the only way on is '" +
           accept,
         true,
       );

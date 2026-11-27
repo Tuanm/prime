@@ -315,7 +315,9 @@ What the gateway can still do, whatever a member checks:
   tampering: an old member cannot have published it through that gateway, except for a head that
   was written before the gateway had the gate (it reads the sealed tip's manifest once if the index
   did not say, so only a tip that was not sealed at all escapes). Either way the refusal names the
-  manifest's hash, and when that member was lost and no upgraded member can take over (the catch-up
+  manifest's hash, and what the manifest itself says of when it was made and with which key (the
+  fingerprint `prime fleets members` prints, to compare with the KEY of the member that is gone; with no
+  seal nothing proves it, so it is something to check, not a check), and when that member was lost and no upgraded member can take over (the catch-up
   to that head is what is refused), the operator of the member that cannot go on may run
   `prime fleets trust accept <fleet> --space <name> --manifest <hash>`. **That trusts the gateway for
   that one snapshot**: the member cannot tell it from an old snapshot the gateway made up (a rollback
