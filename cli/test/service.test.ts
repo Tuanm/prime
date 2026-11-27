@@ -582,6 +582,19 @@ describe("the fleet agent an earlier Windows build registered as the buddy's tas
     expect(after.installed).toBe(true);
   });
 
+  test("a task schtasks says is there is installed, whether or not PowerShell could say what it runs", () => {
+    const shell: Shell = {
+      run: (cmd) => ({ code: cmd[cmd.length - 1] === "\\prime\\prime-fleet-agent" ? 0 : 1, out: "", err: "" }),
+      powershell: () => ({ code: 1, out: "", err: "refused" }),
+    };
+    const status = serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, shell);
+    expect(status).toMatchObject({ installed: true, running: false, where: "Task Scheduler \\prime\\prime-fleet-agent" });
+    // what it runs is not known: its definition does not say, as for a hand-edited one
+    expect(readServiceDefinition("win32", { name: FLEET_AGENT_NAME }, undefined, undefined, undefined, shell)).toEqual({ config: undefined });
+    const throwing: Shell = { run: shell.run, powershell: () => { throw new Error("powershell.exe not found"); } };
+    expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, throwing).installed).toBe(true);
+  });
+
   test("a task of its own is reported as it is, and the old one is not looked up", () => {
     const s = scheduler(undefined, true);
     expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell).where).toBe("Task Scheduler \\prime\\prime-fleet-agent");

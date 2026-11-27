@@ -282,7 +282,7 @@ export function readServiceDefinition(
     // Windows keeps the definition in Task Scheduler: the task's own command line says the configuration.
     const task = identity.name ?? SERVICE_NAME;
     const probed = probeTask(shell, task);
-    return probed ? { config: configOfTaskArguments(probed.argument) } : undefined;
+    return probed ? { config: probed.argument === undefined ? undefined : configOfTaskArguments(probed.argument) } : undefined;
   }
   try {
     if (platform === "linux") {
@@ -462,7 +462,7 @@ export function parseWindowsTaskProbe(out: string): { state: string; argument: s
 // What the last look at a task said, for each way of asking: one command asks about a task for its
 // definition (which configuration) and for its status (running), and each look is a schtasks and a PowerShell
 // to start. Good for a moment; whatever changes a task forgets it.
-const taskProbes = new WeakMap<Shell, Map<string, { at: number; value: { state: string; argument: string } | undefined }>>();
+const taskProbes = new WeakMap<Shell, Map<string, { at: number; value: TaskProbe | undefined }>>();
 const TASK_PROBE_FRESH_MS = 2_000;
 
 /** Forget what was seen of the tasks (after one is installed or removed). */
@@ -470,15 +470,29 @@ function forgetTaskProbes(shell: Shell): void {
   taskProbes.delete(shell);
 }
 
-/** A task's state and its action's arguments; undefined when there is no such task. */
-function probeTask(shell: Shell, taskName: string): { state: string; argument: string } | undefined {
+/** What was seen of a task that exists: its state and its action's arguments, which are left out when PowerShell did not say. */
+interface TaskProbe {
+  state?: string;
+  argument?: string;
+}
+
+/** A task's state and its action's arguments; undefined when there is no such task (schtasks says so). */
+function probeTask(shell: Shell, taskName: string): TaskProbe | undefined {
   const seen = taskProbes.get(shell)?.get(taskName);
   if (seen && Date.now() - seen.at < TASK_PROBE_FRESH_MS) return seen.value;
   // schtasks answers in well under a second, and its exit code is not localized; PowerShell is slow to start.
-  const value =
-    shell.run(["schtasks", "/query", "/tn", TASK_PATH + taskName], { timeoutMs: 30_000 }).code !== 0
-      ? undefined
-      : parseWindowsTaskProbe(shell.powershell(renderWindowsTaskProbeScript(taskName)).out);
+  // That the task is there is schtasks' word; PowerShell says what it runs, and may fail to (it is slow, and
+  // can be refused): the task is then there, and what it runs is not known.
+  let value: TaskProbe | undefined;
+  if (shell.run(["schtasks", "/query", "/tn", TASK_PATH + taskName], { timeoutMs: 30_000 }).code === 0) {
+    let said: { state: string; argument: string } | undefined;
+    try {
+      said = parseWindowsTaskProbe(shell.powershell(renderWindowsTaskProbeScript(taskName)).out);
+    } catch {
+      said = undefined;
+    }
+    value = said ?? {};
+  }
   const mine = taskProbes.get(shell) ?? new Map();
   mine.set(taskName, { at: Date.now(), value });
   taskProbes.set(shell, mine);
@@ -527,7 +541,7 @@ export function configOfTaskArguments(argument: string): string | undefined {
  */
 function oldAgentTask(shell: Shell): { running: boolean; config: string | undefined } | undefined {
   const probed = probeTask(shell, TASK_NAME);
-  if (!probed || !isFleetAgentAction(probed.argument)) return undefined;
+  if (!probed || probed.argument === undefined || !isFleetAgentAction(probed.argument)) return undefined;
   return { running: probed.state === "Running", config: configOfTaskArguments(probed.argument) };
 }
 
@@ -707,7 +721,7 @@ export function serviceStatus(
         };
       }
     }
-    const running = installed && (task === TASK_NAME ? pidAlive(pidFilePath(configPath)) : probed!.state === "Running");
+    const running = installed && (task === TASK_NAME ? pidAlive(pidFilePath(configPath)) : probed?.state === "Running");
     return { installed, running, where, detail: installed ? (running ? "running" : "not running") : undefined };
   }
   throw new CliError("'prime service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
