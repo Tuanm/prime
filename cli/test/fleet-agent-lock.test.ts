@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { acquireAgentLock, agentLockPath, isFleetAgentProcess, procProbeWith } from "../src/fleet-agent-lock";
+import { acquireAgentLock, agentLockPath, isFleetAgentProcess, probeFor, procProbeWith, type ProcessProbe } from "../src/fleet-agent-lock";
 import { bindServiceStatus, fleetAgentServiceStatus } from "../src/fleet-service";
 import { launchdAnswered } from "../src/service";
 import {
@@ -293,6 +293,24 @@ describe("one fleet agent per configuration", () => {
     expect(() => process.kill(old.pid, 0)).toThrow();
   });
 
+  test("Windows has no process list to ask: its probe says nothing, and the lock and state files decide", () => {
+    const asked: string[] = [];
+    const proc: ProcessProbe = () => (asked.push("proc"), { status: 0, stdout: "x" });
+    const ps: ProcessProbe = () => (asked.push("ps"), { status: 0, stdout: "x" });
+    expect(probeFor("win32", proc, ps)(1)).toBeNull();
+    expect(asked).toEqual([]);
+    // The others ask: /proc first on Linux, `ps` where it says nothing and on macOS.
+    expect(probeFor("linux", proc, ps)(1)?.stdout).toBe("x");
+    expect(probeFor("darwin", proc, ps)(1)?.stdout).toBe("x");
+    expect(asked).toEqual(["proc", "ps"]);
+    // What a probe says is believed on any platform, Windows included: a fresh lock does not make a
+    // process that is something else an agent.
+    const dir = scratch();
+    writeFileSync(agentLockPath(dir), process.pid + "\n");
+    expect(isFleetAgentProcess(process.pid, dir, () => ({ status: 0, stdout: "vim notes.md\n" }))).toBe(false);
+    expect(isFleetAgentProcess(process.pid, dir, probeFor("win32"))).toBe(true);
+  });
+
   test("/proc says what a pid is where it can: a command line is an answer, and anything else is not", () => {
     const dir = scratch();
     const files: Record<string, string> = {
@@ -388,7 +406,9 @@ describe("one fleet agent per configuration", () => {
     mkdirp(fleetAgentDir(configPath));
     writeFileSync(agentLockPath(fleetAgentDir(configPath)), String(agent.pid) + "\n");
     writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid: agent.pid, started_at: "x", config_path: configPath }));
-    const was = process.exitCode;
+    // A refused start sets the exit code, as the command does: put back, so the test runner does not exit with it.
+    // (Not `undefined`: Bun leaves the code as it was then.)
+    const was = process.exitCode ?? 0;
     cleanups.push(() => {
       process.exitCode = was;
     });
@@ -456,7 +476,9 @@ describe("switching the replica mode of a running agent", () => {
     expect(() => process.kill(old.pid, 0)).not.toThrow();
   });
 
-  test("without a service the old agent is stopped, and a new one is never spawned while it is alive", async () => {
+  // Windows has no signals to ignore: `process.kill` ends the process outright, so an agent that will not stop
+  // when asked cannot exist there.
+  test.skipIf(process.platform === "win32")("without a service the old agent is stopped, and a new one is never spawned while it is alive", async () => {
     const root = scratch();
     const configPath = join(root, "config.json");
     const stubborn = await fakeAgent(true);
@@ -580,6 +602,8 @@ describe("switching the replica mode of a running agent", () => {
         asked++;
         return false;
       },
+      undefined,
+      "linux",
     );
     for (let i = 0; i < 3; i++) expect((await ensureFleetAgent(configPath, {}, service)).pid).toBe(mine.pid);
     expect(() => process.kill(mine.pid, 0)).not.toThrow();
@@ -594,7 +618,7 @@ describe("switching the replica mode of a running agent", () => {
     withMode("mirror");
     let spawned = 0;
     const service = {
-      ...agentServiceFor(configPath, () => ({ installed: true, reachable: false }), () => false),
+      ...agentServiceFor(configPath, () => ({ installed: true, reachable: false }), () => false, undefined, "linux"),
       spawnAgent: () => void spawned++,
     };
     let error: unknown;
@@ -660,6 +684,8 @@ describe("switching the replica mode of a running agent", () => {
         asked++;
         return true;
       },
+      undefined,
+      "linux",
     );
     // Nothing differs: the running agent is returned as it is.
     expect((await ensureFleetAgent(configPath, {}, service)).pid).toBe(mine.pid);
@@ -747,7 +773,10 @@ describe("switching the replica mode of a running agent", () => {
     expect(aliveAtInstall).toBe(false);
     // What was set here is saved for the service.
     expect(readAgentSettings(configPath)).toEqual({ replica: "mirror" });
-    // One that will not stop is an error, and the service is not installed over it.
+  });
+
+  // Windows has no signals to ignore (see above): an agent that will not stop when asked cannot exist there.
+  test.skipIf(process.platform === "win32")("one that will not stop is an error, and the service is not installed over it", async () => {
     const stubborn = await fakeAgent(true);
     const other = join(scratch(), "config.json");
     running(other, stubborn.pid, "lazy");
@@ -801,7 +830,9 @@ describe("switching the replica mode of a running agent", () => {
     const other = join(scratch(), "config.json");
     running(other, winner.pid, "lazy");
     withEnv("PRIME_FLEET_LOCK_WAIT_MS", "0");
-    const was = process.exitCode;
+    // A refused start sets the exit code, as the command does: put back, so the test runner does not exit with it.
+    // (Not `undefined`: Bun leaves the code as it was then.)
+    const was = process.exitCode ?? 0;
     cleanups.push(() => {
       process.exitCode = was;
     });
@@ -876,16 +907,20 @@ describe("a pid that another configuration's agent now has", () => {
 describe("two spellings of one configuration", () => {
   test("a path that differs only in case is the same file where the file system folds case", () => {
     // Under /tmp, which is a symlink on macOS: realpath leaves the case of a directory after it as it was typed.
-    // Made by another process, and asked in a fresh one (a guard: realpath already settles this).
-    const base = "/tmp/FleetCase-" + process.pid + "-" + Date.now();
+    // Made by another process, and asked in a fresh one (a guard: realpath already settles this). Windows has
+    // no /tmp (and no `sh` to count on): its temporary directory is used, made by `bun` itself.
+    const name = "FleetCase-" + process.pid + "-" + Date.now();
+    const base = process.platform === "win32" ? join(tmpdir(), name) : "/tmp/" + name;
     cleanups.push(() => rmSync(base, { recursive: true, force: true }));
     const dir = join(base, "CaseDir");
-    Bun.spawnSync(["sh", "-c", 'mkdir -p "$1" && : > "$1/Config.yaml"', "sh", dir]);
+    Bun.spawnSync([process.execPath, "-e", 'const fs = require("node:fs"); fs.mkdirSync(process.argv[1], { recursive: true }); fs.writeFileSync(process.argv[1] + require("node:path").sep + "Config.yaml", "");', dir]);
     const swapped = join(base.toLowerCase(), "casedir", "config.yaml");
     if (!existsSync(swapped)) return; // a case-sensitive file system: these are two files, and not the same
-    // In a process of its own: realpath remembers the spellings it has been given.
+    // In a process of its own: realpath remembers the spellings it has been given. The module is named by a
+    // JSON string, so that a Windows path's backslashes are not read as escapes.
+    const service = JSON.stringify(join(import.meta.dir, "../src/fleet-service.ts"));
     const ask = (a: string, b: string): string =>
-      Bun.spawnSync([process.execPath, "-e", 'import { sameConfig } from "' + join(import.meta.dir, "../src/fleet-service.ts") + '"; console.log(sameConfig(process.argv[1], process.argv[2]));', a, b], {
+      Bun.spawnSync([process.execPath, "-e", "import { sameConfig } from " + service + "; console.log(sameConfig(process.argv[1], process.argv[2]));", a, b], {
         env: process.env,
       }).stdout.toString().trim();
     expect(ask(swapped, join(dir, "Config.yaml"))).toBe("true");
@@ -925,8 +960,25 @@ describe("asking the service manager", () => {
     expect(status.pid).toBe(7);
   });
 
+  test("on Windows there is no manager to ask: nothing is installed or unreachable, and it is never asked", () => {
+    let asked = 0;
+    const service = agentServiceFor(
+      "C:\\cfg\\config.yaml",
+      () => {
+        asked++;
+        return { installed: true, reachable: false, pid: 12 };
+      },
+      () => false,
+      undefined,
+      "win32",
+    );
+    expect(service.installed()).toBe(false);
+    expect(service.unreachable?.()).toBe(false);
+    expect(service.loaded?.()).toBe(false);
+    expect(asked).toBe(0);
+  });
+
   test("what one call wants to know of it is asked in one go, not once for each thing", () => {
-    if (!platformHasDefinitions) return;
     let asked = 0;
     const service = agentServiceFor(
       "/somewhere/config.yaml",
@@ -935,6 +987,8 @@ describe("asking the service manager", () => {
         return { installed: true, reachable: true, pid: 12 };
       },
       () => false,
+      undefined,
+      "linux",
     );
     expect(service.installed()).toBe(true);
     expect(service.pid()).toBe(12);

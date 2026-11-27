@@ -63,7 +63,17 @@ export function procProbeWith(read: (file: string) => string): ProcessProbe {
 
 const procProbe = procProbeWith((file) => readFileSync(file, "utf8"));
 
-const defaultProbe: ProcessProbe = (pid) => (process.platform === "linux" ? procProbe(pid) : null) ?? psProbe(pid);
+/**
+ * The probe a platform has: Linux reads /proc and falls back to `ps`, macOS has `ps`, and Windows has
+ * neither (no answer: the lock and state files say, see `isFleetAgentProcess`). The probes are parameters so
+ * that a test can stand in for any of them.
+ */
+export function probeFor(platform: string, proc: ProcessProbe = procProbe, ps: ProcessProbe = psProbe): ProcessProbe {
+  if (platform === "win32") return () => null;
+  return (pid) => (platform === "linux" ? proc(pid) : null) ?? ps(pid);
+}
+
+const defaultProbe: ProcessProbe = probeFor(process.platform);
 
 /**
  * Whether this pid is a fleet agent. A pid in a lock that survived a reboot may belong to
@@ -77,10 +87,9 @@ const defaultProbe: ProcessProbe = (pid) => (process.platform === "linux" ? proc
  */
 export function isFleetAgentProcess(pid: number, agentDir?: string, probe: ProcessProbe = defaultProbe): boolean {
   if (!pidAlive(pid)) return false;
-  if (process.platform !== "win32") {
-    const answer = probe(pid);
-    if (answer && answer.status === 0 && answer.stdout.trim() !== "") return answer.stdout.includes("__fleet-agent") && runsHere(answer.stdout, agentDir);
-  }
+  // What a probe says is believed on any platform; the default one has nothing to say on Windows.
+  const answer = probe(pid);
+  if (answer && answer.status === 0 && answer.stdout.trim() !== "") return answer.stdout.includes("__fleet-agent") && runsHere(answer.stdout, agentDir);
   if (agentDir === undefined) return true;
   const lock = agentLockPath(agentDir);
   if (existsSync(lock)) return readHolder(lock) === pid && freshFile(lock);

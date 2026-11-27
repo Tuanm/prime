@@ -373,6 +373,8 @@ export function agentServiceFor(
   probe: () => { installed: boolean; running?: boolean; detail?: string; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
   restart: () => boolean = restartFleetAgentService,
   stop: () => boolean = stopFleetAgentService,
+  /** The platform whose manager is asked (replaced in tests). */
+  platform: string = process.platform,
 ): AgentServiceHooks {
   // The manager is asked once for what the hooks below want to know together (is it installed, which
   // pid, can it be reached): each is a process spawned to the manager. What it said is good for a moment.
@@ -384,7 +386,7 @@ export function agentServiceFor(
   return {
     installed: () => {
       // Only where the manager can be asked to restart it: elsewhere the agent is started as it always was.
-      if (process.platform !== "darwin" && process.platform !== "linux") return false;
+      if (platform !== "darwin" && platform !== "linux") return false;
       try {
         // A service file with nothing to run it (no login session, no user bus) manages nothing:
         // the agent is handled as if there were no service, which is what it would be.
@@ -402,7 +404,7 @@ export function agentServiceFor(
       }
     },
     unreachable: () => {
-      if (process.platform !== "darwin" && process.platform !== "linux") return false;
+      if (platform !== "darwin" && platform !== "linux") return false;
       try {
         const answer = status();
         return answer.installed && answer.reachable === false;
@@ -411,8 +413,9 @@ export function agentServiceFor(
       }
     },
     loaded: () => {
+      if (platform !== "darwin" && platform !== "linux") return false;
       try {
-        return managerHolds(status(), process.platform);
+        return managerHolds(status(), platform);
       } catch {
         return false;
       }
