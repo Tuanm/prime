@@ -646,9 +646,10 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "create") return "Usage: prime fleets create <fleet-id>";
     if (sub === "invite") return "Usage: prime fleets invite <fleet-id> [--ttl <s>]";
     if (sub === "join") return "Usage: prime fleets join <fleet-id> --code <code> [--label <label>]";
-    if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id>";
-    if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --member <id>";
-    return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]";
+    if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id> [--key <fingerprint>]";
+    if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --member <id> [--key-change]";
+    if (sub === "rotate-key") return "Usage: prime fleets rotate-key <fleet-id> --space <name>";
+    return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|rotate-key|status> [args]";
   }
   if (topic === "devices") {
     if (sub === "connect") return "Usage: prime devices connect <device-id> [--token <t>] [--gateway <url>]";

@@ -103,6 +103,31 @@ describe("choosing which gateway a fleet command talks to", () => {
     }
   });
 
+  test("approving a new key sends its fingerprint, and declining one asks to keep the member", async () => {
+    const { fleetsApprove, fleetsRemove } = await import("../src/fleets");
+    const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async (url: string, init: { body: string }) => {
+      sent.push({ path: new URL(url).pathname, body: JSON.parse(init.body) });
+      return Response.json({ ok: true, removed: "dev-2" });
+    };
+    const out: string[] = [];
+    try {
+      const ctx = (sub: string, flags: Record<string, string | boolean>) =>
+        ({ config: config({ defaults: { gateway: "https://g.example", fleet_operator_token: "op" } }), configPath: "/nowhere", json: false, out: (l: string) => out.push(l), parsed: { positionals: ["fleets", sub, "acme"], flags: new Map<string, string | boolean>(Object.entries(flags)) } }) as never;
+      await fleetsApprove(ctx("approve", { member: "dev-2", key: "AbCdEf012345" }));
+      expect(sent[0]).toEqual({ path: "/fleets/acme/approve", body: { deviceId: "dev-2", key: "AbCdEf012345" } });
+      await fleetsRemove(ctx("remove", { member: "dev-2", "key-change": true }));
+      expect(sent[1]).toEqual({ path: "/fleets/acme/remove", body: { deviceId: "dev-2", keyChange: true } });
+      expect(out.join("\n")).toContain("declined the new key of");
+      expect(out.join("\n")).not.toContain("removed");
+      await fleetsRemove(ctx("remove", { member: "dev-2" }));
+      expect(sent[2]!.body).toEqual({ deviceId: "dev-2" });
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+  });
+
   test("the gateway origin never keeps a trailing slash", () => {
     const t = resolveFleetTarget(config(), { gateway: "https://slash.example/" });
     expect(t.gateway).toBe("https://slash.example");

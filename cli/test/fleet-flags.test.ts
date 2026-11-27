@@ -24,4 +24,20 @@ describe("the flags of `prime fleets`", () => {
     expect(() => parse("invite", "x", "--force")).toThrow(/unknown option/);
     expect(() => parse("agent", "start", "--watch")).toThrow(/unknown option/);
   });
+
+  test("`approve --key` and `remove --key-change` are accepted, each by its own command", () => {
+    const approve = parse("approve", "acme", "--member", "dev-1", "--key", "AAAAAAAAAAA=");
+    expect(str(approve, "member")).toBe("dev-1");
+    expect(str(approve, "key")).toBe("AAAAAAAAAAA=");
+    const remove = parse("remove", "acme", "--member", "dev-1", "--key-change");
+    expect(bool(remove, "key-change")).toBe(true);
+    expect(bool(parse("remove", "acme", "--member", "dev-1"), "key-change")).toBe(false);
+    expect(() => parse("approve", "acme", "--member", "dev-1", "--key-change")).toThrow(/unknown option/);
+    expect(() => parse("remove", "acme", "--member", "dev-1", "--key", "x")).toThrow(/unknown option/);
+  });
+
+  test("`rotate-key`, `pending` and the operator's token take the common flags", () => {
+    expect(str(parse("rotate-key", "acme", "--space", "work"), "space")).toBe("work");
+    expect(str(parse("pending", "acme", "--operator-token", "op"), "operator-token")).toBe("op");
+  });
 });

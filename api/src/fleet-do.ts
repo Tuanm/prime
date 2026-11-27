@@ -949,7 +949,7 @@ export class FleetDO implements DurableObject {
         }
         if (typeof body.key !== "string" || body.key === "") {
           out = Response.json(
-            { error: "this request is for a new key of a member: say which key you approve", hint: "pass its fingerprint (the KEY of the request: `prime fleets pending`, or the admin page)" },
+            { error: "this request is for a new key of a member: say which key you approve", hint: "pass its fingerprint (the KEY of the request: `prime fleets pending`, then `prime fleets approve <fleet> --member <id> --key <fingerprint>`, or the admin page)" },
             { status: 400 },
           );
           return;

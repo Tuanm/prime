@@ -157,7 +157,7 @@ function requireFleetId(raw: string): string {
 function failOn(status: number, json: any, what: string): void {
   if (status < 400) return;
   const message = typeof json?.error === "string" ? json.error : "request failed";
-  throw new CliError(what + ": " + message);
+  throw new CliError(what + ": " + message, typeof json?.hint === "string" ? json.hint : undefined);
 }
 
 function target(ctx: Ctx, spaceName?: string): FleetTarget {
@@ -457,13 +457,14 @@ export async function fleetsRemove(ctx: Ctx): Promise<void> {
   if (!deviceId) throw new UsageError("missing --member", "The device id to remove.");
   const t = target(ctx, spaceArg(ctx));
   // `--key-change` declines a member's request for another key and keeps the member.
-  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/remove", { deviceId, ...(bool(ctx.parsed, "key-change") ? { keyChange: true } : {}) });
-  failOn(res.status, res.json, "could not remove the member");
+  const keyChange = bool(ctx.parsed, "key-change");
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/remove", { deviceId, ...(keyChange ? { keyChange: true } : {}) });
+  failOn(res.status, res.json, keyChange ? "could not decline the new key" : "could not remove the member");
   if (ctx.json) {
-    printJson({ fleet: fleetId, removed: res.json.removed });
+    printJson({ fleet: fleetId, ...(keyChange ? { declined: deviceId } : { removed: res.json.removed }) });
     return;
   }
-  ctx.out(green("removed") + " " + deviceId + " from " + fleetId);
+  ctx.out(keyChange ? green("declined the new key of") + " " + deviceId + dim("  (it stays a member, with the key it had)") : green("removed") + " " + deviceId + " from " + fleetId);
 }
 
 export async function fleetsLeave(ctx: Ctx): Promise<void> {

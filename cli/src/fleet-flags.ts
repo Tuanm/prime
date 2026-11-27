@@ -25,7 +25,14 @@ const FLEET_JOIN_FLAGS: FlagSpec[] = [
 
 const FLEET_APPROVE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
-  flag("member", "string", "The member to approve or remove", { placeholder: "<id>" }),
+  flag("member", "string", "The member to approve", { placeholder: "<id>" }),
+  flag("key", "string", "For a member's request for a new key: the fingerprint of the key approved (the KEY of `prime fleets pending`)", { placeholder: "<fingerprint>" }),
+];
+
+const FLEET_REMOVE_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("member", "string", "The member to remove", { placeholder: "<id>" }),
+  flag("key-change", "boolean", "Decline the member's request for a new key, and keep the member"),
 ];
 
 const FLEET_SYNC_FLAGS: FlagSpec[] = [
@@ -46,7 +53,8 @@ const FLEET_AGENT_FLAGS: FlagSpec[] = [
 export function fleetFlagsFor(sub: string | undefined): FlagSpec[] {
   if (sub === "invite") return FLEET_INVITE_FLAGS;
   if (sub === "join") return FLEET_JOIN_FLAGS;
-  if (sub === "approve" || sub === "remove") return FLEET_APPROVE_FLAGS;
+  if (sub === "approve") return FLEET_APPROVE_FLAGS;
+  if (sub === "remove") return FLEET_REMOVE_FLAGS;
   if (sub === "sync") return FLEET_SYNC_FLAGS;
   if (sub === "agent") return FLEET_AGENT_FLAGS;
   return FLEET_FLAGS;
