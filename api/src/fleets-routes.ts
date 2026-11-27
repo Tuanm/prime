@@ -61,6 +61,8 @@ const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys"
  */
 const PAUSED_ACTIONS = new Set(["join", "bootstrap", "head/advance", "snapshot"]);
 const PAUSED_RETRY_MS = 60_000;
+/** How seldom the registry is told that a member of a paused fleet is alive. */
+const PAUSED_SEEN_MS = 60 * 60_000;
 
 function pausedAnswer(): Response {
   return Response.json(
@@ -366,11 +368,18 @@ async function knownDevices(env: Env): Promise<Set<string> | null> {
   }
 }
 
-/** Tell the registry that a device is still in use. */
-export async function markSeen(env: Env, deviceId: string): Promise<void> {
+/**
+ * Tell the registry that a device is still in use.
+ *
+ * `everyMs` is how seldom it is told: a device that is working is told once a minute, and one of a paused fleet,
+ * which only asks to find out whether it is resumed, once an hour. A device the registry has not heard from for
+ * ANON_IDLE_TTL_MS is collected, and a member of a fleet that is paused for longer than that would otherwise
+ * be gone, and unable to come back, when the operator resumes it.
+ */
+export async function markSeen(env: Env, deviceId: string, everyMs = 60_000): Promise<void> {
   const now = Date.now();
   const previous = lastSeen.get(deviceId) ?? 0;
-  if (now - previous < 60_000) return;
+  if (now - previous < everyMs) return;
   lastSeen.set(deviceId, now);
   try {
     const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
@@ -466,9 +475,11 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     const verdict = await deps.authorizeDevice(claimed);
     if (!verdict.ok) return verdict.response;
     caller = { admin: false, deviceId: claimed };
-    // A paused fleet is answered here, before anything that wakes an object: not
-    // the fleet's, and not the registry's (markSeen below).
+    // A paused fleet is answered here, before anything that wakes the fleet's object. The registry is told
+    // the device is alive all the same, but seldom (see `markSeen`): a paused fleet's members are not unused
+    // devices, and must not be collected as such while the operator has the fleet paused.
     if (deps.fleetPaused && action !== undefined && PAUSED_ACTIONS.has(action) && (await deps.fleetPaused(fleetId))) {
+      await markSeen(env, claimed, PAUSED_SEEN_MS);
       return pausedAnswer();
     }
     // The device is alive: it just proved it. Without this a device that
@@ -532,9 +543,14 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     headers.set("x-prime-fleet", fleetId);
     const reaped = await stub.fetch("https://fleet/reap", { method: "POST", headers });
     if (!reaped.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
-    const body = (await reaped.json()) as { members?: string[]; lastActivity?: number; created?: number };
+    const body = (await reaped.json()) as { members?: string[]; lastActivity?: number; created?: number; meta?: { disabled?: boolean } };
     const members = body.members ?? [];
     if (members.length === 0) return Response.json({ ok: true, gone: true, members: 0 });
+    // A paused fleet is the operator's to keep: its members are not asking, so the gateway forgets them and the
+    // fleet looks untouched, which is what an abandoned one looks like. Only the operator or the owner deletes it.
+    if (body.meta?.disabled === true) {
+      return Response.json({ error: "the fleet is paused, so it is kept", members: members.length }, { status: 409 });
+    }
     const known = await knownDevices(deps.env);
     if (known === null) {
       return Response.json(

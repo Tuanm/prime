@@ -1567,6 +1567,63 @@ describe("clearing away a fleet nobody can reach", () => {
   });
 });
 
+describe("a paused fleet is kept", () => {
+  const DAY = 24 * 60 * 60_000;
+
+  /** The Worker's routes for one fleet whose registry records which devices it was told are alive. */
+  async function pausedWorld() {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "anon-owner");
+    await bucket.put("fleets/acme/packs/" + "a".repeat(64), "sealed");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    const seen: string[] = [];
+    // After a week of the members' anonymous devices being left alone, the registry has collected them.
+    const registry = {
+      idFromName: () => "global",
+      get: () => ({
+        fetch: async (input: Request | string) => {
+          const u = new URL(typeof input === "string" ? input : input.url);
+          if (u.pathname === "/anon/seen") seen.push(u.searchParams.get("id")!);
+          if (u.pathname === "/map") return Response.json({ map: {}, anonymous: ["anon-stranger"] });
+          return Response.json({ ok: true });
+        },
+      }),
+    };
+    const stub = { fetch: (i: Request | string, init?: RequestInit) => doInstance.fetch(typeof i === "string" ? new Request(i, init) : i) };
+    const env = { BUCKET: bucket, FLEET: { idFromName: (n: string) => n, get: () => stub }, REGISTRY: registry } as never;
+    const route = async (action: string, device: string) => {
+      const url = new URL("https://gateway/fleets/acme/" + action);
+      return (await handleFleetRoutes({
+        request: new Request(url, { method: "POST", headers: { "x-prime-device": device, "x-device-token": "t" }, body: "{}" }),
+        env,
+        url,
+        cfg: {} as never,
+        authorizeDevice: async () => ({ ok: true as const }),
+        fleetPaused: async () => true,
+        unauthorized: () => new Response(null, { status: 401 }),
+      }))!;
+    };
+    return { state, bucket, seen, route };
+  }
+
+  test("a stranger cannot reap it however long it has been paused, nor however little the gateway knows of its members", async () => {
+    const { state, bucket, route } = await pausedWorld();
+    state.data.set("lastActivity", Date.now() - 8 * DAY);
+    state.data.set("created", Date.now() - 30 * DAY);
+    const res = await route("reap", "anon-stranger");
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("paused");
+    expect(state.data.get("members")).toBeDefined();
+    expect(bucket.objects.size).toBe(1);
+  });
+
+  test("a member that asks while the fleet is paused is still told to the registry as alive, once an hour, so that its device is not collected", async () => {
+    const { seen, route } = await pausedWorld();
+    for (let i = 0; i < 5; i++) expect((await route("bootstrap", "anon-hourly")).status).toBe(409);
+    expect(seen).toEqual(["anon-hourly"]);
+  });
+});
+
 describe("who runs fleets as the operator", () => {
   // The Worker's routes with a stub for the fleet object that records who the Worker said was calling.
   function ask(opts: { cfg: Record<string, unknown>; bearer?: string; device?: string; path: string; method?: string }) {
