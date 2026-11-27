@@ -737,13 +737,106 @@ describe("a member that goes while its publish is in flight, or is re-keyed", ()
       while (reached < 1) await new Promise((r) => setTimeout(r, 1));
       const two = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "fleets/acme/manifests/" + hex("b"), manifestHash: hex("b"), meta: { full: true } } });
       while (reached < 2) await new Promise((r) => setTimeout(r, 1));
-      expect(Object.keys(state.data.get("storing") as object).sort()).toEqual(["fleets/acme/manifests/" + hex("a"), "fleets/acme/manifests/" + hex("b")]);
+      const manifests = () => Object.values((state.data.get("storing") ?? {}) as Record<string, { manifestKey: string }>).map((v) => v.manifestKey).sort();
+      expect(manifests()).toEqual(["fleets/acme/manifests/" + hex("a"), "fleets/acme/manifests/" + hex("b")]);
       gates[1]!(); // the second's write is the one that loses or wins; whichever, the other's entry stays until it ends
       await new Promise((r) => setTimeout(r, 5));
-      expect(Object.keys((state.data.get("storing") as object) ?? {})).toContain("fleets/acme/manifests/" + hex("a"));
+      expect(manifests()).toContain("fleets/acme/manifests/" + hex("a"));
       gates[0]!();
       await Promise.all([one, two]);
       expect(state.data.get("storing")).toBeUndefined();
+    });
+
+    test("an identical publish sent again does not drop the protection of the first when it ends first", async () => {
+      const bucket = fakeBucket();
+      const { doInstance, state } = await fleetOfTwo(bucket);
+      const realPut = bucket.put;
+      const gates: Array<() => void> = [];
+      let calls = 0;
+      bucket.put = async (...args: Parameters<typeof realPut>) => {
+        const mine = ++calls;
+        await new Promise<void>((r) => gates.push(r));
+        if (mine === 2) throw new Error("refused"); // the retry's head write fails; the first's goes through
+        return realPut.apply(bucket, args);
+      };
+      const pack = "fleets/acme/packs/" + hex("p");
+      const body = { expectedSeq: 0, manifestKey: "fleets/acme/manifests/" + hex("a"), manifestHash: hex("a"), packKey: pack, meta: { full: true } };
+      const first = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body });
+      while (gates.length < 1) await new Promise((r) => setTimeout(r, 1));
+      const again = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body });
+      while (gates.length < 2) await new Promise((r) => setTimeout(r, 1));
+      expect(Object.keys(state.data.get("storing") as object)).toHaveLength(2);
+      gates[1]!();
+      expect((await again).status).toBe(409); // ends first
+      // The first is still writing its head: what it names is still not offered for deletion.
+      expect(Object.keys(state.data.get("storing") as object)).toHaveLength(1);
+      const asked = await call(doInstance, "/unreferenced", { caller: "device", device: "dev-owner", body: { keys: [pack] } });
+      expect(asked.json.keys).toEqual([]);
+      gates[0]!();
+      expect((await first).status).toBe(200);
+      expect(state.data.get("storing")).toBeUndefined();
+    });
+
+    describe("an object that died between writing the head and keeping the snapshot", () => {
+      const advanceBody = (c: string, expectedSeq: number) => ({ expectedSeq, manifestKey: "fleets/acme/manifests/" + hex(c), manifestHash: hex(c), packKey: "fleets/acme/packs/" + hex(c), extraKeys: ["fleets/acme/packs/" + hex("d")], meta: { full: true } });
+      /** The publish dies when it goes to write `recent`, after the head is in R2. */
+      async function crashed() {
+        const bucket = fakeBucket();
+        const { doInstance, state } = await fleetOfTwo(bucket);
+        const realPut = state.storage.put;
+        state.storage.put = async (key: string, value: unknown) => {
+          if (key === "recent") throw new Error("the object was reset");
+          return realPut.call(state.storage, key, value);
+        };
+        const dead = await call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: advanceBody("a", 0) }).catch(() => ({ status: 500 }));
+        state.storage.put = realPut;
+        return { doInstance, state, bucket, dead };
+      }
+      const kept = (state: { data: Map<string, unknown> }) => ((state.data.get("recent") ?? []) as string[]).flatMap((e) => e.split("\n"));
+      const aged = (state: { data: Map<string, unknown> }) => {
+        const storing = state.data.get("storing") as Record<string, { at: number }>;
+        for (const v of Object.values(storing)) v.at -= 5 * 60_000;
+      };
+
+      test("the next publish keeps the snapshot the head names", async () => {
+        const { doInstance, state, bucket } = await crashed();
+        expect(kept(state)).toEqual([]); // the crash point: head written, snapshot not kept
+        expect(Object.keys(state.data.get("storing") as object)).toHaveLength(1);
+        aged(state);
+        const next = await call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: advanceBody("b", 1) });
+        expect(next.status).toBe(200);
+        expect(kept(state)).toEqual(expect.arrayContaining(["fleets/acme/manifests/" + hex("a"), "fleets/acme/packs/" + hex("a"), "fleets/acme/manifests/" + hex("b")]));
+        expect(state.data.get("storing")).toBeUndefined();
+        expect(((state.data.get("index") ?? []) as Array<{ seq: number }>).map((e) => e.seq)).toEqual([1, 2]);
+        void bucket;
+      });
+
+      test("an alarm keeps it too, and what it names is not offered for deletion", async () => {
+        const { doInstance, state } = await crashed();
+        aged(state);
+        await doInstance.alarm();
+        expect(kept(state)).toContain("fleets/acme/manifests/" + hex("a"));
+        const asked = await call(doInstance, "/unreferenced", { caller: "device", device: "dev-owner", body: { keys: ["fleets/acme/packs/" + hex("a")] } });
+        expect(asked.json.keys).toEqual([]);
+      });
+
+      test("a publish that is still young is not settled from under its request", async () => {
+        const { doInstance, state } = await crashed();
+        await doInstance.alarm();
+        expect(kept(state)).toEqual([]);
+        expect(Object.keys(state.data.get("storing") as object)).toHaveLength(1);
+      });
+
+      test("an entry whose head write did not happen is let go, and keeps nothing", async () => {
+        const { doInstance, state } = await crashed();
+        // as if the write had not landed: the head names another snapshot
+        const storing = state.data.get("storing") as Record<string, { manifestKey: string }>;
+        for (const v of Object.values(storing)) v.manifestKey = "fleets/acme/manifests/" + hex("f");
+        aged(state);
+        await doInstance.alarm();
+        expect(kept(state)).toEqual([]);
+        expect(state.data.get("storing")).toBeUndefined();
+      });
     });
 
     test("an object whose storage holds the keys of a publish under the name of the requests (an earlier build) still lists and approves the requests", async () => {

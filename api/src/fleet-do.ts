@@ -101,8 +101,19 @@ interface LeftKey {
  * are out of the retained index (`2 * RECENT_SNAPSHOTS` behind the tip), so this is only reached by a
  * fleet that has had this many members come and go within that: far more than `MAX_MEMBERS`.
  */
-// A publish that has not finished storing after this long is taken to have died.
-const STORING_MAX_MS = 10 * 60_000;
+interface Storing {
+  manifestKey: string;
+  keys: string[];
+  seq: number;
+  headKey: string;
+  meta: Record<string, unknown>;
+  at: number;
+}
+
+// A publish still storing after this long is taken to have died, and what it left is settled (see `settleStoring`).
+const STORING_GRACE_MS = 60_000;
+// The most publishes recorded as storing at once; a longer list is of publishers that died, oldest let go.
+const STORING_MAX_ENTRIES = 64;
 const LEFT_KEYS_KEPT = 256;
 const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 };
 
@@ -244,6 +255,7 @@ export class FleetDO implements DurableObject {
   }
 
   private async onAlarm(): Promise<void> {
+    await this.settleStoring().catch(() => undefined);
     const raw = await this.state.storage.get<Lease>("lease");
     if (raw && raw.expiresAt + 250 > Date.now()) {
       await this.scheduleLeaseAlarm(raw.expiresAt);
@@ -1332,6 +1344,8 @@ export class FleetDO implements DurableObject {
     if (!held || held.holder !== caller.deviceId) return Response.json({ error: "not the lease holder" }, { status: 409 });
 
     const key = this.headKey(fleetId);
+    // A publish whose object died after it wrote the head and before it was kept is made good first.
+    await this.settleStoring();
     this.meter.r2("read");
     const current = await this.bucket().get(key);
     const etag = current?.etag;
@@ -1388,19 +1402,20 @@ export class FleetDO implements DurableObject {
     // objects no snapshot names (`unreferenced`) must not see them as that: the head is written to R2
     // first, and R2 is outside this object, so other requests run in between. A publish that is sent
     // again after it was already accepted names the same objects.
-    await this.startStoring(manifestKey, [manifestKey, packKey, ...extraKeys].filter(Boolean));
+    const stored = [manifestKey, packKey, ...extraKeys].filter(Boolean);
+    const token = await this.startStoring({ manifestKey, keys: stored, seq: next.seq, headKey: key, meta });
     let written: R2Object | null;
     try {
       this.meter.r2("write");
       written = await this.bucket().put(key, JSON.stringify(next), etag ? { onlyIf: { etagMatches: etag } } : { onlyIf: { etagDoesNotMatch: "*" } });
     } catch {
-      await this.endStoring(manifestKey);
+      await this.endStoring(token);
       return Response.json({ error: "head write refused" }, { status: 409 });
     }
     // A failed conditional write returns null rather than throwing: that is the
     // CAS losing the race, not an error.
     if (!written) {
-      await this.endStoring(manifestKey);
+      await this.endStoring(token);
       return Response.json({ error: "head changed" }, { status: 409 });
     }
     // The write above gave other requests room to run, and one of them may have removed this member. Its
@@ -1436,22 +1451,8 @@ export class FleetDO implements DurableObject {
     // Keep a bounded number of snapshots: more than the newest whole tree and
     // the changes after it, which is all a member far behind needs. The old
     // ones are of no use.
-    const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
-    recent.push([manifestKey, packKey, ...extraKeys].filter(Boolean).join("\n"));
-    const evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
-    await this.state.storage.put("recent", recent);
-    const kept = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
-    kept.push({ seq: next.seq, manifestKey, ...meta, sealed: meta.sealed === true });
-    await this.state.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
-    await this.endStoring(manifestKey);
-    for (const entry of evicted) {
-      for (const key of entry.split("\n")) {
-        if (!key) continue;
-        try {
-          await this.bucket().delete(key);
-        } catch {}
-      }
-    }
+    await this.keepSnapshot({ manifestKey, keys: stored, seq: next.seq, meta });
+    await this.endStoring(token);
 
     return Response.json({ ok: true, head: next });
   }
@@ -1488,27 +1489,84 @@ export class FleetDO implements DurableObject {
   }
 
   // What publishes in flight are storing, so that `unreferenced` does not offer it for deletion between
-  // the head being written and the snapshot being kept. One entry per publish (by its manifest), each let
-  // go by the publish that made it; an entry whose publisher died is let go after a few minutes.
-  private async startStoring(manifestKey: string, keys: string[]): Promise<void> {
-    const now = Date.now();
-    const storing = (await this.state.storage.get<Record<string, { keys: string[]; at: number }>>("storing")) ?? {};
-    for (const [k, v] of Object.entries(storing)) if (now - v.at > STORING_MAX_MS) delete storing[k];
-    storing[manifestKey] = { keys, at: now };
+  // the head being written and the snapshot being kept. One entry for each request, by a token of its own
+  // (an identical request sent again has the same manifest, and must not release the first's), each let go
+  // by the request that made it. An entry whose request died is settled by `settleStoring`.
+  private async startStoring(entry: Omit<Storing, "at">): Promise<string> {
+    const token = crypto.randomUUID();
+    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
+    storing[token] = { ...entry, at: Date.now() };
+    const oldest = Object.keys(storing).sort((a, b) => storing[a]!.at - storing[b]!.at);
+    for (const k of oldest.slice(0, Math.max(0, oldest.length - STORING_MAX_ENTRIES))) delete storing[k];
     await this.state.storage.put("storing", storing);
+    return token;
   }
 
-  private async endStoring(manifestKey: string): Promise<void> {
-    const storing = (await this.state.storage.get<Record<string, { keys: string[]; at: number }>>("storing")) ?? {};
-    if (!(manifestKey in storing)) return;
-    delete storing[manifestKey];
+  private async endStoring(token: string): Promise<void> {
+    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
+    if (!(token in storing)) return;
+    delete storing[token];
     if (Object.keys(storing).length === 0) await this.state.storage.delete("storing");
     else await this.state.storage.put("storing", storing);
   }
 
   private async storingKeys(): Promise<string[]> {
-    const storing = (await this.state.storage.get<Record<string, { keys: string[] }>>("storing")) ?? {};
+    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
     return Object.values(storing).flatMap((v) => v.keys);
+  }
+
+  // Keep a snapshot the head names: its objects in `recent` (with the oldest let go beyond the number kept) and
+  // its entry in the index. Safe to do twice for the same snapshot, which a request that died part way and the
+  // settling after it both do.
+  private async keepSnapshot(snap: { manifestKey: string; keys: string[]; seq: number; meta: Record<string, unknown> }): Promise<void> {
+    const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
+    const already = recent.some((entry) => entry.split("\n")[0] === snap.manifestKey);
+    let evicted: string[] = [];
+    if (!already) {
+      recent.push(snap.keys.join("\n"));
+      evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
+      await this.state.storage.put("recent", recent);
+    }
+    const kept = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    if (!kept.some((e) => e.manifestKey === snap.manifestKey)) {
+      kept.push({ seq: snap.seq, manifestKey: snap.manifestKey, ...snap.meta, sealed: snap.meta.sealed === true } as IndexEntry);
+      await this.state.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
+    }
+    for (const entry of evicted) {
+      for (const key of entry.split("\n")) {
+        if (!key) continue;
+        try {
+          await this.bucket().delete(key);
+        } catch {}
+      }
+    }
+  }
+
+  // Publishes that were storing a while ago and never said they were done: their object died between writing
+  // the head and keeping the snapshot. When the head is the snapshot they were storing, it is kept now, so that
+  // the objects the head names are always among the ones kept; when it is not, the write did not happen and the
+  // entry is let go. An entry whose head cannot be read stays for the next time.
+  private async settleStoring(): Promise<void> {
+    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
+    const now = Date.now();
+    const stale = Object.entries(storing).filter(([, v]) => now - v.at > STORING_GRACE_MS);
+    if (stale.length === 0) return;
+    const heads = new Map<string, string | undefined | null>();
+    for (const [token, entry] of stale) {
+      if (!heads.has(entry.headKey)) {
+        try {
+          this.meter.r2("read");
+          const obj = await this.bucket().get(entry.headKey);
+          heads.set(entry.headKey, obj ? ((await obj.json()) as Head).manifestKey : undefined);
+        } catch {
+          heads.set(entry.headKey, null);
+        }
+      }
+      const named = heads.get(entry.headKey);
+      if (named === null) continue;
+      if (named === entry.manifestKey) await this.keepSnapshot(entry);
+      await this.endStoring(token);
+    }
   }
 
   // Whether a stored manifest carries a seal; undefined when it cannot be read (the gate then does not fire:
