@@ -558,8 +558,17 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
 const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /** Whether a path is one of the directories the fleet leaves alone, or inside one. */
-function isLeftAlone(rel: string, keep: string[]): boolean {
-  return keep.some((k) => rel === k || rel.startsWith(k + "/"));
+/**
+ * Whether a path is inside one of the directories the fleet leaves alone. Where the file system
+ * folds case (or normalisation), `Lib` and `lib` are one directory, so they are compared that way.
+ */
+export function isLeftAlone(rel: string, keep: string[], fold = false): boolean {
+  const same = fold ? (a: string) => a.normalize("NFC").toLowerCase() : (a: string) => a;
+  const path = same(rel);
+  return keep.some((k) => {
+    const dir = same(k);
+    return path === dir || path.startsWith(dir + "/");
+  });
 }
 
 // The paths the fleet put in the work tree before and takes out now.
@@ -772,7 +781,7 @@ export async function applyCommit(
   // What goes is worked out from the two trees, and goes first: git's own
   // order is removals, then writes. A name that only changes case is then
   // removed before the new spelling is written, never after it.
-  const gone = (await removedBetween(gitDir, env, previous, commit)).filter((rel) => !isLeftAlone(rel, keep));
+  const gone = (await removedBetween(gitDir, env, previous, commit)).filter((rel) => !isLeftAlone(rel, keep, foldsCase(work)));
   for (const rel of gone) removeTracked(work, rel);
   if (gone.length > 0) {
     await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, gone.join("\u0000") + "\u0000");
@@ -1063,7 +1072,7 @@ export async function localChanges(
     if (finished !== null) {
       const held = await gitText(gitDir, ["rev-parse", finished + "^{tree}"], env);
       const keep = [...left];
-      return (await differing(held)).filter((path) => !isLeftAlone(path, keep));
+      return (await differing(held)).filter((path) => !isLeftAlone(path, keep, foldsCase(work)));
     }
     // An apply that was stopped half way left files of the snapshot it was writing beside
     // those of the one before: a file that is the same as either is the fleet's. Only what is
@@ -1074,7 +1083,7 @@ export async function localChanges(
       paths = paths.filter((p) => notTarget.has(p));
     }
     const keep = [...left];
-    return paths.filter((path) => !isLeftAlone(path, keep));
+    return paths.filter((path) => !isLeftAlone(path, keep, foldsCase(work)));
   } finally {
     rmSync(indexFile, { force: true });
   }

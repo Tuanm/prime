@@ -9,6 +9,7 @@ import {
   EMPTY_TREE,
   finishedApply,
   foldsCase,
+  isLeftAlone,
   isLockConflict,
   waitForIndexLock,
   applyCommit,
@@ -1456,5 +1457,20 @@ describe("settling the work tree", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the directories the fleet leaves alone", () => {
+  test("are matched as the file system does: where case folds, Lib is lib", () => {
+    expect(isLeftAlone("lib/a.js", ["lib"])).toBe(true);
+    expect(isLeftAlone("library/a.js", ["lib"])).toBe(false);
+    // On a file system that tells the two apart, they are two directories.
+    expect(isLeftAlone("Lib/a.js", ["lib"])).toBe(false);
+    // On one that does not, the nested repository is the same directory under either spelling.
+    expect(isLeftAlone("Lib/a.js", ["lib"], true)).toBe(true);
+    expect(isLeftAlone("LIB", ["lib"], true)).toBe(true);
+    expect(isLeftAlone("Library/a.js", ["lib"], true)).toBe(false);
+    // And a composed and a decomposed spelling of one name are one name.
+    expect(isLeftAlone("Cafe\u0301/a", ["Caf\u00e9"], true)).toBe(true);
   });
 });
