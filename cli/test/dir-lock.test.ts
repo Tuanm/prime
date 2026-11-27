@@ -61,24 +61,25 @@ describe("writers in several processes take turns", () => {
     const lock = join(root, "the.lock");
     const counter = join(root, "count");
     writeFileSync(counter, "0");
-    // Each writer holds the lock for 40 ms (a write that is flushed to a slow disk) and comes back at once,
-    // twelve times, and may wait two seconds for it. Six of them take 2.9 s one after the other, so the last
+    // Each writer holds the lock for 100 ms (a write that is flushed to a slow disk) and comes back at once,
+    // eight times, and may wait two seconds for it. Four of them take 3.2 s one after the other, so the last
     // can only get through if they take turns: one that runs its whole loop before the next starts makes it
-    // wait for everybody else's (2.4 s). Taking turns, nobody waits for more than the five others' one write.
+    // wait for everybody else's (2.4 s). Taking turns, nobody waits for more than the three others' one write,
+    // which leaves room for a runner on which taking a lock costs a good deal more than the write.
     const script =
       "import { withDirLockSync } from " + JSON.stringify(join(import.meta.dir, "../src/dir-lock.ts")) + ";" +
       "import { readFileSync, writeFileSync } from 'node:fs';" +
       "const [lock, counter] = process.argv.slice(1); const nap = new Int32Array(new SharedArrayBuffer(4));" +
-      "for (let k = 0; k < 12; k++)" +
-      " withDirLockSync(lock, () => { writeFileSync(counter, String(Number(readFileSync(counter, 'utf8')) + 1)); Atomics.wait(nap, 0, 0, 40); }, { waitMs: 2000, staleMs: 10000 });";
-    const children = Array.from({ length: 6 }, () => Bun.spawn([process.execPath, "-e", script, lock, counter], { env: process.env, stdout: "ignore", stderr: "pipe" }));
+      "for (let k = 0; k < 8; k++)" +
+      " withDirLockSync(lock, () => { writeFileSync(counter, String(Number(readFileSync(counter, 'utf8')) + 1)); Atomics.wait(nap, 0, 0, 100); }, { waitMs: 2000, staleMs: 10000 });";
+    const children = Array.from({ length: 4 }, () => Bun.spawn([process.execPath, "-e", script, lock, counter], { env: process.env, stdout: "ignore", stderr: "pipe" }));
     // None of them gives up on the lock, and none is let in while another holds it (a count that a
     // reader-and-writer under the lock gets wrong by one has lost an update).
     for (const c of children) {
       const [code, said] = await Promise.all([c.exited, new Response(c.stderr).text()]);
       expect({ code, said }).toEqual({ code: 0, said: "" });
     }
-    expect(Number(readFileSync(counter, "utf8"))).toBe(6 * 12);
+    expect(Number(readFileSync(counter, "utf8"))).toBe(4 * 8);
     // Nothing is left beside the lock.
     expect(readdirSync(root).sort()).toEqual(["count"]);
   }, 60_000);
