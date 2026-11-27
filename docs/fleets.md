@@ -532,7 +532,10 @@ with the same.
   systemd merges it: from the user's directory and the machine's (`/etc/systemd/user`, `/run`,
   `/usr/lib`, in systemd's order of priority, by file name, a file of the same name in a higher
   directory replacing the lower one), so `systemctl --user edit` and an administrator's drop-in are
-  both followed.
+  both followed. Not read: the directories named by `$XDG_CONFIG_DIRS` beyond `/etc/xdg` and by
+  `$XDG_DATA_DIRS`, generator output, and the drop-ins that systemd applies to a whole type
+  (`service.d/`) or a name prefix (`prime-.service.d/`); an `ExecStart=` set there is not seen, and the
+  service is then taken for the default configuration's.
 - One agent runs per configuration: a second one that is started exits, saying who holds the
   lock (`fleet-agent/agent.lock`, which the running agent touches every few seconds). A stopping
   agent is given ten seconds to let go. The lock names its holder, and where the process list
