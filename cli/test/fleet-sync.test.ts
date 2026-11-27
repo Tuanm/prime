@@ -441,7 +441,8 @@ describe("what leaves the work tree is decided by the two trees", () => {
   });
 
   test("the diff names exactly the paths the fleet dropped, whatever they are called", async () => {
-    const odd = "dir with space/it's \"q\" é.txt";
+    // A double quote cannot be in a Windows file name; the space, the apostrophe and the accent can.
+    const odd = process.platform === "win32" ? "dir with space/it's q é.txt" : "dir with space/it's \"q\" é.txt";
     const r = await replicaOf({ "keep.txt": "k", [odd]: "x", "gone.txt": "g", "sub/gone2.txt": "g2" });
     try {
       rmSync(join(r.work, "gone.txt"));

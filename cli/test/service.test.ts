@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
 import { effectiveCodeMcpArgv, serviceEnv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
@@ -268,13 +268,15 @@ describe("which configuration a service runs", () => {
 
   test("a service that runs another configuration is not installed for this one", () => {
     const status = { installed: true, running: true, where: "w", pid: 42 };
-    expect(bindServiceStatus(status, "/cfg/default.yaml", "/cfg/default.yaml")).toMatchObject({ installed: true, pid: 42 });
-    const other = bindServiceStatus(status, "/cfg/default.yaml", "/cfg/other.yaml");
+    // Paths as this platform writes them: "/cfg/x" is `D:\cfg\x` on Windows, which is what the commands pass.
+    const abs = (p: string): string => resolve(p);
+    expect(bindServiceStatus(status, abs("/cfg/default.yaml"), abs("/cfg/default.yaml"))).toMatchObject({ installed: true, pid: 42 });
+    const other = bindServiceStatus(status, abs("/cfg/default.yaml"), abs("/cfg/other.yaml"));
     expect(other.installed).toBe(false);
     expect(other.running).toBe(false);
     expect(other.pid).toBeUndefined();
     // A definition that does not say is taken as it is (an older install).
-    expect(bindServiceStatus(status, undefined, "/cfg/other.yaml").installed).toBe(true);
+    expect(bindServiceStatus(status, undefined, abs("/cfg/other.yaml")).installed).toBe(true);
   });
 
   test("the service is installed with an absolute path", () => {
@@ -337,8 +339,9 @@ describe("which configuration a service runs", () => {
   });
 
   test("a systemd drop-in that overrides ExecStart decides which configuration the service runs", () => {
+    // The spec writes the configuration as an absolute path of the platform it is made on.
     const unit = renderSystemdUnit(fleetAgentSpec("/cfg/a.yaml", "linux"));
-    expect(parseSystemdConfig(unit)).toBe("/cfg/a.yaml");
+    expect(parseSystemdConfig(unit)).toBe(resolve("/cfg/a.yaml"));
     // `ExecStart=` clears the unit's, the next one is the command; with no reset the last one still wins (as systemd's, for a simple service).
     expect(parseSystemdConfig(unit + '\n[Service]\nExecStart=\nExecStart="/bin/prime" "__fleet-agent" "--config" "/cfg/b.yaml"\n')).toBe("/cfg/b.yaml");
     expect(parseSystemdConfig(unit + '\n[Service]\nExecStart="/bin/prime" "--config" "/cfg/c.yaml"\n')).toBe("/cfg/c.yaml");
@@ -375,7 +378,7 @@ describe("which configuration a service runs", () => {
         mkdirSync(join(dir, FLEET_AGENT_NAME + ".service.d"), { recursive: true });
         writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", file), '[Service]\nExecStart=\nExecStart="/bin/prime" "__fleet-agent" "--config" "' + config + '"\n');
       };
-      expect(readServiceDefinition("linux", identity, home, {}, roots)).toEqual({ config: "/cfg/a.yaml" });
+      expect(readServiceDefinition("linux", identity, home, {}, roots)).toEqual({ config: resolve("/cfg/a.yaml") });
       dropIn(machine, "10-machine.conf", "/cfg/machine.yaml");
       expect(readServiceDefinition("linux", identity, home, {}, roots)).toEqual({ config: "/cfg/machine.yaml" });
       // Files merge by name, whichever directory they are in: the later name wins.
