@@ -432,6 +432,91 @@ describe("a member that comes back with a new key", () => {
   });
 });
 
+describe("a key change and a removal at the same moment", () => {
+  // An object that serialises what runs in blockConcurrencyWhile, as the runtime does (the other stand-ins run it at once).
+  function serialisedDo(bucket: ReturnType<typeof fakeBucket>) {
+    const state = fakeState();
+    let tail: Promise<unknown> = Promise.resolve();
+    const lock = <T,>(fn: () => Promise<T>): Promise<T> => {
+      const run = tail.then(fn);
+      tail = run.then(() => undefined, () => undefined);
+      return run;
+    };
+    const doInstance = new FleetDO({ storage: state.storage, blockConcurrencyWhile: lock } as never, { BUCKET: bucket } as never);
+    return { doInstance, state };
+  }
+
+  test("a removal that commits while a proven key change waits on the head is not undone by it", async () => {
+    const bucket = fakeBucket();
+    const { doInstance, state } = serialisedDo(bucket);
+    await makeFleet(doInstance, "owner-1");
+    const old = memberKey();
+    const invite = await call(doInstance, "/invite", { caller: "device", device: "owner-1", body: {} });
+    await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: invite.json.code, pubkey: old.publicKey } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
+    const objectKey = (await call(doInstance, "/role", { caller: "device", device: "member-1", method: "GET" })).json.keyProofKey as string;
+    const next = memberKey();
+
+    // The head is read once before the roster and once when the old key is recorded as left: the second is held.
+    let reads = 0;
+    let reached!: () => void;
+    const held = new Promise<void>((r) => (reached = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const get = bucket.get.bind(bucket);
+    bucket.get = (async (key: string) => {
+      if (key.endsWith("/head") && ++reads === 2) {
+        reached();
+        await gate;
+      }
+      return get(key);
+    }) as never;
+
+    const bootstrap = call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: next.publicKey, keyProof: keyProof(old, objectKey, next.publicKey), seals: true } });
+    await held;
+    const removal = call(doInstance, "/remove", { caller: "device", device: "owner-1", body: { deviceId: "member-1" } });
+    // Long enough for a removal that is not held back to commit.
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    await Promise.all([bootstrap, removal]);
+    expect(Object.keys(state.data.get("members") as object)).not.toContain("member-1");
+  });
+
+  test("a member that was removed is refused, whatever its key", async () => {
+    const { doInstance } = await fleetWithKeyedMember();
+    await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
+    expect((await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: "B".repeat(43) + "=" } })).status).toBe(403);
+  });
+});
+
+describe("the fleet object's key for proofs", () => {
+  test("a failure to make it is not kept: the next ask tries again", async () => {
+    const { doInstance, state } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    const put = state.storage.put;
+    state.storage.put = (async (k: string, v: unknown) => {
+      if (k === "proofKey") throw new Error("storage is busy");
+      return put(k, v);
+    }) as never;
+    expect((await call(doInstance, "/role", { caller: "device", device: "owner-1", method: "GET" })).json.keyProofKey).toBeUndefined();
+    state.storage.put = put;
+    const later = (await call(doInstance, "/role", { caller: "device", device: "owner-1", method: "GET" })).json.keyProofKey as string;
+    expect(Buffer.from(later, "base64").length).toBe(32);
+    expect((state.data.get("proofKey") as { publicKey: string }).publicKey).toBe(later);
+  });
+
+  test("a deleted fleet's key is not the next fleet's of the name", async () => {
+    const { doInstance } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    const first = (await call(doInstance, "/role", { caller: "device", device: "owner-1", method: "GET" })).json.keyProofKey;
+    await call(doInstance, "/delete", { caller: "admin", device: "operator" });
+    await makeFleet(doInstance, "owner-1");
+    const second = (await call(doInstance, "/role", { caller: "device", device: "owner-1", method: "GET" })).json.keyProofKey;
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+  });
+});
+
 describe("what a member says it has applied", () => {
   async function fleetAtSeq(seq: number) {
     const made = await fleetWithKeyedMember();

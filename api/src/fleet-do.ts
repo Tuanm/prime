@@ -411,6 +411,11 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("index");
     await this.state.storage.delete("recent");
     await this.state.storage.delete("ownerSeenAt");
+    // The next fleet of the name has a key pair of its own for key-change proofs.
+    await this.state.storage.delete("proofKey");
+    await this.state.storage.delete("proofNonces");
+    await this.state.storage.delete("lastActivity");
+    this.proofKeyMemo = undefined;
     await this.deleteStored(fleetId);
     // The fleet is gone, so the registry should stop listing it.
     await this.registerWithRegistry(fleetId, false);
@@ -709,8 +714,8 @@ export class FleetDO implements DurableObject {
 
   // The operator, or the owner of this fleet.
   //
-  // The operator holds the gateway token, which is the authority of the whole
-  // deployment. The owner is the device that created the fleet, and it runs
+  // The operator is what the Worker says is one: the fleet operator token, or the admin page behind
+  // Access. The owner is the device that created the fleet, and it runs
   // its own fleet: a member it invited would have no way to admit anyone if
   // only the operator could.
   private async requireOperatorOrOwner(caller: Caller): Promise<Response | null> {
@@ -1691,7 +1696,8 @@ export class FleetDO implements DurableObject {
 
   /** The object's own key pair for key-change proofs, made on first use; null where the runtime cannot make one. */
   private proofKey(): Promise<{ publicKey: string; privateKey: CryptoKey } | null> {
-    this.proofKeyMemo ??= (async () => {
+    if (this.proofKeyMemo) return this.proofKeyMemo;
+    const made: Promise<{ publicKey: string; privateKey: CryptoKey } | null> = (async () => {
       try {
         // "X25519" is a WebCrypto algorithm in the Workers runtime and in Bun; the lib types predate it.
         const algo = { name: "X25519" } as never;
@@ -1710,7 +1716,12 @@ export class FleetDO implements DurableObject {
         return null;
       }
     })();
-    return this.proofKeyMemo;
+    this.proofKeyMemo = made;
+    // A failure is not kept: the next ask tries again (a key pair that could not be made or stored is not one a member was told of).
+    void made.then((k) => {
+      if (k === null && this.proofKeyMemo === made) this.proofKeyMemo = undefined;
+    });
+    return made;
   }
 
   /** Whether `proof` shows that its sender holds the private half of `oldPubkey` and means `newPubkey` for this device. */
