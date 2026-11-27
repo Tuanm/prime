@@ -1886,3 +1886,32 @@ describe("a state file from an older build", () => {
     }
   });
 });
+
+describe("the beat of a replica that waits for the lease", () => {
+  test("wakes the round when it can take the lease now, and leaves it asleep when it is another's turn", async () => {
+    const { heartbeat } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      await w.publishNext();
+      const s = await space(w, "r1", { connected: false });
+      w.gateway.primary = ""; // the lease is free, and r1 is behind
+      w.gateway.applied.set("r1", 0);
+      let woken = 0;
+      s.loop.lastBootstrap = 1;
+      // Another replica is catching up and has the claim: r1 is told to wait for it.
+      w.gateway.claim = { device: "someone-else", since: Date.now(), until: Date.now() + 20_000, queue: [] };
+      expect(await heartbeat(s.loop as never, () => void woken++, 10_000_000)).toBe(true);
+      expect(s.loop.claim).toBe(true);
+      expect(s.loop.claimAt).toBeGreaterThan(Date.now() + 5_000);
+      expect(woken).toBe(0);
+      // Nobody has it: r1 may start now.
+      w.gateway.claim = null;
+      s.loop.lastBootstrap = 1;
+      expect(await heartbeat(s.loop as never, () => void woken++, 20_000_000)).toBe(true);
+      expect(s.loop.claimAt).toBeLessThanOrEqual(Date.now());
+      expect(woken).toBe(1);
+    } finally {
+      finish(w);
+    }
+  });
+});

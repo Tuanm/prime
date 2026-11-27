@@ -853,7 +853,9 @@ export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number =
     loop.beatRetryMs = renewalRetryMs(err, loop.leaseMs);
     return false;
   }
-  if (loop.claim) wake();
+  // Only a claim that can be acted on now wakes the round: one that has to wait for another's turn would
+  // wake it for a round that does nothing.
+  if (loop.claim && Date.now() >= loop.claimAt) wake();
   return true;
 }
 
