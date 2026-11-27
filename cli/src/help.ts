@@ -323,6 +323,12 @@ That happens on every run, not only on the run that installed something: a space
 can be a version behind because the CLI was updated by a build that predates
 this rule. 'already up to date' still means "and the spaces are now too".
 
+When it installed something, the fleet agent of this configuration (the one in
+'prime fleets agent status') is restarted too, so that it runs the new build and
+not the one it started from: through its service if it has one, otherwise
+stopped and started again with its saved settings. Only that agent is touched,
+and the output says so. If it cannot be restarted, the output says how to.
+
   current   26.10.3
   latest    26.10.4
   installed 26.10.4 -> /Users/you/.local/bin/prime

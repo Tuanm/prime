@@ -48,6 +48,7 @@ import {
   fleetsTrust,
 } from "./fleets.ts";
 import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
+import type { AgentRestart } from "./fleet-daemon.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
@@ -443,8 +444,22 @@ async function main(argv: string[]): Promise<void> {
         version: str(ctx.parsed, "release-version"),
         to: str(ctx.parsed, "to"),
       });
-      if (ctx.json) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
+      // The fleet agent that is running keeps the build it started from: it is restarted so that it, and the
+      // commands that work beside it, are of one build. Only this configuration's agent is touched.
+      let agentRestart: AgentRestart | { error: string } = { restarted: false };
+      if (outcome.updated) {
+        const { restartFleetAgentAfterUpdate } = await import("./fleet-daemon.ts");
+        agentRestart = await restartFleetAgentAfterUpdate(ctx.configPath).catch((err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }));
+      }
+      if (ctx.json) process.stdout.write(`${JSON.stringify({ ...outcome, ...("error" in agentRestart ? { agent_restart_error: agentRestart.error } : agentRestart.restarted ? { agent_restarted: agentRestart.via } : {}) }, null, 2)}\n`);
       else process.stdout.write(`${renderUpdate(outcome)}\n`);
+      if (!ctx.json) {
+        if ("error" in agentRestart) {
+          ctx.note(`could not restart the fleet agent of ${ctx.configPath}: ${agentRestart.error}; restart it with 'prime fleets agent start' so that it runs the new build`);
+        } else if (agentRestart.restarted) {
+          ctx.note(`restarted the fleet agent of ${ctx.configPath} (pid ${agentRestart.pid}, ${agentRestart.via === "service" ? "through its service" : "started again with its saved settings"}) so that it runs the new build; no other agent was touched`);
+        }
+      }
       // The spaces run their image inside a container, which `prime update` did
       // not touch, and an
       // update that says "already up to date" still has spaces to move: they

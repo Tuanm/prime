@@ -581,6 +581,40 @@ async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: n
   }
 }
 
+/** What `restartFleetAgentAfterUpdate` did. */
+export type AgentRestart = { restarted: false } | { restarted: true; via: "service" | "direct"; pid: number };
+
+/**
+ * Restart the fleet agent of this configuration, if one is running, so that it runs the build that was just
+ * installed. An update replaces the program on disk and leaves the agent running the one it started from, and
+ * for as long as it does, old and new builds are both at work on the same state (and on the same locks).
+ *
+ * Only this configuration's agent is touched: another configuration's agent has a state of its own. A
+ * service's agent is restarted through its manager; one that nobody supervises is stopped (it may be
+ * finishing a round, and is waited for) and started again with the settings that were saved for it.
+ */
+export async function restartFleetAgentAfterUpdate(
+  configPath: string,
+  service: AgentServiceHooks = agentServiceFor(configPath),
+): Promise<AgentRestart> {
+  const existing = runningAgent(configPath);
+  if (!existing) return { restarted: false };
+  const waitMs = service.stopWaitMs ?? STOP_WAIT_MS;
+  if (service.installed() && service.pid() === existing.pid) {
+    if (!service.restart()) throw new CliError("the service manager would not restart the fleet agent (pid " + existing.pid + ")");
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const state = runningAgent(configPath);
+      if (state && state.pid !== existing.pid) return { restarted: true, via: "service", pid: state.pid };
+      if (Date.now() > deadline) throw new CliError("the fleet agent did not come back after the service was restarted");
+      await Bun.sleep(100);
+    }
+  }
+  await stopAndWait(configPath, existing, waitMs);
+  const state = await ensureFleetAgent(configPath, {}, service);
+  return { restarted: true, via: "direct", pid: state.pid };
+}
+
 /**
  * Install the agent as a login service. An agent that is already running is stopped first and
  * waited for: the service starts its own, and two of them would act as the primary for the

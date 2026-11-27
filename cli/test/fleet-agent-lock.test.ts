@@ -17,6 +17,7 @@ import {
   installFleetAgent,
   ownsAgentState,
   readAgentSettings,
+  restartFleetAgentAfterUpdate,
   runFleetAgent,
   stopFleetAgent,
   managerHolds,
@@ -611,6 +612,70 @@ describe("switching the replica mode of a running agent", () => {
     for (let i = 0; i < 3; i++) expect((await ensureFleetAgent(configPath, {}, service)).pid).toBe(mine.pid);
     expect(() => process.kill(mine.pid, 0)).not.toThrow();
     expect(asked).toBe(0);
+  });
+
+  test("after an update the agent of the service is restarted by its manager, and only that one", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const other = join(root, "elsewhere", "config.json");
+    const mine = await fakeAgent();
+    const theirs = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    running(other, theirs.pid, "lazy");
+    const restarts = { n: 0 };
+    const result = await restartFleetAgentAfterUpdate(configPath, hooks(restarts, configPath, "lazy", 512, mine.pid));
+    expect(restarts.n).toBe(1);
+    expect(result.restarted && result.via).toBe("service");
+    expect(result.restarted && result.pid).not.toBe(mine.pid);
+    // Another configuration's agent was not touched, nor was this one's signalled: the manager does the restart.
+    expect(() => process.kill(theirs.pid, 0)).not.toThrow();
+    expect(() => process.kill(mine.pid, 0)).not.toThrow();
+  });
+
+  test("after an update an agent that nobody supervises is stopped and started again with its saved settings", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    running(configPath, old.pid, "mirror", 64);
+    mkdirp(fleetAgentDir(configPath));
+    writeFileSync(agentSettingsPath(configPath), JSON.stringify({ replica: "mirror", cacheMb: 64 }));
+    let spawned = 0;
+    const result = await restartFleetAgentAfterUpdate(configPath, {
+      installed: () => false,
+      pid: () => undefined,
+      restart: () => false,
+      stopWaitMs: 3000,
+      spawnAgent: () => {
+        spawned++;
+        running(configPath, plainAgent().pid, "mirror", 64);
+      },
+    });
+    expect(spawned).toBe(1);
+    expect(result.restarted && result.via).toBe("direct");
+    // The old one is gone before the new one was started.
+    expect(isFleetAgentProcess(old.pid, fleetAgentDir(configPath))).toBe(false);
+  });
+
+  test("after an update with no agent running nothing is started", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    let spawned = 0;
+    const restarts = { n: 0 };
+    const result = await restartFleetAgentAfterUpdate(configPath, { ...hooks(restarts, configPath, "lazy"), spawnAgent: () => void spawned++ });
+    expect(result).toEqual({ restarted: false });
+    expect(spawned).toBe(0);
+    expect(restarts.n).toBe(0);
+  });
+
+  test("after an update a manager that will not restart the agent is an error that says so, and the agent is left running", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    await expect(
+      restartFleetAgentAfterUpdate(configPath, { installed: () => true, pid: () => mine.pid, restart: () => false, stopWaitMs: 300 }),
+    ).rejects.toThrow(/would not restart/);
+    expect(() => process.kill(mine.pid, 0)).not.toThrow();
   });
 
   test("a settings change that cannot reach the manager of an installed service leaves the running agent alone, and says why", async () => {
