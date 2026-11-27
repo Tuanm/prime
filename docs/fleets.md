@@ -297,13 +297,18 @@ helps can still read what it was sent before it was removed, as it always could.
 
 What a credential on its own can no longer do, and what the gateway still can.
 
-- **A device's token cannot put a key of its own on the roster.** The token of a space is a short code (an
+- **A member's device token cannot replace the key of that member.** The token of a space is a short code (an
   anonymous device's is six characters), which the space also keeps in its environment. The fleet takes a
   member's new key only on a proof made with the member's old private key (checked by the fleet object, which
-  has an X25519 key pair of its own), or when the operator or the owner approves it. A member cannot report
-  an `applied` sequence past the head either, so it cannot take the lease without catching up. A request for a
-  new key shows its fingerprint (`prime fleets pending`, the admin page), to compare with what the member's own
-  machine prints before approving.
+  has an X25519 key pair of its own), or when the operator or the owner approves it. A request for a new key
+  shows its fingerprint (`prime fleets pending`, the admin page), to compare with what the member's own machine
+  prints before approving. What this does not cover: **the owner's device token** is the owner's authority over
+  its fleet, so it can still invite a device of its own and admit it (a new member, with a key of its own),
+  and it can approve the request of another member; it cannot approve a new key for the owner itself, nor
+  replace the owner's key without the old key's proof, since that takes the operator. A member's `applied`
+  sequence is held to the head, not below it: a member can still report exactly `head.seq` without having
+  taken that snapshot in, and so can be handed the lease at the head; what it cannot do is report a sequence
+  the fleet has not published.
 - **The gateway token does not run fleets.** Every machine and client of the gateway holds it. The operator
   has `FLEET_OPERATOR_TOKEN`.
 - **The gateway itself is not stopped by either.** It runs the fleet object, so it can still write the roster
@@ -667,7 +672,7 @@ What is deliberately not done, so that nobody has to find it out:
   has one request waiting for the operator, and a later request from the same device replaces it. An operator
   that approves without comparing the fingerprint with the one the member's own machine prints (`prime fleets
   rotate-key` prints it, and so does the refusal the agent reports for a member whose key waits) approves whoever wrote last. `prime fleets approve --key
-  <fingerprint>` approves exactly the key that was read, and the gateway requires it: an approval of a new key without it, or with another, is refused, and the device that asked cannot approve its own request (not even the owner: the operator does).
+  <fingerprint>` approves exactly the key that was read, and the gateway requires it: an approval of a new key without it, or with another, is refused, and the device that asked cannot approve its own request, the owner's included, so a request made with a stolen owner token still waits for the operator. What a stolen owner token can do is what the owner can: invite and admit devices of its own, remove members, delete the fleet, and read what the fleet's members are sent from then on (a device it admits gets the next snapshots). It cannot replace the owner's own key without the operator, and it cannot read what was sealed before.
 - **A member that lost its key needs the operator.** Its new key waits, and until it is approved the member
   takes no place in the fleet.
 - **Rollback and split views are not detected.** A member cannot know about a newer head it was never
@@ -775,7 +780,7 @@ you already run (the released 26.11.49 included); none of the changes below need
   to set) until you set the secret on the gateway - `npx wrangler secret put FLEET_OPERATOR_TOKEN`, a random
   value that is not the gateway token - and give the same value to the operator's machine
   (`PRIME_FLEET_OPERATOR_TOKEN`, `--operator-token`, or `fleet_operator_token` under `defaults` in the
-  config; the last two go only to the gateway the machine is set up with, not to one a space names for itself). A value equal to `GATEWAY_TOKEN` or `DEVICE_TOKEN` is not accepted as the operator's, and the refusal says so. The CLI that has the new option is this release's; an older `prime` cannot send it as the
+  config; the environment variable and the config field go only to the gateway the machine is set up with, not to one a space names for itself, while the flag goes where the command goes). A value equal to `GATEWAY_TOKEN` or `DEVICE_TOKEN` is not accepted as the operator's, and the refusal says so. The CLI that has the new option is this release's; an older `prime` cannot send it as the
   operator (it sends the gateway token), but a fleet's owner device works with any build. **A gateway with no
   `GATEWAY_TOKEN`** (the admin page and the owner device are the operator there) **needs nothing**: it had no
   token operator, and has none now. The admin page is unchanged.
