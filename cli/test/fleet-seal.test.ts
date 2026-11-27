@@ -209,6 +209,16 @@ describe("a checkpoint the gateway will not take for its size", () => {
   });
 });
 
+describe("the fake gateway these tests stand up", () => {
+  test("puts the real fetch back when a test made two worlds, so the files after it see the real one", async () => {
+    const real = globalThis.fetch;
+    await world();
+    await world();
+    (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+    expect(globalThis.fetch).toBe(real);
+  });
+});
+
 describe("a manifest stored under a hash", () => {
   test("is the one asked for, or it is refused", async () => {
     const w = await world();

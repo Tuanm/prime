@@ -110,7 +110,11 @@ function credsFor(_gateway: FakeGateway, deviceId: string): FleetCredentials {
 
 // Point the transport at the fake gateway for the duration of a test.
 function useFakeGateway(gateway: FakeGateway): void {
-  const original = globalThis.fetch;
+  // The real fetch, kept from the first time: a test that makes two worlds installs a second fake over the
+  // first, and putting back "what was there before" would then put back the first fake for every file after.
+  const g = globalThis as { __realFetch?: typeof fetch };
+  g.__realFetch ??= globalThis.fetch;
+  const original = g.__realFetch;
   (globalThis as { fetch: unknown }).fetch = (async (url: string, init: { method: string; headers: Record<string, string>; body?: Buffer | string }) => {
     const path = new URL(url).pathname;
     const deviceId = init.headers["x-prime-device"] ?? "";
