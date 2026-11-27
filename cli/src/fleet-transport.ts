@@ -186,29 +186,6 @@ export async function getPayload(creds: FleetCredentials, fleet: string, kind: "
   return Buffer.from(await res.arrayBuffer());
 }
 
-/** Publish a manifest as the fleet's new head. */
-export async function advanceHead(
-  creds: FleetCredentials,
-  fleet: string,
-  expectedSeq: number,
-  manifestKey: string,
-  manifestHash: string,
-  /** The pack this manifest points at, so the gateway can let the old ones go. */
-  packKey?: string,
-): Promise<{ ok: boolean; seq?: number; error?: string }> {
-  const res = await request(
-    creds,
-    "POST",
-    "/fleets/" + encodeURIComponent(fleet) + "/head/advance",
-    JSON.stringify({ expectedSeq, manifestKey, manifestHash, ...(packKey ? { packKey } : {}) }),
-  );
-  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; seq?: number; error?: string };
-  if (!res.ok) {
-    return { ok: false, error: body.error ?? ("status " + res.status) };
-  }
-  return { ok: true, seq: body.seq };
-}
-
 /**
  * Tell the fleet how far this member has got.
  *
@@ -322,12 +299,6 @@ export async function fetchRole(
     // Whether the gateway refuses to move the head from a sealed snapshot to one that is not.
     ...(body.sealGate === true ? { sealGate: true as const } : {}),
   };
-}
-
-/** Renew the lease this device holds. */
-export async function renewLease(creds: FleetCredentials, fleet: string, ttlMs: number): Promise<boolean> {
-  const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/lease/renew", JSON.stringify({ ttlMs }));
-  return res.ok;
 }
 
 /**

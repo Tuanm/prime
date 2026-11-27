@@ -18,13 +18,10 @@ import {
   hasFiles,
   localChanges,
   NestedRepoCache,
-  payloadId,
   preserveLocalChange,
   removedBetween,
-  seal,
   settle,
   snapshot,
-  unseal,
 } from "../src/fleet-sync";
 
 function scratch(): string {
@@ -1269,45 +1266,6 @@ describe("a repository that arrives while the cache is stale", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe("sealing", () => {
-  test("round trips exactly", () => {
-    const plain = Buffer.from("the workspace contents".repeat(100));
-    const sealed = seal(plain);
-    expect(Buffer.compare(unseal(sealed.ciphertext, sealed.key), plain)).toBe(0);
-    expect(sealed.ciphertext.length).not.toBe(plain.length);
-  });
-
-  test("a wrong key does not open it", () => {
-    const sealed = seal(Buffer.from("secret"));
-    let failed = false;
-    try {
-      unseal(sealed.ciphertext, Buffer.alloc(32));
-    } catch {
-      failed = true;
-    }
-    expect(failed).toBe(true);
-  });
-
-  test("a tampered payload does not open it", () => {
-    const sealed = seal(Buffer.from("secret"));
-    const tampered = Buffer.from(sealed.ciphertext);
-    tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 0xff;
-    let failed = false;
-    try {
-      unseal(tampered, sealed.key);
-    } catch {
-      failed = true;
-    }
-    expect(failed).toBe(true);
-  });
-
-  test("payload ids are stable and content addressed", () => {
-    expect(payloadId(Buffer.from("a"))).toBe(payloadId(Buffer.from("a")));
-    expect(payloadId(Buffer.from("a"))).not.toBe(payloadId(Buffer.from("b")));
-    expect(payloadId(Buffer.from("a"))).toHaveLength(64);
   });
 });
 

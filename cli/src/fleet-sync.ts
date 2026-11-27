@@ -17,7 +17,6 @@
 // sealed with it, and the key is wrapped separately for each member. The
 // gateway sees ciphertext and wrapped keys it cannot open.
 
-import { createHash, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, sep } from "node:path";
@@ -556,38 +555,6 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   return { commit, tree, parent, pack, delta };
 }
 
-export interface Sealed {
-  /** The sealed pack. */
-  ciphertext: Buffer;
-  /** The random key that opened it, in the clear: only for local use. */
-  key: Buffer;
-}
-
-/** Seal a pack with a fresh random key. */
-export function seal(plain: Buffer): Sealed {
-  const key = randomBytes(32);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const body = Buffer.concat([cipher.update(plain), cipher.final()]);
-  return { ciphertext: Buffer.concat([iv, body, cipher.getAuthTag()]), key };
-}
-
-/** Open a sealed pack. */
-export function unseal(sealed: Buffer, key: Buffer): Buffer {
-  if (sealed.length < 12 + 16) throw new Error("the sealed payload is too short to be valid");
-  const iv = sealed.subarray(0, 12);
-  const tag = sealed.subarray(sealed.length - 16);
-  const body = sealed.subarray(12, sealed.length - 16);
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(body), decipher.final()]);
-}
-
-/** A stable id for a payload, used as its storage key. */
-export function payloadId(bytes: Buffer): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /** Whether a path is one of the directories the fleet leaves alone, or inside one. */
@@ -1046,11 +1013,6 @@ export async function settle(work: string, settleMs = 120, opts: SettleOptions =
     if (next === previous) return;
     previous = next;
   }
-}
-
-export function timingSafeEqualBytes(a: Buffer, b: Buffer): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
 }
 
 /**
