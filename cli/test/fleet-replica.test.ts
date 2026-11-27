@@ -1594,6 +1594,29 @@ describe("a claim and the pace of the agent's rounds", () => {
     }
   });
 
+  test("a paused member with a socket says it is here every few hours, and not before", async () => {
+    const { PAUSED_PRESENCE_MS } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      s.loop.paused = true;
+      s.loop.lastBootstrap = Date.now();
+      const before = w.gateway.bootstraps;
+      await s.round();
+      expect(w.gateway.bootstraps).toBe(before);
+      s.loop.lastBootstrap = Date.now() - PAUSED_PRESENCE_MS - 1000;
+      w.gateway.paused = true;
+      await s.round();
+      expect(w.gateway.bootstraps).toBe(before + 1);
+      // Told it is paused, it stays so and does not ask again at once.
+      expect(s.loop.paused).toBe(true);
+      await s.round();
+      expect(w.gateway.bootstraps).toBe(before + 1);
+    } finally {
+      finish(w);
+    }
+  });
+
   test("a failed request while the lease is free does not put a replica with a socket to sleep for minutes", async () => {
     const loopSleepMs = await two();
     const w = await world();

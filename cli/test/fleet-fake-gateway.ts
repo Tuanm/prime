@@ -52,6 +52,8 @@ export class FakeGateway {
   bootstrapBodies: Array<Record<string, unknown>> = [];
   /** The key the gateway's object makes key-change proofs with (what /role says); undefined for a gateway that predates it. */
   keyProofKey: string | undefined = undefined;
+  /** The fleet is paused: a place is answered with a 409 that says so. */
+  paused = false;
   /** What the gateway's clock says (its answers' Date header); undefined: no header. */
   serverDate: string | undefined = undefined;
   /** A key other than the one on the roster waits for the operator: the ask is refused, as the real object does without a proof. */
@@ -106,6 +108,7 @@ export class FakeGateway {
       })();
       this.bootstrapBodies.push(said);
       if (!this.members.has(creds.deviceId)) return Response.json({ error: "forbidden" }, { status: 403 });
+      if (this.paused) return Response.json({ error: "the fleet is paused", paused: true, retryAfterMs: 60_000 }, { status: 409 });
       const held = this.members.get(creds.deviceId)!.pubkey;
       if (this.keyChangePending && typeof said.pubkey === "string" && said.pubkey !== held) {
         return Response.json(

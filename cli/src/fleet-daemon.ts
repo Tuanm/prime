@@ -1001,11 +1001,14 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // lease is; the heartbeat is a third of that, so two renewals can be lost
   // before the place is gone. Five seconds is the ceiling on a long lease.
   // A paused fleet takes no one in. With a live socket the fleet says when it
-  // is resumed, so there is nothing to ask; without one, a look now and then
-  // (as often as the gateway asked) finds out.
+  // is resumed, so there is nothing to ask - but the gateway keeps a device only
+  // while it hears from it (an anonymous device is let go after days offline,
+  // and a socket to a fleet is not that), so one look every few hours says the
+  // device is still here. Without a socket, a look now and then (as often as the
+  // gateway asked) finds out.
   if (loop.paused) {
-    if (loop.events.connected) return;
-    if (Date.now() - loop.lastBootstrap < (loop.retryAfterMs ?? 60_000)) return;
+    const since = Date.now() - loop.lastBootstrap;
+    if (loop.events.connected ? since < PAUSED_PRESENCE_MS : since < (loop.retryAfterMs ?? 60_000)) return;
     await takePlace(loop);
     if (loop.paused) {
       report("the fleet is paused");
@@ -1325,6 +1328,9 @@ export function heartbeatIntervalMs(leaseMs: number | undefined, ceilingMs: numb
 function heartbeatFor(loop: SpaceLoop, ceilingMs: number): number {
   return heartbeatIntervalMs(loop.leaseMs, ceilingMs);
 }
+
+/** How often a paused member with a live socket still says it is here (see the paused branch of a round). */
+export const PAUSED_PRESENCE_MS = 6 * 60 * 60_000;
 
 /**
  * Drop the key pair a rotation replaced once nothing is left that was sealed for it.
