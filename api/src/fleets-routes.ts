@@ -11,7 +11,7 @@
 // authorization in the object.
 
 import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
-import { MAX_FLEETS_PER_DEVICE, validFleetId, type FleetAuth } from "./fleets";
+import { MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, validFleetId, type FleetAuth } from "./fleets";
 import { countFleetR2 } from "./usage";
 import type { Env } from "./config";
 
@@ -115,7 +115,21 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   if (!role) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
   if (!role.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
 
+  const tooBig = (bytes: number): Response =>
+    Response.json(
+      {
+        error:
+          "this snapshot is " + Math.ceil(bytes / (1024 * 1024)) + " MB, and the gateway takes at most " + MAX_SNAPSHOT_BYTES / (1024 * 1024) +
+          " MB for one: the work tree is too big to publish whole (keep what is not the work's, such as build output, out of it with .gitignore)",
+        limit: MAX_SNAPSHOT_BYTES,
+      },
+      { status: 413 },
+    );
+  // Said before the body is read, when the sender says how long it is.
+  const declared = Number(deps.request.headers.get("content-length") ?? 0);
+  if (declared > MAX_SNAPSHOT_BYTES) return tooBig(declared);
   const body = Buffer.from(await deps.request.arrayBuffer());
+  if (body.length > MAX_SNAPSHOT_BYTES) return tooBig(body.length);
   if (body.length < 4) return Response.json({ error: "malformed snapshot" }, { status: 400 });
   const manifestLength = body.readUInt32BE(0);
   if (manifestLength === 0 || manifestLength + 4 > body.length) {

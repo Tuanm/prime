@@ -173,6 +173,16 @@ describe("a manifest the gateway rewrote", () => {
   });
 });
 
+describe("a snapshot the gateway will not take for its size", () => {
+  test("is reported as that, not as another member having won", async () => {
+    const w = await world();
+    w.gateway.snapshotLimit = 100;
+    const failed = (await w.next("one\n").catch((e: unknown) => e)) as Error;
+    expect(failed.message).toMatch(/bigger than the gateway takes/);
+    expect(failed.message).not.toMatch(/head moved/);
+  });
+});
+
 describe("a manifest stored under a hash", () => {
   test("is the one asked for, or it is refused", async () => {
     const w = await world();

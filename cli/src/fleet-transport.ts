@@ -265,7 +265,7 @@ export async function putSnapshot(
   fleet: string,
   manifest: FleetManifest,
   pack: Buffer,
-): Promise<{ ok: boolean; seq?: number; manifestKey?: string; error?: string }> {
+): Promise<{ ok: boolean; seq?: number; manifestKey?: string; error?: string; status?: number }> {
   const manifestBytes = Buffer.from(JSON.stringify(manifest), "utf8");
   const header = Buffer.alloc(4);
   header.writeUInt32BE(manifestBytes.length, 0);
@@ -278,7 +278,7 @@ export async function putSnapshot(
     "application/octet-stream",
   );
   const result = (await res.json().catch(() => ({}))) as { ok?: boolean; seq?: number; manifestKey?: string; error?: string };
-  if (!res.ok) return { ok: false, error: result.error ?? ("status " + res.status) };
+  if (!res.ok) return { ok: false, error: result.error ?? ("status " + res.status), status: res.status };
   return { ok: true, seq: result.seq, manifestKey: result.manifestKey };
 }
 

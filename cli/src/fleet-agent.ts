@@ -291,6 +291,8 @@ export async function publish(
     if (sealed.ciphertexts[1]) await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
     moved = await putSnapshot(creds, fleet, manifest, main);
   }
+  // Too big for the gateway to take: the head did not move, and nobody won; the gateway says what to do.
+  if (!moved.ok && moved.status === 413) throw new Error(moved.error ?? "the snapshot is too big for the gateway");
   if (!moved.ok) {
     throw new Error("the fleet head moved while publishing: " + (moved.error ?? "another member won"));
   }

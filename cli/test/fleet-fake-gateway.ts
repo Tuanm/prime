@@ -16,6 +16,8 @@ export class FakeGateway {
   members = new Map<string, { deviceId: string; role: string; pubkey?: string }>();
   applied = new Map<string, number>();
   primary = "";
+  /** The most one snapshot upload may be (the gateway answers 413 above it). */
+  snapshotLimit: number | undefined = undefined;
   /** How many snapshots are kept; older packs and manifests are deleted, as the real gateway does. */
   retain = Infinity;
   /** Whether the gateway has an index (an older one answers 404). */
@@ -143,6 +145,9 @@ export class FakeGateway {
     }
     if (kind === "snapshot" && method === "POST") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
+      if (this.snapshotLimit !== undefined && (Buffer.isBuffer(body) ? body.length : String(body ?? "").length) > this.snapshotLimit) {
+        return Response.json({ error: "this snapshot is bigger than the gateway takes", limit: this.snapshotLimit }, { status: 413 });
+      }
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
       const manifestLength = bytes.readUInt32BE(0);
       const manifestBytes = bytes.subarray(4, 4 + manifestLength);

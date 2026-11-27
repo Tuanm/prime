@@ -41,6 +41,13 @@ export const OWNER_SILENCE_MS = 24 * 60 * 60_000;
  */
 export const RECENT_SNAPSHOTS = 64;
 
+/**
+ * The most one snapshot upload (the manifest and the sealed pack) may be. The Worker holds the body in
+ * memory more than once while it hashes and stores it, and has 128 MB; a whole tree that does not fit
+ * would die there with nothing said, so it is refused first, with the size and the limit.
+ */
+export const MAX_SNAPSHOT_BYTES = 96 * 1024 * 1024;
+
 /** How many fleets one device may create in an hour. */
 export const MAX_FLEETS_PER_DEVICE = 5;
 

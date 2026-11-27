@@ -9,6 +9,7 @@ import {
   FleetCreationAllowance,
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
+  MAX_SNAPSHOT_BYTES,
   OWNER_SILENCE_MS,
   RECENT_SNAPSHOTS,
   newInviteCode,
@@ -1953,6 +1954,31 @@ describe("the Worker publishes a snapshot", () => {
     expect(advances[0]!.expectedSeq).toBe(3);
     expect(advances[0]!.meta).toEqual({ full: true, packBytes: 1234, deltaBytes: 56 });
     expect(advances[0]!.extraKeys).toEqual([delta]);
+  });
+
+  test("a snapshot bigger than the Worker can hold is refused before it is read, with its size and the limit", async () => {
+    const stub = { fetch: async () => Response.json({ member: true, primary: true }) };
+    const reads: string[] = [];
+    const env = { BUCKET: { put: async () => reads.push("put"), delete: async () => undefined }, FLEET: { idFromName: (n: string) => n, get: () => stub } } as never;
+    const url = new URL("https://gateway/fleets/acme/snapshot");
+    const request = new Request(url, {
+      method: "POST",
+      headers: { "x-prime-device": "dev-a", "x-device-token": "t", "content-length": String(MAX_SNAPSHOT_BYTES + 5 * 1024 * 1024) },
+      body: Buffer.from("tiny"),
+    });
+    const res = (await handleFleetRoutes({
+      request,
+      env,
+      url,
+      cfg: { gatewayToken: "op-secret" } as never,
+      authorizeDevice: async () => ({ ok: true as const }),
+      unauthorized: () => new Response(null, { status: 401 }),
+    }))!;
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: string; limit: number };
+    expect(body.error).toMatch(/101 MB.*at most 96 MB/);
+    expect(body.limit).toBe(MAX_SNAPSHOT_BYTES);
+    expect(reads).toEqual([]);
   });
 
   test("a publisher that predates sizes and the change pack publishes as it always did", async () => {

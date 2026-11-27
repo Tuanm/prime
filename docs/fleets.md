@@ -596,7 +596,7 @@ it, and so does everything that is not a fleet.
 | members per fleet | 32 |
 | invite lifetime | ten minutes by default, one hour at most |
 | lease | forty-five seconds, renewed every fifteen |
-| snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change |
+| snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change; one upload is at most 96 MB (the gateway answers 413 and says so: a work tree whose whole tree is bigger than that cannot be published, so keep what is not the work's out of it with `.gitignore`) |
 | snapshots kept | the last 64 |
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
