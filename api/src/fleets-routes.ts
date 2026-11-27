@@ -465,7 +465,9 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
         return Response.json(
           {
             error: "the gateway token does not run fleets any more",
-            hint: "set FLEET_OPERATOR_TOKEN on the gateway and present that value (prime: --operator-token, or PRIME_FLEET_OPERATOR_TOKEN); the admin page and a fleet's owner device work as before",
+            hint: cfg.fleetOperatorTokenRefused
+              ? "FLEET_OPERATOR_TOKEN is the same value as GATEWAY_TOKEN (or DEVICE_TOKEN), so it is not used: it must differ from both"
+              : "set FLEET_OPERATOR_TOKEN on the gateway and present that value (prime: --operator-token, or PRIME_FLEET_OPERATOR_TOKEN); the admin page and a fleet's owner device work as before",
           },
           { status: 403 },
         );

@@ -1824,6 +1824,13 @@ describe("who runs fleets as the operator", () => {
     }
   });
 
+  test("a gateway whose operator token is its gateway token says that, not to set it", async () => {
+    const { answer } = ask({ cfg: { gatewayToken: "same", fleetOperatorTokenRefused: true }, bearer: "same", path: "/fleets/acme/invite" });
+    const res = (await answer)!;
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { hint: string }).hint).toContain("must differ");
+  });
+
   test("it may create a fleet no more than it may run one", async () => {
     const { answer, callers } = ask({ cfg, bearer: "gateway-token", device: "dev-a", path: "/fleets/acme" });
     await answer;
@@ -1848,6 +1855,10 @@ describe("who runs fleets as the operator", () => {
     expect(loadConfig({ GATEWAY_TOKEN: "g" } as never).fleetOperatorToken).toBeUndefined();
     expect(loadConfig({ FLEET_OPERATOR_TOKEN: "o" } as never).fleetOperatorToken).toBe("o");
     expect(loadConfig({ GATEWAY_TOKEN: "same", FLEET_OPERATOR_TOKEN: "same" } as never).fleetOperatorToken).toBeUndefined();
+    expect(loadConfig({ DEVICE_TOKEN: "same", FLEET_OPERATOR_TOKEN: "same" } as never).fleetOperatorToken).toBeUndefined();
+    expect(loadConfig({ GATEWAY_TOKEN: "same", FLEET_OPERATOR_TOKEN: "same" } as never).fleetOperatorTokenRefused).toBe(true);
+    expect(loadConfig({ GATEWAY_TOKEN: "g", FLEET_OPERATOR_TOKEN: "o" } as never).fleetOperatorTokenRefused).toBe(false);
+    expect(loadConfig({ GATEWAY_TOKEN: "g" } as never).fleetOperatorTokenRefused).toBe(false);
     // The admin token still falls back to the gateway token, which is why it is not used for this.
     expect(loadConfig({ GATEWAY_TOKEN: "g" } as never).adminToken).toBe("g");
   });

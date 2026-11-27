@@ -122,6 +122,8 @@ export interface GatewayConfig {
    * Unset: no token runs fleets (the admin page, behind Access, and a fleet's owner device still do).
    */
   fleetOperatorToken?: string;
+  /** FLEET_OPERATOR_TOKEN is set, and to a value that is also the gateway token or the shared device token: it is not used. */
+  fleetOperatorTokenRefused?: boolean;
   rateWindowMs: number;
   rateMax: number;
   timeoutMs: number;
@@ -237,15 +239,23 @@ function parseDeviceTokens(raw: string | undefined): Map<string, string> | undef
   }
 }
 
+/** Whether FLEET_OPERATOR_TOKEN is set to a value of its own: not the gateway token, nor the shared device token. */
+function operatorTokenOk(env: Env): boolean {
+  const t = env.FLEET_OPERATOR_TOKEN;
+  return !!t && t !== env.GATEWAY_TOKEN && t !== env.DEVICE_TOKEN;
+}
+
 export function loadConfig(env: Env): GatewayConfig {
   return {
     gatewayToken: env.GATEWAY_TOKEN || undefined,
     deviceToken: env.DEVICE_TOKEN || undefined,
     deviceTokens: parseDeviceTokens(env.DEVICE_TOKENS),
     adminToken: env.ADMIN_TOKEN || env.GATEWAY_TOKEN || undefined,
-    // The same value as the gateway token is not a separate credential: it is refused, so that setting the
-    // one secret to the other's value does not quietly bring the shared token back as the operator's.
-    fleetOperatorToken: env.FLEET_OPERATOR_TOKEN && env.FLEET_OPERATOR_TOKEN !== env.GATEWAY_TOKEN ? env.FLEET_OPERATOR_TOKEN : undefined,
+    // The same value as a token that every client or device holds is not a credential of its own: it is
+    // refused, so that setting the one secret to the other's value does not quietly bring the shared token
+    // back as the operator's (the answer to a caller then says so: `fleetOperatorTokenRefused`).
+    fleetOperatorToken: operatorTokenOk(env) ? env.FLEET_OPERATOR_TOKEN : undefined,
+    fleetOperatorTokenRefused: !!env.FLEET_OPERATOR_TOKEN && !operatorTokenOk(env),
     rateWindowMs: num(env, "RATE_LIMIT_WINDOW_MS", 60_000),
     rateMax: num(env, "RATE_LIMIT_MAX", 100),
     timeoutMs: num(env, "TIMEOUT_MS", 300_000),
