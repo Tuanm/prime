@@ -670,8 +670,9 @@ export function restartService(
 
 /**
  * Stop an installed service through its manager, so that the manager (which restarts what dies)
- * does not start it again behind the person's back. The service stays installed: it starts again at
- * the next login, and `restartService` starts it now. Returns whether the manager did; Windows has no
+ * does not start it again behind the person's back. The service stays installed and stays stopped:
+ * `restartService` starts it now, and it starts of itself when its manager does (the next login on
+ * macOS, the next start of the user's manager on Linux). Returns whether the manager did; Windows has no
  * equivalent that its watchdog would not undo, and says no.
  */
 export function stopService(

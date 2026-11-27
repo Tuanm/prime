@@ -514,9 +514,14 @@ with the same.
   says so and the agent keeps the settings it has.
   `agent stop` goes through the manager too: signalling the process of a service only has the manager
   start another a few seconds later, so it asks the manager to stop the service (`systemctl --user stop`,
-  `launchctl bootout`). The service stays installed; it starts again at the next login, and `agent start`
-  starts it now. If the manager will not stop it, the process is stopped and the command says that the
-  service starts another (`agent uninstall` removes the service).
+  `launchctl bootout`). The service stays installed and stays stopped: `agent start` starts it now,
+  and otherwise it starts again at the next login on macOS, and on Linux the next time the user's
+  manager starts (a reboot, or the end of the last session when lingering is off), not at the next login
+  while the manager keeps running. That is done only for the agent that is the service's: an agent
+  started by hand beside the service is stopped itself, and the service is stopped as well when its
+  manager holds it (it would start its own the moment the lock is free). If the manager holds the
+  service and will not stop it, the process is stopped and the command says that the service starts
+  another (`agent uninstall` removes the service).
   For any other configuration (`--config`, `PRIME_CONFIG`) the service is not its own: its agent
   is started, stopped and restarted directly, `agent status` says which configuration the service
   runs, `agent install` is refused while it runs another, and `agent uninstall` is refused too
@@ -598,7 +603,7 @@ it, and so does everything that is not a fleet.
 | members per fleet | 32 |
 | invite lifetime | ten minutes by default, one hour at most |
 | lease | forty-five seconds, renewed every fifteen |
-| snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change; one upload is at most 96 MB (the gateway answers 413 and says so: a work tree whose whole tree is bigger than that cannot be published, so keep what is not the work's out of it with `.gitignore`) |
+| snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change; one upload is at most 32 MiB, whole snapshot or change pack (the Worker holds a body about three times over while it hashes and stores it, in 128 MB; the member is told the limit and says so before it uploads anything, and the gateway answers 413 with the size too). A work tree whose whole tree is bigger than that stops the fleet at its next whole tree - every 32nd snapshot, and whenever the members change - and nothing more is published until the tree is smaller, so keep what is not the work's out of it with `.gitignore`; the members keep what they have |
 | snapshots kept | the last 64 |
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
@@ -625,8 +630,9 @@ What is deliberately not done, so that nobody has to find it out:
   malicious while that member was in the fleet can say a later sequence, as it can say the roster is
   anything; nothing here checks it outside the gateway.
 - **Which fleet of a name it is is the gateway's word, taken on first use.** A member learns the id
-  from the gateway when it is admitted (`prime spaces create`, `prime fleets join`; a member of before
-  that was recorded learns it the first time it checks a snapshot), and keeps it: a replay of an older
+  from the gateway when its space is set up, once it is admitted (`prime spaces create`: a first `prime
+  fleets join` always waits for the operator, so the id is learnt there and not at the join; a member of
+  before that was recorded learns it the first time it checks a snapshot), and keeps it: a replay of an older
   fleet's snapshot from storage (a bucket, a backup) is refused from then on. A gateway that lies about
   it once, to a member that has not yet learnt it - at the moment of joining - is believed, and
   nothing a member holds at that moment can say otherwise. A member that joins forgets what an
@@ -654,7 +660,9 @@ What is deliberately not done, so that nobody has to find it out:
   reports it wrongly misleads nobody but the operator who reads it.
 - **Objects can still be left in storage** when a publisher dies after uploading a checkpoint's change
   pack and before the snapshot request, or when the gateway itself fails between storing and asking
-  the fleet object. A refused publish cleans up after itself.
+  the fleet object. A publish the fleet refuses removes what it stored, except a checkpoint's change
+  pack when the publish is refused for its size by a gateway that does not say its limit (one before
+  the limit was told to members): it stays, and each retry stores another.
 - **A work tree that git cannot write fails inside git**, with a plain error and not an errno: it is
   retried with back-off, and is not recognised as "cannot be written" (which would stop the claim).
 - **Names that differ only in case** (`README` and `readme`) from a case-sensitive member arrive as one
@@ -669,7 +677,12 @@ What is deliberately not done, so that nobody has to find it out:
   the lock's and state file's freshness (so an agent that does more than half a minute of work without
   touching its lock can lose it there). `prime fleets agent install` registers its own Scheduled Task
   (`\prime\prime-fleet-agent`), apart from the buddy's (`\prime\code-mcp`); Task Scheduler is not asked to
-  restart it on a settings change, so a change there stops the agent and starts another.
+  restart it on a settings change, so a change there stops the agent and starts another. A machine whose
+  agent was installed by a build before that has it under the buddy's name, `\prime\code-mcp`:
+  `agent status` reports it there, and `agent install` and `agent uninstall` remove it (only when what it
+  runs is `__fleet-agent`, never the buddy's `code-mcp --service`) and the agent process of that
+  configuration, so installing again moves it. It is looked up by the task's action, so a task of that
+  name that runs something else is left alone.
 
 ## Where to read more
 
