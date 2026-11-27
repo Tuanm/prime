@@ -61,6 +61,12 @@ export interface ServiceSpec {
   restart?: "on-failure" | "always";
   /** Run at login and come back after any exit, including a clean one. */
   keepAlive?: boolean;
+  /**
+   * How many seconds the manager lets the process finish after asking it to stop, before it kills it
+   * (systemd's TimeoutStopSec, launchd's ExitTimeOut). Left out, the manager's own default applies (90 s,
+   * 20 s): too short for a process that finishes its round of work when it is asked to stop.
+   */
+  stopTimeoutSec?: number;
 }
 
 // ---- paths -------------------------------------------------------------------
@@ -341,6 +347,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     envLine("PATH", spec.pathEnv),
     "Restart=" + (spec.restart ?? "on-failure"),
     "RestartSec=5",
+    ...(spec.stopTimeoutSec !== undefined ? ["TimeoutStopSec=" + spec.stopTimeoutSec] : []),
     "",
     "[Install]",
     "WantedBy=default.target",
@@ -375,6 +382,7 @@ export function renderLaunchdPlist(spec: ServiceSpec): string {
       ? "  <!-- Back after any exit: an agent that stops is a fleet with no primary. -->\n  <key>KeepAlive</key><true/>"
       : "  <!-- Restart after a crash, not after a clean stop. -->\n  <key>KeepAlive</key>\n  <dict><key>SuccessfulExit</key><false/></dict>",
     "  <key>ThrottleInterval</key><integer>10</integer>",
+    ...(spec.stopTimeoutSec !== undefined ? ["  <key>ExitTimeOut</key><integer>" + spec.stopTimeoutSec + "</integer>"] : []),
     "  <key>StandardOutPath</key>" + s(spec.logPath),
     "  <key>StandardErrorPath</key>" + s(spec.logPath),
     "</dict>",
@@ -731,19 +739,31 @@ export function serviceStatus(
  * Restart an installed service through its manager, so that the manager (which restarts
  * what dies) and the person are never fighting over the process. Returns whether the
  * manager took the request; Windows has no equivalent and says no.
+ *
+ * `gentle` asks for the process to be stopped the way the manager stops it for good (SIGTERM, and the
+ * time it is given to finish) and returns without waiting for that: the caller waits for the new process.
+ * Without it the restart is as quick as the manager makes it, which on launchd (`kickstart -k`) is a kill
+ * the process is not asked to finish for, and on systemd a call that does not return until the old
+ * process is gone (up to its TimeoutStopSec, longer than a command's timeout).
  */
 export function restartService(
   platform: Platform = process.platform as Platform,
   identity: { name?: string; label?: string } = {},
+  opts: { gentle?: boolean } = {},
 ): boolean {
   if (platform === "linux") {
     if (!Bun.which("systemctl")) return false;
-    return run(["systemctl", "--user", "restart", (identity.name ?? SERVICE_NAME) + ".service"]).code === 0;
+    // --no-block queues the restart and returns: systemd stops the process (SIGTERM, then TimeoutStopSec) and starts it again.
+    const args = opts.gentle ? ["restart", "--no-block"] : ["restart"];
+    return run(["systemctl", "--user", ...args, (identity.name ?? SERVICE_NAME) + ".service"]).code === 0;
   }
   if (platform === "darwin") {
     const label = identity.label ?? LAUNCHD_LABEL;
+    const target = "gui/" + uid() + "/" + label;
+    // SIGTERM to a job that is kept alive: it finishes what it is doing and exits, and launchd starts it again.
+    if (opts.gentle && run(["launchctl", "kill", "SIGTERM", target]).code === 0) return true;
     // -k: kill the running instance first; it is started again at once.
-    if (run(["launchctl", "kickstart", "-k", "gui/" + uid() + "/" + label]).code === 0) return true;
+    if (run(["launchctl", "kickstart", "-k", target]).code === 0) return true;
     // A service that was stopped (see `stopService`) is not loaded: load it again, which starts it.
     const plist = launchdPlistPath(homedir(), label);
     return existsSync(plist) && run(["launchctl", "bootstrap", "gui/" + uid(), plist]).code === 0;

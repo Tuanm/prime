@@ -325,9 +325,18 @@ this rule. 'already up to date' still means "and the spaces are now too".
 
 When it installed something, the fleet agent of this configuration (the one in
 'prime fleets agent status') is restarted too, so that it runs the new build and
-not the one it started from: through its service if it has one, otherwise
-stopped and started again with its saved settings. Only that agent is touched,
-and the output says so. If it cannot be restarted, the output says how to.
+not the one it started from. Only that agent is touched, only when the program
+that was updated is the one it runs (not after --to another place), and the
+output says what was done.
+  - Through its service, if it has one: the manager stops it the way it stops it
+    for good, and gives it the time it has to finish its round. If the manager
+    cannot be reached from here (sudo, su, cron), nothing is done: run it from a
+    login session.
+  - Otherwise the new build is started first and waits for the agent's lock; the
+    old agent is then asked to stop, finishes its round, and the new one takes
+    over. If the new build does not start, the old agent is left as it was.
+  - On Windows an agent can only be stopped in the middle of its round, so it
+    is left running: stop it and start it again when it is idle.
 
   current   26.10.3
   latest    26.10.4

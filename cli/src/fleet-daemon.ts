@@ -47,7 +47,8 @@ import {
   type PlaceAnswer,
   type ReplicaMode,
 } from "./fleet-replica.ts";
-import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
+import { fleetAgentServiceConfig, fleetAgentServiceRuns, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
+import { runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -337,6 +338,12 @@ function settingsDiffer(running: FleetAgentState, settings: AgentSettings): bool
   return SETTING_KEYS.some((key) => has[key] !== undefined && has[key] !== wanted[key]);
 }
 
+/** A process that was started to be the agent: its pid, and its exit code once it has exited. */
+export interface StartedAgent {
+  pid: number;
+  exitCode: number | null;
+}
+
 /** How the agent's login service is asked about and restarted; replaced in tests. */
 export interface AgentServiceHooks {
   /** Whether a login service runs the agent here (one that a service manager can restart). */
@@ -349,8 +356,13 @@ export interface AgentServiceHooks {
    * running may well be the service's own.
    */
   unreachable?(): boolean;
-  /** Ask the service manager to (re)start it; false when it would not. */
-  restart(): boolean;
+  /**
+   * Ask the service manager to (re)start it; false when it would not. `gentle` asks for the running
+   * agent to be stopped the way the manager stops it for good, and not to be waited for.
+   */
+  restart(gentle?: boolean): boolean;
+  /** Whether the service runs this program (undefined: its definition cannot say). Replaced in tests. */
+  runs?(target: string): boolean | undefined;
   /** Ask the service manager to stop it (it stays installed); false when it would not. */
   stop?(): boolean;
   /**
@@ -360,8 +372,8 @@ export interface AgentServiceHooks {
   loaded?(): boolean;
   /** How long a running agent is given to stop when it is replaced, or to come back (tests make it short). */
   stopWaitMs?: number;
-  /** Start a detached agent with this environment; replaced in tests. */
-  spawnAgent?: (env: Record<string, string | undefined>) => void;
+  /** Start a detached agent with this environment; replaced in tests. It may return the process it started. */
+  spawnAgent?: (env: Record<string, string | undefined>) => void | StartedAgent;
 }
 
 /**
@@ -372,10 +384,12 @@ export interface AgentServiceHooks {
 export function agentServiceFor(
   configPath: string,
   probe: () => { installed: boolean; running?: boolean; detail?: string; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
-  restart: () => boolean = restartFleetAgentService,
+  restart: (gentle?: boolean) => boolean = restartFleetAgentService,
   stop: () => boolean = stopFleetAgentService,
   /** The platform whose manager is asked (replaced in tests). */
   platform: string = process.platform,
+  /** Whether the service's definition runs a program (replaced in tests). */
+  runs: (target: string) => boolean | undefined = fleetAgentServiceRuns,
 ): AgentServiceHooks {
   // The manager is asked once for what the hooks below want to know together (is it installed, which
   // pid, can it be reached): each is a process spawned to the manager. What it said is good for a moment.
@@ -421,9 +435,17 @@ export function agentServiceFor(
         return false;
       }
     },
-    restart: () => {
+    restart: (gentle) => {
       asked = undefined; // whatever it said before is not what it says after
-      return restart();
+      return restart(gentle);
+    },
+    runs: (target) => {
+      if (platform !== "darwin" && platform !== "linux") return undefined;
+      try {
+        return runs(target);
+      } catch {
+        return undefined;
+      }
     },
     stop: () => {
       asked = undefined;
@@ -540,19 +562,7 @@ export async function ensureFleetAgent(
   // one exit and that one's state is returned.
   // (Not a live agent's state, though: a racing start may have just started one.)
   if (!runningAgent(configPath)) rmSync(fleetAgentStatePath(configPath), { force: true });
-  mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
-  const agentEnv = buildAgentEnv(configPath, options, process.env, shell);
-  if (service.spawnAgent) service.spawnAgent(agentEnv);
-  else {
-    const child = Bun.spawn({
-      cmd: agentCommand(configPath),
-      env: agentEnv,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    (child as unknown as { unref?: () => void }).unref?.();
-  }
+  startAgentProcess(configPath, buildAgentEnv(configPath, options, process.env, shell), service);
   const deadline = Date.now() + 5000;
   for (;;) {
     const state = runningAgent(configPath);
@@ -581,38 +591,140 @@ async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: n
   }
 }
 
+/** Start a detached agent with this environment. */
+function startAgentProcess(configPath: string, env: Record<string, string | undefined>, service: AgentServiceHooks): StartedAgent | undefined {
+  mkdirSync(fleetAgentDir(configPath), { recursive: true, mode: 0o700 });
+  if (service.spawnAgent) return service.spawnAgent(env) ?? undefined;
+  const child = Bun.spawn({
+    cmd: agentCommand(configPath),
+    env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  (child as unknown as { unref?: () => void }).unref?.();
+  return child;
+}
+
 /** What `restartFleetAgentAfterUpdate` did. */
-export type AgentRestart = { restarted: false } | { restarted: true; via: "service" | "direct"; pid: number };
+export type AgentRestart =
+  | { restarted: false; reason?: string }
+  | { restarted: true; via: "service" | "direct"; pid?: number; pending?: boolean };
+
+export interface AgentRestartOptions {
+  /** The file the update installed; the agent is restarted only if that is the program it runs. */
+  target?: string;
+  /** Replaced in tests. */
+  platform?: string;
+  /** What this process would start the agent with (replaced in tests). */
+  command?: string[];
+  /** How long the new agent waits for the old one to let go of the lock. */
+  lockWaitMs?: number;
+  /** How long a new agent has to stay up for the new build to count as started. */
+  startCheckMs?: number;
+}
+
+/** How long a service manager is given to bring the agent back (it stops the old one first: up to its TimeoutStopSec). */
+const SERVICE_RESTART_WAIT_MS = 120_000;
+/** How long a restarted agent waits for the one it replaces to finish its round and let go. */
+const REPLACE_LOCK_WAIT_MS = 15 * 60_000;
+const START_CHECK_MS = 1_500;
 
 /**
  * Restart the fleet agent of this configuration, if one is running, so that it runs the build that was just
  * installed. An update replaces the program on disk and leaves the agent running the one it started from, and
  * for as long as it does, old and new builds are both at work on the same state (and on the same locks).
  *
- * Only this configuration's agent is touched: another configuration's agent has a state of its own. A
- * service's agent is restarted through its manager; one that nobody supervises is stopped (it may be
- * finishing a round, and is waited for) and started again with the settings that were saved for it.
+ * Only this configuration's agent is touched, and only when the program that was updated is the one it
+ * runs (an update `--to` another place changes nothing it runs). The agent finishes its round and is never
+ * left without a successor:
+ * - A service's agent is restarted by its manager, which stops it the way it stops it for good (and gives it
+ *   its stop timeout) and starts it again. If the manager cannot be reached from here, nothing is done: a
+ *   second agent started here would run beside the service's, which its manager would restart on the lock.
+ * - One that nobody supervises is replaced: the new build is started first and waits for the agent lock, and
+ *   it is only then that the old agent is asked to stop. The old one finishes its round, lets go of the lock,
+ *   and the new one takes it, with whatever time that takes. A new build that does not start leaves the old
+ *   agent as it was.
+ * - On Windows an agent can only be stopped in the middle of its round, so it is left running.
  */
 export async function restartFleetAgentAfterUpdate(
   configPath: string,
   service: AgentServiceHooks = agentServiceFor(configPath),
+  opts: AgentRestartOptions = {},
 ): Promise<AgentRestart> {
   const existing = runningAgent(configPath);
   if (!existing) return { restarted: false };
-  const waitMs = service.stopWaitMs ?? STOP_WAIT_MS;
+  if ((opts.platform ?? process.platform) === "win32") {
+    return {
+      restarted: false,
+      reason: "on Windows an agent can only be stopped in the middle of its round, so it was left running; stop it and start it again when it is idle ('prime fleets agent stop', then 'prime fleets agent start')",
+    };
+  }
+  const notIt = (): AgentRestart => ({
+    restarted: false,
+    reason: "the update went to " + opts.target + ", which is not the program of the fleet agent, so it was left running",
+  });
+  const waitMs = service.stopWaitMs;
   if (service.installed() && service.pid() === existing.pid) {
-    if (!service.restart()) throw new CliError("the service manager would not restart the fleet agent (pid " + existing.pid + ")");
-    const deadline = Date.now() + waitMs;
+    if (opts.target !== undefined && service.runs?.(opts.target) === false) return notIt();
+    if (!service.restart(true)) throw new CliError("the service manager would not restart the fleet agent (pid " + existing.pid + ")", "restart it by hand, or run 'prime fleets agent install' to set the service up again");
+    const deadline = Date.now() + (waitMs ?? SERVICE_RESTART_WAIT_MS);
     for (;;) {
       const state = runningAgent(configPath);
       if (state && state.pid !== existing.pid) return { restarted: true, via: "service", pid: state.pid };
-      if (Date.now() > deadline) throw new CliError("the fleet agent did not come back after the service was restarted");
+      if (Date.now() > deadline) {
+        // Still finishing its round: the manager has asked it to stop, and starts the new build when it has.
+        if (pidAlive(existing.pid)) return { restarted: true, via: "service", pending: true };
+        throw new CliError("the fleet agent did not come back after the service was restarted", "start it with 'prime fleets agent start'");
+      }
       await Bun.sleep(100);
     }
   }
-  await stopAndWait(configPath, existing, waitMs);
-  const state = await ensureFleetAgent(configPath, {}, service);
-  return { restarted: true, via: "direct", pid: state.pid };
+  const command = opts.command ?? selfCommand();
+  if (opts.target !== undefined && !runsProgram(command, opts.target)) return notIt();
+  if (service.unreachable?.()) {
+    throw new CliError(
+      "the fleet agent (pid " + existing.pid + ") runs as a login service whose manager cannot be reached from here, so it was not restarted",
+      "restart it from a login session ('prime fleets agent start'), or run 'prime update' there",
+    );
+  }
+  // The new build first, and the old agent only once the new one is up and waiting for its lock.
+  const env = { ...buildAgentEnv(configPath, {}, process.env, false), PRIME_FLEET_LOCK_WAIT_MS: String(opts.lockWaitMs ?? REPLACE_LOCK_WAIT_MS) };
+  const child = startAgentProcess(configPath, env, service);
+  const checkUntil = Date.now() + (opts.startCheckMs ?? (waitMs === undefined ? START_CHECK_MS : Math.min(START_CHECK_MS, waitMs)));
+  while (Date.now() < checkUntil) {
+    if (child && child.exitCode !== null) {
+      throw new CliError(
+        "the new build of the fleet agent did not start (exit " + child.exitCode + "); the running agent was left as it was",
+        "check that 'prime --version' runs, then run 'prime fleets agent start'",
+      );
+    }
+    await Bun.sleep(50);
+  }
+  try {
+    process.kill(existing.pid, "SIGTERM");
+  } catch {
+    // Gone already.
+  }
+  // Its state is left for it to remove when it is done: until then it is what is running.
+  const deadline = Date.now() + (waitMs ?? STOP_WAIT_MS);
+  for (;;) {
+    const state = runningAgent(configPath);
+    if (state && state.pid !== existing.pid) return { restarted: true, via: "direct", pid: state.pid };
+    const old = pidAlive(existing.pid);
+    if (!old && child && child.exitCode !== null) {
+      throw new CliError(
+        "the old fleet agent stopped, and the new one exited (code " + child.exitCode + "): no fleet agent is running",
+        "start it with 'prime fleets agent start'",
+      );
+    }
+    if (Date.now() > deadline) {
+      // The old agent is finishing its round; the new one waits for the lock and starts when it is let go.
+      if (old || (child && child.exitCode === null)) return { restarted: true, via: "direct", pid: child?.pid, pending: true };
+      throw new CliError("no fleet agent is running after the update", "start it with 'prime fleets agent start'");
+    }
+    await Bun.sleep(100);
+  }
 }
 
 /**

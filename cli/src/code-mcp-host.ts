@@ -12,7 +12,7 @@
 // to a declaration stub: code-mcp is written to its own conventions, not this
 // package's strict compiler settings.
 
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { type OptionMap, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "./code-mcp-options.ts";
 import { defaultConfigPath, loadConfig } from "./config.ts";
@@ -256,6 +256,17 @@ async function runRaw(args: string[]): Promise<void> {
 }
 
 /**
+ * This process's executable. On Linux a binary that was replaced while it runs (`prime update`) is reported
+ * as "<path> (deleted)", which is not a path anything can run; the file that took its place is.
+ */
+export function exePath(path: string = process.execPath, exists: (p: string) => boolean = existsSync): string {
+  const gone = / \(deleted\)$/;
+  if (!gone.test(path)) return path;
+  const now = path.replace(gone, "");
+  return exists(now) ? now : path;
+}
+
+/**
  * The argv that re-runs this CLI: the compiled binary itself, or the Bun
  * runtime plus the script (src/index.ts or dist/prime.js).
  */
@@ -264,5 +275,5 @@ export function selfCommand(): string[] {
   // A compiled executable reports its embedded entry point from the virtual
   // filesystem: /$bunfs/root/... on POSIX, B:/~BUN/root/... on Windows.
   const compiled = main.startsWith("/$bunfs/") || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(main);
-  return compiled ? [process.execPath] : [process.execPath, main];
+  return compiled ? [exePath()] : [exePath(), main];
 }

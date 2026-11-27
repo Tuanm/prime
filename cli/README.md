@@ -313,7 +313,9 @@ prime update --to ./prime    # install somewhere you own
 
 An update fetches the release for this platform, checks it against the release's checksum, and swaps the file in one step, so an interrupted update cannot leave half an executable. A release without a checksum is refused. The checksum proves the download arrived intact, not that the release is trustworthy.
 
-When an update installs something, the fleet agent of this configuration is restarted so that it runs the new build (through its service if it has one, otherwise stopped and started again with its saved settings); no other agent is touched, and the output says which was restarted or how to do it by hand.
+When an update installs something, the fleet agent of this configuration is restarted so that it runs the new build, and the output says what was done. Only that agent is touched, and only if the program that was updated is the one it runs (not after `--to` elsewhere). Through its service, if it has one (the manager stops it the way it stops it for good; if the manager cannot be reached from here, as under `sudo` or cron, nothing is done); otherwise the new build is started first and waits for the agent's lock, the old agent is asked to stop and finishes its round, and the new one takes over. A new build that does not start leaves the old agent as it was. On Windows an agent can only be stopped in the middle of its round, so it is left running.
+
+A service installed before this release gives the agent the manager's default time to stop (90 s on systemd, 20 s on launchd); `prime fleets agent install` sets 5 minutes.
 
 A directory you cannot write says so, and suggests the privileges that own it or `--to`. On Windows the running file is renamed aside and removed on the next run. A version carries the year and the month, so `prime --version` says how old the download is.
 

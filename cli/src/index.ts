@@ -449,15 +449,19 @@ async function main(argv: string[]): Promise<void> {
       let agentRestart: AgentRestart | { error: string } = { restarted: false };
       if (outcome.updated) {
         const { restartFleetAgentAfterUpdate } = await import("./fleet-daemon.ts");
-        agentRestart = await restartFleetAgentAfterUpdate(ctx.configPath).catch((err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }));
+        agentRestart = await restartFleetAgentAfterUpdate(ctx.configPath, undefined, { target: outcome.target }).catch((err: unknown) => ({ error: err instanceof Error ? err.message + ((err as { hint?: string }).hint ? " (" + (err as { hint?: string }).hint + ")" : "") : String(err) }));
       }
-      if (ctx.json) process.stdout.write(`${JSON.stringify({ ...outcome, ...("error" in agentRestart ? { agent_restart_error: agentRestart.error } : agentRestart.restarted ? { agent_restarted: agentRestart.via } : {}) }, null, 2)}\n`);
+      if (ctx.json) process.stdout.write(`${JSON.stringify({ ...outcome, ...("error" in agentRestart ? { agent_restart_error: agentRestart.error } : agentRestart.restarted ? { agent_restarted: agentRestart.via, ...(agentRestart.pending ? { agent_restart_pending: true } : {}) } : {}) }, null, 2)}\n`);
       else process.stdout.write(`${renderUpdate(outcome)}\n`);
       if (!ctx.json) {
         if ("error" in agentRestart) {
-          ctx.note(`could not restart the fleet agent of ${ctx.configPath}: ${agentRestart.error}; restart it with 'prime fleets agent start' so that it runs the new build`);
+          ctx.note(`could not restart the fleet agent of ${ctx.configPath}: ${agentRestart.error}`);
+        } else if (agentRestart.restarted && agentRestart.pending) {
+          ctx.note(`asked the fleet agent of ${ctx.configPath} to restart${agentRestart.via === "service" ? " (through its service)" : ""}: it is finishing its round, and the new build starts when it has; no other agent was touched`);
         } else if (agentRestart.restarted) {
           ctx.note(`restarted the fleet agent of ${ctx.configPath} (pid ${agentRestart.pid}, ${agentRestart.via === "service" ? "through its service" : "started again with its saved settings"}) so that it runs the new build; no other agent was touched`);
+        } else if (agentRestart.reason) {
+          ctx.note(`the fleet agent of ${ctx.configPath}: ${agentRestart.reason}`);
         }
       }
       // The spaces run their image inside a container, which `prime update` did

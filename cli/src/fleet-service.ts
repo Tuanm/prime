@@ -5,12 +5,13 @@
 // fleet with no primary until a person notices and starts it again - which is
 // exactly what happened. Installing it is 'prime fleets agent install'.
 
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
 import { defaultConfigPath } from "./config.ts";
-import { samePath } from "./fleet-paths.ts";
+import { runsProgram, samePath } from "./fleet-paths.ts";
 import {
   installService,
   readServiceDefinition,
@@ -27,6 +28,9 @@ import {
 /** The unit name and launchd label. Named for what it is, not for the buddy. */
 export const FLEET_AGENT_NAME = "prime-fleet-agent";
 export const FLEET_AGENT_LABEL = "dev.prime.fleet-agent";
+
+/** How long the manager lets the agent finish what it is doing once it is asked to stop. */
+export const STOP_TIMEOUT_SEC = 300;
 
 /**
  * The service definition for this machine.
@@ -51,6 +55,8 @@ export function fleetAgentSpec(configPath: string, platform: Platform = process.
     description: "Prime fleet agent (keeps this machine's spaces in step)",
     restart: "always",
     keepAlive: true,
+    // A restart finds the old agent finishing its round (an apply can take minutes): the manager lets it.
+    stopTimeoutSec: STOP_TIMEOUT_SEC,
   };
 }
 
@@ -126,9 +132,29 @@ export function fleetAgentServiceStatus(
   return bindServiceStatus(status, fleetAgentServiceConfig(definition ?? null), configPath);
 }
 
-/** Restart the installed service through its manager. Returns whether the manager did. */
-export function restartFleetAgentService(): boolean {
-  return restartService(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+/** Restart the installed service through its manager (`gentle`: see `restartService`). Returns whether the manager did. */
+export function restartFleetAgentService(gentle = false): boolean {
+  return restartService(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL }, { gentle });
+}
+
+/**
+ * Whether the installed service runs this program (the file `prime update` just replaced): its definition
+ * names it. undefined when the definition cannot be read, which is not a "no".
+ */
+export function fleetAgentServiceRuns(target: string): boolean | undefined {
+  const where = serviceDefinitionPath(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+  if (where === undefined) return undefined;
+  try {
+    const text = readFileSync(where, "utf8");
+    return programNamed(text, target);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether a service definition's text runs the program: one of its words is a path to that file. */
+export function programNamed(definition: string, target: string): boolean {
+  return runsProgram(definition.split(/[\s"'<>=]+/), target);
 }
 
 /** Stop the installed service through its manager (it stays installed). Returns whether the manager did. */

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, probeFor, procProbeWith, type ProcessProbe } from "../src/fleet-agent-lock";
-import { bindServiceStatus, fleetAgentServiceStatus } from "../src/fleet-service";
+import { exePath } from "../src/code-mcp-host";
+import { runsProgram } from "../src/fleet-paths";
+import { bindServiceStatus, fleetAgentServiceStatus, programNamed } from "../src/fleet-service";
 import { launchdAnswered } from "../src/service";
 import {
   SettingsPendingError,
@@ -632,28 +634,241 @@ describe("switching the replica mode of a running agent", () => {
     expect(() => process.kill(mine.pid, 0)).not.toThrow();
   });
 
-  test("after an update an agent that nobody supervises is stopped and started again with its saved settings", async () => {
+  /** The program this "process" would be started from, and the one an update installed. */
+  const programs = (root: string) => ({ here: join(root, "prime"), elsewhere: join(root, "elsewhere-prime") });
+  const gone = async (pid: number, ms = 3000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until && isFleetAgentProcess(pid, undefined)) await Bun.sleep(25);
+    return !isFleetAgentProcess(pid, undefined);
+  };
+  /** What an agent started for a restart is: a process that waits (as the lock makes it) and says what it was told. */
+  const newAgentHook = (seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } }) => (env: Record<string, string | undefined>) => {
+    seen.envs.push(env);
+    const child = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    cleanups.push(() => child.kill("SIGKILL"));
+    seen.child = child;
+    return child;
+  };
+
+  test("after an update an agent that nobody supervises is replaced: the new build is started first, and waits for the old one to let go", async () => {
     const root = scratch();
     const configPath = join(root, "config.json");
     const old = await fakeAgent();
     running(configPath, old.pid, "mirror", 64);
     mkdirp(fleetAgentDir(configPath));
     writeFileSync(agentSettingsPath(configPath), JSON.stringify({ replica: "mirror", cacheMb: 64 }));
-    let spawned = 0;
-    const result = await restartFleetAgentAfterUpdate(configPath, {
-      installed: () => false,
-      pid: () => undefined,
-      restart: () => false,
-      stopWaitMs: 3000,
-      spawnAgent: () => {
-        spawned++;
-        running(configPath, plainAgent().pid, "mirror", 64);
+    const seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } } = { envs: [] };
+    let oldAliveWhenStarted: boolean | undefined;
+    const spawn = newAgentHook(seen);
+    const result = await restartFleetAgentAfterUpdate(
+      configPath,
+      {
+        installed: () => false,
+        pid: () => undefined,
+        restart: () => false,
+        stopWaitMs: 400,
+        spawnAgent: (env) => {
+          oldAliveWhenStarted = isFleetAgentProcess(old.pid, fleetAgentDir(configPath));
+          return spawn(env);
+        },
       },
-    });
-    expect(spawned).toBe(1);
+      { startCheckMs: 100, command: [programs(root).here], target: programs(root).here },
+    );
+    // The old agent was still running when the new one was started, and is asked to stop after.
+    expect(oldAliveWhenStarted).toBe(true);
+    expect(await gone(old.pid)).toBe(true);
+    expect(seen.envs.length).toBe(1);
+    // The new one is told to wait a long time for the lock (an agent started by a command is told not to wait at all), and runs with the saved settings.
+    expect(Number(seen.envs[0]!.PRIME_FLEET_LOCK_WAIT_MS)).toBeGreaterThanOrEqual(60_000);
+    expect(seen.envs[0]!.PRIME_FLEET_REPLICA).toBe("mirror");
+    // Not yet its state (the new agent writes that when it has the lock): the old one is on its way out.
     expect(result.restarted && result.via).toBe("direct");
-    // The old one is gone before the new one was started.
-    expect(isFleetAgentProcess(old.pid, fleetAgentDir(configPath))).toBe(false);
+    expect(result.restarted && result.pending).toBe(true);
+    expect(result.restarted && result.pid).toBe(seen.child!.pid);
+    expect(() => process.kill(seen.child!.pid, 0)).not.toThrow();
+  });
+
+  test("an agent that finishes its round for longer than the update waits is not left without a successor, and its state stays until it is gone", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    // Exits 1.5 s after it is asked to stop (a round of an apply that outlives the wait).
+    const child = Bun.spawn(["sh", "-c", "trap 'sleep 1.5; exit 0' TERM; while :; do sleep 0.1; done", "__fleet-agent"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    cleanups.push(() => child.kill("SIGKILL"));
+    running(configPath, child.pid, "lazy");
+    await Bun.sleep(200);
+    const seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } } = { envs: [] };
+    const result = await restartFleetAgentAfterUpdate(
+      configPath,
+      { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 500, spawnAgent: newAgentHook(seen) },
+      { startCheckMs: 100 },
+    );
+    expect(result.restarted && result.pending).toBe(true);
+    // The old agent is still at work, and what says so is still there.
+    expect(isFleetAgentProcess(child.pid, fleetAgentDir(configPath))).toBe(true);
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
+    expect(fleetAgentStatus(configPath).running).toBe(true);
+    // When it is done a new agent is there: one is running at every moment, and it is the new build's.
+    await child.exited;
+    expect(seen.child).toBeDefined();
+    expect(() => process.kill(seen.child!.pid, 0)).not.toThrow();
+  }, 15_000);
+
+  test("a new build that does not start leaves the running agent, and its state, as they were", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const old = await fakeAgent();
+    running(configPath, old.pid, "lazy");
+    // What the replaced program does when it is not a prime: it exits at once.
+    await expect(
+      restartFleetAgentAfterUpdate(
+        configPath,
+        {
+          installed: () => false,
+          pid: () => undefined,
+          restart: () => false,
+          stopWaitMs: 1000,
+          spawnAgent: () => Bun.spawn(["sh", "-c", "echo not a prime; exit 3"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }),
+        },
+        { startCheckMs: 1500 },
+      ),
+    ).rejects.toThrow(/did not start \(exit 3\).*left as it was/);
+    expect(isFleetAgentProcess(old.pid, fleetAgentDir(configPath))).toBe(true);
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
+    expect(fleetAgentStatus(configPath).pid).toBe(old.pid);
+  });
+
+  test("an update that went somewhere the agent does not run from leaves it alone (the manager and the process alike)", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    const { here, elsewhere } = programs(root);
+    writeFileSync(here, "");
+    writeFileSync(elsewhere, "");
+    let spawned = 0;
+    const direct = await restartFleetAgentAfterUpdate(
+      configPath,
+      { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: () => void spawned++ },
+      { command: [here], target: elsewhere },
+    );
+    expect(direct.restarted).toBe(false);
+    expect(!direct.restarted && direct.reason).toMatch(/not the program of the fleet agent/);
+    // A service that runs another program: the manager is not asked.
+    let asked = 0;
+    const managed = await restartFleetAgentAfterUpdate(
+      configPath,
+      { installed: () => true, pid: () => mine.pid, restart: () => (asked++, true), runs: () => false, stopWaitMs: 300 },
+      { target: elsewhere },
+    );
+    expect(managed.restarted).toBe(false);
+    expect(spawned).toBe(0);
+    expect(asked).toBe(0);
+    expect(() => process.kill(mine.pid, 0)).not.toThrow();
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
+    // The one that is the agent's program is restarted.
+    const seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } } = { envs: [] };
+    const same = await restartFleetAgentAfterUpdate(
+      configPath,
+      { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: newAgentHook(seen) },
+      { command: [here], target: here, startCheckMs: 50 },
+    );
+    expect(same.restarted).toBe(true);
+  });
+
+  test("whether a program is the one a command runs: through links, and for a script that bun runs", () => {
+    const root = scratch();
+    const real = join(root, "real-prime");
+    const link = join(root, "link-prime");
+    writeFileSync(real, "");
+    symlinkSync(real, link);
+    expect(runsProgram([link, "__fleet-agent"], real)).toBe(true);
+    expect(runsProgram([real], link)).toBe(true);
+    expect(runsProgram(["/usr/bin/bun", real], real)).toBe(true);
+    expect(runsProgram([join(root, "other")], real)).toBe(false);
+    expect(programNamed("ExecStart=" + link + " __fleet-agent", real)).toBe(true);
+    expect(programNamed("ExecStart=/somewhere/else __fleet-agent", real)).toBe(false);
+  });
+
+  test("a service whose manager cannot be reached from here is not restarted, and no second agent is started beside it", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const svc = await fakeAgent();
+    running(configPath, svc.pid, "lazy");
+    let asked = 0;
+    let spawned = 0;
+    const service = {
+      ...agentServiceFor(configPath, () => ({ installed: true, reachable: false }), () => (asked++, false), () => false, "linux"),
+      stopWaitMs: 300,
+      spawnAgent: () => void spawned++,
+    };
+    let error: unknown;
+    try {
+      await restartFleetAgentAfterUpdate(configPath, service, { startCheckMs: 50 });
+    } catch (err) {
+      error = err;
+    }
+    expect(String((error as Error)?.message)).toMatch(/manager cannot be reached from here/);
+    expect(String((error as { hint?: string })?.hint)).toMatch(/login session/);
+    // The service's agent is running, nothing was spawned, and the manager was not asked.
+    expect(() => process.kill(svc.pid, 0)).not.toThrow();
+    expect(existsSync(fleetAgentStatePath(configPath))).toBe(true);
+    expect(spawned).toBe(0);
+    expect(asked).toBe(0);
+  });
+
+  test("a service's agent is restarted gently, and one that is still finishing its round is said to be restarting, not to have failed", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    const asked: Array<boolean | undefined> = [];
+    const result = await restartFleetAgentAfterUpdate(configPath, {
+      installed: () => true,
+      pid: () => mine.pid,
+      restart: (gentle) => (asked.push(gentle), true),
+      stopWaitMs: 300,
+    });
+    expect(asked).toEqual([true]);
+    expect(result.restarted && result.pending).toBe(true);
+    expect(() => process.kill(mine.pid, 0)).not.toThrow();
+    // One that is gone, and nothing in its place, is a failure.
+    const dead = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    cleanups.push(() => dead.kill("SIGKILL"));
+    running(configPath, dead.pid, "lazy");
+    await expect(
+      restartFleetAgentAfterUpdate(configPath, {
+        installed: () => true,
+        pid: () => dead.pid,
+        restart: () => (dead.kill("SIGKILL"), true),
+        stopWaitMs: 300,
+      }),
+    ).rejects.toThrow(/did not come back/);
+  });
+
+  test("on Windows an agent is left running: it can only be stopped in the middle of its round", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    let spawned = 0;
+    const result = await restartFleetAgentAfterUpdate(
+      configPath,
+      { installed: () => false, pid: () => undefined, restart: () => false, spawnAgent: () => void spawned++ },
+      { platform: "win32" },
+    );
+    expect(result.restarted).toBe(false);
+    expect(!result.restarted && result.reason).toMatch(/Windows.*middle of its round/);
+    expect(spawned).toBe(0);
+    expect(() => process.kill(mine.pid, 0)).not.toThrow();
+  });
+
+  test("a program that was replaced while it ran is found where it was, not under the name Linux gives it", () => {
+    const root = scratch();
+    const path = join(root, "prime");
+    writeFileSync(path, "");
+    expect(exePath(path + " (deleted)")).toBe(path);
+    expect(exePath(path)).toBe(path);
+    expect(exePath(join(root, "none") + " (deleted)")).toBe(join(root, "none") + " (deleted)");
   });
 
   test("after an update with no agent running nothing is started", async () => {

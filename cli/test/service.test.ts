@@ -202,6 +202,15 @@ describe("service definitions", () => {
     expect(plist).toContain("<key>RunAtLoad</key><true/>");
   });
 
+  test("the fleet agent is given time to finish its round when its manager stops it; the buddy keeps the manager's default", () => {
+    const agent = fleetAgentSpec("/home/u/.prime/config.yaml", "linux");
+    expect(agent.stopTimeoutSec).toBe(300);
+    expect(renderSystemdUnit(agent)).toContain("TimeoutStopSec=300\n");
+    expect(renderLaunchdPlist(agent)).toContain("<key>ExitTimeOut</key><integer>300</integer>");
+    expect(renderSystemdUnit(spec)).not.toContain("TimeoutStopSec");
+    expect(renderLaunchdPlist(spec)).not.toContain("ExitTimeOut");
+  });
+
   test("Windows: CommandLineToArgvW quoting and a headless, per-user, logon task", () => {
     expect(windowsQuote("C:\\Program Files\\prime.exe")).toBe('"C:\\Program Files\\prime.exe"');
     expect(windowsQuote("plain")).toBe("plain");
