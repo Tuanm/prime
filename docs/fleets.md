@@ -687,7 +687,11 @@ What is deliberately not done, so that nobody has to find it out:
   configuration) and the agent process of that configuration, so installing again moves it. It is looked
   up by the task's action, so a task of that name that runs something else is left alone, and so is the
   agent task of another configuration: `agent status` names that configuration, and the command that
-  moves it is `agent install` with its `--config`.
+  moves it is `agent install` with its `--config`. There is one agent task per machine, as on the other
+  platforms: `agent install` for a configuration is refused while `\prime\prime-fleet-agent` runs another
+  (`agent uninstall` first, or `--force` on the uninstall of that one), and the task's own `--config` is
+  what says which. The scripts' output is read as UTF-8, so a profile path with non-ASCII characters
+  is compared as it is.
 
 ## Upgrading
 
@@ -701,8 +705,10 @@ What changes for a fleet and a machine that already run an earlier build.
   failure (`this snapshot is NN MB, and the gateway takes at most 32 MB for one ...`), and the snapshot is
   tried again every round, so it goes on by itself once the tree fits. To go on, make the work tree smaller (keep build output,
   dependencies and caches out of it with `.gitignore`) until its sealed whole tree is under the limit.
-  Deploy the gateway before the members: a member that is told the limit refuses before uploading, and
-  one that is not (an older gateway) is refused by the gateway with the same message.
+  Deploy the gateway first: upgraded members are then told the limit and refuse before uploading;
+  members that are not upgraded yet are refused by the gateway, with its message (it follows "the fleet
+  head moved while publishing:" in what they print), and leave the checkpoint's change pack behind on
+  each attempt.
 - **A sealed fleet does not go back to unsealed snapshots.** Once a fleet has a sealed snapshot, the
   gateway refuses a publish without a seal from an old build (it says to upgrade, the member carries on
   as a replica and the lease goes to a member that seals). Upgrade every member that may become the
