@@ -61,14 +61,20 @@ function bootstrap(ip = "198.51.100.9") {
   });
 }
 
-test("a member knocking on a paused fleet costs the registry one ask", async () => {
+test("a member knocking on a paused fleet costs the registry one ask, and says it is alive once an hour", async () => {
   const { env, asked } = await gateway();
   // Long enough after any earlier test that no isolate cache is warm.
   await new Promise((r) => setTimeout(r, 2_100));
   const res = await worker.fetch(bootstrap(), env as never);
   expect(res.status).toBe(409);
   expect(((await res.json()) as { paused?: boolean }).paused).toBe(true);
-  expect(asked.filter((p) => p !== "/usage")).toEqual(["/map"]);
+  // The one ask for the map, and one note that the device is alive (it is let go after days of silence).
+  expect(asked.filter((p) => p !== "/usage")).toEqual(["/map", "/anon/seen"]);
+  // Knocking again costs no second note.
+  asked.length = 0;
+  await new Promise((r) => setTimeout(r, 2_100));
+  expect((await worker.fetch(bootstrap(), env as never)).status).toBe(409);
+  expect(asked).not.toContain("/anon/seen");
 });
 
 test("a blocked address is still refused, read from the same ask", async () => {
