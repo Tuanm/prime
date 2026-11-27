@@ -100,6 +100,8 @@ interface LeftKey {
  * are out of the retained index (`2 * RECENT_SNAPSHOTS` behind the tip), so this is only reached by a
  * fleet that has had this many members come and go within that: far more than `MAX_MEMBERS`.
  */
+// A publish that has not finished storing after this long is taken to have died.
+const STORING_MAX_MS = 10 * 60_000;
 const LEFT_KEYS_KEPT = 256;
 const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 };
 
@@ -382,6 +384,7 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("unsealedBar");
     await this.state.storage.delete("invites");
     await this.state.storage.delete("pending");
+    await this.state.storage.delete("storing");
     await this.state.storage.delete("lease");
     await this.state.storage.delete("epoch");
     await this.state.storage.delete("applied");
@@ -389,7 +392,6 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("fetched");
     await this.state.storage.delete("index");
     await this.state.storage.delete("recent");
-    await this.state.storage.delete("pending");
     await this.state.storage.delete("ownerSeenAt");
     await this.deleteStored(fleetId);
     // The fleet is gone, so the registry should stop listing it.
@@ -862,7 +864,7 @@ export class FleetDO implements DurableObject {
         return;
       }
 
-      const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
+      const pending = await this.joinRequests();
       const waiting = findClash(members, pending, caller.deviceId, label);
       if (waiting) {
         out = Response.json(
@@ -897,7 +899,7 @@ export class FleetDO implements DurableObject {
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {
-      const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
+      const pending = await this.joinRequests();
       const request = pending[deviceId];
       if (!request) {
         out = Response.json({ error: "no such request" }, { status: 404 });
@@ -942,7 +944,7 @@ export class FleetDO implements DurableObject {
     let freedLease = false;
     await this.state.blockConcurrencyWhile(async () => {
       const members = await this.members();
-      const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
+      const pending = await this.joinRequests();
       if (pending[deviceId]) {
         delete pending[deviceId];
         await this.state.storage.put("pending", pending);
@@ -1042,7 +1044,7 @@ export class FleetDO implements DurableObject {
   private async listPending(caller: Caller): Promise<Response> {
     const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
-    const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
+    const pending = await this.joinRequests();
     return Response.json({ ok: true, pending: Object.values(pending) });
   }
 
@@ -1385,19 +1387,19 @@ export class FleetDO implements DurableObject {
     // objects no snapshot names (`unreferenced`) must not see them as that: the head is written to R2
     // first, and R2 is outside this object, so other requests run in between. A publish that is sent
     // again after it was already accepted names the same objects.
-    await this.state.storage.put("pending", [manifestKey, packKey, ...extraKeys].filter(Boolean));
+    await this.startStoring(manifestKey, [manifestKey, packKey, ...extraKeys].filter(Boolean));
     let written: R2Object | null;
     try {
       this.meter.r2("write");
       written = await this.bucket().put(key, JSON.stringify(next), etag ? { onlyIf: { etagMatches: etag } } : { onlyIf: { etagDoesNotMatch: "*" } });
     } catch {
-      await this.state.storage.delete("pending");
+      await this.endStoring(manifestKey);
       return Response.json({ error: "head write refused" }, { status: 409 });
     }
     // A failed conditional write returns null rather than throwing: that is the
     // CAS losing the race, not an error.
     if (!written) {
-      await this.state.storage.delete("pending");
+      await this.endStoring(manifestKey);
       return Response.json({ error: "head changed" }, { status: 409 });
     }
     // The write above gave other requests room to run, and one of them may have removed this member. Its
@@ -1440,7 +1442,7 @@ export class FleetDO implements DurableObject {
     const kept = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
     kept.push({ seq: next.seq, manifestKey, ...meta, sealed: meta.sealed === true });
     await this.state.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
-    await this.state.storage.delete("pending");
+    await this.endStoring(manifestKey);
     for (const entry of evicted) {
       for (const key of entry.split("\n")) {
         if (!key) continue;
@@ -1466,8 +1468,46 @@ export class FleetDO implements DurableObject {
     const own = new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/(packs|manifests)/[0-9a-f]{64}$");
     const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, 8) : [];
     const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
-    const kept = new Set([...recent.flatMap((entry) => entry.split("\n")), ...((await this.state.storage.get<string[]>("pending")) ?? [])]);
+    const kept = new Set([...recent.flatMap((entry) => entry.split("\n")), ...(await this.storingKeys())]);
     return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
+  }
+
+  // The join requests waiting for the operator. Read tolerantly: an earlier build kept the keys of a
+  // publish in flight under this same name, so what is stored may be a list of keys, or have such
+  // entries among the requests, and only what has the shape of a request is one.
+  private async joinRequests(): Promise<Record<string, PendingRequest>> {
+    const stored = await this.state.storage.get<unknown>("pending");
+    const out: Record<string, PendingRequest> = {};
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return out;
+    for (const [device, value] of Object.entries(stored as Record<string, unknown>)) {
+      const r = value as Partial<PendingRequest> | null;
+      if (r && typeof r === "object" && typeof r.deviceId === "string" && r.deviceId === device && typeof r.requestedAt === "number") out[device] = r as PendingRequest;
+    }
+    return out;
+  }
+
+  // What publishes in flight are storing, so that `unreferenced` does not offer it for deletion between
+  // the head being written and the snapshot being kept. One entry per publish (by its manifest), each let
+  // go by the publish that made it; an entry whose publisher died is let go after a few minutes.
+  private async startStoring(manifestKey: string, keys: string[]): Promise<void> {
+    const now = Date.now();
+    const storing = (await this.state.storage.get<Record<string, { keys: string[]; at: number }>>("storing")) ?? {};
+    for (const [k, v] of Object.entries(storing)) if (now - v.at > STORING_MAX_MS) delete storing[k];
+    storing[manifestKey] = { keys, at: now };
+    await this.state.storage.put("storing", storing);
+  }
+
+  private async endStoring(manifestKey: string): Promise<void> {
+    const storing = (await this.state.storage.get<Record<string, { keys: string[]; at: number }>>("storing")) ?? {};
+    if (!(manifestKey in storing)) return;
+    delete storing[manifestKey];
+    if (Object.keys(storing).length === 0) await this.state.storage.delete("storing");
+    else await this.state.storage.put("storing", storing);
+  }
+
+  private async storingKeys(): Promise<string[]> {
+    const storing = (await this.state.storage.get<Record<string, { keys: string[] }>>("storing")) ?? {};
+    return Object.values(storing).flatMap((v) => v.keys);
   }
 
   // Whether a stored manifest carries a seal; undefined when it cannot be read (the gate then does not fire:
@@ -1537,7 +1577,7 @@ export class FleetDO implements DurableObject {
     const members = await this.members();
     const member = members[caller.deviceId];
     if (member) return Response.json({ ok: true, status: "member", member });
-    const pending = (await this.state.storage.get<Record<string, PendingRequest>>("pending")) ?? {};
+    const pending = await this.joinRequests();
     if (pending[caller.deviceId]) return Response.json({ ok: true, status: "pending" });
     return Response.json({ ok: true, status: "none" });
   }

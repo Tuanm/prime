@@ -666,6 +666,98 @@ describe("a member that goes while its publish is in flight, or is re-keyed", ()
     expect(await unreferenced([lost])).toEqual([lost]);
   });
 
+  describe("a join request that waits while the fleet publishes", () => {
+    async function waiting(bucket = fakeBucket()) {
+      const made = await fleetOfTwo(bucket);
+      const inv = await call(made.doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
+      const joined = await call(made.doInstance, "/join", { caller: "device", device: "dev-three", body: { code: inv.json.code, pubkey: "C".repeat(43) + "=" } });
+      expect(joined.json.status).toBe("pending");
+      return made;
+    }
+    const hex = (c: string) => c.repeat(64);
+
+    test("is still there after a publish that was accepted and one that was refused, and can be approved", async () => {
+      const bucket = fakeBucket();
+      const { doInstance } = await waiting(bucket);
+      const advance = (expectedSeq: number, c: string) =>
+        call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq, manifestKey: "fleets/acme/manifests/" + hex(c), manifestHash: hex(c), packKey: "fleets/acme/packs/" + hex(c), meta: { full: true } } });
+      expect((await advance(0, "a")).status).toBe(200);
+      expect((await advance(0, "b")).status).toBe(409); // another publish on the same head: refused
+      const listed = await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" });
+      expect((listed.json.pending as Array<{ deviceId: string }>).map((p) => p.deviceId)).toEqual(["dev-three"]);
+      expect((await call(doInstance, "/me", { caller: "device", device: "dev-three", method: "GET" })).json.status).toBe("pending");
+      expect((await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-three" } })).status).toBe(200);
+    });
+
+    test("does not stop the object from answering which stored objects belong to no snapshot", async () => {
+      const { doInstance } = await waiting();
+      const orphan = "fleets/acme/packs/" + hex("c");
+      const asked = await call(doInstance, "/unreferenced", { caller: "device", device: "dev-owner", body: { keys: [orphan] } });
+      expect(asked.status).toBe(200);
+      expect(asked.json.keys).toEqual([orphan]);
+    });
+
+    test("is not listed as the keys of a publish in flight, and a request that arrives meanwhile is kept", async () => {
+      const bucket = fakeBucket();
+      const { doInstance } = await fleetOfTwo(bucket);
+      const realPut = bucket.put;
+      let release!: () => void;
+      let reached!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const arrived = new Promise<void>((r) => (reached = r));
+      bucket.put = async (...args: Parameters<typeof realPut>) => {
+        reached();
+        await gate;
+        return realPut.apply(bucket, args);
+      };
+      const inflight = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "fleets/acme/manifests/" + hex("a"), manifestHash: hex("a"), meta: { full: true } } });
+      await arrived;
+      const inv = await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
+      await call(doInstance, "/join", { caller: "device", device: "dev-three", body: { code: inv.json.code, pubkey: "C".repeat(43) + "=" } });
+      const during = await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" });
+      expect((during.json.pending as Array<{ deviceId: string }>).map((p) => p.deviceId)).toEqual(["dev-three"]);
+      release();
+      expect((await inflight).status).toBe(200);
+      const after = await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" });
+      expect((after.json.pending as Array<{ deviceId: string }>).map((p) => p.deviceId)).toEqual(["dev-three"]);
+    });
+
+    test("two publishes in flight each keep their own objects, and one finishing does not release the other's", async () => {
+      const bucket = fakeBucket();
+      const { doInstance, state } = await fleetOfTwo(bucket);
+      const realPut = bucket.put;
+      const gates: Array<() => void> = [];
+      let reached = 0;
+      bucket.put = async (...args: Parameters<typeof realPut>) => {
+        reached++;
+        await new Promise<void>((r) => gates.push(r));
+        return realPut.apply(bucket, args);
+      };
+      const one = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "fleets/acme/manifests/" + hex("a"), manifestHash: hex("a"), meta: { full: true } } });
+      while (reached < 1) await new Promise((r) => setTimeout(r, 1));
+      const two = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body: { expectedSeq: 0, manifestKey: "fleets/acme/manifests/" + hex("b"), manifestHash: hex("b"), meta: { full: true } } });
+      while (reached < 2) await new Promise((r) => setTimeout(r, 1));
+      expect(Object.keys(state.data.get("storing") as object).sort()).toEqual(["fleets/acme/manifests/" + hex("a"), "fleets/acme/manifests/" + hex("b")]);
+      gates[1]!(); // the second's write is the one that loses or wins; whichever, the other's entry stays until it ends
+      await new Promise((r) => setTimeout(r, 5));
+      expect(Object.keys((state.data.get("storing") as object) ?? {})).toContain("fleets/acme/manifests/" + hex("a"));
+      gates[0]!();
+      await Promise.all([one, two]);
+      expect(state.data.get("storing")).toBeUndefined();
+    });
+
+    test("an object whose storage holds the keys of a publish under the name of the requests (an earlier build) still lists and approves the requests", async () => {
+      const { doInstance, state } = await fleetOfTwo();
+      state.data.set("pending", ["fleets/acme/manifests/" + hex("a"), "fleets/acme/packs/" + hex("b")]);
+      expect(((await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" })).json.pending as unknown[]).length).toBe(0);
+      const inv = await call(doInstance, "/invite", { caller: "device", device: "dev-owner", body: {} });
+      expect((await call(doInstance, "/join", { caller: "device", device: "dev-three", body: { code: inv.json.code, pubkey: "C".repeat(43) + "=" } })).json.status).toBe("pending");
+      expect((await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-three" } })).status).toBe(200);
+      const unref = await call(doInstance, "/unreferenced", { caller: "device", device: "dev-owner", body: { keys: ["fleets/acme/packs/" + hex("d")] } });
+      expect(unref.status).toBe(200);
+    });
+  });
+
   test("a key that left is credited up to the head in storage, which can be ahead of the index", async () => {
     const bucket = fakeBucket();
     const { doInstance, state } = await fleetOfTwo(bucket);
