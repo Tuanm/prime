@@ -69,21 +69,17 @@ export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
   return pair;
 }
 
-/** The key pair file as it is on disk: the pair, and the one it replaced while the fleet has not yet taken the new one. */
-interface KeyFile extends MemberKeyPair {
-  previous?: MemberKeyPair;
-}
-
 /**
- * Take a new key pair and keep the one it replaces beside it, so that the fleet can be shown that the new
- * key is this member's own (see `proveKeyChange`). The old pair stays in the file until the fleet has taken
- * the new key (`dropPreviousKey`). Rotating again before that keeps the first old pair: the fleet still holds that one.
+ * Take a new key pair and keep the one it replaces beside it. The old pair is what shows the fleet that the new key is
+ * this member's own (see `proveKeyChange`), and what opens the snapshots that were sealed for it and are not taken in yet.
+ * It stays in the file until both are done (`dropPreviousKey`). Rotating again before that keeps the first old pair: the
+ * fleet still holds that one.
  */
 export function rotateKeyPair(keyFile: string): MemberKeyPair {
-  const current = loadOrCreateKeyPair(keyFile) as KeyFile;
+  const current = loadOrCreateKeyPair(keyFile);
   const previous = current.previous ?? { publicKey: current.publicKey, privateKey: current.privateKey };
   const pair = generateMemberKeyPair();
-  const next: KeyFile = { ...pair, previous };
+  const next: MemberKeyPair = { ...pair, previous };
   writeFileAtomic(keyFile, JSON.stringify(next, null, 2), 0o600);
   return pair;
 }
@@ -92,7 +88,7 @@ export function rotateKeyPair(keyFile: string): MemberKeyPair {
 export function previousKeyPair(keyFile: string): MemberKeyPair | undefined {
   if (!existsSync(keyFile)) return undefined;
   try {
-    const raw = JSON.parse(readFileSync(keyFile, "utf8")) as KeyFile;
+    const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
     const p = raw.previous;
     return p && typeof p.publicKey === "string" && typeof p.privateKey === "string" ? p : undefined;
   } catch {
@@ -100,10 +96,14 @@ export function previousKeyPair(keyFile: string): MemberKeyPair | undefined {
   }
 }
 
-/** The fleet holds the new key: the old pair is of no more use, and is not kept. */
-export function dropPreviousKey(keyFile: string): void {
-  if (!previousKeyPair(keyFile)) return;
-  const raw = JSON.parse(readFileSync(keyFile, "utf8")) as KeyFile;
+/**
+ * The old pair is of no more use: it is not kept. `only` names the pair that was meant (its public key), so a pair that
+ * a later rotation put there is not dropped by an answer to the one before.
+ */
+export function dropPreviousKey(keyFile: string, only?: string): void {
+  const previous = previousKeyPair(keyFile);
+  if (!previous || (only !== undefined && previous.publicKey !== only)) return;
+  const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
   const { previous: _gone, ...kept } = raw;
   writeFileAtomic(keyFile, JSON.stringify(kept, null, 2), 0o600);
 }
@@ -433,6 +433,8 @@ export interface Asker {
   memberId: string;
   /** Its key's fingerprint (see `keyIdOf`): a snapshot wrapped for another key of its own is not openable. */
   keyId?: string;
+  /** The fingerprint of the key it had before it rotated: what was sealed for that one opens too, until it is taken in. */
+  alsoKeyId?: string;
   /** Snapshots up to this sequence are known not to open (a step that failed): leave them out. */
   skipThrough?: number;
   /** What a step costs besides its pack, in bytes (default `ROUTE_STEP_COST`). */
@@ -444,7 +446,7 @@ function openableBy(manifest: FleetManifest, who: Asker): boolean {
   const entry = manifest.wrapped.find((w) => w.memberId === who.memberId);
   if (!entry) return false;
   // A snapshot from an older publisher does not say which key: trust the id.
-  return entry.keyId === undefined || who.keyId === undefined || entry.keyId === who.keyId;
+  return entry.keyId === undefined || who.keyId === undefined || entry.keyId === who.keyId || (who.alsoKeyId !== undefined && entry.keyId === who.alsoKeyId);
 }
 
 // The pack that brings a member that holds the snapshot before this one to this
@@ -697,12 +699,16 @@ async function downloadStep(
   const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
-  const opened = openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey);
+  // A member that rotated its key still opens what was sealed for the key it had, until it has taken that in.
+  const opened =
+    openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey) ??
+    (keys.previous ? openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.previous.privateKey) : null);
   if (!opened) {
     // A sealed snapshot with a key wrapped for exactly this member's key, whose pack
     // does not open, is not "sealed before this device joined": it is damaged or swapped.
     const mine = m.wrapped.find((w) => w.memberId === creds.deviceId);
-    if (m.seal !== undefined && mine?.keyId !== undefined && mine.keyId === keyIdOf(keys.publicKey)) {
+    const ours = [keyIdOf(keys.publicKey), ...(keys.previous ? [keyIdOf(keys.previous.publicKey)] : [])];
+    if (m.seal !== undefined && mine?.keyId !== undefined && ours.includes(mine.keyId)) {
       throw new TamperedSnapshotError(m.seq, "its pack does not open with the key it was wrapped for this member (damaged, or another snapshot's)");
     }
     throw new NotSealedError(m.seq);
@@ -795,7 +801,7 @@ export async function fetchAhead(
   // that publishes fast outruns a member that downloads a big tree slowly.
   let evicted = 0;
   for (let attempt = 0; ; attempt++) {
-    const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(skipThrough !== undefined ? { skipThrough } : {}) }).catch((err: unknown) => {
+    const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(keys.previous ? { alsoKeyId: keyIdOf(keys.previous.publicKey) } : {}), ...(skipThrough !== undefined ? { skipThrough } : {}) }).catch((err: unknown) => {
       // Going around a refused snapshot found no route: say why it was refused, not what the planner missed.
       throw refused && (err instanceof NotSealedYetError || err instanceof NoRouteError) ? refused : err;
     });

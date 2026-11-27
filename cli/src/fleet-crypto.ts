@@ -22,6 +22,11 @@ export interface MemberKeyPair {
   publicKey: string;
   /** PEM of the private key, for the local key file. */
   privateKey: string;
+  /**
+   * The pair this one replaced, while snapshots sealed for it may still be waiting to be opened (see `rotateKeyPair`).
+   * Only the key file has it; it is tried when the current key does not open a snapshot.
+   */
+  previous?: MemberKeyPair;
 }
 
 const CURVE = "x25519";

@@ -676,6 +676,85 @@ describe("the agent's round for a replica", () => {
       }
     });
 
+    test("the old pair is kept until what was sealed for it is taken in, and then dropped", async () => {
+      const { heartbeat } = await import("../src/fleet-daemon");
+      const { previousKeyPair, rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const s = await space(w, "r1");
+        const obj = objectPair();
+        w.gateway.keyProofKey = obj.publicKey;
+        const old = loadOrCreateKeyPair(s.paths.keyFile);
+        rotateKeyPair(s.paths.keyFile);
+        // The fleet replaced the key when the head was at 5; this member has applied nothing.
+        w.gateway.left = [{ pubkey: old.publicKey, until: 5 }];
+        s.loop.lastBootstrap = 1;
+        await heartbeat(s.loop as never, () => undefined);
+        expect(previousKeyPair(s.paths.keyFile)?.publicKey).toBe(old.publicKey);
+        // Once it has applied past that, the next place drops it.
+        const { updateFleetState } = await import("../src/fleets");
+        updateFleetState(s.loop.configPath, "x", "r1", { seq: 5, base: "b5" });
+        s.loop.lastBootstrap = 1;
+        await heartbeat(s.loop as never, () => undefined);
+        expect(previousKeyPair(s.paths.keyFile)).toBeUndefined();
+      } finally {
+        finish(w);
+      }
+    });
+
+    test("a snapshot sealed for the key it had before it rotated still opens, and the member takes it in", async () => {
+      const { rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const s = await baseline(w, "r1");
+        await w.publishNext();
+        // Rotated here, and the roster still lists the old key: the new snapshot is sealed for it.
+        rotateKeyPair(s.paths.keyFile);
+        s.loop.headDirty = true;
+        await s.round();
+        // Taken in (lazily: fetched, and opened with the old pair).
+        expect(Math.max(s.state().seq ?? 0, s.state().fetchedSeq ?? 0)).toBe(w.gateway.head!.seq);
+        expect(s.said.join("\n")).not.toContain("not sealed for this member");
+      } finally {
+        finish(w);
+      }
+    });
+
+    test("the proof is made on the gateway's clock when it says what it is, so a machine with a wrong clock can still change its key", async () => {
+      const { heartbeat } = await import("../src/fleet-daemon");
+      const { rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const s = await space(w, "r1");
+        w.gateway.keyProofKey = objectPair().publicKey;
+        const hourAhead = new Date(Date.now() + 3_600_000);
+        w.gateway.serverDate = hourAhead.toUTCString();
+        rotateKeyPair(s.paths.keyFile);
+        s.loop.lastBootstrap = 1;
+        await heartbeat(s.loop as never, () => undefined);
+        const ts = (w.gateway.bootstrapBodies.at(-1)!.keyProof as { ts: number }).ts;
+        expect(Math.abs(ts - hourAhead.getTime())).toBeLessThan(10_000);
+      } finally {
+        finish(w);
+      }
+    });
+
+    test("a rotation does not drop a pair that a later rotation put there", async () => {
+      const { dropPreviousKey, previousKeyPair, rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const file = join(w.root, "rot2", "m.key");
+        const first = loadOrCreateKeyPair(file);
+        rotateKeyPair(file);
+        dropPreviousKey(file, "not-the-previous-one");
+        expect(previousKeyPair(file)?.publicKey).toBe(first.publicKey);
+        dropPreviousKey(file, first.publicKey);
+        expect(previousKeyPair(file)).toBeUndefined();
+      } finally {
+        finish(w);
+      }
+    });
+
     test("a gateway that does not ask for a proof takes the key as it always did, and the old pair is dropped", async () => {
       const { heartbeat } = await import("../src/fleet-daemon");
       const { previousKeyPair, rotateKeyPair } = await import("../src/fleet-agent");

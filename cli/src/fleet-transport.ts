@@ -286,14 +286,18 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; keyProofKey?: string }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; keyProofKey?: string; serverTimeMs?: number }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
   const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; keyProofKey?: unknown };
+  // The gateway's clock, from the answer's Date header: a proof is only good for a few minutes of its own, so a
+  // machine whose clock is off must not make every proof fail.
+  const dated = Date.parse(res.headers.get("date") ?? "");
   return {
     member: body.member === true,
     primary: body.primary === true,
     epoch: body.epoch ?? 0,
+    ...(Number.isFinite(dated) ? { serverTimeMs: dated } : {}),
     // Which fleet of this name it is: absent from a gateway that predates it.
     ...(typeof body.incarnation === "string" && body.incarnation ? { incarnation: body.incarnation } : {}),
     // Whether the gateway refuses to move the head from a sealed snapshot to one that is not.

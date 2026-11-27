@@ -50,7 +50,7 @@ import {
 import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
-import { fetchMemberKeys, fetchRole, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
@@ -1327,6 +1327,26 @@ function heartbeatFor(loop: SpaceLoop, ceilingMs: number): number {
 }
 
 /**
+ * Drop the key pair a rotation replaced once nothing is left that was sealed for it.
+ *
+ * The fleet lists a replaced key with the sequence the head was at when it was replaced (`left`): the snapshots
+ * up to there may be sealed for it, and a member that has not taken them in yet opens them with the old pair.
+ * Once this member has applied past that sequence (by opening them, or by taking the whole tree that was published
+ * for its new key) the pair is of no more use. A fleet that does not list the key (a gateway that does not
+ * keep them) has nothing sealed for it that a member needs. A roster that cannot be read keeps the pair.
+ */
+async function dropPreviousWhenSpent(loop: SpaceLoop, previousPublicKey: string): Promise<void> {
+  try {
+    const { left } = await fetchRoster(loop.creds, loop.fleet);
+    const entry = left.find((k) => k.pubkey === previousPublicKey);
+    const applied = positions(readFleetState(loop.configPath, loop.fleet, loop.name)).applied.seq;
+    if (!entry || applied >= entry.until) dropPreviousKey(loop.paths.keyFile, previousPublicKey);
+  } catch {
+    // Kept: asked again with the next place.
+  }
+}
+
+/**
  * Take (or take back) this space's place in the fleet.
  *
  * Callable outside the round on purpose: a round can spend a minute pulling a
@@ -1347,9 +1367,11 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     let proof: KeyProof | undefined;
     let asked = false;
     if (before) {
+      const fetchedAt = Date.now();
       const role = await fetchRole(loop.creds, loop.fleet).catch(() => undefined);
       asked = role?.keyProofKey !== undefined;
-      if (role?.keyProofKey) proof = proveKeyChange(before.privateKey, role.keyProofKey, keys.publicKey, loop.fleet, loop.creds.deviceId);
+      // On the gateway's clock when it says what it is (a proof is good for ten minutes), else on this machine's.
+      if (role?.keyProofKey) proof = proveKeyChange(before.privateKey, role.keyProofKey, keys.publicKey, loop.fleet, loop.creds.deviceId, role.serverTimeMs !== undefined ? role.serverTimeMs + (Date.now() - fetchedAt) : Date.now());
     }
     const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name, proof).catch((err: unknown) => {
       // The request did not get an answer: what an earlier refusal asked for is history.
@@ -1358,8 +1380,9 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     });
     loop.lastBootstrap = Date.now();
     // The fleet answered with a place (or a wait for one) rather than a refusal, so it holds the key this
-    // member has now - on the proof, or because a gateway that predates it asks for none: the old pair is spent.
-    if (before && placed.ok && (proof || !asked)) dropPreviousKey(loop.paths.keyFile);
+    // member has now - on the proof, or because a gateway that predates it asks for none. The old pair is kept
+    // until what was sealed for it has been taken in (see `dropPreviousWhenSpent`).
+    if (before && placed.ok && (proof || !asked)) await dropPreviousWhenSpent(loop, before.publicKey);
     if (placed.paused) {
       loop.paused = true;
       loop.primary = false;
