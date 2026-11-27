@@ -417,6 +417,63 @@ function processMarker(identity: { name?: string }): string {
 }
 
 /**
+ * An earlier build registered the fleet agent as the buddy's own task, `\prime\code-mcp`. Whether that
+ * task is the agent's is told by what it runs: `__fleet-agent` and not `code-mcp --service`. The buddy's
+ * task is never touched.
+ */
+export function isFleetAgentAction(argument: string): boolean {
+  return argument.includes("__fleet-agent") && !argument.includes("code-mcp --service");
+}
+
+/** What the old task `\prime\code-mcp` is, read-only: its action's arguments and whether it is running. */
+function renderWindowsOldTaskProbeScript(): string {
+  return [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$task = Get-ScheduledTask -TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(TASK_NAME),
+    "if ($task) { 'task ' + $task.State; $task.Actions | ForEach-Object { 'arguments ' + $_.Arguments } }",
+  ].join("\n");
+}
+
+/**
+ * Remove the old task when it is the fleet agent's, and the agent process of this configuration. It
+ * looks again inside the script, so that a task replaced by the buddy's between the look and this is
+ * left alone.
+ */
+export function renderWindowsRetireOldAgentScript(configPath: string): string {
+  const ref = "-TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(TASK_NAME);
+  return [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$task = Get-ScheduledTask " + ref,
+    "$arguments = if ($task) { ($task.Actions | ForEach-Object { $_.Arguments }) -join ' ' } else { '' }",
+    "if ($task -and $arguments.Contains('__fleet-agent') -and -not $arguments.Contains('code-mcp --service')) {",
+    "  Stop-ScheduledTask " + ref,
+    "  Unregister-ScheduledTask " + ref + " -Confirm:$false",
+    "  Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('__fleet-agent') -and $_.CommandLine.Contains(" + psQuote(configPath) + ") } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+    "  'removed'",
+    "} else { 'absent' }",
+  ].join("\n");
+}
+
+/** How the Windows scripts are run; replaced in tests. */
+export interface Shell {
+  run(cmd: string[], opts?: { timeoutMs?: number }): RunResult;
+  powershell(script: string): RunResult;
+}
+
+const realShell: Shell = { run: (cmd, opts) => run(cmd, opts), powershell: (script) => powershell(script) };
+
+/** The old `\prime\code-mcp` task when it is the fleet agent's, as the status of that service. */
+function oldAgentTask(shell: Shell): { running: boolean } | undefined {
+  if (shell.run(["schtasks", "/query", "/tn", TASK_PATH + TASK_NAME], { timeoutMs: 30_000 }).code !== 0) return undefined;
+  const lines = shell.powershell(renderWindowsOldTaskProbeScript()).out.split(/\r?\n/).map((line) => line.trim());
+  const state = lines.find((line) => line.startsWith("task "));
+  if (!state) return undefined;
+  const argument = lines.filter((line) => line.startsWith("arguments ")).join(" ");
+  if (!isFleetAgentAction(argument)) return undefined;
+  return { running: state === "task Running" };
+}
+
+/**
  * Register the Scheduled Task. It runs under conhost --headless so the console
  * program gets no window, for the logged-on user only (no admin rights needed),
  * starts at logon, never times out, and restarts after a failure.
@@ -523,6 +580,7 @@ export function serviceStatus(
   platform: Platform = process.platform as Platform,
   configPath: string = defaultConfigPath(),
   identity: { name?: string; label?: string } = {},
+  shell: Shell = realShell,
 ): ServiceStatus {
   const name = identity.name ?? SERVICE_NAME;
   const label = identity.label ?? LAUNCHD_LABEL;
@@ -562,13 +620,25 @@ export function serviceStatus(
     const task = taskNameOf(identity);
     const where = "Task Scheduler " + TASK_PATH + task;
     // schtasks answers in well under a second, and its exit code is not localized.
-    const installed = run(["schtasks", "/query", "/tn", TASK_PATH + task], { timeoutMs: 30_000 }).code === 0;
+    const installed = shell.run(["schtasks", "/query", "/tn", TASK_PATH + task], { timeoutMs: 30_000 }).code === 0;
+    if (!installed && task !== TASK_NAME) {
+      // A machine whose agent was installed by an earlier build has it under the buddy's task name.
+      const old = oldAgentTask(shell);
+      if (old) {
+        return {
+          installed: true,
+          running: old.running,
+          where: "Task Scheduler " + TASK_PATH + TASK_NAME,
+          detail: (old.running ? "running" : "not running") + ", registered under the name of the buddy's task by an earlier build: install it again to move it",
+        };
+      }
+    }
     // The buddy writes its pid down; the fleet agent has its own lock and state, and Task Scheduler is asked.
     const running =
       installed &&
       (task === TASK_NAME
         ? pidAlive(pidFilePath(configPath))
-        : powershell("(Get-ScheduledTask " + taskRef(identity) + ").State -eq 'Running'").out.trim() === "True");
+        : shell.powershell("(Get-ScheduledTask " + taskRef(identity) + ").State -eq 'Running'").out.trim() === "True");
     return { installed, running, where, detail: installed ? (running ? "running" : "not running") : undefined };
   }
   throw new CliError("'prime service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
@@ -628,7 +698,7 @@ export function serviceSpecFor(platform: Platform, configPath: string): ServiceS
   return { command, configPath, logPath, pathEnv: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", home: homedir() };
 }
 
-export function installService(platform: Platform, spec: ServiceSpec): string {
+export function installService(platform: Platform, spec: ServiceSpec, shell: Shell = realShell): string {
   if (platform === "linux") {
     if (!Bun.which("systemctl")) throw new CliError("systemctl not found: 'prime service' needs systemd on Linux");
     const unit = systemdUnitPath(process.env, homedir(), spec.name ?? SERVICE_NAME);
@@ -664,16 +734,29 @@ export function installService(platform: Platform, spec: ServiceSpec): string {
     // A reinstall must stop the running instance: re-registering only replaces
     // the definition, and with IgnoreNew the new start is skipped while the old
     // process (with the old options) keeps running.
-    powershell(renderWindowsUninstallScript(spec.configPath, spec));
+    shell.powershell(renderWindowsUninstallScript(spec.configPath, spec));
+    // The agent an earlier build registered under the buddy's task name is moved, not left to race the new one.
+    if (taskNameOf(spec) !== TASK_NAME) retireOldAgentTask(spec.configPath, shell);
     if (taskNameOf(spec) === TASK_NAME) for (let i = 0; i < 40 && pidAlive(pidFilePath(spec.configPath)); i++) Bun.sleepSync(250);
-    must(powershell(renderWindowsInstallScript(spec)), "registering the Scheduled Task");
+    must(shell.powershell(renderWindowsInstallScript(spec)), "registering the Scheduled Task");
     return "Task Scheduler " + TASK_PATH + taskNameOf(spec);
   }
   throw new CliError("'prime service' is not supported on " + platform);
 }
 
+/** Remove the old `\prime\code-mcp` task when it is the fleet agent's. Returns whether it was. */
+function retireOldAgentTask(configPath: string, shell: Shell): boolean {
+  if (!oldAgentTask(shell)) return false;
+  return shell.powershell(renderWindowsRetireOldAgentScript(configPath)).out.trim() === "removed";
+}
+
 /** Stop and remove. Returns what was there (false: nothing was installed). */
-export function uninstallService(platform: Platform, configPath: string, identity: { name?: string; label?: string } = {}): boolean {
+export function uninstallService(
+  platform: Platform,
+  configPath: string,
+  identity: { name?: string; label?: string } = {},
+  shell: Shell = realShell,
+): boolean {
   const name = identity.name ?? SERVICE_NAME;
   const label = identity.label ?? LAUNCHD_LABEL;
   if (platform === "linux") {
@@ -697,7 +780,9 @@ export function uninstallService(platform: Platform, configPath: string, identit
     return had || out.code === 0;
   }
   if (platform === "win32") {
-    return powershell(renderWindowsUninstallScript(configPath, identity)).out.trim() === "removed";
+    const removed = shell.powershell(renderWindowsUninstallScript(configPath, identity)).out.trim() === "removed";
+    if (taskNameOf(identity) === TASK_NAME) return removed;
+    return retireOldAgentTask(configPath, shell) || removed;
   }
   throw new CliError("'prime service' is not supported on " + platform);
 }

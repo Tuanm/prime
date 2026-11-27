@@ -18,7 +18,13 @@ import {
   parseSystemdConfig,
   renderLaunchdPlist,
   renderSystemdUnit,
+  installService,
+  isFleetAgentAction,
   renderWindowsInstallScript,
+  renderWindowsRetireOldAgentScript,
+  serviceStatus,
+  uninstallService,
+  type Shell,
   renderWindowsUninstallScript,
   taskNameOf,
   saveOverrides,
@@ -393,5 +399,104 @@ describe("which configuration a service runs", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the fleet agent an earlier Windows build registered as the buddy's task", () => {
+  const AGENT = fleetAgentSpec("C:\\cfg\\config.yaml", "win32");
+  const agentArguments = "--headless prime.exe __fleet-agent --config C:\\cfg\\config.yaml";
+  const buddyArguments = "--headless prime.exe code-mcp --service --config C:\\cfg\\config.yaml";
+
+  // A Task Scheduler with `\prime\code-mcp` registered to run `argument` (or nothing), and what was asked of it.
+  function scheduler(oldTask: { argument: string; state?: string } | undefined, own = false) {
+    const calls: string[] = [];
+    let oldPresent = oldTask !== undefined;
+    let ownPresent = own;
+    const shell: Shell = {
+      run(cmd) {
+        calls.push(cmd.join(" "));
+        const named = cmd[cmd.length - 1] ?? "";
+        if (named === "\\prime\\code-mcp") return { code: oldPresent ? 0 : 1, out: "", err: "" };
+        if (named === "\\prime\\prime-fleet-agent") return { code: ownPresent ? 0 : 1, out: "", err: "" };
+        return { code: 1, out: "", err: "" };
+      },
+      powershell(script) {
+        calls.push(script);
+        if (script.includes("Unregister-ScheduledTask -TaskPath '\\prime\\' -TaskName 'code-mcp'")) {
+          // the script's own guard, evaluated here as PowerShell would
+          const guard = script.includes("$arguments.Contains('__fleet-agent') -and -not $arguments.Contains('code-mcp --service')");
+          if (oldPresent && guard && isFleetAgentAction(oldTask!.argument)) {
+            oldPresent = false;
+            return { code: 0, out: "removed\n", err: "" };
+          }
+          return { code: 0, out: "absent\n", err: "" };
+        }
+        if (script.includes("Unregister-ScheduledTask") && script.includes("prime-fleet-agent")) {
+          const had = ownPresent;
+          ownPresent = false;
+          return { code: 0, out: had ? "removed\n" : "absent\n", err: "" };
+        }
+        if (script.includes("Get-ScheduledTask -TaskPath '\\prime\\' -TaskName 'code-mcp'") && script.includes("'task '")) {
+          return { code: 0, out: oldPresent ? "task " + (oldTask!.state ?? "Ready") + "\narguments " + oldTask!.argument + "\n" : "", err: "" };
+        }
+        if (script.includes("Register-ScheduledTask")) { ownPresent = true; return { code: 0, out: "", err: "" }; }
+        return { code: 0, out: "False", err: "" };
+      },
+    };
+    return { shell, calls, oldPresent: () => oldPresent, ownPresent: () => ownPresent };
+  }
+
+  test("is told apart by what it runs", () => {
+    expect(isFleetAgentAction(agentArguments)).toBe(true);
+    expect(isFleetAgentAction(buddyArguments)).toBe(false);
+    expect(isFleetAgentAction("")).toBe(false);
+  });
+
+  test("installing the agent removes the old task, and then registers its own", () => {
+    const s = scheduler({ argument: agentArguments });
+    installService("win32", AGENT, s.shell);
+    expect(s.oldPresent()).toBe(false);
+    expect(s.ownPresent()).toBe(true);
+  });
+
+  test("the buddy's task is never touched by installing or removing the agent", () => {
+    const s = scheduler({ argument: buddyArguments }, true);
+    installService("win32", AGENT, s.shell);
+    expect(s.oldPresent()).toBe(true);
+    uninstallService("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell);
+    expect(s.oldPresent()).toBe(true);
+    expect(s.calls.join("\n")).not.toContain("Unregister-ScheduledTask -TaskPath '\\prime\\' -TaskName 'code-mcp'");
+  });
+
+  test("the retiring script guards itself, and only stops the agent's process, not the buddy's", () => {
+    const script = renderWindowsRetireOldAgentScript("C:\\cfg\\config.yaml");
+    expect(script).toContain("$arguments.Contains('__fleet-agent') -and -not $arguments.Contains('code-mcp --service')");
+    expect(script).toContain("Contains('__fleet-agent')");
+    expect(script).not.toMatch(/Contains\('code-mcp --service'\) -and \$_/);
+  });
+
+  test("uninstalling the agent removes the old task too, and says there was one", () => {
+    const s = scheduler({ argument: agentArguments });
+    expect(uninstallService("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell)).toBe(true);
+    expect(s.oldPresent()).toBe(false);
+  });
+
+  test("its status says it is there, whether it runs, and that installing again moves it", () => {
+    const running = serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler({ argument: agentArguments, state: "Running" }).shell);
+    expect(running).toMatchObject({ installed: true, running: true, where: "Task Scheduler \\prime\\code-mcp" });
+    expect(running.detail).toContain("install it again");
+    const ready = serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler({ argument: agentArguments, state: "Ready" }).shell);
+    expect(ready).toMatchObject({ installed: true, running: false });
+  });
+
+  test("the status of the agent does not take the buddy's task for its own, nor does a machine with neither", () => {
+    expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler({ argument: buddyArguments }).shell).installed).toBe(false);
+    expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler(undefined).shell).installed).toBe(false);
+  });
+
+  test("a task of its own is reported as it is, and the old one is not looked up", () => {
+    const s = scheduler(undefined, true);
+    expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell).where).toBe("Task Scheduler \\prime\\prime-fleet-agent");
+    expect(s.calls.some((c) => c.includes("\\prime\\code-mcp"))).toBe(false);
   });
 });
