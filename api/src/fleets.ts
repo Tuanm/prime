@@ -44,13 +44,14 @@ export const RECENT_SNAPSHOTS = 64;
 /**
  * The most one upload (a snapshot, the manifest and the sealed pack, or one change pack) may be.
  *
- * A Worker has 128 MB for everything it holds. The body is read whole (`arrayBuffer`), then hashed
- * (`crypto.subtle.digest` takes its own copy), then handed to R2 (`put` takes another): up to three
- * times its size at once, with the Worker's own few tens of MB on top. That puts the largest body that is
- * certain to fit near 36 MB, and a round 32 MiB is used. An upload that goes over would be killed by the
- * runtime with nothing said, so it is refused first, with its size and the limit. Going beyond it takes
- * an upload that is streamed to R2 and hashed as it goes, which the object store's API needs the length
- * of up front for: it is not done.
+ * An isolate has 128 MB, and that is shared by every request it is serving at that moment, not given to
+ * each. One upload is read whole (`arrayBuffer`), then hashed (`crypto.subtle.digest` may take its own copy),
+ * then handed to R2 (`put` may take another): up to three times its size at once, on top of what the isolate
+ * already holds. 32 MiB is therefore a budget, not a guarantee: one such upload leaves room for the others
+ * that arrive with it, and several large ones at once can still exhaust it. The limit is a choice that keeps
+ * the usual case well inside the memory, and an upload over it is refused first, with its size and the limit,
+ * rather than killed by the runtime with nothing said. Going beyond it takes an upload that is streamed to R2
+ * and hashed as it goes; R2 needs the length of a stream up front, so it is not done.
  */
 export const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 

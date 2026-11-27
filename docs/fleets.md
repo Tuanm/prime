@@ -683,9 +683,46 @@ What is deliberately not done, so that nobody has to find it out:
   restart it on a settings change, so a change there stops the agent and starts another. A machine whose
   agent was installed by a build before that has it under the buddy's name, `\prime\code-mcp`:
   `agent status` reports it there, and `agent install` and `agent uninstall` remove it (only when what it
-  runs is `__fleet-agent`, never the buddy's `code-mcp --service`) and the agent process of that
-  configuration, so installing again moves it. It is looked up by the task's action, so a task of that
-  name that runs something else is left alone.
+  runs is `__fleet-agent`, never the buddy's `code-mcp --service`, and the `--config` it names is this
+  configuration) and the agent process of that configuration, so installing again moves it. It is looked
+  up by the task's action, so a task of that name that runs something else is left alone, and so is the
+  agent task of another configuration: `agent status` names that configuration, and the command that
+  moves it is `agent install` with its `--config`.
+
+## Upgrading
+
+What changes for a fleet and a machine that already run an earlier build.
+
+- **Uploads are capped at 32 MiB** (it was not capped, and anything near 100 MB died inside the
+  gateway). A fleet whose whole tree is bigger than that stops at its next whole tree: the 32nd
+  snapshot, or the next time the members change. Until then the changes (deltas) go on being
+  published; at that point the primary's round fails and nothing more is published. Every member
+  keeps what it has. It is reported where the primary runs: `prime fleets agent status` shows the
+  failure (`this snapshot is NN MB, and the gateway takes at most 32 MB for one ...`), and the snapshot is
+  tried again every round, so it goes on by itself once the tree fits. To go on, make the work tree smaller (keep build output,
+  dependencies and caches out of it with `.gitignore`) until its sealed whole tree is under the limit.
+  Deploy the gateway before the members: a member that is told the limit refuses before uploading, and
+  one that is not (an older gateway) is refused by the gateway with the same message.
+- **A sealed fleet does not go back to unsealed snapshots.** Once a fleet has a sealed snapshot, the
+  gateway refuses a publish without a seal from an old build (it says to upgrade, the member carries on
+  as a replica and the lease goes to a member that seals). Upgrade every member that may become the
+  primary; a fleet whose members are all old builds does not move until one is upgraded. Deploy the
+  gateway first (see "Roll out slowly" above).
+- **The intermediate fleet test builds** (the ones that already sealed the incarnation or tagged the
+  entries) are not all interoperable with this release: a member that has seen the sender's tag in an
+  entry refuses a snapshot without it. Upgrade all of them together. Builds of the released line, which
+  do not seal, are read as before.
+- **On Windows**, an agent installed by an earlier build is registered under the buddy's task name,
+  `\prime\code-mcp`. `prime fleets agent install` (or `uninstall`) for the configuration it runs finds
+  it by what it runs, removes it and registers `\prime\prime-fleet-agent` in its place; `agent status`
+  reports it meanwhile. The buddy's own task is never touched.
+- **`prime fleets agent stop` now stops the service.** With a login service installed, signalling the
+  agent's process only had the service manager start another a few seconds later. It now asks the
+  manager to stop the service (`systemctl --user stop`, `launchctl bootout`); the service stays
+  installed and stays stopped until `prime fleets agent start`, or until its manager starts it of itself
+  (the next login on macOS, the next start of the user's manager on Linux). A machine that relied on
+  `stop` being followed by a restart should use `agent start` (or `agent install`, which also stops an
+  older agent first).
 
 ## Where to read more
 
