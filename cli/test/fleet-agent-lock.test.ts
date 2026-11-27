@@ -19,6 +19,7 @@ import {
   readAgentSettings,
   runFleetAgent,
   stopFleetAgent,
+  managerHolds,
   stopFleetAgentManaged,
   uninstallFleetAgent,
   writeAgentState,
@@ -1032,6 +1033,83 @@ describe("stopping an agent that a service runs", () => {
     });
     expect(result.stopped).toBe(false);
     expect(stops).toBe(0);
+  });
+
+  test("an agent started by hand beside a loaded service is stopped, and so is the service that would start another", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const agent = await fakeAgent();
+    running(configPath, agent.pid);
+    let loaded = true;
+    const calls: string[] = [];
+    const service = {
+      installed: () => true,
+      pid: () => undefined, // its own instance is crash-looping on the lock
+      loaded: () => loaded,
+      restart: () => false,
+      stop: () => {
+        calls.push("stop");
+        const was = loaded;
+        loaded = false;
+        return was;
+      },
+      stopWaitMs: 300,
+    };
+    const result = await stopFleetAgentManaged(configPath, service);
+    expect(result).toEqual({ stopped: true, via: "process", restarts: false, serviceStopped: true });
+    expect(await gone(agent.pid)).toBe(true);
+    expect(loaded).toBe(false);
+    // Said again, with nothing running and nothing loaded, it is not an error and asks nothing.
+    expect(await stopFleetAgentManaged(configPath, service)).toEqual({ stopped: false, via: "process", restarts: false });
+    expect(calls).toEqual(["stop"]);
+  });
+
+  test("an agent beside a service the manager has unloaded is stopped, and nothing is said to start another", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const agent = await fakeAgent();
+    running(configPath, agent.pid);
+    let asked = 0;
+    const result = await stopFleetAgentManaged(configPath, {
+      installed: () => true,
+      pid: () => undefined,
+      loaded: () => false,
+      restart: () => false,
+      stop: () => {
+        asked++;
+        return false; // bootout of what is not loaded fails
+      },
+    });
+    expect(result).toEqual({ stopped: true, via: "process", restarts: false });
+    expect(asked).toBe(0);
+    expect(await gone(agent.pid)).toBe(true);
+  });
+
+  test("a loaded service whose agent is not running (failing, or just starting) is stopped through the manager", async () => {
+    const root = scratch();
+    let stops = 0;
+    const result = await stopFleetAgentManaged(join(root, "config.json"), {
+      installed: () => true,
+      pid: () => 4242,
+      loaded: () => true,
+      restart: () => false,
+      stop: () => {
+        stops++;
+        return true;
+      },
+    });
+    expect(result).toEqual({ stopped: false, via: "service", restarts: false, serviceStopped: true });
+    expect(stops).toBe(1);
+  });
+
+  test("the manager holds a service that is running or about to start again, not one that was stopped", () => {
+    expect(managerHolds({ installed: true, running: true, detail: "running" }, "darwin")).toBe(true);
+    expect(managerHolds({ installed: true, running: false, detail: "spawn scheduled" }, "darwin")).toBe(true);
+    expect(managerHolds({ installed: true, running: false, detail: "not loaded" }, "darwin")).toBe(false);
+    expect(managerHolds({ installed: true, running: false, detail: "activating" }, "linux")).toBe(true);
+    expect(managerHolds({ installed: true, running: false, detail: "inactive" }, "linux")).toBe(false);
+    expect(managerHolds({ installed: true, running: false, detail: "failed" }, "linux")).toBe(false);
+    expect(managerHolds({ installed: false, running: true }, "linux")).toBe(false);
   });
 
   test("a service the manager has unloaded is still its manager answering", () => {

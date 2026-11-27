@@ -478,18 +478,20 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
     return;
   }
   if (what === "stop") {
-    const { stopped, via, restarts } = await stopFleetAgentManaged(ctx.configPath);
+    const { stopped, via, restarts, serviceStopped } = await stopFleetAgentManaged(ctx.configPath);
     if (ctx.json) {
-      printJson({ stopped, via, ...(restarts ? { restarts: true } : {}) });
+      printJson({ stopped, via, ...(restarts ? { restarts: true } : {}), ...(serviceStopped ? { service_stopped: true } : {}) });
       return;
     }
     if (!stopped) {
-      ctx.out(dim("the fleet agent was not running"));
+      ctx.out(serviceStopped ? green("the fleet agent was not running; its service, which would have started one, is stopped") : dim("the fleet agent was not running"));
+      if (serviceStopped) ctx.out(dim("  'prime fleets agent start' starts it again"));
       return;
     }
     ctx.out(green("stopped the fleet agent"));
-    if (via === "service") ctx.out(dim("  its service is stopped with it, and starts again at the next login; 'prime fleets agent start' starts it now"));
-    if (restarts) ctx.out(yellow("  its service's manager would not stop it, so the manager starts another: 'prime fleets agent uninstall' removes the service"));
+    if (via === "service") ctx.out(dim("  its service is stopped with it, and stays stopped until 'prime fleets agent start' (or the next login on macOS, the next start of the user manager on Linux)"));
+    if (serviceStopped) ctx.out(dim("  the service was running beside it, and is stopped too; 'prime fleets agent start' starts it again"));
+    if (restarts) ctx.out(yellow("  its service's manager would not stop the service, so the manager starts another: 'prime fleets agent uninstall' removes the service"));
     return;
   }
   if (what === "reset") {

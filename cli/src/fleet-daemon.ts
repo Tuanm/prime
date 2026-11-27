@@ -352,6 +352,11 @@ export interface AgentServiceHooks {
   restart(): boolean;
   /** Ask the service manager to stop it (it stays installed); false when it would not. */
   stop?(): boolean;
+  /**
+   * Whether the manager has the service loaded or running, so that it would start an agent that is
+   * gone: false for one that was stopped (or never started), which nothing starts again.
+   */
+  loaded?(): boolean;
   /** How long a running agent is given to stop when it is replaced, or to come back (tests make it short). */
   stopWaitMs?: number;
   /** Start a detached agent with this environment; replaced in tests. */
@@ -365,7 +370,7 @@ export interface AgentServiceHooks {
  */
 export function agentServiceFor(
   configPath: string,
-  probe: () => { installed: boolean; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
+  probe: () => { installed: boolean; running?: boolean; detail?: string; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
   restart: () => boolean = restartFleetAgentService,
   stop: () => boolean = stopFleetAgentService,
 ): AgentServiceHooks {
@@ -405,6 +410,13 @@ export function agentServiceFor(
         return false;
       }
     },
+    loaded: () => {
+      try {
+        return managerHolds(status(), process.platform);
+      } catch {
+        return false;
+      }
+    },
     restart: () => {
       asked = undefined; // whatever it said before is not what it says after
       return restart();
@@ -414,6 +426,19 @@ export function agentServiceFor(
       return stop();
     },
   };
+}
+
+/**
+ * Whether the manager would start the agent again if it died: it has the service running, or waiting to
+ * be started again. launchd says "not loaded" for one that was booted out; systemd says "inactive" (or
+ * "failed" once it has given up) for one that was stopped.
+ */
+export function managerHolds(status: { installed: boolean; running?: boolean; detail?: string }, platform: string): boolean {
+  if (!status.installed) return false;
+  if (status.running === true) return true;
+  if (platform === "darwin") return status.detail !== undefined && status.detail !== "not loaded";
+  if (platform === "linux") return status.detail === "activating" || status.detail === "reloading";
+  return false;
 }
 
 // How long what the service manager said stays true for one `ensureFleetAgent`.
@@ -609,17 +634,26 @@ export function uninstallFleetAgent(
 /**
  * Stop the agent the way it can be stopped. When a login service runs it, signalling the process
  * only has the service manager start another a few seconds later, so the manager is asked to stop
- * the service (it stays installed: it starts again at the next login, and `prime fleets agent start`
- * starts it now). Without a service, or when its manager will not, the process is stopped as before.
+ * the service (it stays installed, and `prime fleets agent start` starts it again). That is done only
+ * for the agent that IS the service's: one started by hand beside the service is signalled, and the
+ * service is stopped as well when the manager holds it, because it would start its own the moment
+ * the agent's lock was free. Without a service, or when its manager will not stop it, the process is
+ * stopped as before, and `restarts` says whether a manager is left that starts another.
  */
 export async function stopFleetAgentManaged(
   configPath: string,
   service: AgentServiceHooks = agentServiceFor(configPath),
   waitMs: number = service.stopWaitMs ?? STOP_WAIT_MS,
-): Promise<{ stopped: boolean; via: "service" | "process"; restarts: boolean }> {
+): Promise<{ stopped: boolean; via: "service" | "process"; restarts: boolean; serviceStopped?: boolean }> {
   const existing = runningAgent(configPath);
-  const managed = existing !== undefined && service.installed();
-  if (existing && managed && service.stop?.()) {
+  const installed = service.installed();
+  const held = installed && (service.loaded?.() ?? true);
+  if (existing === undefined) {
+    // Nothing runs, but a service the manager holds is about to start one (or is failing to): stop it too.
+    if (installed && service.loaded?.() === true && service.stop?.()) return { stopped: false, via: "service", restarts: false, serviceStopped: true };
+    return { stopped: false, via: "process", restarts: false };
+  }
+  if (installed && service.pid() === existing.pid && service.stop?.()) {
     const gone = Date.now() + waitMs;
     while (pidAlive(existing.pid) && Date.now() < gone) await Bun.sleep(50);
     if (pidAlive(existing.pid)) {
@@ -628,8 +662,11 @@ export async function stopFleetAgentManaged(
     rmSync(fleetAgentStatePath(configPath), { force: true });
     return { stopped: true, via: "service", restarts: false };
   }
-  // The process is stopped; if a service is there to start another (its manager would not stop it), it will.
-  return { stopped: stopFleetAgent(configPath), via: "process", restarts: managed };
+  // Not the service's agent, or its manager would not stop it: the process is stopped here. A service the
+  // manager holds is stopped too (after the process, which it is not running), or it starts another.
+  const stopped = stopFleetAgent(configPath);
+  if (installed && service.pid() !== existing.pid && held && service.stop?.()) return { stopped, via: "process", restarts: false, serviceStopped: true };
+  return { stopped, via: "process", restarts: held };
 }
 
 /** Stop the agent. Returns true when one was running. */
