@@ -281,8 +281,7 @@ export function readServiceDefinition(
   if (platform === "win32") {
     // Windows keeps the definition in Task Scheduler: the task's own command line says the configuration.
     const task = identity.name ?? SERVICE_NAME;
-    if (shell.run(["schtasks", "/query", "/tn", TASK_PATH + task], { timeoutMs: 30_000 }).code !== 0) return undefined;
-    const probed = parseWindowsTaskProbe(shell.powershell(renderWindowsTaskProbeScript(task)).out);
+    const probed = probeTask(shell, task);
     return probed ? { config: configOfTaskArguments(probed.argument) } : undefined;
   }
   try {
@@ -438,7 +437,9 @@ export function isFleetAgentAction(argument: string): boolean {
 // What a script's output is read back as: Windows PowerShell writes its stdout in the console's code page when
 // it is redirected, and `run` reads UTF-8, so a path with a character outside it (a profile directory named
 // with one) would come back as something else and never match. No byte order mark: it would be read as text.
-const UTF8_OUTPUT = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false";
+// Guarded: with no console attached (a task, a service) setting it can throw "the handle is invalid", and a
+// script that is only reading must not stop for that.
+const UTF8_OUTPUT = "try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}";
 
 /** What a task is, read-only: its action's arguments and whether it is running. */
 export function renderWindowsTaskProbeScript(taskName: string = TASK_NAME): string {
@@ -456,6 +457,32 @@ export function parseWindowsTaskProbe(out: string): { state: string; argument: s
   const state = lines.find((line) => line.startsWith("task "));
   if (!state) return undefined;
   return { state: state.slice("task ".length), argument: lines.filter((line) => line.startsWith("arguments ")).map((l) => l.slice("arguments ".length)).join(" ") };
+}
+
+// What the last look at a task said, for each way of asking: one command asks about a task for its
+// definition (which configuration) and for its status (running), and each look is a schtasks and a PowerShell
+// to start. Good for a moment; whatever changes a task forgets it.
+const taskProbes = new WeakMap<Shell, Map<string, { at: number; value: { state: string; argument: string } | undefined }>>();
+const TASK_PROBE_FRESH_MS = 2_000;
+
+/** Forget what was seen of the tasks (after one is installed or removed). */
+function forgetTaskProbes(shell: Shell): void {
+  taskProbes.delete(shell);
+}
+
+/** A task's state and its action's arguments; undefined when there is no such task. */
+function probeTask(shell: Shell, taskName: string): { state: string; argument: string } | undefined {
+  const seen = taskProbes.get(shell)?.get(taskName);
+  if (seen && Date.now() - seen.at < TASK_PROBE_FRESH_MS) return seen.value;
+  // schtasks answers in well under a second, and its exit code is not localized; PowerShell is slow to start.
+  const value =
+    shell.run(["schtasks", "/query", "/tn", TASK_PATH + taskName], { timeoutMs: 30_000 }).code !== 0
+      ? undefined
+      : parseWindowsTaskProbe(shell.powershell(renderWindowsTaskProbeScript(taskName)).out);
+  const mine = taskProbes.get(shell) ?? new Map();
+  mine.set(taskName, { at: Date.now(), value });
+  taskProbes.set(shell, mine);
+  return value;
 }
 
 /**
@@ -499,8 +526,7 @@ export function configOfTaskArguments(argument: string): string | undefined {
  * its command line does not say, which the agent's always did). There is one such task per machine.
  */
 function oldAgentTask(shell: Shell): { running: boolean; config: string | undefined } | undefined {
-  if (shell.run(["schtasks", "/query", "/tn", TASK_PATH + TASK_NAME], { timeoutMs: 30_000 }).code !== 0) return undefined;
-  const probed = parseWindowsTaskProbe(shell.powershell(renderWindowsTaskProbeScript()).out);
+  const probed = probeTask(shell, TASK_NAME);
   if (!probed || !isFleetAgentAction(probed.argument)) return undefined;
   return { running: probed.state === "Running", config: configOfTaskArguments(probed.argument) };
 }
@@ -656,8 +682,10 @@ export function serviceStatus(
   if (platform === "win32") {
     const task = taskNameOf(identity);
     const where = "Task Scheduler " + TASK_PATH + task;
-    // schtasks answers in well under a second, and its exit code is not localized.
-    const installed = shell.run(["schtasks", "/query", "/tn", TASK_PATH + task], { timeoutMs: 30_000 }).code === 0;
+    // The buddy writes its pid down, and only needs to know that its task is there; the fleet agent has its
+    // own lock and state, and its task is looked at once for both what it runs and whether it is running.
+    const probed = task === TASK_NAME ? undefined : probeTask(shell, task);
+    const installed = task === TASK_NAME ? shell.run(["schtasks", "/query", "/tn", TASK_PATH + task], { timeoutMs: 30_000 }).code === 0 : probed !== undefined;
     if (!installed && task !== TASK_NAME) {
       // A machine whose agent was installed by an earlier build has it under the buddy's task name.
       const old = oldAgentTask(shell);
@@ -679,12 +707,7 @@ export function serviceStatus(
         };
       }
     }
-    // The buddy writes its pid down; the fleet agent has its own lock and state, and Task Scheduler is asked.
-    const running =
-      installed &&
-      (task === TASK_NAME
-        ? pidAlive(pidFilePath(configPath))
-        : shell.powershell("(Get-ScheduledTask " + taskRef(identity) + ").State -eq 'Running'").out.trim() === "True");
+    const running = installed && (task === TASK_NAME ? pidAlive(pidFilePath(configPath)) : probed!.state === "Running");
     return { installed, running, where, detail: installed ? (running ? "running" : "not running") : undefined };
   }
   throw new CliError("'prime service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
@@ -781,11 +804,13 @@ export function installService(platform: Platform, spec: ServiceSpec, shell: She
     // A reinstall must stop the running instance: re-registering only replaces
     // the definition, and with IgnoreNew the new start is skipped while the old
     // process (with the old options) keeps running.
+    forgetTaskProbes(shell);
     shell.powershell(renderWindowsUninstallScript(spec.configPath, spec));
     // The agent an earlier build registered under the buddy's task name is moved, not left to race the new one.
     if (taskNameOf(spec) !== TASK_NAME) retireOldAgentTask(spec.configPath, shell);
     if (taskNameOf(spec) === TASK_NAME) for (let i = 0; i < 40 && pidAlive(pidFilePath(spec.configPath)); i++) Bun.sleepSync(250);
     must(shell.powershell(renderWindowsInstallScript(spec)), "registering the Scheduled Task");
+    forgetTaskProbes(shell);
     return "Task Scheduler " + TASK_PATH + taskNameOf(spec);
   }
   throw new CliError("'prime service' is not supported on " + platform);
@@ -795,7 +820,9 @@ export function installService(platform: Platform, spec: ServiceSpec, shell: She
 function retireOldAgentTask(configPath: string, shell: Shell): boolean {
   const old = oldAgentTask(shell);
   if (!old || !oldTaskIsFor(old, configPath)) return false;
-  return shell.powershell(renderWindowsRetireOldAgentScript(configPath)).out.trim() === "removed";
+  const removed = shell.powershell(renderWindowsRetireOldAgentScript(configPath)).out.trim() === "removed";
+  forgetTaskProbes(shell);
+  return removed;
 }
 
 /** Stop and remove. Returns what was there (false: nothing was installed). */
@@ -828,7 +855,9 @@ export function uninstallService(
     return had || out.code === 0;
   }
   if (platform === "win32") {
+    forgetTaskProbes(shell);
     const removed = shell.powershell(renderWindowsUninstallScript(configPath, identity)).out.trim() === "removed";
+    forgetTaskProbes(shell);
     if (taskNameOf(identity) === TASK_NAME) return removed;
     return retireOldAgentTask(configPath, shell) || removed;
   }

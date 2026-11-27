@@ -443,6 +443,9 @@ describe("the fleet agent an earlier Windows build registered as the buddy's tas
         if (script.includes("Get-ScheduledTask -TaskPath '\\prime\\' -TaskName 'code-mcp'") && script.includes("'task '")) {
           return { code: 0, out: oldPresent ? "task " + (oldTask!.state ?? "Ready") + "\narguments " + oldTask!.argument + "\n" : "", err: "" };
         }
+        if (script.includes("Get-ScheduledTask -TaskPath '\\prime\\' -TaskName 'prime-fleet-agent'") && script.includes("'task '")) {
+          return { code: 0, out: ownPresent ? "task Ready\narguments " + agentArguments + "\n" : "", err: "" };
+        }
         if (script.includes("Register-ScheduledTask")) { ownPresent = true; return { code: 0, out: "", err: "" }; }
         return { code: 0, out: "False", err: "" };
       },
@@ -550,6 +553,33 @@ describe("the fleet agent an earlier Windows build registered as the buddy's tas
     expect(readServiceDefinition("win32", identity, undefined, undefined, undefined, own(undefined))).toBeUndefined();
     // what installFleetAgent compares with: another configuration is refused
     await expect(installFleetAgent("D:\\other\\config.yaml", { install: () => "x", boundTo: () => fleetAgentServiceConfig(definition ?? null) })).rejects.toThrow(/installed for C:\\cfg\\config.yaml/);
+  });
+
+  test("the scripts that only read guard the output encoding, which throws without a console", () => {
+    const set = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false";
+    for (const script of [renderWindowsTaskProbeScript(), renderWindowsTaskProbeScript("prime-fleet-agent"), renderWindowsRetireOldAgentScript("C:\\cfg\\config.yaml")]) {
+      expect(script).toContain("try { " + set + " } catch {}");
+    }
+  });
+
+  test("a status asks Task Scheduler about the agent's task once, for what it runs and whether it runs", () => {
+    const s = scheduler(undefined, true);
+    const definition = readServiceDefinition("win32", { name: FLEET_AGENT_NAME }, undefined, undefined, undefined, s.shell);
+    const status = serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell);
+    expect(definition).toEqual({ config: "C:\\cfg\\config.yaml" });
+    expect(status.installed).toBe(true);
+    const scripts = s.calls.filter((c) => c.includes("Get-ScheduledTask"));
+    expect(scripts).toHaveLength(1);
+    expect(s.calls.filter((c) => c.startsWith("schtasks"))).toHaveLength(1);
+  });
+
+  test("what was seen of a task is forgotten when it is installed, so the status after is what is there", () => {
+    const s = scheduler({ argument: agentArguments });
+    expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell).detail).toContain("install it again");
+    installService("win32", AGENT, s.shell); // retires the old, registers its own
+    const after = serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell);
+    expect(after.where).toBe("Task Scheduler \\prime\\prime-fleet-agent");
+    expect(after.installed).toBe(true);
   });
 
   test("a task of its own is reported as it is, and the old one is not looked up", () => {
