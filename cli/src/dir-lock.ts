@@ -9,8 +9,8 @@
 //    breaker that took a lock that was not the stale one gives it back, and two breakers cannot
 //    both remove a lock one of them has just made;
 //  - waiting is by timers, so the event loop (the agent's heartbeat among it) goes on meanwhile;
-//  - a process that lets go of a lock and wants it again at once (a loop of writes) leaves a moment for
-//    the ones waiting for it to take it (see `HANDOFF_MS`): otherwise the holder is back before any of
+//  - a process that lets go of a lock and wants it again at once (a loop of writes, with the synchronous
+//    lock) leaves a moment for the ones waiting for it to take it (see `HANDOFF_MS`): otherwise the holder is back before any of
 //    them has looked, and they wait for the whole loop - and for each other's loops - until they give up.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -168,7 +168,6 @@ function release(lock: string, token: string): void {
 export async function withDirLock<T>(lock: string, fn: () => Promise<T> | T, opts: DirLockOptions = {}): Promise<T> {
   const until = Date.now() + (opts.waitMs ?? 5000);
   const token = randomBytes(8).toString("hex");
-  while (handingOver(lock)) await new Promise((r) => setTimeout(r, 2));
   while (!tryTake(lock, token, opts)) {
     if (Date.now() > until) throw new LockBusyError(lock);
     await new Promise((r) => setTimeout(r, 10 + Math.floor(Math.random() * 20)));
