@@ -442,9 +442,12 @@ lease and may write; the replicas mirror it. Membership takes two steps: the
 operator mints an invite, the device presents it and waits for approval.
 Knowing the fleet name is never enough to join.
 
-The operator commands need the gateway token; the member commands need the
-device's own token. Pass --device and --token, or --space to take them from
-a space that was created for a fleet.
+The operator commands need the gateway's fleet operator token (FLEET_OPERATOR_TOKEN:
+--operator-token, PRIME_FLEET_OPERATOR_TOKEN, or defaults.fleet_operator_token in the
+config); it is not the gateway token, which every client holds. The member commands
+need the device's own token. Pass --device and --token, or --space to take them from
+a space that was created for a fleet. The owner of a fleet needs no operator token
+for the commands that run its own fleet.
 `;
 
 const VAULTS = `prime vaults - encrypted local values, secrets and TOTP codes

@@ -4,7 +4,8 @@ import { flag, type FlagSpec } from "./args.ts";
 
 const FLEET_FLAGS: FlagSpec[] = [
   flag("gateway", "string", "Gateway origin", { placeholder: "<url>" }),
-  flag("gateway-token", "string", "Gateway credential (operator authority)", { placeholder: "<token>" }),
+  flag("operator-token", "string", "The gateway's fleet operator credential (FLEET_OPERATOR_TOKEN), for running fleets as the operator; not the gateway token", { placeholder: "<token>" }),
+  flag("gateway-token", "string", "Not used by fleet commands any more (the gateway token does not run fleets): see --operator-token", { placeholder: "<token>" }),
   flag("device", "string", "Device id this call speaks as", { placeholder: "<id>" }),
   flag("token", "string", "Device token (X-Device-Token)", { placeholder: "<token>" }),
   flag("space", "string", "Take the device credentials from this space", { placeholder: "<name>" }),

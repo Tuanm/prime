@@ -276,7 +276,7 @@ Code 3 and code 4 sit close together on purpose. A gateway that uses per-buddy t
 
 Each field comes from the flag first, then the environment, then the buddy's entry, then the defaults section. The gateway itself falls back to `https://prime.tuanm.workers.dev`. `PRIME_GATEWAY_URL`, `PRIME_GATEWAY_TOKEN`, `PRIME_DEVICE_TOKEN` and `PRIME_TIMEOUT_MS` set the common fields, and `PRIME_CONFIG` points at another config file.
 
-Two tokens are in play. The gateway token admits you to the gateway; the buddy token travels through to the buddy. A gateway may ask for either, both or neither.
+Two tokens are in play. The gateway token admits you to the gateway; the buddy token travels through to the buddy. A gateway may ask for either, both or neither. Running fleets as the operator takes a third, the gateway's `FLEET_OPERATOR_TOKEN` (`--operator-token`, `PRIME_FLEET_OPERATOR_TOKEN`, or `fleet_operator_token` under `defaults`): the gateway token does not run fleets.
 
 A request is retried only when it provably never reached the tool: a rate limit, a full queue, a failed tunnel send. A timeout or a dropped connection is reported instead. The tool may still be running, and running it twice is worse.
 

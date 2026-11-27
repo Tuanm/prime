@@ -22,12 +22,12 @@ function config(over: Partial<Config> = {}): Config {
 describe("choosing which gateway a fleet command talks to", () => {
   test("a flag wins over everything else", () => {
     const c = config({
-      defaults: { gateway: "https://default.example", gateway_token: "from-defaults" },
+      defaults: { gateway: "https://default.example", gateway_token: "gateway-token", fleet_operator_token: "from-defaults" },
       devices: { one: { gateway: "https://from-device.example", token: "device-token" } },
     });
-    const t = resolveFleetTarget(c, { gateway: "https://from-flag.example", gatewayToken: "from-flag", device: "other", token: "flag-token" });
+    const t = resolveFleetTarget(c, { gateway: "https://from-flag.example", operatorToken: "from-flag", device: "other", token: "flag-token" });
     expect(t.gateway).toBe("https://from-flag.example");
-    expect(t.gatewayToken).toBe("from-flag");
+    expect(t.operatorToken).toBe("from-flag");
     expect(t.device).toBe("other");
     expect(t.deviceToken).toBe("flag-token");
   });
@@ -67,9 +67,40 @@ describe("choosing which gateway a fleet command talks to", () => {
 
   test("the environment is used when nothing is stored", () => {
     const c = config();
-    const t = resolveFleetTarget(c, {}, undefined, { PRIME_GATEWAY_URL: "https://env.example", PRIME_GATEWAY_TOKEN: "env-token" });
+    const t = resolveFleetTarget(c, {}, undefined, { PRIME_GATEWAY_URL: "https://env.example", PRIME_FLEET_OPERATOR_TOKEN: "env-token" });
     expect(t.gateway).toBe("https://env.example");
-    expect(t.gatewayToken).toBe("env-token");
+    expect(t.operatorToken).toBe("env-token");
+  });
+
+  test("the gateway token is not the operator's credential: it is not picked up from the flag, the environment, the defaults or a space", () => {
+    const c = config({
+      defaults: { gateway: "https://g.example", gateway_token: "defaults-gateway-token" },
+      spaces: {
+        work: { id: "s", runtime: "apple", image: "img", mode: "ephemeral", container: "c", token: "t", gateway: "https://g.example", gateway_device: "anon-space", remote_token: "r", gateway_token: "space-gateway-token" },
+      },
+    });
+    const t = resolveFleetTarget(c, {}, "work", { PRIME_GATEWAY_TOKEN: "env-gateway-token" });
+    expect(t.operatorToken).toBeUndefined();
+  });
+
+  test("the operator's credential is sent to the gateway as the bearer token, and nothing else is", async () => {
+    const { fleetsMembers } = await import("../src/fleets");
+    const seen: Array<Headers> = [];
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async (_url: string, init: { headers: Record<string, string> }) => {
+      seen.push(new Headers(init.headers));
+      return Response.json({ ok: true, members: [] });
+    };
+    try {
+      const ctx = (parsed: Record<string, string>) =>
+        ({ config: config({ defaults: { gateway: "https://g.example", gateway_token: "gateway-token", fleet_operator_token: "operator-token" } }), configPath: "/nowhere", json: true, out: () => undefined, parsed: { positionals: ["fleets", "members", "acme"], flags: new Map(Object.entries(parsed)) } }) as never;
+      await fleetsMembers(ctx({ device: "dev-1", token: "device-token" }));
+      expect(seen[0]!.get("authorization")).toBe("Bearer operator-token");
+      expect(seen[0]!.get("x-device-token")).toBe("device-token");
+      for (const value of seen[0]!.values()) expect(value).not.toContain("gateway-token");
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
   });
 
   test("the gateway origin never keeps a trailing slash", () => {

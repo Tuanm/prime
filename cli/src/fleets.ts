@@ -8,9 +8,12 @@
 // is its owner.
 //
 // Credentials, highest priority first:
-//   1. --gateway / --gateway-token (operator) and --device / --token (member)
-//   2. the config file's defaults and device entries
-//   3. PRIME_GATEWAY_URL / PRIME_GATEWAY_TOKEN / PRIME_DEVICE_TOKEN
+//   1. --gateway / --operator-token (operator) and --device / --token (member)
+//   2. the config file's defaults (`fleet_operator_token`) and device entries
+//   3. PRIME_GATEWAY_URL / PRIME_FLEET_OPERATOR_TOKEN / PRIME_DEVICE_TOKEN
+//
+// The operator's credential is the gateway's FLEET_OPERATOR_TOKEN. It is not the gateway token: that one
+// is what every machine and client of the gateway holds, and it does not run fleets.
 
 import { bool, num, str } from "./args.ts";
 import type { Config, SpaceEntry } from "./config.ts";
@@ -35,8 +38,8 @@ const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 export interface FleetTarget {
   gateway: string;
-  /** Operator credential; absent for member-only calls. */
-  gatewayToken?: string;
+  /** The gateway's fleet operator credential; absent for member-only calls. */
+  operatorToken?: string;
   /** Device id this call speaks as. */
   device?: string;
   /** Device token this call speaks as. */
@@ -46,7 +49,7 @@ export interface FleetTarget {
 
 export interface FleetTargetFlags {
   gateway?: string;
-  gatewayToken?: string;
+  operatorToken?: string;
   device?: string;
   token?: string;
   timeout?: number;
@@ -71,9 +74,9 @@ export function resolveFleetTarget(
   // space still has something to speak with.
   const deviceToken = flags.token ?? space?.remote_token ?? space?.token ?? (device ? config.devices[device]?.token : undefined);
   const gateway = normalizeGateway(flags.gateway ?? space?.gateway ?? config.defaults.gateway ?? env[ENV.gateway] ?? DEFAULT_GATEWAY);
-  const gatewayToken = flags.gatewayToken ?? env[ENV.gatewayToken] ?? config.defaults.gateway_token ?? space?.gateway_token;
+  const operatorToken = flags.operatorToken ?? env[ENV.fleetOperatorToken] ?? config.defaults.fleet_operator_token;
   const timeoutMs = flags.timeout ?? config.defaults.timeout_ms ?? 300_000;
-  return { gateway, gatewayToken, device, deviceToken, timeoutMs };
+  return { gateway, operatorToken, device, deviceToken, timeoutMs };
 }
 
 export interface FleetMember {
@@ -115,7 +118,7 @@ async function call(
   body?: unknown,
 ): Promise<{ status: number; json: any }> {
   const headers: Record<string, string> = {};
-  if (target.gatewayToken) headers["authorization"] = "Bearer " + target.gatewayToken;
+  if (target.operatorToken) headers["authorization"] = "Bearer " + target.operatorToken;
   if (target.device) headers["x-prime-device"] = target.device;
   if (target.deviceToken) headers["x-device-token"] = target.deviceToken;
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -162,7 +165,7 @@ function target(ctx: Ctx, spaceName?: string): FleetTarget {
     ctx.config,
     {
       gateway: str(ctx.parsed, "gateway"),
-      gatewayToken: str(ctx.parsed, "gateway-token"),
+      operatorToken: str(ctx.parsed, "operator-token"),
       device: str(ctx.parsed, "device"),
       token: str(ctx.parsed, "token"),
       timeout: ctx.parsed.flags.has("timeout") ? Number(ctx.parsed.flags.get("timeout")) : undefined,
@@ -172,10 +175,10 @@ function target(ctx: Ctx, spaceName?: string): FleetTarget {
   // A fleet command speaks for a device. Without its credential the gateway
   // cannot tell who is asking, and the answer would be a bare
   // "unauthorized" that says nothing about what to do.
-  if (!t.gatewayToken && !t.deviceToken) {
+  if (!t.operatorToken && !t.deviceToken) {
     throw new CliError(
       "no credential to speak with",
-      "Name the device this command is about: --space <name>, or --device <id> --token <token>. The operator's own credential is --gateway-token.",
+      "Name the device this command is about: --space <name>, or --device <id> --token <token>. The operator's own credential is the gateway's FLEET_OPERATOR_TOKEN: --operator-token, or PRIME_FLEET_OPERATOR_TOKEN.",
     );
   }
   return t;
@@ -218,7 +221,7 @@ export async function fleetsList(ctx: Ctx): Promise<void> {
   // The operator sees every fleet on the gateway, not only the ones this
   // machine has a space in.
   const remote = new Set<string>();
-  if (t.gatewayToken) {
+  if (t.operatorToken) {
     const listed = await call(t, "GET", "/fleets", undefined);
     if (listed.status === 200) {
       for (const id of (listed.json?.fleets ?? []) as string[]) remote.add(id);
@@ -245,7 +248,7 @@ export async function fleetsList(ctx: Ctx): Promise<void> {
       // This machine's own space speaks for the fleet: it is a member.
       const as: FleetTarget = {
         gateway: t.gateway,
-        ...(t.gatewayToken ? { gatewayToken: t.gatewayToken } : {}),
+        ...(t.operatorToken ? { operatorToken: t.operatorToken } : {}),
         device: space.gateway_device!,
         deviceToken: space.remote_token!,
         timeoutMs: t.timeoutMs,

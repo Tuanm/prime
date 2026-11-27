@@ -20,6 +20,7 @@ export const ENV = {
   gateway: "PRIME_GATEWAY_URL",
   gatewayToken: "PRIME_GATEWAY_TOKEN",
   deviceToken: "PRIME_DEVICE_TOKEN",
+  fleetOperatorToken: "PRIME_FLEET_OPERATOR_TOKEN",
   timeoutMs: "PRIME_TIMEOUT_MS",
 } as const;
 

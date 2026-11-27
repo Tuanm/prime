@@ -51,6 +51,8 @@ export interface DeviceEntry {
 export interface Defaults {
   gateway?: string;
   gateway_token?: string;
+  /** The gateway's FLEET_OPERATOR_TOKEN: the credential of whoever runs the fleets. Not the gateway token, which every client holds. */
+  fleet_operator_token?: string;
   token?: string;
   timeout_ms?: number;
 }
@@ -160,6 +162,7 @@ export function parseConfig(text: string, source: string): Config {
   config.defaults = {
     gateway: asString(defaults.gateway),
     gateway_token: asString(defaults.gateway_token),
+    fleet_operator_token: asString(defaults.fleet_operator_token),
     token: asString(defaults.token),
     timeout_ms: typeof defaults.timeout_ms === "number" ? defaults.timeout_ms : undefined,
   };
@@ -274,6 +277,7 @@ export function serializeConfig(config: Config): string {
   const defaults = emitSection("defaults", {
     gateway: config.defaults.gateway,
     gateway_token: config.defaults.gateway_token,
+    fleet_operator_token: config.defaults.fleet_operator_token,
     token: config.defaults.token,
     timeout_ms: config.defaults.timeout_ms,
   });
