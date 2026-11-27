@@ -988,7 +988,6 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       ...state,
       base: result.commit,
       seq: result.seq,
-      manifest: result.manifestKey,
       memberCount: result.members,
       // What the snapshot was sealed for, not what was asked a moment before:
       // a member that joined in between is then still seen as new next round.

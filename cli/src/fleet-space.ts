@@ -160,7 +160,6 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     writeFleetState(ctx.configPath, opts.fleet, opts.spaceName, {
       base: published.commit,
       seq: published.seq,
-      manifest: published.manifestKey,
       memberCount: published.members,
       roster: published.roster,
     }, { replace: true });

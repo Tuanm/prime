@@ -1847,3 +1847,42 @@ describe("what wakes the primary", () => {
     }
   });
 });
+
+describe("what the primary writes down after it publishes", () => {
+  test("its position, and no pointer to a manifest that nothing reads", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+      await s.round();
+      expect(s.said).toContain("published 1");
+      expect(s.state().seq).toBe(1);
+      expect(Object.keys(s.state())).not.toContain("manifest");
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("a state file from an older build", () => {
+  test("loses the pointer to a manifest when it is next written", async () => {
+    const { readFleetState, writeFleetState } = await import("../src/fleets");
+    const root = mkdtempSync(join(tmpdir(), "fleet-state-"));
+    try {
+      const config = join(root, "config.json");
+      const { fleetStateDir } = await import("../src/fleets");
+      writeFileSync(join(fleetStateDir(config, "x", "r1"), "state.json"), JSON.stringify({ seq: 3, base: "a".repeat(40), manifest: "fleets/x/manifests/" + "b".repeat(64) }));
+      expect(Object.keys(readFleetState(config, "x", "r1"))).toContain("manifest");
+      writeFleetState(config, "x", "r1", { ...readFleetState(config, "x", "r1"), seq: 4 });
+      const after = readFleetState(config, "x", "r1");
+      expect(after.seq).toBe(4);
+      expect(Object.keys(after)).not.toContain("manifest");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

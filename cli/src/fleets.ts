@@ -675,7 +675,6 @@ export async function syncFleetSpace(
       ...state,
       base: result.commit,
       seq: result.seq,
-      manifest: result.manifestKey,
       memberCount: result.members,
       roster: result.roster,
       // Remember the tree, so the next round knows there is nothing to do.
@@ -839,8 +838,6 @@ export interface FleetMemberState {
   seq?: number;
   /** The commit this member's store last held. */
   base?: string;
-  /** Where the manifest of that snapshot is stored: the next one names it. */
-  manifest?: string;
   /** How many members the last publish sealed for. */
   memberCount?: number;
   /** The members and their keys, so a member that changed is sealed again. */
@@ -885,7 +882,7 @@ export function readFleetState(configPath: string, fleetId: string, spaceName: s
 export function mergeFleetState(disk: FleetMemberState, next: FleetMemberState): FleetMemberState {
   const out: FleetMemberState = { ...next };
   if ((disk.seq ?? 0) > (next.seq ?? 0)) {
-    for (const key of ["seq", "base", "tree", "roster", "manifest", "memberCount"] as const) {
+    for (const key of ["seq", "base", "tree", "roster", "memberCount"] as const) {
       if (disk[key] === undefined) delete out[key];
       else (out as Record<string, unknown>)[key] = disk[key];
     }
@@ -944,6 +941,8 @@ export function writeFleetState(configPath: string, fleetId: string, spaceName: 
   // for no state at all (and apply the fleet again from nothing).
   withStateLock(dir, () => {
     const next = opts.replace ? state : mergeFleetState(readFleetState(configPath, fleetId, spaceName), state);
+    // A pointer that older builds wrote to the last manifest: nothing reads it, and it goes when the file is next written.
+    delete (next as Record<string, unknown>).manifest;
     writeFileAtomic(file, JSON.stringify(next, null, 2));
   });
 }
