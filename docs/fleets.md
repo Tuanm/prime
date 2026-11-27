@@ -514,9 +514,11 @@ with the same.
   unless `--force` is given (remove the service from the configuration it runs, or force it).
   A definition that does not say (a hand-edited unit, a binary plist) is taken for the default
   configuration's.
-  A systemd drop-in (`~/.config/systemd/user/prime-fleet-agent.service.d/*.conf`) that sets
-  `ExecStart=` is read the way systemd merges it, so `systemctl --user edit` is followed; a drop-in
-  anywhere else (`/etc/systemd/user`) is not.
+  A systemd drop-in (`prime-fleet-agent.service.d/*.conf`) that sets `ExecStart=` is read the way
+  systemd merges it: from the user's directory and the machine's (`/etc/systemd/user`, `/run`,
+  `/usr/lib`, in systemd's order of priority, by file name, a file of the same name in a higher
+  directory replacing the lower one), so `systemctl --user edit` and an administrator's drop-in are
+  both followed.
 - One agent runs per configuration: a second one that is started exits, saying who holds the
   lock (`fleet-agent/agent.lock`, which the running agent touches every few seconds). A stopping
   agent is given ten seconds to let go. The lock names its holder, and where the process list
@@ -630,8 +632,6 @@ What is deliberately not done, so that nobody has to find it out:
   file on a case-folding one; the member that takes over then publishes the other's deletion.
 - **Two agents can overlap** for up to one touch of the lock (five seconds) plus one round when a lock is
   taken over at the same moment by two starters; the one that finds its lock gone stops.
-- **A systemd drop-in elsewhere than the user's unit directory** (`/etc/systemd/user`) is not read when
-  working out which configuration the service runs.
 - **Windows** has no service-manager restart and no process list for the agent lock: it falls back to
   the lock's and state file's freshness.
 

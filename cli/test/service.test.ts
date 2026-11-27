@@ -21,6 +21,7 @@ import {
   renderWindowsInstallScript,
   saveOverrides,
   systemdQuote,
+  systemdUserDirs,
   windowsQuote,
   type ServiceSpec,
 } from "../src/service.ts";
@@ -319,6 +320,38 @@ describe("which configuration a service runs", () => {
       writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", "override.conf"), '[Service]\nExecStart=\nExecStart="/bin/prime" "__fleet-agent" "--config" "/cfg/b.yaml"\n');
       writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", "notes.txt"), '[Service]\nExecStart="/bin/x" "--config" "/ignored.yaml"\n');
       expect(readServiceDefinition("linux", identity, home, {})).toEqual({ config: "/cfg/b.yaml" });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a drop-in from the machine's own directory (/etc/systemd/user) counts too, and the user's masks it by name", () => {
+    const unit = renderSystemdUnit(fleetAgentSpec("/cfg/a.yaml", "linux"));
+    const home = mkdtempSync(join(tmpdir(), "svc-dropin-sys-"));
+    try {
+      const identity = { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL };
+      const user = join(home, ".config", "systemd", "user");
+      const machine = join(home, "etc-systemd-user");
+      mkdirSync(user, { recursive: true });
+      mkdirSync(join(machine, FLEET_AGENT_NAME + ".service.d"), { recursive: true });
+      writeFileSync(join(user, FLEET_AGENT_NAME + ".service"), unit);
+      const roots = [user, machine];
+      const dropIn = (dir: string, file: string, config: string): void => {
+        mkdirSync(join(dir, FLEET_AGENT_NAME + ".service.d"), { recursive: true });
+        writeFileSync(join(dir, FLEET_AGENT_NAME + ".service.d", file), '[Service]\nExecStart=\nExecStart="/bin/prime" "__fleet-agent" "--config" "' + config + '"\n');
+      };
+      expect(readServiceDefinition("linux", identity, home, {}, roots)).toEqual({ config: "/cfg/a.yaml" });
+      dropIn(machine, "10-machine.conf", "/cfg/machine.yaml");
+      expect(readServiceDefinition("linux", identity, home, {}, roots)).toEqual({ config: "/cfg/machine.yaml" });
+      // Files merge by name, whichever directory they are in: the later name wins.
+      dropIn(user, "20-user.conf", "/cfg/user.yaml");
+      expect(readServiceDefinition("linux", identity, home, {}, roots)).toEqual({ config: "/cfg/user.yaml" });
+      // The same name in a directory of higher priority replaces the machine's file instead of adding one.
+      dropIn(user, "10-machine.conf", "/cfg/masked.yaml");
+      writeFileSync(join(user, FLEET_AGENT_NAME + ".service.d", "20-user.conf"), "[Service]\n# nothing\n");
+      expect(readServiceDefinition("linux", identity, home, {}, roots)).toEqual({ config: "/cfg/masked.yaml" });
+      // The default list of directories names the machine's.
+      expect(systemdUserDirs({}, home)).toContain("/etc/systemd/user");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -216,6 +216,53 @@ export function parseSystemdConfig(unit: string): string | undefined {
 }
 
 /**
+ * The directories a systemd user manager reads units and their drop-ins from, highest priority first
+ * (systemd.unit(5)): the user's own and the machine's (`/etc/systemd/user` among them).
+ */
+export function systemdUserDirs(env: Record<string, string | undefined> = process.env, home = homedir()): string[] {
+  const config = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() ? env.XDG_CONFIG_HOME : join(home, ".config");
+  const data = env.XDG_DATA_HOME && env.XDG_DATA_HOME.trim() ? env.XDG_DATA_HOME : join(home, ".local", "share");
+  const runtime = env.XDG_RUNTIME_DIR && env.XDG_RUNTIME_DIR.trim() ? env.XDG_RUNTIME_DIR : undefined;
+  return [
+    join(config, "systemd", "user.control"),
+    ...(runtime ? [join(runtime, "systemd", "user.control"), join(runtime, "systemd", "transient")] : []),
+    join(config, "systemd", "user"),
+    "/etc/xdg/systemd/user",
+    "/etc/systemd/user",
+    ...(runtime ? [join(runtime, "systemd", "user")] : []),
+    "/run/systemd/user",
+    join(data, "systemd", "user"),
+    "/usr/local/lib/systemd/user",
+    "/usr/lib/systemd/user",
+    "/lib/systemd/user",
+  ];
+}
+
+/**
+ * The drop-in files that apply to a unit, in the order systemd merges them: `<unit>.service.d/*.conf`
+ * from every directory it reads, ordered by file name, and a file of a name that a higher directory
+ * has too is that directory's (it masks the other).
+ */
+export function systemdDropIns(
+  env: Record<string, string | undefined> = process.env,
+  home = homedir(),
+  name = SERVICE_NAME,
+  roots: string[] = systemdUserDirs(env, home),
+): string[] {
+  const byName = new Map<string, string>();
+  for (const root of roots) {
+    let names: string[];
+    try {
+      names = readdirSync(join(root, name + ".service.d"));
+    } catch {
+      continue; // none here
+    }
+    for (const file of names) if (file.endsWith(".conf") && !byName.has(file)) byName.set(file, join(root, name + ".service.d", file));
+  }
+  return [...byName.keys()].sort().map((file) => byName.get(file)!);
+}
+
+/**
  * What an installed service's definition says (read from its file, the manager is not asked):
  * undefined when there is no definition, and `config` undefined when there is one that does not
  * say which configuration it runs (unreadable: a binary plist, a hand-edited ExecStart).
@@ -225,6 +272,8 @@ export function readServiceDefinition(
   identity: { name?: string; label?: string } = {},
   home = homedir(),
   env: Record<string, string | undefined> = process.env,
+  /** The directories of units systemd reads, highest priority first (see `systemdUserDirs`); replaced in tests. */
+  dropInRoots?: string[],
 ): { config: string | undefined } | undefined {
   try {
     if (platform === "linux") {
@@ -232,13 +281,7 @@ export function readServiceDefinition(
       // The unit's own text, then its drop-ins (`<unit>.d/*.conf`, in name order) as systemd merges them:
       // `systemctl --user edit` writes the ones that override ExecStart there.
       let text = readFileSync(unit, "utf8");
-      try {
-        for (const name of readdirSync(unit + ".d").filter((n) => n.endsWith(".conf")).sort()) {
-          text += "\n" + readFileSync(join(unit + ".d", name), "utf8");
-        }
-      } catch {
-        // No drop-ins.
-      }
+      for (const file of systemdDropIns(env, home, identity.name ?? SERVICE_NAME, dropInRoots)) text += "\n" + readFileSync(file, "utf8");
       return { config: parseSystemdConfig(text) };
     }
     if (platform === "darwin") {
