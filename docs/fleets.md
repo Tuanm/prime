@@ -284,7 +284,9 @@ that edits or reorders manifests, and against a removed member that is helped by
 to serve what it makes - provided the gateway was honest about the roster, and about when a member
 left, while that member was in the fleet. They do not hold against a gateway that also lies about the roster:
 one that adds a key of its own to the list it serves, or swaps a member's key for its own, can then
-author snapshots (for the members that read that roster). That is visible only to someone who compares:
+author snapshots (for the members that read that roster) **and read what the fleet publishes after that**:
+the primary seals every snapshot for every key on the roster it is served, so a key the gateway adds is given
+the snapshot key of each later snapshot, and opens it. That is visible only to someone who compares:
 `prime fleets members` prints a fingerprint of each member's key (the KEY column), and a swapped key
 keeps the device and changes only that. The fingerprint has to be checked outside the gateway
 (against what the member's own `prime fleets members` shows) to mean anything; the admin page
@@ -293,8 +295,34 @@ informational, the gateway decides nothing from `fetched`), and it is the gatewa
 it is no more than the roster is. A member that was removed and that the gateway
 helps can still read what it was sent before it was removed, as it always could.
 
+What a credential on its own can no longer do, and what the gateway still can.
+
+- **A device's token cannot put a key of its own on the roster.** The token of a space is a short code (an
+  anonymous device's is six characters), which the space also keeps in its environment. The fleet takes a
+  member's new key only on a proof made with the member's old private key (checked by the fleet object, which
+  has an X25519 key pair of its own), or when the operator or the owner approves it. A member cannot report
+  an `applied` sequence past the head either, so it cannot take the lease without catching up. A request for a
+  new key shows its fingerprint (`prime fleets pending`, the admin page), to compare with what the member's own
+  machine prints before approving.
+- **The gateway token does not run fleets.** Every machine and client of the gateway holds it. The operator
+  has `FLEET_OPERATOR_TOKEN`.
+- **The gateway itself is not stopped by either.** It runs the fleet object, so it can still write the roster
+  it serves, and the proof above is checked by the gateway's own code. A key the operator approves is
+  trusted on the operator's word: a request that comes from somebody who holds the device's token (an attacker
+  who overwrote the member's waiting request with a key of its own, say) is approved by an operator who does not
+  compare the fingerprint.
+
 What the gateway can still do, whatever a member checks:
 
+- **Run commands on any connected space.** The tunnel of a space executes whatever call the gateway sends
+  it, with no check on the space's side of who sent it, so the gateway (or whoever controls its deployment or
+  its Cloudflare account) can call any tool - `bash` included - on any space that is connected to it. The
+  calls a client makes and what they return pass through the gateway in the clear as well, so what a
+  space is asked to read or run is visible to it. This does not depend on fleets or on the roster, and nothing a
+  member checks of a snapshot protects it. A gateway you do not trust with the machines on it is a gateway
+  those machines should not be connected to.
+- **Read the work tree through a lying roster**, not only author it (see above): a key it adds is sealed for
+  by the primary.
 - **Stop the fleet**: not serve, not store, not move the head.
 - **Show an older head** (a rollback): a member sees a snapshot that is real and was the
   head once. It cannot be shown as newer, so a member that holds a higher sequence ignores it,
@@ -340,7 +368,8 @@ What the gateway can still do, whatever a member checks:
 ## Joining
 
 The operator makes the fleet - from `/admin`, or with `prime fleets create` where
-the gateway token is at hand. Nowhere else: a space cannot bring a fleet into
+the gateway's fleet operator token is at hand (`--operator-token`, or `PRIME_FLEET_OPERATOR_TOKEN`).
+Nowhere else: a space cannot bring a fleet into
 being. The spaces join, and the operator admits them.
 
 ```bash
@@ -423,9 +452,17 @@ chance.
 
 | Credential | Belongs to | Can do |
 |---|---|---|
-| gateway token | the operator | create fleets, mint invites, admit and remove |
+| fleet operator token (`FLEET_OPERATOR_TOKEN`) | the operator | create fleets, mint invites, admit and remove, delete, list every fleet |
 | device token | one device | speak for that device: join, sync, take the lease |
 | fleet token | one fleet | reach the fleet and nothing else: it cannot join, admit or publish |
+
+The **gateway token** (`GATEWAY_TOKEN`) is none of these: it is what every machine and MCP client of the
+gateway is configured with, and it does not run fleets. It used to be the operator's credential as well,
+which made every client an operator of every fleet; the operator's credential is now a secret of its own that
+no client needs. A gateway that does not set `FLEET_OPERATOR_TOKEN` has no token operator at all: the admin
+page (behind Access) is the operator, and so is a fleet's owner device for its own fleet. The operator
+token can create, invite, admit, remove, delete and list across every fleet of the gateway: keep it to the
+person who runs them, and set it to a value that is not the gateway token (the same value is refused).
 
 The fleet's token belongs to the fleet, not to any space. No member ever uses it.
 It is what a client that is not a member presents, and it carries exactly one
@@ -455,7 +492,7 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | a fleet nobody has touched for a day | nothing: only the operator or the fleet's owner may delete a fleet, however long it has been quiet (a paused fleet records no activity at all). `prime fleets reap` clears away one whose members the gateway has all forgotten (an anonymous device is dropped after a week offline): any proven device may ask, but only when the gateway knows none of its members **and** nobody has touched the fleet for a week. A gateway that cannot say who it knows (the registry failed, or answered in part) keeps the fleet |
 | the name a fleet wants is a device's | refused: a fleet is reached under its own name, so the two must not collide |
 | two spaces would share a name | the second is refused when it asks to join, and told to pass `--name`; names are compared without case |
-| a member comes back with a new key | the fleet learns it when the member takes its place, and seals the next snapshot for it |
+| a member comes back with a new key | the fleet takes it only on proof that the member holds the old one (the agent makes it after `prime fleets rotate-key`), or when the operator or the owner approves it: without the proof (the old key is lost, the member is an older build) the member is told that its new key waits, and it takes no place until it is decided. The fleet then seals the next snapshot for the new key |
 | a replica's work tree was edited locally | the paths that differ from what the fleet gave it - and only those; ignored files and nested repositories are not touched - are moved aside into `local-change-<time>` beside the work tree when the replica is next brought up to date (a promotion, `prime fleets sync`, or every head in `mirror` mode): a replica that cannot catch up is a fleet that cannot promote it |
 | no member can be promoted | every member is behind the head (each one was edited and could not sync); the move above is what lets them catch up again |
 
@@ -617,11 +654,22 @@ it, and so does everything that is not a fleet.
 
 What is deliberately not done, so that nobody has to find it out:
 
-- **The roster is the trust anchor, and the first one is taken on trust.** A gateway that lies about who
-  the members are (adds a key of its own, or swaps a member's) can author snapshots, and a member that
-  reads the roster for the first time has nothing of its own to compare it with. Only a fingerprint checked
+- **The roster is the trust anchor, and every read of it is taken on trust.** A gateway that lies about who
+  the members are (adds a key of its own, or swaps a member's) can author snapshots **and read them**: the
+  primary seals every later snapshot for the keys it is served. A member that reads the roster has nothing of
+  its own to compare it with, the first time or any later one. Only a fingerprint checked
   outside the gateway (`prime fleets members` on each machine prints it; the admin page shows the same
   one) would close it, and nothing in the product can check it for the operator.
+- **A tool call to a space is the gateway's to make.** See "Run commands on any connected space" above: a
+  space does not check who sent the call it runs. Closing it would take a key that the caller proves it
+  holds to the space itself, and that is not built.
+- **A request for a new key is as good as its fingerprint.** A member that cannot prove it holds its old key
+  has one request waiting for the operator, and a later request from the same device replaces it. An operator
+  that approves without comparing the fingerprint with the one the member's own machine prints (`prime fleets
+  rotate-key` prints it, and so does the refusal the agent reports for a member whose key waits) approves whoever wrote last. `prime fleets approve --key
+  <fingerprint>` approves exactly the key that was read.
+- **A member that lost its key needs the operator.** Its new key waits, and until it is approved the member
+  takes no place in the fleet.
 - **Rollback and split views are not detected.** A member cannot know about a newer head it was never
   shown, and two members shown two different (each real) histories find out only when one of them
   publishes on a head the other does not have. Telling them apart would take a record that the members
@@ -696,6 +744,39 @@ What is deliberately not done, so that nobody has to find it out:
 ## Upgrading
 
 What changes for a fleet and a machine that already run an earlier build.
+
+**Order: deploy the gateway first, then upgrade the members.** The gateway is compatible with the members
+you already run (the released 26.11.49 included); none of the changes below needs a member upgraded first.
+
+- **Only the operator or the fleet's owner may delete a fleet.** A fleet nobody had touched for a day used to
+  be deletable by any proven device, and a paused fleet never records activity. `prime fleets reap` still
+  clears away a fleet whose members the gateway has all forgotten, but only when the gateway can say who it
+  knows (a registry that fails or answers in part keeps the fleet) and nobody has touched the fleet for a
+  week. Nothing to do.
+- **A member's key changes only on proof, or on approval.** A member that sends a key other than the one the
+  fleet holds - an agent of any build, with a key file that was replaced or deleted - no longer gets it
+  taken: it is answered "the new key waits" (HTTP 409; a member of 26.11.49 prints "status 409"), the roster
+  keeps the old key, and the member takes no place in the fleet until the operator or the owner approves the
+  request (the admin page shows it beside the members, with the key's fingerprint; `prime fleets pending`
+  and `prime fleets approve <fleet> --member <id> [--key <fingerprint>]`). A member that keeps its key file
+  is not affected, and neither is one whose agent sends the key it already had. To rotate a key without
+  anyone approving it, upgrade the member and run `prime fleets rotate-key <fleet> --space <name>`: the
+  agent proves the new key with the old. **Nothing is needed for a fleet whose members keep their key
+  files.** A paused fleet (the usual state after an operator has stopped it) needs nothing either: the
+  members' keys are what they were. A member that has *no* key on the roster (admitted before keys
+  existed) is treated like one that lost its key.
+- **`applied` is held to the head.** A member cannot report a sequence past the head; a report within it is
+  taken as before.
+- **The gateway token does not run fleets; set `FLEET_OPERATOR_TOKEN` if you run fleets from the command
+  line.** On a gateway that has `GATEWAY_TOKEN` and whose operator used it for `prime fleets create`,
+  `invite`, `approve`, `remove`, `delete` or `list`, those commands are now refused (403, saying which secret
+  to set) until you set the secret on the gateway - `npx wrangler secret put FLEET_OPERATOR_TOKEN`, a random
+  value that is not the gateway token - and give the same value to the operator's machine
+  (`PRIME_FLEET_OPERATOR_TOKEN`, `--operator-token`, or `fleet_operator_token` under `defaults` in the
+  config). The CLI that has the new option is this release's; an older `prime` cannot send it as the
+  operator (it sends the gateway token), but a fleet's owner device works with any build. **A gateway with no
+  `GATEWAY_TOKEN`** (the admin page and the owner device are the operator there) **needs nothing**: it had no
+  token operator, and has none now. The admin page is unchanged.
 
 - **Uploads are capped at 32 MiB** (it was not capped, and anything near 100 MB died inside the
   gateway). A fleet whose whole tree is bigger than that stops at its next whole tree: the 32nd
