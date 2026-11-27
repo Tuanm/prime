@@ -355,12 +355,8 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   // A new membership starts knowing nothing of the fleet: what an earlier one under this name left
   // beside the key is not this fleet's. Only once it has been made: a join that failed changes nothing.
   if (!wasMember) FleetTrust.forget(keyFile);
-  // Admitted at once: which fleet of this name it is, learnt now (see `FleetTrust.pinAtJoin`). A member
-  // that waits for the operator learns it when the space is set up.
-  if (res.json?.status === "member") {
-    const role = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/role");
-    if (role.status === 200 && role.json?.member === true && typeof role.json.incarnation === "string") FleetTrust.pinAtJoin(keyFile, role.json.incarnation);
-  }
+  // (Which fleet of this name it is, is learnt when the space is set up, once the member is in: a first
+  // join always waits for the operator, so there is nothing to learn from the gateway here.)
   if (ctx.json) {
     printJson({ fleet: fleetId, status: res.json.status });
     return;
