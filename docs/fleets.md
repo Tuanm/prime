@@ -452,7 +452,7 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | the invite expired or was used | the request is refused, and the code is gone |
 | the fleet is full | refused, at thirty-two members |
 | the owner leaves | the fleet goes to the member that has been in it longest, and is gone with the last one |
-| a fleet nobody has touched for a day | any proven device may clean it up |
+| a fleet nobody has touched for a day | nothing: only the operator or the fleet's owner may delete a fleet, however long it has been quiet (a paused fleet records no activity at all). `prime fleets reap` clears away one whose members the gateway has all forgotten |
 | the name a fleet wants is a device's | refused: a fleet is reached under its own name, so the two must not collide |
 | two spaces would share a name | the second is refused when it asks to join, and told to pass `--name`; names are compared without case |
 | a member comes back with a new key | the fleet learns it when the member takes its place, and seals the next snapshot for it |
@@ -611,7 +611,7 @@ it, and so does everything that is not a fleet.
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
 | `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (15000 ms; the fleet's own lease can lower it); saved like the others |
-| a fleet nobody touches | cleaned up after a day |
+| a fleet nobody touches | kept: only the operator or the owner deletes it |
 
 ## Known limitations
 

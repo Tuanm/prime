@@ -26,11 +26,6 @@ export const INVITE_MAX_TTL_MS = 60 * 60 * 1000;
 export const MAX_MEMBERS = 32;
 export const MAX_PENDING = 32;
 /**
- * How long a fleet's owner may be silent before a member may clean it up.
- */
-export const OWNER_SILENCE_MS = 24 * 60 * 60_000;
-
-/**
  * How many snapshots a fleet keeps.
  *
  * The primary publishes a whole tree every 32 snapshots and only the change in

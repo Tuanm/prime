@@ -11,7 +11,6 @@ import {
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
   MAX_SNAPSHOT_BYTES,
-  OWNER_SILENCE_MS,
   RECENT_SNAPSHOTS,
   newInviteCode,
   onlineNow,
@@ -1167,28 +1166,86 @@ describe("what a deleted fleet leaves in storage", () => {
   });
 });
 
-describe("a fleet nobody is running", () => {
-  test("a proven device may clean it up once it has gone quiet", async () => {
+describe("who may delete a fleet", () => {
+  const DAY = 24 * 60 * 60_000;
+
+  test("a device that is not the owner may not, however long the fleet has been quiet", async () => {
     const { doInstance, state } = makeDo();
     await makeFleet(doInstance, "dev-owner");
-    // While the fleet is alive, nobody may delete it but its owner.
-    const tooEarly = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
-    expect(tooEarly.status).toBe(403);
+    state.data.set("lastActivity", Date.now() - 400 * DAY);
+    const stranger = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
+    expect(stranger.status).toBe(403);
+    expect(state.data.get("members")).toBeDefined();
+  });
 
-    // Once it has been quiet for a day, it is not being run by anybody.
-    state.data.set("lastActivity", Date.now() - OWNER_SILENCE_MS - 1000);
-    const cleaned = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
-    expect(cleaned.status).toBe(200);
+  test("a paused fleet is not open to a stranger either, and keeps its roster and storage", async () => {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await bucket.put("fleets/acme/packs/" + "a".repeat(64), "sealed");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    state.data.set("lastActivity", Date.now() - 2 * DAY);
+    const stranger = await call(doInstance, "/delete", { caller: "device", device: "dev-stranger" });
+    expect(stranger.status).toBe(403);
+    expect(state.data.get("members")).toBeDefined();
+    expect(bucket.objects.size).toBe(1);
+  });
+
+  test("a member that is not the owner may not", async () => {
+    const { doInstance } = makeDo();
+    await twoMembers(doInstance);
+    expect((await call(doInstance, "/delete", { caller: "device", device: "dev-two" })).status).toBe(403);
+  });
+
+  test("the owner may, quiet or not, paused or not", async () => {
+    const { doInstance, state } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    state.data.set("lastActivity", Date.now() - 2 * DAY);
+    const deleted = await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
+    expect(deleted.status).toBe(200);
     expect(state.data.get("members")).toBeUndefined();
   });
 
-  test("the owner may always delete its own fleet", async () => {
+  test("the operator may", async () => {
     const { doInstance } = makeDo();
     await makeFleet(doInstance, "dev-owner");
-    const deleted = await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
-    expect(deleted.status).toBe(200);
+    expect((await call(doInstance, "/delete", { caller: "admin", device: "operator" })).status).toBe(200);
+  });
+
+  test("through the Worker, a proven stranger's delete of a paused fleet that has been quiet for a day is refused", async () => {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await bucket.put("fleets/acme/packs/" + "a".repeat(64), "sealed");
+    await call(doInstance, "/meta", { caller: "admin", device: "operator", body: { disabled: true } });
+    state.data.set("lastActivity", Date.now() - 2 * DAY);
+    const res = await routeOf(doInstance, bucket, "delete", "anon-stranger");
+    expect(res.status).toBe(403);
+    expect(state.data.get("members")).toBeDefined();
+    expect(bucket.objects.size).toBe(1);
   });
 });
+
+/** The Worker's fleet routes in front of one fleet object, as a proven device `device` (not the operator). */
+async function routeOf(
+  doInstance: FleetDO,
+  bucket: ReturnType<typeof fakeBucket>,
+  action: string,
+  device: string,
+  registry?: unknown,
+): Promise<Response> {
+  const stub = { fetch: (i: Request | string, init?: RequestInit) => doInstance.fetch(typeof i === "string" ? new Request(i, init) : i) };
+  const env = { BUCKET: bucket, FLEET: { idFromName: (n: string) => n, get: () => stub }, REGISTRY: registry ?? fakeRegistry() } as never;
+  const url = new URL("https://gateway/fleets/acme/" + action);
+  const res = await handleFleetRoutes({
+    request: new Request(url, { method: "POST", headers: { "x-prime-device": device, "x-device-token": "t" }, body: "{}" }),
+    env,
+    url,
+    cfg: {} as never,
+    authorizeDevice: async () => ({ ok: true as const }),
+    unauthorized: () => new Response(null, { status: 401 }),
+  });
+  return res!;
+}
 
 describe("caps", () => {
   test("the member cap refuses further admissions", async () => {

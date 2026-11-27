@@ -24,7 +24,6 @@ import {
   inviteShape,
   MAX_MEMBERS,
   MAX_SNAPSHOT_BYTES,
-  OWNER_SILENCE_MS,
   RECENT_SNAPSHOTS,
   MAX_PENDING,
   newInviteCode,
@@ -355,8 +354,8 @@ export class FleetDO implements DurableObject {
   // again and nothing of the workspace is left behind.
   // Remember that this fleet was touched.
   //
-  // A fleet nobody touches is not being run. That is what tells a device
-  // that meets an abandoned fleet that it may clean it up.
+  // The gateway reads it when a device asks to clear away a fleet it thinks is abandoned (`reap`):
+  // one more condition, never the reason to allow a delete.
   private async touch(): Promise<void> {
     await this.state.storage.put("lastActivity", Date.now());
   }
@@ -427,17 +426,14 @@ export class FleetDO implements DurableObject {
     } catch {}
   }
 
+  // Only the operator or the fleet's owner may delete a fleet. A fleet that is paused, or whose
+  // agents were stopped for a weekend, records no activity, so silence says nothing about whether
+  // anybody still wants it; and on a gateway that gives devices to anyone, "a proven device" is
+  // anyone. An abandoned fleet is cleared away by `reap`, which the Worker allows only when the
+  // gateway knows none of its members.
   private async delete(caller: Caller, request: Request): Promise<Response> {
     const denied = await this.requireOperatorOrOwner(caller);
-    if (denied) {
-      // A fleet that has not been touched for a day is not being run by
-      // anybody, and a fleet whose members are all gone cannot be run at
-      // all. A proven device may clean such a fleet up, otherwise it sits
-      // there for ever with nobody able to touch it.
-      if (caller.kind !== "device") return denied;
-      const last = (await this.state.storage.get<number>("lastActivity")) ?? 0;
-      if (last === 0 || Date.now() - last < OWNER_SILENCE_MS) return denied;
-    }
+    if (denied) return denied;
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
     await this.clear(fleetId);
     return Response.json({ ok: true, deleted: fleetId });
