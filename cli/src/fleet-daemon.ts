@@ -649,13 +649,28 @@ export function fleetSpaces(configPath: string): Array<{ name: string; space: Sp
  * wait for a poll to notice. It is a hint, not a promise - the agent still
  * checks the tree from time to time, because a watcher can miss something.
  */
+/**
+ * Whether a path from the watcher is something inside a `.git` directory: a repository being used
+ * (an editor running `git status`), which is never part of what the fleet publishes. A `.git` that
+ * itself appears or goes (a repository arriving) is not.
+ */
+export function insideGitDir(filename: string | null | undefined): boolean {
+  if (!filename) return false;
+  const parts = filename.split(/[\\/]/);
+  return parts.includes(".git") && parts[parts.length - 1] !== ".git";
+}
+
 export function watchTree(
   work: string,
   onChange: (eventType?: string, filename?: string | null) => void,
 ): { stop: () => void } {
   let watcher: FSWatcher | undefined;
   try {
-    watcher = watch(work, { recursive: true }, (eventType, filename) => onChange(eventType, filename));
+    watcher = watch(work, { recursive: true }, (eventType, filename) => {
+      // Nothing in a repository's own files is the fleet's: it would wake the primary for a look at nothing.
+      if (insideGitDir(filename)) return;
+      onChange(eventType, filename);
+    });
   } catch {
     // A platform that cannot watch recursively: the agent falls back to
     // checking the tree on its own.

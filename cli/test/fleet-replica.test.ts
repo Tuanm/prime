@@ -1813,3 +1813,37 @@ describe("an error that says the work tree cannot be written", () => {
     expect(cannotWrite(null)).toBe(false);
   });
 });
+
+describe("what wakes the primary", () => {
+  test("the files of a repository in use do not, a repository arriving does", async () => {
+    const { insideGitDir } = await import("../src/fleet-daemon");
+    expect(insideGitDir(".git/index")).toBe(true);
+    expect(insideGitDir("lib/.git/objects/ab/cd")).toBe(true);
+    expect(insideGitDir("lib/.git")).toBe(false);
+    expect(insideGitDir(".git")).toBe(false);
+    expect(insideGitDir("src/index.ts")).toBe(false);
+    expect(insideGitDir(".gitignore")).toBe(false);
+    expect(insideGitDir(null)).toBe(false);
+  });
+
+  test("the watcher stays quiet for writes inside a .git and speaks for the rest", async () => {
+    const { watchTree } = await import("../src/fleet-daemon");
+    const root = mkdtempSync(join(tmpdir(), "fleet-watch-"));
+    mkdirSync(join(root, "lib", ".git"), { recursive: true });
+    const seen: string[] = [];
+    const watcher = watchTree(root, (_event, name) => void seen.push(String(name)));
+    try {
+      await Bun.sleep(100);
+      writeFileSync(join(root, "lib", ".git", "index"), "1");
+      writeFileSync(join(root, "lib", ".git", "HEAD"), "1");
+      await Bun.sleep(200);
+      expect(seen.filter((n) => n.includes(".git/"))).toEqual([]);
+      writeFileSync(join(root, "a.txt"), "1");
+      await Bun.sleep(300);
+      expect(seen).toContain("a.txt");
+    } finally {
+      watcher.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
