@@ -313,6 +313,8 @@ prime update --to ./prime    # install somewhere you own
 
 An update fetches the release for this platform, checks it against the release's checksum, and swaps the file in one step, so an interrupted update cannot leave half an executable. A release without a checksum is refused. The checksum proves the download arrived intact, not that the release is trustworthy.
 
+When an update installs something, the fleet agent of this configuration is restarted so that it runs the new build (through its service if it has one, otherwise stopped and started again with its saved settings); no other agent is touched, and the output says which was restarted or how to do it by hand.
+
 A directory you cannot write says so, and suggests the privileges that own it or `--to`. On Windows the running file is renamed aside and removed on the next run. A version carries the year and the month, so `prime --version` says how old the download is.
 
 ## Where to read more
