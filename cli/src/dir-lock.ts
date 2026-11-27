@@ -8,9 +8,12 @@
 //    by renaming it to a name of the breaker's own and checking the note of what was renamed: a
 //    breaker that took a lock that was not the stale one gives it back, and two breakers cannot
 //    both remove a lock one of them has just made;
-//  - waiting is by timers, so the event loop (the agent's heartbeat among it) goes on meanwhile.
+//  - waiting is by timers, so the event loop (the agent's heartbeat among it) goes on meanwhile;
+//  - a process that lets go of a lock and wants it again at once (a loop of writes) leaves a moment for
+//    the ones waiting for it to take it (see `HANDOFF_MS`): otherwise the holder is back before any of
+//    them has looked, and they wait for the whole loop - and for each other's loops - until they give up.
 
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -54,13 +57,35 @@ function running(pid: number): boolean {
   }
 }
 
-// What to do about a lock that is there: its holder's note if it is stale, null if it is to be waited for.
-function staleOwner(lock: string, opts: DirLockOptions): { token: string | null } | null {
+/**
+ * How long a process that has just let go of a lock gives the others to take it before it takes it again.
+ * A waiter looks every few milliseconds and a holder that comes straight back does so within microseconds,
+ * so without this a loop of writes keeps the lock until it is done, and the processes behind it (each
+ * with a loop of its own) wait for all of them one after the other. It costs only the process that asks
+ * again within this time of letting go, and only until somebody has taken the lock.
+ */
+const HANDOFF_MS = 30;
+const letGoAt = new Map<string, number>();
+
+// Whether the lock was let go of a moment ago, and nobody has taken it yet.
+function handingOver(lock: string): boolean {
+  const at = letGoAt.get(lock);
+  if (at === undefined) return false;
+  if (Date.now() - at >= HANDOFF_MS || existsSync(lock)) {
+    letGoAt.delete(lock);
+    return false;
+  }
+  return true;
+}
+
+// What to do about a lock that is there: its holder's note if it is stale, null if it is to be waited for,
+// "gone" if it is not there any more (it was let go of while looking: take it).
+function staleOwner(lock: string, opts: DirLockOptions): { token: string | null } | "gone" | null {
   let age: number;
   try {
     age = Date.now() - statSync(lock).mtimeMs;
   } catch {
-    return { token: null }; // gone while looking: try to take it
+    return "gone";
   }
   const owner = readOwner(lock);
   if (owner === null) return age > (opts.graceMs ?? 2000) ? { token: null } : null;
@@ -105,14 +130,25 @@ function tryTake(lock: string, token: string, opts: DirLockOptions): boolean {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       const stale = staleOwner(lock, opts);
-      if (!stale) return false;
-      breakLock(lock, stale, opts);
+      if (stale === null) return false;
+      // A lock that is gone by now is nobody's: it is not broken (what stands there next may be somebody's
+      // that was just made), the name is taken again.
+      if (stale !== "gone") breakLock(lock, stale, opts);
       continue;
     }
     try {
       writeFileSync(join(lock, "owner"), JSON.stringify({ pid: process.pid, token }));
     } catch (err) {
-      rmSync(lock, { recursive: true, force: true });
+      const code = (err as NodeJS.ErrnoException).code;
+      // The directory that was just made is gone: a breaker that judged the lock before this one stood
+      // there moved it away. It is nobody's to remove, and the lock is taken again.
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      // Not removed with what is in it: an empty directory is this one's, one with a note is not.
+      try {
+        rmdirSync(lock);
+      } catch {
+        // Somebody else's by now.
+      }
       throw err;
     }
     return true;
@@ -121,13 +157,17 @@ function tryTake(lock: string, token: string, opts: DirLockOptions): boolean {
 
 // Only a lock that is still this one's: one that was broken and taken by another is theirs.
 function release(lock: string, token: string): void {
-  if (readOwner(lock)?.token === token) rmSync(lock, { recursive: true, force: true });
+  if (readOwner(lock)?.token !== token) return;
+  rmSync(lock, { recursive: true, force: true });
+  if (letGoAt.size > 64) letGoAt.clear();
+  letGoAt.set(lock, Date.now());
 }
 
 /** Run `fn` holding the lock `lock` (a path that does not exist yet). Never holds it past `fn`. */
 export async function withDirLock<T>(lock: string, fn: () => Promise<T> | T, opts: DirLockOptions = {}): Promise<T> {
   const until = Date.now() + (opts.waitMs ?? 5000);
   const token = randomBytes(8).toString("hex");
+  while (handingOver(lock)) await new Promise((r) => setTimeout(r, 2));
   while (!tryTake(lock, token, opts)) {
     if (Date.now() > until) throw new LockBusyError(lock);
     await new Promise((r) => setTimeout(r, 10 + Math.floor(Math.random() * 20)));
@@ -148,6 +188,7 @@ export function withDirLockSync<T>(lock: string, fn: () => T, opts: DirLockOptio
   const until = Date.now() + (opts.waitMs ?? 2000);
   const token = randomBytes(8).toString("hex");
   const nap = new Int32Array(new SharedArrayBuffer(4));
+  while (handingOver(lock)) Atomics.wait(nap, 0, 0, 2);
   while (!tryTake(lock, token, opts)) {
     if (Date.now() > until) throw new LockBusyError(lock);
     Atomics.wait(nap, 0, 0, 5);
