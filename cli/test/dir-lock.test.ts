@@ -520,6 +520,61 @@ describe("a holder that lost its lock", () => {
   });
 });
 
+describe("a holder is not told it lost a lock it still has", () => {
+  test("a note that cannot be read for a moment (Windows refuses it while the file is moved or scanned) is read again", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    let refusals = 2;
+    const opts: DirLockOptions = {
+      hooks: {
+        readNote: (file) => {
+          if (refusals-- > 0) throw errno("EBUSY");
+          return readFileSync(file, "utf8");
+        },
+      },
+    };
+    // The write was done; only the look afterwards was refused, twice.
+    expect(withDirLockSync(lock, (held) => (held.assert(), "written"), opts)).toBe("written");
+    expect(refusals).toBeLessThan(0);
+  });
+
+  test("a note that is refused every time is no evidence of a loss either, and one that is gone or is another's still is", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    const always: DirLockOptions = {
+      hooks: {
+        readNote: () => {
+          throw errno("EPERM");
+        },
+      },
+    };
+    expect(withDirLockSync(lock, () => "written", always)).toBe("written");
+    const gone: DirLockOptions = { hooks: { readNote: () => { throw errno("ENOENT"); } } };
+    expect(() => withDirLockSync(lock, () => "written", gone)).toThrow(LockLostError);
+  });
+});
+
+describe("a publisher whose leftover was swept while it was stopped", () => {
+  test("makes the lock again instead of failing with a raw ENOENT", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    let swept = false;
+    const opts: DirLockOptions = {
+      hooks: {
+        // The process is stopped for longer than a minute between making its directory and moving it, and another sweeps it.
+        publishing: () => {
+          if (swept) return;
+          swept = true;
+          for (const name of readdirSync(root)) if (name.includes(".new.")) rmSync(join(root, name), { recursive: true, force: true });
+        },
+      },
+    };
+    expect(withDirLockSync(lock, () => "held", opts)).toBe("held");
+    expect(swept).toBe(true);
+    expect(readdirSync(root)).toEqual([]);
+  });
+});
+
 describe("a lock that cannot be published twice under one name", () => {
   test("a refused publish whose leftover cannot be removed does not surface as an error of the name being taken", () => {
     const root = scratch();

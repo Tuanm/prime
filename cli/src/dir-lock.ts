@@ -42,6 +42,8 @@ export interface DirLockHooks {
   boot?: () => { id?: string; up: number };
   /** Called just before a lock that is made is moved to the lock's name, with that name. */
   publishing?: (lock: string) => void;
+  /** Read a lock's note (to see whether the lock is still this holder's). */
+  readNote?: (file: string) => string;
 }
 
 export interface DirLockOptions {
@@ -138,21 +140,53 @@ const HOST = hostname();
 // a lock it left behind (a removal that was refused for good), not one that is held.
 const held = new Set<string>();
 
+// What a lock's note says. A note that cannot be read at all (as opposed to one that is not there, or says something
+// else) throws: `readOwner` takes that for "nobody", which is what a judge of staleness wants; a holder asking whether it
+// still holds the lock is not told it lost it for a read that was refused for a moment (see `stillHeld`).
+function readOwnerRaw(lock: string, read: (file: string) => string = (file) => readFileSync(file, "utf8")): Owner | null {
+  let raw: { pid?: unknown; token?: unknown; host?: unknown; at?: unknown; up?: unknown; boot?: unknown };
+  try {
+    raw = JSON.parse(read(join(lock, "owner")));
+  } catch (err) {
+    if (err instanceof SyntaxError) return null;
+    throw err;
+  }
+  if (!raw || typeof raw.pid !== "number" || typeof raw.token !== "string") return null;
+  return {
+    pid: raw.pid,
+    token: raw.token,
+    ...(typeof raw.host === "string" ? { host: raw.host } : {}),
+    ...(typeof raw.at === "number" ? { at: raw.at } : {}),
+    ...(typeof raw.up === "number" ? { up: raw.up } : {}),
+    ...(typeof raw.boot === "string" ? { boot: raw.boot } : {}),
+  };
+}
+
 function readOwner(lock: string): Owner | null {
   try {
-    const raw = JSON.parse(readFileSync(join(lock, "owner"), "utf8")) as { pid?: unknown; token?: unknown; host?: unknown; at?: unknown; up?: unknown; boot?: unknown };
-    if (typeof raw.pid !== "number" || typeof raw.token !== "string") return null;
-    return {
-      pid: raw.pid,
-      token: raw.token,
-      ...(typeof raw.host === "string" ? { host: raw.host } : {}),
-      ...(typeof raw.at === "number" ? { at: raw.at } : {}),
-      ...(typeof raw.up === "number" ? { up: raw.up } : {}),
-      ...(typeof raw.boot === "string" ? { boot: raw.boot } : {}),
-    };
+    return readOwnerRaw(lock);
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether the lock is still this holder's. A note that says another holder, or is gone, is a lock that was taken;
+ * one that cannot be read (Windows refuses a read for a moment while the file is being moved or scanned) is asked
+ * again a few times, and then is no evidence of a loss: a holder is not told it lost a lock it still has.
+ */
+function stillHeld(lock: string, token: string, opts: DirLockOptions): boolean {
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      return readOwnerRaw(lock, opts.hooks?.readNote)?.token === token;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return false;
+      Atomics.wait(nap, 0, 0, 20 * (attempt + 1));
+    }
+  }
+  return true;
 }
 
 function running(pid: number): boolean {
@@ -315,9 +349,13 @@ function publish(lock: string, token: string, opts: DirLockOptions, last: Attemp
     rename(opts, mine, lock);
     return "made";
   } catch (err) {
+    const swept = !exists(mine);
     removeQuietly(mine, opts);
     const code = (err as NodeJS.ErrnoException).code ?? "";
     if (TAKEN_CODES.has(code)) return "taken";
+    // The directory this attempt made is gone: a publisher that was stopped for longer than a minute, and
+    // whose leftover another process swept. The lock is not made; the next try makes it again.
+    if (code === "ENOENT" && swept) return "taken";
     if (busy(opts, err)) {
       last.refused = err as NodeJS.ErrnoException;
       return "busy";
@@ -479,10 +517,10 @@ async function releaseAsync(lock: string, token: string, opts: DirLockOptions): 
   }
 }
 
-function holdOf(lock: string, token: string): HeldLock {
+function holdOf(lock: string, token: string, opts: DirLockOptions): HeldLock {
   return {
     assert: () => {
-      if (readOwner(lock)?.token !== token) throw new LockLostError(lock);
+      if (!stillHeld(lock, token, opts)) throw new LockLostError(lock);
     },
   };
 }
@@ -503,8 +541,8 @@ export async function withDirLock<T>(lock: string, fn: (held: HeldLock) => Promi
   let result: T;
   let lost = false;
   try {
-    result = await fn(holdOf(lock, token));
-    lost = readOwner(lock)?.token !== token;
+    result = await fn(holdOf(lock, token, opts));
+    lost = !stillHeld(lock, token, opts);
   } finally {
     await releaseAsync(lock, token, opts);
   }
@@ -530,8 +568,8 @@ export function withDirLockSync<T>(lock: string, fn: (held: HeldLock) => T, opts
   let result: T;
   let lost = false;
   try {
-    result = fn(holdOf(lock, token));
-    lost = readOwner(lock)?.token !== token;
+    result = fn(holdOf(lock, token, opts));
+    lost = !stillHeld(lock, token, opts);
   } finally {
     releaseSync(lock, token, opts);
   }
