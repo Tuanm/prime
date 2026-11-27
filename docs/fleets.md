@@ -288,7 +288,9 @@ author snapshots (for the members that read that roster). That is visible only t
 `prime fleets members` prints a fingerprint of each member's key (the KEY column), and a swapped key
 keeps the device and changes only that. The fingerprint has to be checked outside the gateway
 (against what the member's own `prime fleets members` shows) to mean anything; the admin page
-lists who is in, and does not show it. A member that was removed and that the gateway
+shows it too, in the tooltip of each space (with how far the member says it has applied and fetched:
+informational, the gateway decides nothing from `fetched`), and it is the gateway's own page, so
+it is no more than the roster is. A member that was removed and that the gateway
 helps can still read what it was sent before it was removed, as it always could.
 
 What the gateway can still do, whatever a member checks:

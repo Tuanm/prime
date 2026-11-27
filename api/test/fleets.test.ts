@@ -6,6 +6,7 @@ import {
   INVITE_DEFAULT_TTL_MS,
   INVITE_MAX_TTL_MS,
   inviteShape,
+  keyFingerprint,
   FleetCreationAllowance,
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
@@ -902,6 +903,29 @@ describe("deleting a fleet", () => {
     // The name can be used again.
     const again = await call(doInstance, "/create", { caller: "admin", device: "operator" });
     expect(again.status).toBe(200);
+  });
+});
+
+describe("what the operator is shown of a member", () => {
+  test("the fingerprint of its key is the one `prime fleets members` prints", async () => {
+    const { createHash } = await import("node:crypto");
+    const key = Buffer.from(Array.from({ length: 32 }, (_, i) => i * 7 + 1)).toString("base64");
+    // The CLI: the first eight bytes of the key's SHA-256, in base64.
+    const cli = createHash("sha256").update(Buffer.from(key, "base64")).digest().subarray(0, 8).toString("base64");
+    expect(await keyFingerprint(key)).toBe(cli);
+    expect(await keyFingerprint("not base64 !!")).toBe("");
+  });
+
+  test("the roster for the operator says how far each member has applied and fetched, and carries the key", async () => {
+    const { doInstance, state } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    state.data.set("applied", { "dev-owner": 7 });
+    state.data.set("fetched", { "dev-owner": 9 });
+    const roster = await call(doInstance, "/members", { caller: "admin", device: "operator", method: "GET" });
+    const owner = (roster.json.members as Array<{ deviceId: string; applied: number; fetched?: number; pubkey?: string }>).find((m) => m.deviceId === "dev-owner")!;
+    expect(owner.applied).toBe(7);
+    expect(owner.fetched).toBe(9);
+    expect(owner.pubkey).toBe(TEST_PUBKEY);
   });
 });
 

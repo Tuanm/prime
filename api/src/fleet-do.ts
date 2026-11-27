@@ -1005,7 +1005,17 @@ export class FleetDO implements DurableObject {
 
   private async listMembers(caller: Caller): Promise<Response> {
     const members = await this.members();
-    if (caller.kind === "admin") return Response.json({ ok: true, members: Object.values(members), left: await this.leftKeys() });
+    if (caller.kind === "admin") {
+      // The operator also sees how far each member says it has got (informational: only `applied` gates the lease).
+      const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+      const fetched = (await this.state.storage.get<Record<string, number>>("fetched")) ?? {};
+      const shown = Object.values(members).map((m) => ({
+        ...m,
+        applied: applied[m.deviceId] ?? 0,
+        ...(fetched[m.deviceId] !== undefined ? { fetched: fetched[m.deviceId] } : {}),
+      }));
+      return Response.json({ ok: true, members: shown, left: await this.leftKeys() });
+    }
     // The owner runs the fleet: it admits and removes members, so it needs
     // their ids in full. Any other member sees the other ids cut short:
     // knowing a member's full id is not something a member needs, and the

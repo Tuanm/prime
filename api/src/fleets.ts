@@ -228,3 +228,19 @@ export async function onlineNow(
   }
   return online;
 }
+
+/**
+ * A short fingerprint of a member's public key (base64), to tell its keys apart: the first eight bytes
+ * of the key's SHA-256, in base64. It is the same as the KEY column of `prime fleets members`, so what
+ * the operator sees here can be compared with what a member's own machine prints. "" for a key that is
+ * not base64.
+ */
+export async function keyFingerprint(pubkeyB64: string): Promise<string> {
+  try {
+    const raw = Uint8Array.from(atob(pubkeyB64), (c) => c.charCodeAt(0));
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
+    return btoa(String.fromCharCode(...digest.subarray(0, 8)));
+  } catch {
+    return "";
+  }
+}

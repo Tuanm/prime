@@ -34,7 +34,7 @@ import { SECURITY_HTML } from "./security-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleFleetRoutes, markSeen } from "./fleets-routes";
-import { onlineNow, validFleetId } from "./fleets";
+import { keyFingerprint, onlineNow, validFleetId } from "./fleets";
 import { sendUsage, takeFleetR2 } from "./usage";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
@@ -688,15 +688,23 @@ async function adminFleets(env: Env): Promise<Response> {
       requestedAt: typeof p.requestedAt === "number" ? p.requestedAt : 0,
       online: online.has(String(p.deviceId ?? "")),
     }));
-    const members = (rosterBody.members ?? []).map((m) => ({
-      deviceId: String(m.deviceId ?? ""),
-      role: String(m.role ?? "member"),
-      label: typeof m.label === "string" ? m.label : undefined,
-      addedAt: typeof m.addedAt === "number" ? m.addedAt : 0,
-      online: online.has(String(m.deviceId ?? "")),
-      disabled: off.has(String(m.deviceId ?? "")),
-      known: known.has(String(m.deviceId ?? "")),
-    }));
+    const members = await Promise.all(
+      (rosterBody.members ?? []).map(async (m) => ({
+        deviceId: String(m.deviceId ?? ""),
+        role: String(m.role ?? "member"),
+        label: typeof m.label === "string" ? m.label : undefined,
+        addedAt: typeof m.addedAt === "number" ? m.addedAt : 0,
+        online: online.has(String(m.deviceId ?? "")),
+        disabled: off.has(String(m.deviceId ?? "")),
+        known: known.has(String(m.deviceId ?? "")),
+        // The key snapshots are sealed for, as a fingerprint: a gateway that swapped a member's key for
+        // its own keeps the device and changes only this, so it is where the operator can see it.
+        ...(typeof m.pubkey === "string" && m.pubkey ? { key: await keyFingerprint(m.pubkey) } : {}),
+        // How far the member says it has got. Informational: nothing in the gateway decides on `fetched`.
+        ...(typeof m.applied === "number" ? { applied: m.applied } : {}),
+        ...(typeof m.fetched === "number" ? { fetched: m.fetched } : {}),
+      })),
+    );
     fleets.push({
       fleet: id,
       label: body.meta?.label ?? "",

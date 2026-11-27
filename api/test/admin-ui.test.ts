@@ -294,6 +294,31 @@ describe("the fleets in the admin interface", () => {
     expect(branch.children.length).toBeGreaterThan(1);
     expect(branch.children[0]!.className).toContain("fleet-row");
   });
+  test("a space shows the fingerprint of its key and how far it says it has got, where the operator can compare it", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        members: [
+          { deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true, key: "F7qCfRFGadQ=", applied: 41, fetched: 43 },
+          { deviceId: "d2", role: "member", label: "beta", addedAt: 2, online: true },
+        ],
+        memberCount: 2,
+        primary: "d1",
+        pending: [],
+      },
+    ]);
+    await page.settle();
+    const titles: string[] = [];
+    const walk = (el: El): void => {
+      if (el.title) titles.push(el.title);
+      el.children.forEach(walk);
+    };
+    page.list().forEach(walk);
+    expect(titles.some((t) => t.includes("the primary") && t.includes("key F7qCfRFGadQ=") && t.includes("applied 41, fetched 43"))).toBe(true);
+    // A member the gateway has no key for says nothing of one.
+    expect(titles.some((t) => t.includes("a member of the fleet") && !t.includes("key"))).toBe(true);
+  });
+
   test("a fleet is a cloud, and it offers Save and Deactivate", async () => {
     const page = loadPage([
       {

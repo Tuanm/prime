@@ -1146,6 +1146,14 @@ ${UI_CSS}    </style>
             : m.role === "owner"
               ? "the owner of the fleet"
               : "a member of the fleet";
+          // The key snapshots are sealed for, as a fingerprint (the KEY of 'prime fleets members' on that
+          // machine says the same), and how far the member says it has got.
+          var facts = [];
+          if (m.key) facts.push("key " + m.key);
+          if (typeof m.applied === "number") {
+            facts.push("applied " + m.applied + (typeof m.fetched === "number" ? ", fetched " + m.fetched : ""));
+          }
+          if (facts.length) nameInput.title += " (" + facts.join("; ") + ")";
 
           // The space is a device, so it has the actions a device has.
           var menu = fleetMenu([
