@@ -633,7 +633,9 @@ What is deliberately not done, so that nobody has to find it out:
 - **Two agents can overlap** for up to one touch of the lock (five seconds) plus one round when a lock is
   taken over at the same moment by two starters; the one that finds its lock gone stops.
 - **Windows** has no service-manager restart and no process list for the agent lock: it falls back to
-  the lock's and state file's freshness.
+  the lock's and state file's freshness. `prime fleets agent install` registers its own Scheduled Task
+  (`\prime\prime-fleet-agent`), apart from the buddy's (`\prime\code-mcp`); Task Scheduler is not asked to
+  restart it on a settings change, so a change there stops the agent and starts another.
 
 ## Where to read more
 

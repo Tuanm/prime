@@ -19,6 +19,8 @@ import {
   renderLaunchdPlist,
   renderSystemdUnit,
   renderWindowsInstallScript,
+  renderWindowsUninstallScript,
+  taskNameOf,
   saveOverrides,
   systemdQuote,
   systemdUserDirs,
@@ -200,6 +202,29 @@ describe("service definitions", () => {
     // The watchdog trigger that actually restarts a crashed service.
     expect(script).toContain("-RepetitionInterval (New-TimeSpan -Minutes 1)");
     expect(script).toContain("-MultipleInstances IgnoreNew");
+  });
+});
+
+describe("the Scheduled Task each Windows service is", () => {
+  test("the fleet agent has a task of its own: installing it never replaces the buddy's", () => {
+    const buddy = renderWindowsInstallScript({ command: ["prime.exe", "code-mcp", "--service"], configPath: "C:\\cfg\\config.yaml", logPath: "C:\\log", pathEnv: "", home: "C:\\Users\\o" });
+    expect(buddy).toContain("-TaskName 'code-mcp'");
+    const agent = renderWindowsInstallScript(fleetAgentSpec("C:\\cfg\\config.yaml", "win32"));
+    expect(agent).toContain("-TaskPath '\\prime\\' -TaskName 'prime-fleet-agent'");
+    expect(agent).not.toContain("-TaskName 'code-mcp'");
+    expect(agent).not.toContain("installed by prime service install");
+    expect(taskNameOf(fleetAgentSpec("x", "win32"))).toBe("prime-fleet-agent");
+    expect(taskNameOf({})).toBe("code-mcp");
+  });
+
+  test("removing one stops its own task and processes, not the other's", () => {
+    const agent = renderWindowsUninstallScript("C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME });
+    expect(agent).toContain("-TaskName 'prime-fleet-agent'");
+    expect(agent).toContain("Contains('__fleet-agent')");
+    expect(agent).not.toContain("code-mcp");
+    const buddy = renderWindowsUninstallScript("C:\\cfg\\config.yaml");
+    expect(buddy).toContain("-TaskName 'code-mcp'");
+    expect(buddy).toContain("Contains('code-mcp --service')");
   });
 });
 

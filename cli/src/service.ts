@@ -399,7 +399,22 @@ export function psQuote(text: string): string {
   return "'" + text.replace(/'/g, "''") + "'";
 }
 
-const TASK_REF = "-TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(TASK_NAME);
+/**
+ * The Scheduled Task a service is registered as: `\prime\<name>`. The buddy is "code-mcp" and the fleet agent
+ * "prime-fleet-agent", so installing one never replaces, stops or removes the other's task.
+ */
+export function taskNameOf(identity: { name?: string } = {}): string {
+  return identity.name ?? TASK_NAME;
+}
+
+function taskRef(identity: { name?: string }): string {
+  return "-TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(taskNameOf(identity));
+}
+
+// What a service's process has on its command line: how the Windows script tells it from the other's.
+function processMarker(identity: { name?: string }): string {
+  return taskNameOf(identity) === TASK_NAME ? "code-mcp --service" : "__fleet-agent";
+}
 
 /**
  * Register the Scheduled Task. It runs under conhost --headless so the console
@@ -407,6 +422,7 @@ const TASK_REF = "-TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(TAS
  * starts at logon, never times out, and restarts after a failure.
  */
 export function renderWindowsInstallScript(spec: ServiceSpec): string {
+  const TASK_REF = taskRef(spec);
   const argument = "--headless " + spec.command.map(windowsQuote).join(" ");
   return [
     "$ErrorActionPreference = 'Stop'",
@@ -424,19 +440,20 @@ export function renderWindowsInstallScript(spec: ServiceSpec): string {
       "-ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew",
     "$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited",
     "Register-ScheduledTask " + TASK_REF + " -Action $action -Trigger $trigger -Settings $settings -Principal $principal " +
-      "-Description 'code-mcp (installed by prime service install)' -Force | Out-Null",
+      "-Description " + psQuote(spec.description ?? "code-mcp (installed by prime service install)") + " -Force | Out-Null",
     "Start-ScheduledTask " + TASK_REF,
   ].join("\n");
 }
 
-export function renderWindowsUninstallScript(configPath: string): string {
+export function renderWindowsUninstallScript(configPath: string, identity: { name?: string } = {}): string {
+  const TASK_REF = taskRef(identity);
   return [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$task = Get-ScheduledTask " + TASK_REF,
     "if ($task) { Stop-ScheduledTask " + TASK_REF + "; Unregister-ScheduledTask " + TASK_REF + " -Confirm:$false }",
     // Belt and braces: the service's own process (it also exits on its own when
     // its conhost parent goes away).
-    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('code-mcp --service') -and $_.CommandLine.Contains(" +
+    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(" + psQuote(processMarker(identity)) + ") -and $_.CommandLine.Contains(" +
       psQuote(configPath) + ") } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
     "if ($task) { 'removed' } else { 'absent' }",
   ].join("\n");
@@ -533,10 +550,16 @@ export function serviceStatus(
     };
   }
   if (platform === "win32") {
-    const where = "Task Scheduler " + TASK_PATH + TASK_NAME;
+    const task = taskNameOf(identity);
+    const where = "Task Scheduler " + TASK_PATH + task;
     // schtasks answers in well under a second, and its exit code is not localized.
-    const installed = run(["schtasks", "/query", "/tn", TASK_PATH + TASK_NAME], { timeoutMs: 30_000 }).code === 0;
-    const running = installed && pidAlive(pidFilePath(configPath));
+    const installed = run(["schtasks", "/query", "/tn", TASK_PATH + task], { timeoutMs: 30_000 }).code === 0;
+    // The buddy writes its pid down; the fleet agent has its own lock and state, and Task Scheduler is asked.
+    const running =
+      installed &&
+      (task === TASK_NAME
+        ? pidAlive(pidFilePath(configPath))
+        : powershell("(Get-ScheduledTask " + taskRef(identity) + ").State -eq 'Running'").out.trim() === "True");
     return { installed, running, where, detail: installed ? (running ? "running" : "not running") : undefined };
   }
   throw new CliError("'prime service' supports Linux (systemd), macOS (launchd) and Windows (Task Scheduler); this is " + platform);
@@ -607,10 +630,10 @@ export function installService(platform: Platform, spec: ServiceSpec): string {
     // A reinstall must stop the running instance: re-registering only replaces
     // the definition, and with IgnoreNew the new start is skipped while the old
     // process (with the old options) keeps running.
-    powershell(renderWindowsUninstallScript(spec.configPath));
-    for (let i = 0; i < 40 && pidAlive(pidFilePath(spec.configPath)); i++) Bun.sleepSync(250);
+    powershell(renderWindowsUninstallScript(spec.configPath, spec));
+    if (taskNameOf(spec) === TASK_NAME) for (let i = 0; i < 40 && pidAlive(pidFilePath(spec.configPath)); i++) Bun.sleepSync(250);
     must(powershell(renderWindowsInstallScript(spec)), "registering the Scheduled Task");
-    return "Task Scheduler " + TASK_PATH + TASK_NAME;
+    return "Task Scheduler " + TASK_PATH + taskNameOf(spec);
   }
   throw new CliError("'prime service' is not supported on " + platform);
 }
@@ -640,7 +663,7 @@ export function uninstallService(platform: Platform, configPath: string, identit
     return had || out.code === 0;
   }
   if (platform === "win32") {
-    return powershell(renderWindowsUninstallScript(configPath)).out.trim() === "removed";
+    return powershell(renderWindowsUninstallScript(configPath, identity)).out.trim() === "removed";
   }
   throw new CliError("'prime service' is not supported on " + platform);
 }
