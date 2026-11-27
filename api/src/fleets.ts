@@ -26,6 +26,15 @@ export const INVITE_MAX_TTL_MS = 60 * 60 * 1000;
 export const MAX_MEMBERS = 32;
 export const MAX_PENDING = 32;
 /**
+ * How long a fleet must have been untouched before it can be cleared away as abandoned (see `reap`).
+ *
+ * It is a second condition beside "the gateway knows none of its members": a fleet that is paused
+ * records no activity at all, and a fleet whose members never came back after a long weekend is
+ * not abandoned. Only the operator or the fleet's owner may delete a fleet otherwise.
+ */
+export const REAP_SILENCE_MS = 7 * 24 * 60 * 60_000;
+
+/**
  * How many snapshots a fleet keeps.
  *
  * The primary publishes a whole tree every 32 snapshots and only the change in

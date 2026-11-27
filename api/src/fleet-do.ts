@@ -449,8 +449,9 @@ export class FleetDO implements DurableObject {
     if (caller.kind !== "admin") return this.deny();
     const members = await this.members();
     const lastActivity = (await this.state.storage.get<number>("lastActivity")) ?? 0;
+    const created = (await this.state.storage.get<number>("created")) ?? 0;
     const meta = await this.meta();
-    return Response.json({ members: Object.keys(members), lastActivity, meta });
+    return Response.json({ members: Object.keys(members), lastActivity, created, meta });
   }
 
   //

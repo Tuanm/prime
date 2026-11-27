@@ -11,6 +11,7 @@ import {
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
   MAX_SNAPSHOT_BYTES,
+  REAP_SILENCE_MS,
   RECENT_SNAPSHOTS,
   newInviteCode,
   onlineNow,
@@ -1246,6 +1247,87 @@ async function routeOf(
   });
   return res!;
 }
+
+/** A registry that answers /map as the test says: members it knows, or a failure. */
+function registryMapping(answer: () => Response | Promise<Response>) {
+  return {
+    idFromName: () => "global",
+    get: () => ({
+      fetch: async (input: Request | string) => {
+        const path = new URL(typeof input === "string" ? input : input.url).pathname;
+        if (path === "/map") return answer();
+        return Response.json({ ok: true });
+      },
+    }),
+  };
+}
+
+describe("clearing away a fleet nobody can reach", () => {
+  const DAY = 24 * 60 * 60_000;
+  const quiet = (state: ReturnType<typeof fakeState>) => {
+    state.data.set("created", Date.now() - REAP_SILENCE_MS - 2 * DAY);
+    state.data.set("lastActivity", Date.now() - REAP_SILENCE_MS - DAY);
+  };
+  const mapOf = (known: { map?: Record<string, string>; anonymous?: string[] }) => () => Response.json({ map: {}, anonymous: [], ...known });
+
+  test("when the gateway knows none of its members and it has been quiet for a week, any proven device clears it", async () => {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    await bucket.put("fleets/acme/packs/" + "a".repeat(64), "sealed");
+    quiet(state);
+    const res = await routeOf(doInstance, bucket, "reap", "anon-stranger", registryMapping(mapOf({ anonymous: ["anon-stranger"] })));
+    expect(res.status).toBe(200);
+    expect(state.data.get("members")).toBeUndefined();
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  test("a registry that fails keeps the fleet", async () => {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    quiet(state);
+    for (const answer of [
+      () => new Response("Durable Object is overloaded", { status: 503 }),
+      () => { throw new Error("registry unreachable"); },
+      () => new Response("not json", { status: 200 }),
+    ]) {
+      const res = await routeOf(doInstance, bucket, "reap", "anon-stranger", registryMapping(answer));
+      expect(res.status).toBe(503);
+      expect(state.data.get("members")).toBeDefined();
+    }
+  });
+
+  test("a partial answer from the registry keeps the fleet", async () => {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    quiet(state);
+    for (const body of [{}, { map: {} }, { anonymous: [] }, { map: [], anonymous: [] }, { map: {}, anonymous: "dev-owner" }, { map: null, anonymous: [] }, { map: {}, anonymous: [1] }]) {
+      const res = await routeOf(doInstance, bucket, "reap", "anon-stranger", registryMapping(() => Response.json(body)));
+      expect(res.status).toBe(503);
+      expect(state.data.get("members")).toBeDefined();
+    }
+  });
+
+  test("a fleet with a member the gateway knows is kept, as a registered or as an anonymous device", async () => {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    quiet(state);
+    for (const known of [{ map: { "dev-owner": "verifier" } }, { anonymous: ["dev-owner"] }]) {
+      const res = await routeOf(doInstance, bucket, "reap", "anon-stranger", registryMapping(mapOf(known)));
+      expect(res.status).toBe(409);
+      expect(state.data.get("members")).toBeDefined();
+    }
+  });
+
+  test("a fleet that was in use within the week is kept even when no member is known", async () => {
+    const { doInstance, state, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    state.data.set("created", Date.now() - 30 * DAY);
+    state.data.set("lastActivity", Date.now() - REAP_SILENCE_MS + DAY);
+    const res = await routeOf(doInstance, bucket, "reap", "anon-stranger", registryMapping(mapOf({})));
+    expect(res.status).toBe(409);
+    expect(state.data.get("members")).toBeDefined();
+  });
+});
 
 describe("caps", () => {
   test("the member cap refuses further admissions", async () => {

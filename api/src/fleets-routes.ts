@@ -11,7 +11,7 @@
 // authorization in the object.
 
 import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
-import { MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, validFleetId, type FleetAuth } from "./fleets";
+import { MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
 import { countFleetR2 } from "./usage";
 import type { Env } from "./config";
 
@@ -339,22 +339,29 @@ async function sha256Hex(data: ArrayBuffer): Promise<string> {
 const lastSeen = new Map<string, number>();
 
 /**
- * The devices the gateway still knows.
+ * The devices the gateway still knows, or null when that cannot be said.
  *
- * A device that is not here any more cannot be called, so it cannot be
- * taking part in a fleet.
+ * A device that is not here any more cannot be called, so it cannot be taking part in a fleet.
+ * The answer is used to take a fleet away, so anything short of a whole answer (the registry
+ * failed, was slow, or sent something that is not both lists) is null, and a caller that gets null
+ * keeps what it was going to delete: an empty set would read as "nobody is known".
  */
-async function knownDevices(env: Env): Promise<Set<string>> {
-  const known = new Set<string>();
+async function knownDevices(env: Env): Promise<Set<string> | null> {
   try {
     const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
     const res = await reg.fetch("https://registry/map");
-    if (!res.ok) return known;
-    const body = (await res.json()) as { map?: Record<string, string>; anonymous?: string[] };
-    for (const id of Object.keys(body.map ?? {})) known.add(id);
-    for (const id of body.anonymous ?? []) known.add(id);
-  } catch {}
-  return known;
+    if (!res.ok) return null;
+    const body = (await res.json()) as { map?: unknown; anonymous?: unknown };
+    if (!body || typeof body.map !== "object" || body.map === null || Array.isArray(body.map) || !Array.isArray(body.anonymous)) return null;
+    const known = new Set<string>(Object.keys(body.map));
+    for (const id of body.anonymous) {
+      if (typeof id !== "string") return null;
+      known.add(id);
+    }
+    return known;
+  } catch {
+    return null;
+  }
 }
 
 /** Tell the registry that a device is still in use. */
@@ -489,11 +496,14 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     return await listenStub.fetch(new Request("https://fleet/events", { method: "GET", headers: listenHeaders }));
   }
 
-  // Reaping a fleet nobody can reach.
+  // Clearing away a fleet that nobody can reach.
   //
-  // A fleet whose members are all gone - the gateway does not know any of
-  // them any more - is a fleet nobody can run and nobody can leave. Any
-  // proven device may clear it away.
+  // A fleet whose members are all gone - the gateway knows none of them any more - is a fleet nobody
+  // can run and nobody can leave, so any proven device may clear it away. That is the one way a device
+  // that is not the fleet's owner can delete a fleet, and it fails closed: a registry that cannot be
+  // read, or answers in part, keeps the fleet, and so does a fleet that has been touched within
+  // REAP_SILENCE_MS (a paused fleet records nothing, so being quiet alone is not enough, and it is
+  // not the only condition).
   if (action === "reap" && request.method === "POST") {
     const namespace = deps.env.FLEET;
     if (!namespace) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
@@ -505,14 +515,27 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     headers.set("x-prime-fleet", fleetId);
     const reaped = await stub.fetch("https://fleet/reap", { method: "POST", headers });
     if (!reaped.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
-    const body = (await reaped.json()) as { members?: string[]; lastActivity?: number };
+    const body = (await reaped.json()) as { members?: string[]; lastActivity?: number; created?: number };
     const members = body.members ?? [];
     if (members.length === 0) return Response.json({ ok: true, gone: true, members: 0 });
     const known = await knownDevices(deps.env);
+    if (known === null) {
+      return Response.json(
+        { error: "the gateway could not say which of the fleet's members it knows, so the fleet is kept", hint: "try again in a moment" },
+        { status: 503, headers: { "retry-after": "30" } },
+      );
+    }
     const living = members.filter((id) => known.has(id));
     if (living.length > 0) {
       return Response.json(
         { error: "the fleet still has members the gateway knows", members: living.length },
+        { status: 409 },
+      );
+    }
+    const touched = Math.max(body.lastActivity ?? 0, body.created ?? 0);
+    if (touched === 0 || Date.now() - touched < REAP_SILENCE_MS) {
+      return Response.json(
+        { error: "the fleet was in use less than " + Math.round(REAP_SILENCE_MS / 86_400_000) + " days ago, so it is kept", members: members.length },
         { status: 409 },
       );
     }
