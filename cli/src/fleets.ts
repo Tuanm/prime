@@ -74,7 +74,11 @@ export function resolveFleetTarget(
   // space still has something to speak with.
   const deviceToken = flags.token ?? space?.remote_token ?? space?.token ?? (device ? config.devices[device]?.token : undefined);
   const gateway = normalizeGateway(flags.gateway ?? space?.gateway ?? config.defaults.gateway ?? env[ENV.gateway] ?? DEFAULT_GATEWAY);
-  const operatorToken = flags.operatorToken ?? env[ENV.fleetOperatorToken] ?? config.defaults.fleet_operator_token;
+  // The operator's credential from the environment or the config goes to the gateway that is configured as this
+  // machine's own, and to no other: a space may point at another one, and that gateway is not owed it. One passed
+  // on the command line goes where the command goes.
+  const ownGateway = normalizeGateway(config.defaults.gateway ?? env[ENV.gateway] ?? DEFAULT_GATEWAY);
+  const operatorToken = flags.operatorToken ?? (gateway === ownGateway ? env[ENV.fleetOperatorToken] ?? config.defaults.fleet_operator_token : undefined);
   const timeoutMs = flags.timeout ?? config.defaults.timeout_ms ?? 300_000;
   return { gateway, operatorToken, device, deviceToken, timeoutMs };
 }

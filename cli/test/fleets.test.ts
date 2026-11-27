@@ -83,6 +83,21 @@ describe("choosing which gateway a fleet command talks to", () => {
     expect(t.operatorToken).toBeUndefined();
   });
 
+  test("the operator's credential from the environment or the config is not sent to another gateway than this machine's own", () => {
+    const c = config({
+      defaults: { gateway: "https://own.example", fleet_operator_token: "operator-token" },
+      spaces: {
+        elsewhere: { id: "s", runtime: "apple", image: "img", mode: "ephemeral", container: "c", token: "t", gateway: "https://other.example", gateway_device: "anon-x", remote_token: "r" },
+        here: { id: "s2", runtime: "apple", image: "img", mode: "ephemeral", container: "c2", token: "t", gateway: "https://own.example/", gateway_device: "anon-y", remote_token: "r" },
+      },
+    });
+    expect(resolveFleetTarget(c, {}, "here").operatorToken).toBe("operator-token");
+    expect(resolveFleetTarget(c, {}, "elsewhere").operatorToken).toBeUndefined();
+    expect(resolveFleetTarget(c, {}, "elsewhere", { PRIME_FLEET_OPERATOR_TOKEN: "env-token" }).operatorToken).toBeUndefined();
+    // On the command line it goes where the command goes.
+    expect(resolveFleetTarget(c, { operatorToken: "flag-token" }, "elsewhere").operatorToken).toBe("flag-token");
+  });
+
   test("the operator's credential is sent to the gateway as the bearer token, and nothing else is", async () => {
     const { fleetsMembers } = await import("../src/fleets");
     const seen: Array<Headers> = [];
