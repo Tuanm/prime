@@ -609,11 +609,17 @@ it, and so does everything that is not a fleet.
 
 What is deliberately not done, so that nobody has to find it out:
 
-- **The roster is the trust anchor.** A gateway that lies about who the members are (adds a key of
-  its own, or swaps a member's) can author snapshots; only a fingerprint checked outside the gateway
-  (`prime fleets members` shows it) would close it. See "What the gateway can still do".
+- **The roster is the trust anchor, and the first one is taken on trust.** A gateway that lies about who
+  the members are (adds a key of its own, or swaps a member's) can author snapshots, and a member that
+  reads the roster for the first time has nothing of its own to compare it with. Only a fingerprint checked
+  outside the gateway (`prime fleets members` on each machine prints it; the admin page shows the same
+  one) would close it, and nothing in the product can check it for the operator.
 - **Rollback and split views are not detected.** A member cannot know about a newer head it was never
-  shown. Sizes in a manifest (`packBytes`) are not sealed: they steer the route, not the content.
+  shown, and two members shown two different (each real) histories find out only when one of them
+  publishes on a head the other does not have. Telling them apart would take a record that the members
+  share outside the gateway (a witness, or a counter the members sign and keep), and the gateway is
+  the only channel they have. Sizes in a manifest (`packBytes`) are not sealed: they steer the route,
+  not the content.
 - **The sequence a member left at is the gateway's word.** A replica trusts the key of a member that
   has left for the snapshots up to where the fleet says the head was when it did. A gateway that was
   malicious while that member was in the fleet can say a later sequence, as it can say the roster is
@@ -629,11 +635,23 @@ What is deliberately not done, so that nobody has to find it out:
   for its old key are still ones it could open. A gateway that does not say leaves the check out (and is
   asked again after a minute). Joining again as a member that already is one is not a new membership:
   what it has learnt stays.
-- **Unsealed snapshots are taken until the first sealed one is seen.** And a replica that has seen a
-  sealed one refuses an unsealed one at or above it, so an old member that is promoted stalls the new
-  replicas on the snapshot before it, until an upgraded member publishes (a whole tree) or the
-  operator accepts that snapshot (`prime fleets trust accept`). The trust file (`<space>.key.trust.json`) is not
-  tamper-evident: deleting it opens the same window again.
+- **Unsealed snapshots are taken until a sealed one has been taken in.** The check that a snapshot has
+  not lost the seal its predecessors had needs a sealed snapshot that this member has taken in (applied,
+  or fetched, in order: not one that was merely downloaded ahead). Until then there is nothing to compare
+  with, and a gateway that withholds the pack of the first sealed snapshot (or fails it) while it shows an
+  older, unsealed one as the head is a gateway the member cannot tell from a fleet that has never been
+  sealed: the unsealed snapshot is accepted. The window closes with the first sealed snapshot the member
+  does take in. After that a replica that has seen a sealed one refuses an unsealed one at or above it, so
+  an old member that is promoted stalls the new replicas on the snapshot before it, until an upgraded
+  member publishes (a whole tree) or the operator accepts that snapshot (`prime fleets trust accept`).
+  The trust file (`<space>.key.trust.json`) is not tamper-evident: it is a file of the member's own
+  user, and deleting it opens the same window again.
+- **A member that was recorded before the fleet had an id learns it late.** A member whose trust file was
+  made by a build without the id learns which fleet of the name it is the first time it checks a sealed
+  snapshot, from the gateway, the same trust on first use as at a join (the window is longer).
+- **`fetched` is informational.** It is how far a member says it has fetched; the gateway keeps it and the
+  admin page shows it, and nothing decides on it (only `applied` gates the lease), so a member that
+  reports it wrongly misleads nobody but the operator who reads it.
 - **Objects can still be left in storage** when a publisher dies after uploading a checkpoint's change
   pack and before the snapshot request, or when the gateway itself fails between storing and asking
   the fleet object. A refused publish cleans up after itself.
@@ -642,9 +660,14 @@ What is deliberately not done, so that nobody has to find it out:
 - **Names that differ only in case** (`README` and `readme`) from a case-sensitive member arrive as one
   file on a case-folding one; the member that takes over then publishes the other's deletion.
 - **Two agents can overlap** for up to one touch of the lock (five seconds) plus one round when a lock is
-  taken over at the same moment by two starters; the one that finds its lock gone stops.
+  taken over at the same moment by two starters; the one that finds its lock gone stops. Breaking a stale
+  lock (the agent's, or the one around a work tree's apply) is a rename, and a rename onto a directory that
+  happens to be empty replaces it: with a stale lock and three starters at the same instant, one can
+  think it holds a lock it has just lost. The window is microseconds, and the holder checks its own token
+  before it lets go.
 - **Windows** has no service-manager restart and no process list for the agent lock: it falls back to
-  the lock's and state file's freshness. `prime fleets agent install` registers its own Scheduled Task
+  the lock's and state file's freshness (so an agent that does more than half a minute of work without
+  touching its lock can lose it there). `prime fleets agent install` registers its own Scheduled Task
   (`\prime\prime-fleet-agent`), apart from the buddy's (`\prime\code-mcp`); Task Scheduler is not asked to
   restart it on a settings change, so a change there stops the agent and starts another.
 
