@@ -295,7 +295,7 @@ function breakStale(lock: string, judged: Verdict, opts: DirLockOptions): boolea
 
 // Publish a lock whole: made under a name of its own, with its note, and moved to the lock's name. "taken":
 // the name is not free; "busy": it is refused as a lock that is being removed is (see `BUSY_CODES`).
-function publish(lock: string, token: string, opts: DirLockOptions, last: { refused?: NodeJS.ErrnoException }): "made" | "taken" | "busy" {
+function publish(lock: string, token: string, opts: DirLockOptions, last: Attempt): "made" | "taken" | "busy" {
   // A name of its own for this attempt: one that an earlier attempt could not remove must not be made again.
   const mine = lock + ".new." + token + "." + randomBytes(3).toString("hex");
   mkdirSync(mine);
@@ -350,9 +350,24 @@ function sweepLitter(lock: string, opts: DirLockOptions): void {
   }
 }
 
+// What one wait for a lock remembers between its tries.
+interface Attempt {
+  /** The last refusal of the kind a lock that is being removed gets on Windows (see `BUSY_CODES`). */
+  refused?: NodeJS.ErrnoException;
+  /** When the lock that is there was last looked into (its note read) and found held. */
+  looked?: number;
+}
+
+/**
+ * How often a waiter reads the note of the lock it waits for. Reading it is what opens the file, and where a
+ * directory cannot be moved while a file in it is open (Windows) every waiter that is reading it every few
+ * milliseconds is a refusal for the holder that is letting go - and a longer turn for everybody behind it.
+ */
+const LOOK_EVERY_MS = 100;
+
 // One try at taking the lock: true when it is held now, false when somebody holds it, or it cannot be cleared
 // now (a stale lock is broken, and taken at once if that frees it). Bounded by `until` like every wait.
-function tryTake(lock: string, token: string, opts: DirLockOptions, until: number, last: { refused?: NodeJS.ErrnoException }): boolean {
+function tryTake(lock: string, token: string, opts: DirLockOptions, until: number, last: Attempt): boolean {
   while (performance.now() <= until) {
     let st: Stats;
     try {
@@ -374,8 +389,12 @@ function tryTake(lock: string, token: string, opts: DirLockOptions, until: numbe
       if (made === "busy") return false;
       continue; // somebody was first: look at what is there
     }
+    if (last.looked !== undefined && performance.now() - last.looked < LOOK_EVERY_MS) return false;
     const stale = judge(lock, st, opts);
-    if (stale === null) return false;
+    if (stale === null) {
+      last.looked = performance.now();
+      return false;
+    }
     if (!breakStale(lock, stale, opts)) return false;
   }
   return false;
@@ -476,7 +495,7 @@ function holdOf(lock: string, token: string): HeldLock {
 export async function withDirLock<T>(lock: string, fn: (held: HeldLock) => Promise<T> | T, opts: DirLockOptions = {}): Promise<T> {
   const until = performance.now() + (opts.waitMs ?? 5000);
   const token = randomBytes(8).toString("hex");
-  const last: { refused?: NodeJS.ErrnoException } = {};
+  const last: Attempt = {};
   while (!tryTake(lock, token, opts, until, last)) {
     if (performance.now() > until) throw new LockBusyError(lock, last.refused, describe(lock));
     await new Promise((r) => setTimeout(r, 10 + Math.floor(Math.random() * 20)));
@@ -501,7 +520,7 @@ export async function withDirLock<T>(lock: string, fn: (held: HeldLock) => Promi
 export function withDirLockSync<T>(lock: string, fn: (held: HeldLock) => T, opts: DirLockOptions = {}): T {
   const until = performance.now() + (opts.waitMs ?? 2000);
   const token = randomBytes(8).toString("hex");
-  const last: { refused?: NodeJS.ErrnoException } = {};
+  const last: Attempt = {};
   const nap = new Int32Array(new SharedArrayBuffer(4));
   while (handingOver(lock)) Atomics.wait(nap, 0, 0, 2);
   while (!tryTake(lock, token, opts, until, last)) {

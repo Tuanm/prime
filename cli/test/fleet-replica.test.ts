@@ -1507,10 +1507,11 @@ describe("the member's state file", () => {
       mkdirSync(fleetStateDir(configPath, "x", "s"), { recursive: true });
       writeFleetState(configPath, "x", "s", { seq: 1, base: "a" });
       const file = join(fleetStateDir(configPath, "x", "s"), "state.json");
-      const before = statSync(file).ino;
+      // As a bigint: a file number on Windows is wider than a number can hold, and two near ones would be equal.
+      const before = statSync(file, { bigint: true }).ino;
       writeFleetState(configPath, "x", "s", { seq: 2, base: "b", roster: "r" });
       // A reader that opened the old one keeps a whole file; the new one is another file.
-      expect(statSync(file).ino).not.toBe(before);
+      expect(statSync(file, { bigint: true }).ino).not.toBe(before);
       expect(readFleetState(configPath, "x", "s")).toEqual({ seq: 2, base: "b", roster: "r" });
       expect(readdirSync(fleetStateDir(configPath, "x", "s")).filter((n) => n.endsWith(".tmp"))).toEqual([]);
     } finally {
