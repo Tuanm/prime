@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync as renameFor, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync as renameFor, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LockBusyError, withDirLock, withDirLockSync, type DirLockOptions } from "../src/dir-lock";
+import { LockBusyError, LockLostError, withDirLock, withDirLockSync, type DirLockOptions } from "../src/dir-lock";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -44,6 +44,7 @@ function age(path: string, ms: number): void {
   const t = new Date(Date.now() - ms);
   utimesSync(path, t, t);
 }
+const age2 = (path: string): number => Date.now() - statSync(path).mtimeMs;
 // Run a body in a process of its own with a hard limit: a wait that never ends cannot be stopped from inside.
 async function inChild(body: string, limitMs = 10_000): Promise<{ code: number | null; out: string; killed: boolean }> {
   const script =
@@ -190,7 +191,8 @@ describe("what stands at the lock's name", () => {
       caught = err;
     }
     expect(caught).toBeInstanceOf(LockBusyError);
-    expect((caught as LockBusyError).message).toContain("held by process " + DEAD_PID);
+    expect((caught as LockBusyError).message).toContain("left by process " + DEAD_PID);
+    expect((caught as LockBusyError).message).toContain("no longer running");
     // Not a spin, and not a wait past the deadline.
     expect(performance.now() - started).toBeLessThan(1500);
   });
@@ -364,18 +366,53 @@ describe("a lock that another made", () => {
     expect(() => withDirLockSync(lock, () => "no", { waitMs: 100 })).toThrow(LockBusyError);
   });
 
-  test("a lock made before the machine was started is of a process that is gone, though its pid is a live one's now", () => {
+  test("a lock made in an earlier boot is of a process that is gone, though its pid is a live one's now", () => {
     const root = scratch();
     const lock = join(root, "apply.lock");
     const pid = otherLivePid();
-    // Written by an older build: no time in it, so it is as good as its pid.
-    leave(lock, { pid, token: "before the reboot" });
-    expect(() => withDirLockSync(lock, () => "no", { waitMs: 100 })).toThrow(LockBusyError);
+    const boot = (id: string | undefined, up: number): DirLockOptions => ({ waitMs: 100, hooks: { boot: () => ({ ...(id ? { id } : {}), up }) } });
+    // Where the system has a boot id, that is what is compared: another boot, and the lock is stale.
+    leave(lock, { pid, token: "t", boot: "boot-1", up: 50 });
+    expect(withDirLockSync(lock, () => "took it", boot("boot-2", 100_000))).toBe("took it");
+    // The same boot: the pid is the holder's, whatever the uptime says.
+    leave(lock, { pid, token: "t", boot: "boot-1", up: 5_000_000 });
+    expect(() => withDirLockSync(lock, () => "no", boot("boot-1", 10))).toThrow(LockBusyError);
     rmSync(lock, { recursive: true });
-    // Made a month before the machine started.
-    leave(lock, { pid, token: "before the reboot", at: Date.now() - 400 * 86_400_000 });
-    expect(withDirLockSync(lock, () => "took it", { waitMs: 1000 })).toBe("took it");
+    // Without an id: a longer uptime than the machine has now is from before it was started.
+    leave(lock, { pid, token: "t", up: 90_000 });
+    expect(withDirLockSync(lock, () => "took it", boot(undefined, 120))).toBe("took it");
+    leave(lock, { pid, token: "t", up: 90_000 });
+    expect(() => withDirLockSync(lock, () => "no", boot(undefined, 90_100))).toThrow(LockBusyError);
+    rmSync(lock, { recursive: true });
+    // Written by a build that wrote no uptime: as good as its pid.
+    leave(lock, { pid, token: "t", at: Date.now() - 400 * 86_400_000 });
+    expect(() => withDirLockSync(lock, () => "no", boot("boot-2", 10))).toThrow(LockBusyError);
   });
+
+  test("a holder is not broken when the clock was stepped forward after it took the lock", async () => {
+    const root = scratch();
+    const lock = join(root, "apply.lock");
+    // The holder's clock is two days behind (a machine with no clock, before the time is set), as the
+    // lock's note was written by it; the other process has the time that is right now.
+    const holder = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        "import { withDirLock } from " + JSON.stringify(join(import.meta.dir, "../src/dir-lock.ts")) + ";" +
+          "const real = Date.now; Date.now = () => real() - 2 * 86_400_000;" +
+          "await withDirLock(" + JSON.stringify(lock) + ", async () => { console.log('held'); await new Promise((r) => setTimeout(r, 2500)); });",
+      ],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    aliveChildren.push(holder);
+    const reader = holder.stdout.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("held");
+    const note = JSON.parse(readFileSync(join(lock, "owner"), "utf8"));
+    expect(note.at).toBeLessThan(Date.now() - 86_400_000); // it was written on the wrong clock
+    expect(() => withDirLockSync(lock, () => "no", { waitMs: 300, staleMs: 3_600_000 })).toThrow(LockBusyError);
+    expect(existsSync(lock)).toBe(true);
+    await holder.exited;
+  }, 30_000);
 
   test("a lock without a note is left for a moment and then cleared, a gate a breaker died in is cleared too", () => {
     const root = scratch();
@@ -384,9 +421,148 @@ describe("a lock that another made", () => {
     expect(() => withDirLockSync(lock, () => "no", { waitMs: 100, graceMs: 5000 })).toThrow(LockBusyError);
     age(lock, 10_000);
     mkdirSync(lock + ".break");
-    age(lock + ".break", 60_000);
-    // The first look removes the gate that was left, the next takes the lock.
+    age(lock + ".break", 3_000);
+    // The first look removes the gate that was left (it is older than 2 s), the next takes the lock.
     expect(withDirLockSync(lock, () => "took it", { waitMs: 2000, graceMs: 2000 })).toBe("took it");
     expect(readdirSync(root)).toEqual([]);
+  });
+});
+
+describe("a gate that a breaker left", () => {
+  test("one that is still fresh is left alone, and the lock waits for it", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    leave(lock, { pid: DEAD_PID, token: "dead" });
+    mkdirSync(lock + ".break");
+    age(lock + ".break", 300);
+    expect(() => withDirLockSync(lock, () => "no", { waitMs: 150 })).toThrow(LockBusyError);
+    expect(existsSync(lock + ".break")).toBe(true);
+  });
+
+  test("an old one that is moved aside and turns out to be younger than it looked is made again, not lost", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    leave(lock, { pid: DEAD_PID, token: "dead" });
+    mkdirSync(lock + ".break");
+    age(lock + ".break", 5_000);
+    // Between the look and the move another breaker replaces the gate with a new one: the rename is what shows it.
+    let moved = 0;
+    const hooks: DirLockOptions["hooks"] = {
+      rename: (from, to) => {
+        if (from.endsWith(".break") && moved++ === 0) {
+          rmSync(from, { recursive: true });
+          mkdirSync(from);
+        }
+        renameFor(from, to);
+      },
+    };
+    expect(() => withDirLockSync(lock, () => "no", { waitMs: 150, hooks })).toThrow(LockBusyError);
+    // The fresh gate is there for the other breaker that made it, not removed by this one, and what was moved aside is gone.
+    expect(readdirSync(root).sort()).toEqual(["state.lock", "state.lock.break"]);
+    expect(age2(lock + ".break")).toBeLessThan(2_000);
+  });
+});
+
+describe("what a killed process leaves beside a lock", () => {
+  test("leftovers older than a minute are removed when the lock is taken, and what is newer or not theirs is not", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    const old = ["state.lock.new.aa.bb", "state.lock.gone.cc", "state.lock.broken.1.dd", "state.lock.break.gone.ee"];
+    for (const name of old) {
+      mkdirSync(join(root, name));
+      age(join(root, name), 120_000);
+    }
+    mkdirSync(join(root, "state.lock.new.fresh.ff"));
+    mkdirSync(join(root, "state.lock.json.new.of.another"));
+    age(join(root, "state.lock.json.new.of.another"), 120_000);
+    writeFileSync(join(root, "state.json"), "{}");
+    expect(withDirLockSync(lock, () => "took it")).toBe("took it");
+    expect(readdirSync(root).sort()).toEqual(["state.json", "state.lock.json.new.of.another", "state.lock.new.fresh.ff"]);
+  });
+});
+
+describe("a holder that lost its lock", () => {
+  // Another process judged the holder stale and took the name: what stands there is its lock now.
+  const taken = (lock: string): void => {
+    rmSync(lock, { recursive: true, force: true });
+    leave(lock, { pid: otherLivePid(), token: "the new holder" });
+  };
+
+  test("is told when it asks, before it writes", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    let wrote = false;
+    expect(() =>
+      withDirLockSync(lock, (held) => {
+        taken(lock);
+        held.assert();
+        wrote = true;
+      }),
+    ).toThrow(LockLostError);
+    expect(wrote).toBe(false);
+    // And the new holder's lock is not removed by it.
+    expect(JSON.parse(readFileSync(join(lock, "owner"), "utf8")).token).toBe("the new holder");
+  });
+
+  test("is told when it is done even if it did not ask, and gets no result as if nothing had happened", async () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    expect(() => withDirLockSync(lock, () => taken(lock))).toThrow(LockLostError);
+    rmSync(lock, { recursive: true });
+    await expect(withDirLock(lock, async () => taken(lock))).rejects.toBeInstanceOf(LockLostError);
+  });
+
+  test("keeps its own error when the critical section failed, and one that did not lose its lock is not told it did", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    expect(() => withDirLockSync(lock, () => { throw new Error("the write failed"); })).toThrow("the write failed");
+    expect(withDirLockSync(lock, (held) => { held.assert(); return "fine"; })).toBe("fine");
+  });
+});
+
+describe("a lock that cannot be published twice under one name", () => {
+  test("a refused publish whose leftover cannot be removed does not surface as an error of the name being taken", () => {
+    const root = scratch();
+    let refused = 3;
+    const opts: DirLockOptions = {
+      waitMs: 2000,
+      hooks: {
+        platform: "win32",
+        rename: (from, to) => {
+          if (refused-- > 0) throw errno("EPERM");
+          renameFor(from, to);
+        },
+        // What the refusal left behind cannot be removed either.
+        remove: () => {
+          throw errno("EPERM");
+        },
+      },
+    };
+    expect(withDirLockSync(join(root, "state.lock"), () => "took it", opts)).toBe("took it");
+    expect(refused).toBeLessThan(0);
+  });
+});
+
+describe("a lock that a build before this one is making", () => {
+  test("an empty directory at the name is held, not replaced: its maker is about to write its note into it", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    let made = false;
+    const opts: DirLockOptions = {
+      waitMs: 150,
+      hooks: {
+        // Between this build's look at the name and its move: the older build has made the directory.
+        publishing: (name) => {
+          if (!made) {
+            made = true;
+            mkdirSync(name);
+          }
+        },
+      },
+    };
+    expect(() => withDirLockSync(lock, () => "no", opts)).toThrow(LockBusyError);
+    // Nothing of this build was put in it or beside it, so the older build's note goes into a lock that is its own.
+    expect(readdirSync(lock)).toEqual([]);
+    expect(readdirSync(root)).toEqual(["state.lock"]);
   });
 });

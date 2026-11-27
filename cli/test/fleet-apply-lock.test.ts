@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
-import { LockBusyError, withDirLock } from "../src/dir-lock";
+import { LockBusyError, LockLostError, withDirLock } from "../src/dir-lock";
 import { fleetStateDir, readFleetState, recordedPosition, updateFleetState, writeFleetState } from "../src/fleets";
 import { localChanges } from "../src/fleet-sync";
 import { applyReady } from "../src/fleet-replica";
@@ -184,12 +184,15 @@ describe("a lock between processes", () => {
 
   test("a holder does not remove a lock that was taken from it", async () => {
     const lock = join(scratch(), "l");
-    await withDirLock(lock, () => {
-      // Broken and taken by another while this one was slow.
-      rmSync(lock, { recursive: true, force: true });
-      mkdirSync(lock);
-      writeFileSync(join(lock, "owner"), JSON.stringify({ pid: process.pid, token: "somebody else" }));
-    });
+    // The holder is told it lost the lock (it may have worked beside another), and what it does not own is left alone.
+    await expect(
+      withDirLock(lock, () => {
+        // Broken and taken by another while this one was slow.
+        rmSync(lock, { recursive: true, force: true });
+        mkdirSync(lock);
+        writeFileSync(join(lock, "owner"), JSON.stringify({ pid: process.pid, token: "somebody else" }));
+      }),
+    ).rejects.toBeInstanceOf(LockLostError);
     expect(existsSync(lock)).toBe(true);
   });
 });

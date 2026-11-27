@@ -29,7 +29,7 @@ import { FleetTrust } from "./fleet-trust.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
-import { withDirLockSync } from "./dir-lock.ts";
+import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgentManaged, uninstallFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
@@ -953,7 +953,7 @@ export function mergeFleetState(disk: FleetMemberState, next: FleetMemberState):
 // lock says whose it is (see dir-lock.ts): one whose holder is gone is broken at once, one older than
 // ten seconds is a holder that hung, and a holder only ever releases its own. A writer that cannot
 // get it in two seconds fails (and is tried again at the next round) rather than writing without it.
-function withStateLock<T>(dir: string, fn: () => T): T {
+function withStateLock<T>(dir: string, fn: (held: HeldLock) => T): T {
   return withDirLockSync(join(dir, "state.lock"), fn, { waitMs: 2000, staleMs: 10_000 });
 }
 
@@ -971,10 +971,12 @@ export function updateFleetState(
   opts: { rewind?: boolean } = {},
 ): FleetMemberState {
   const dir = fleetStateDir(configPath, fleetId, spaceName);
-  return withStateLock(dir, () => {
+  return withStateLock(dir, (held) => {
     const disk = readFleetState(configPath, fleetId, spaceName);
     const wanted = { ...disk, ...patch };
     const next = opts.rewind ? wanted : mergeFleetState(disk, wanted);
+    // A holder that was judged stale while it ran does not write over what another has written since.
+    held.assert();
     writeFileAtomic(join(dir, "state.json"), JSON.stringify(next, null, 2), 0o600, { durable: true });
     return next;
   });
@@ -991,10 +993,11 @@ export function writeFleetState(configPath: string, fleetId: string, spaceName: 
   // Written beside it and moved into place: the agent and `prime fleets sync` can
   // both write this file, and a reader that met a half-written one would take it
   // for no state at all (and apply the fleet again from nothing).
-  withStateLock(dir, () => {
+  withStateLock(dir, (held) => {
     const next = opts.replace ? state : mergeFleetState(readFleetState(configPath, fleetId, spaceName), state);
     // A pointer that older builds wrote to the last manifest: nothing reads it, and it goes when the file is next written.
     delete (next as Record<string, unknown>).manifest;
+    held.assert();
     writeFileAtomic(file, JSON.stringify(next, null, 2), 0o600, { durable: true });
   });
 }
