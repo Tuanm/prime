@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, procProbeWith } from "../src/fleet-agent-lock";
-import { bindServiceStatus } from "../src/fleet-service";
+import { bindServiceStatus, fleetAgentServiceStatus } from "../src/fleet-service";
 import {
   SettingsPendingError,
   agentCommand,
@@ -887,5 +887,59 @@ describe("two spellings of one configuration", () => {
       }).stdout.toString().trim();
     expect(ask(swapped, join(dir, "Config.yaml"))).toBe("true");
     expect(ask(join(base.toLowerCase(), "casedir", "other.yaml"), join(dir, "Config.yaml"))).toBe("false");
+  });
+});
+
+describe("asking the service manager", () => {
+  const platformHasDefinitions = process.platform === "darwin" || process.platform === "linux";
+
+  test.skipIf(!platformHasDefinitions)("a configuration with no service definition is not a reason to ask launchd or systemd", () => {
+    let asked = 0;
+    const status = fleetAgentServiceStatus("/somewhere/config.yaml", {
+      definition: null,
+      probe: () => {
+        asked++;
+        return { installed: true, running: true, where: "x", reachable: true };
+      },
+    });
+    expect(asked).toBe(0);
+    expect(status.installed).toBe(false);
+    expect(status.running).toBe(false);
+    expect(status.where).toContain("fleet-agent");
+  });
+
+  test.skipIf(!platformHasDefinitions)("a definition that is there is asked about, once", () => {
+    let asked = 0;
+    const status = fleetAgentServiceStatus("/somewhere/config.yaml", {
+      definition: { config: "/somewhere/config.yaml" },
+      probe: () => {
+        asked++;
+        return { installed: true, running: true, where: "x", reachable: true, pid: 7 };
+      },
+    });
+    expect(asked).toBe(1);
+    expect(status.installed).toBe(true);
+    expect(status.pid).toBe(7);
+  });
+
+  test("what one call wants to know of it is asked in one go, not once for each thing", () => {
+    if (!platformHasDefinitions) return;
+    let asked = 0;
+    const service = agentServiceFor(
+      "/somewhere/config.yaml",
+      () => {
+        asked++;
+        return { installed: true, reachable: true, pid: 12 };
+      },
+      () => false,
+    );
+    expect(service.installed()).toBe(true);
+    expect(service.pid()).toBe(12);
+    expect(service.unreachable?.()).toBe(false);
+    expect(asked).toBe(1);
+    // After a restart it is asked again: what it said before is not what it says now.
+    service.restart();
+    service.installed();
+    expect(asked).toBe(2);
   });
 });

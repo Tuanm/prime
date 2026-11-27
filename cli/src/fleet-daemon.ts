@@ -363,9 +363,16 @@ export interface AgentServiceHooks {
  */
 export function agentServiceFor(
   configPath: string,
-  status: () => { installed: boolean; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
+  probe: () => { installed: boolean; pid?: number; reachable?: boolean } = () => fleetAgentServiceStatus(configPath),
   restart: () => boolean = restartFleetAgentService,
 ): AgentServiceHooks {
+  // The manager is asked once for what the hooks below want to know together (is it installed, which
+  // pid, can it be reached): each is a process spawned to the manager. What it said is good for a moment.
+  let asked: { at: number; answer: ReturnType<typeof probe> } | undefined;
+  const status = (): ReturnType<typeof probe> => {
+    if (asked === undefined || Date.now() - asked.at > STATUS_FRESH_MS) asked = { at: Date.now(), answer: probe() };
+    return asked.answer;
+  };
   return {
     installed: () => {
       // Only where the manager can be asked to restart it: elsewhere the agent is started as it always was.
@@ -395,9 +402,15 @@ export function agentServiceFor(
         return false;
       }
     },
-    restart,
+    restart: () => {
+      asked = undefined; // whatever it said before is not what it says after
+      return restart();
+    },
   };
 }
+
+// How long what the service manager said stays true for one `ensureFleetAgent`.
+const STATUS_FRESH_MS = 2_000;
 
 /** How long a running agent is given to stop when it has to be replaced (it may be finishing a round). */
 const STOP_WAIT_MS = 15_000;

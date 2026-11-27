@@ -250,6 +250,18 @@ export function readServiceDefinition(
   return undefined;
 }
 
+/** Where a service's definition file lives (the unit, the plist); undefined where there is none (Windows keeps it in Task Scheduler). */
+export function serviceDefinitionPath(
+  platform: Platform,
+  identity: { name?: string; label?: string } = {},
+  home = homedir(),
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  if (platform === "linux") return systemdUnitPath(env, home, identity.name ?? SERVICE_NAME);
+  if (platform === "darwin") return launchdPlistPath(home, identity.label ?? LAUNCHD_LABEL);
+  return undefined;
+}
+
 /** The configuration an installed service runs, as its definition says; undefined when none is installed or it does not say. */
 export function definedServiceConfig(
   platform: Platform,

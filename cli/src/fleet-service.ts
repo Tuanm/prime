@@ -15,6 +15,7 @@ import {
   installService,
   readServiceDefinition,
   restartService,
+  serviceDefinitionPath,
   serviceStatus,
   uninstallService,
   type Platform,
@@ -101,9 +102,27 @@ export function bindServiceStatus(
  * Whether it is installed for this configuration, and whether it is running. There is one
  * service per machine, and it runs one configuration: for any other it is not installed.
  */
-export function fleetAgentServiceStatus(configPath: string = defaultConfigPath()): ServiceStatus & { config?: string } {
-  const status = serviceStatus(process.platform as Platform, configPath, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
-  return bindServiceStatus(status, fleetAgentServiceConfig(), configPath);
+export function fleetAgentServiceStatus(
+  configPath: string = defaultConfigPath(),
+  deps: {
+    /** What the service's definition says (null: there is none); replaced in tests. */
+    definition?: { config: string | undefined } | null;
+    /** Ask the manager; replaced in tests. */
+    probe?: () => ServiceStatus;
+  } = {},
+): ServiceStatus & { config?: string } {
+  const identity = { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL };
+  const platform = process.platform as Platform;
+  const definition =
+    deps.definition !== undefined ? deps.definition ?? undefined : readServiceDefinition(platform, identity);
+  // No definition file for this configuration's service on a platform that keeps one: there is nothing
+  // for the manager to say, and asking it (launchctl print, systemctl show) is a call for nothing.
+  const where = serviceDefinitionPath(platform, identity);
+  if (definition === undefined && where !== undefined) {
+    return { installed: false, running: false, where };
+  }
+  const status = (deps.probe ?? (() => serviceStatus(platform, configPath, identity)))();
+  return bindServiceStatus(status, fleetAgentServiceConfig(definition ?? null), configPath);
 }
 
 /** Restart the installed service through its manager. Returns whether the manager did. */
