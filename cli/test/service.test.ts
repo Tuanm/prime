@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describeOptions, mergeOptions, optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
 import { effectiveCodeMcpArgv, serviceEnv, splitHostFlags, withDefaultGateway } from "../src/code-mcp-host.ts";
 import { codeMcpLaunch } from "../src/connect.ts";
+import { installFleetAgent } from "../src/fleet-daemon.ts";
 import { FLEET_AGENT_LABEL, FLEET_AGENT_NAME, bindServiceStatus, fleetAgentServiceConfig, fleetAgentSpec, sameConfig } from "../src/fleet-service.ts";
 import { emptyConfig, loadConfig, parseConfig, saveConfig } from "../src/config.ts";
 import { rememberAnonymous } from "../src/connect.ts";
@@ -20,6 +21,8 @@ import {
   renderSystemdUnit,
   installService,
   configOfTaskArguments,
+  parseWindowsTaskProbe,
+  renderWindowsTaskProbeScript,
   isFleetAgentAction,
   renderWindowsInstallScript,
   renderWindowsRetireOldAgentScript,
@@ -521,6 +524,32 @@ describe("the fleet agent an earlier Windows build registered as the buddy's tas
     const s = scheduler({ argument: "--headless prime.exe __fleet-agent" });
     installService("win32", AGENT, s.shell);
     expect(s.oldPresent()).toBe(true);
+  });
+
+  test("what the scripts print is read as UTF-8, so a path with a non-ASCII character round-trips", () => {
+    expect(renderWindowsTaskProbeScript("prime-fleet-agent")).toContain("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false");
+    expect(renderWindowsTaskProbeScript()).toContain("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false");
+    expect(renderWindowsRetireOldAgentScript("C:\\cfg\\config.yaml")).toContain("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false");
+    const config = "C:\\Users\\Nguy\u1ec5n \u00c9mile\\.prime\\config.yaml";
+    // as the probe prints it (with the byte order mark a host may add), read back, and compared
+    const printed = "\uFEFFtask Ready\r\narguments --headless prime.exe __fleet-agent --config " + windowsQuote(config) + "\r\n";
+    const probed = parseWindowsTaskProbe(printed)!;
+    expect(probed.state).toBe("Ready");
+    expect(configOfTaskArguments(probed.argument)).toBe(config);
+    expect(parseWindowsTaskProbe("")).toBeUndefined();
+  });
+
+  test("the configuration the task of its own runs is its definition, so another configuration's install is refused", async () => {
+    const own = (argument: string | undefined): Shell => ({
+      run: (cmd) => ({ code: argument === undefined && cmd.join(" ").includes("prime-fleet-agent") ? 1 : 0, out: "", err: "" }),
+      powershell: (script) => ({ code: 0, out: argument !== undefined && script.includes("'prime-fleet-agent'") ? "task Running\narguments " + argument + "\n" : "", err: "" }),
+    });
+    const identity = { name: FLEET_AGENT_NAME };
+    const definition = readServiceDefinition("win32", identity, undefined, undefined, undefined, own(agentArguments));
+    expect(definition).toEqual({ config: "C:\\cfg\\config.yaml" });
+    expect(readServiceDefinition("win32", identity, undefined, undefined, undefined, own(undefined))).toBeUndefined();
+    // what installFleetAgent compares with: another configuration is refused
+    await expect(installFleetAgent("D:\\other\\config.yaml", { install: () => "x", boundTo: () => fleetAgentServiceConfig(definition ?? null) })).rejects.toThrow(/installed for C:\\cfg\\config.yaml/);
   });
 
   test("a task of its own is reported as it is, and the old one is not looked up", () => {

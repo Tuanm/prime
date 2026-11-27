@@ -275,7 +275,16 @@ export function readServiceDefinition(
   env: Record<string, string | undefined> = process.env,
   /** The directories of units systemd reads, highest priority first (see `systemdUserDirs`); replaced in tests. */
   dropInRoots?: string[],
+  /** How Task Scheduler is asked on Windows; replaced in tests. */
+  shell: Shell = realShell,
 ): { config: string | undefined } | undefined {
+  if (platform === "win32") {
+    // Windows keeps the definition in Task Scheduler: the task's own command line says the configuration.
+    const task = identity.name ?? SERVICE_NAME;
+    if (shell.run(["schtasks", "/query", "/tn", TASK_PATH + task], { timeoutMs: 30_000 }).code !== 0) return undefined;
+    const probed = parseWindowsTaskProbe(shell.powershell(renderWindowsTaskProbeScript(task)).out);
+    return probed ? { config: configOfTaskArguments(probed.argument) } : undefined;
+  }
   try {
     if (platform === "linux") {
       const unit = systemdUnitPath(env, home, identity.name ?? SERVICE_NAME);
@@ -426,13 +435,27 @@ export function isFleetAgentAction(argument: string): boolean {
   return argument.includes("__fleet-agent") && !argument.includes("code-mcp --service");
 }
 
-/** What the old task `\prime\code-mcp` is, read-only: its action's arguments and whether it is running. */
-function renderWindowsOldTaskProbeScript(): string {
+// What a script's output is read back as: Windows PowerShell writes its stdout in the console's code page when
+// it is redirected, and `run` reads UTF-8, so a path with a character outside it (a profile directory named
+// with one) would come back as something else and never match. No byte order mark: it would be read as text.
+const UTF8_OUTPUT = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false";
+
+/** What a task is, read-only: its action's arguments and whether it is running. */
+export function renderWindowsTaskProbeScript(taskName: string = TASK_NAME): string {
   return [
+    UTF8_OUTPUT,
     "$ErrorActionPreference = 'SilentlyContinue'",
-    "$task = Get-ScheduledTask -TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(TASK_NAME),
+    "$task = Get-ScheduledTask -TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(taskName),
     "if ($task) { 'task ' + $task.State; $task.Actions | ForEach-Object { 'arguments ' + $_.Arguments } }",
   ].join("\n");
+}
+
+/** What a probe printed: the task's state and its action's arguments (undefined: no such task). */
+export function parseWindowsTaskProbe(out: string): { state: string; argument: string } | undefined {
+  const lines = out.replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => line.trim());
+  const state = lines.find((line) => line.startsWith("task "));
+  if (!state) return undefined;
+  return { state: state.slice("task ".length), argument: lines.filter((line) => line.startsWith("arguments ")).map((l) => l.slice("arguments ".length)).join(" ") };
 }
 
 /**
@@ -443,6 +466,7 @@ function renderWindowsOldTaskProbeScript(): string {
 export function renderWindowsRetireOldAgentScript(configPath: string): string {
   const ref = "-TaskPath " + psQuote(TASK_PATH) + " -TaskName " + psQuote(TASK_NAME);
   return [
+    UTF8_OUTPUT,
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$task = Get-ScheduledTask " + ref,
     "$arguments = if ($task) { ($task.Actions | ForEach-Object { $_.Arguments }) -join ' ' } else { '' }",
@@ -476,12 +500,9 @@ export function configOfTaskArguments(argument: string): string | undefined {
  */
 function oldAgentTask(shell: Shell): { running: boolean; config: string | undefined } | undefined {
   if (shell.run(["schtasks", "/query", "/tn", TASK_PATH + TASK_NAME], { timeoutMs: 30_000 }).code !== 0) return undefined;
-  const lines = shell.powershell(renderWindowsOldTaskProbeScript()).out.split(/\r?\n/).map((line) => line.trim());
-  const state = lines.find((line) => line.startsWith("task "));
-  if (!state) return undefined;
-  const argument = lines.filter((line) => line.startsWith("arguments ")).join(" ");
-  if (!isFleetAgentAction(argument)) return undefined;
-  return { running: state === "task Running", config: configOfTaskArguments(argument) };
+  const probed = parseWindowsTaskProbe(shell.powershell(renderWindowsTaskProbeScript()).out);
+  if (!probed || !isFleetAgentAction(probed.argument)) return undefined;
+  return { running: probed.state === "Running", config: configOfTaskArguments(probed.argument) };
 }
 
 /** Whether an old agent task runs this configuration. One that does not say is not taken for it. */
@@ -654,7 +675,7 @@ export function serviceStatus(
           installed: false,
           running: false,
           where,
-          detail: "an agent of " + (old.config ?? "an unknown configuration") + " is registered under the buddy's task name (" + TASK_PATH + TASK_NAME + ") by an earlier build; run 'prime fleets agent install' with that --config to move it",
+          detail: "an agent of " + (old.config ?? "an unknown configuration") + " is registered under the buddy's task name (" + TASK_PATH + TASK_NAME + ") by an earlier build; run 'prime fleets agent install' with that --config to move it (one agent service per machine: that is refused while another configuration's is installed)",
         };
       }
     }
