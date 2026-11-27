@@ -31,7 +31,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { acquireAgentLock, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
-import { proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
+import { keyIdOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
 import {
   FETCHED_REPORT_MS,
@@ -1210,6 +1210,8 @@ interface BootstrapResult {
   error?: string;
   /** The fleet is paused: it will not take anyone in until it is resumed. */
   paused?: boolean;
+  /** The key this member offered waits for the operator to approve it. */
+  keyPending?: true;
   /** How long the fleet asked to wait before looking again. */
   retryAfterMs?: number;
   /** How long the fleet says a place lasts; the heartbeat is derived from it. */
@@ -1245,7 +1247,7 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     // the operator. It is said as it is, because it is the one refusal that needs somebody to act.
     if (body && body.keyChange === "pending" && typeof body.error === "string") {
       const after = Number(res.headers.get("retry-after"));
-      return { ok: false, primary: false, answered: true, error: body.error, ...(Number.isFinite(after) && after > 0 ? { retryAfterMs: after * 1000 } : {}) };
+      return { ok: false, primary: false, answered: true, keyPending: true, error: body.error, ...(Number.isFinite(after) && after > 0 ? { retryAfterMs: after * 1000 } : {}) };
     }
     if (body && body.paused === true) {
       const header = Number(res.headers.get("retry-after"));
@@ -1367,7 +1369,8 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     }
     if (!placed.ok) {
       loop.refusedForMs = placed.retryAfterMs;
-      throw new PlaceRefused(placed.error ?? "refused", placed.retryAfterMs);
+      // What the operator compares the request with: the key this machine holds, as the list of requests prints it.
+      throw new PlaceRefused((placed.error ?? "refused") + (placed.keyPending ? " (this member's key is " + keyIdOf(keys.publicKey) + ")" : ""), placed.retryAfterMs);
     }
     loop.refusedForMs = undefined;
     loop.paused = false;
