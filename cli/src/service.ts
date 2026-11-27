@@ -18,6 +18,7 @@ import { selfCommand } from "./code-mcp-host.ts";
 import { type OptionMap, optionsFromConfig } from "./code-mcp-options.ts";
 import { defaultConfigPath, yamlScalar } from "./config.ts";
 import { CliError } from "./errors.ts";
+import { samePath } from "./fleet-paths.ts";
 
 export type Platform = "linux" | "darwin" | "win32";
 
@@ -462,15 +463,30 @@ export interface Shell {
 
 const realShell: Shell = { run: (cmd, opts) => run(cmd, opts), powershell: (script) => powershell(script) };
 
-/** The old `\prime\code-mcp` task when it is the fleet agent's, as the status of that service. */
-function oldAgentTask(shell: Shell): { running: boolean } | undefined {
+/** The configuration an old agent task's command line names (`--config <path>`, quoted or not). */
+export function configOfTaskArguments(argument: string): string | undefined {
+  const found = /--config\s+(?:"((?:[^"\\]|\\.)*)"|(\S+))/.exec(argument);
+  if (!found) return undefined;
+  return found[1] !== undefined ? found[1].replace(/\\"/g, '"') : found[2];
+}
+
+/**
+ * The old `\prime\code-mcp` task when it is a fleet agent's, with the configuration it runs (undefined when
+ * its command line does not say, which the agent's always did). There is one such task per machine.
+ */
+function oldAgentTask(shell: Shell): { running: boolean; config: string | undefined } | undefined {
   if (shell.run(["schtasks", "/query", "/tn", TASK_PATH + TASK_NAME], { timeoutMs: 30_000 }).code !== 0) return undefined;
   const lines = shell.powershell(renderWindowsOldTaskProbeScript()).out.split(/\r?\n/).map((line) => line.trim());
   const state = lines.find((line) => line.startsWith("task "));
   if (!state) return undefined;
   const argument = lines.filter((line) => line.startsWith("arguments ")).join(" ");
   if (!isFleetAgentAction(argument)) return undefined;
-  return { running: state === "task Running" };
+  return { running: state === "task Running", config: configOfTaskArguments(argument) };
+}
+
+/** Whether an old agent task runs this configuration. One that does not say is not taken for it. */
+function oldTaskIsFor(old: { config: string | undefined }, configPath: string): boolean {
+  return old.config !== undefined && samePath(old.config, configPath);
 }
 
 /**
@@ -624,12 +640,21 @@ export function serviceStatus(
     if (!installed && task !== TASK_NAME) {
       // A machine whose agent was installed by an earlier build has it under the buddy's task name.
       const old = oldAgentTask(shell);
-      if (old) {
+      if (old && oldTaskIsFor(old, configPath)) {
         return {
           installed: true,
           running: old.running,
           where: "Task Scheduler " + TASK_PATH + TASK_NAME,
           detail: (old.running ? "running" : "not running") + ", registered under the name of the buddy's task by an earlier build: install it again to move it",
+        };
+      }
+      if (old) {
+        // Another configuration's agent: not this one's to report as its own, nor to remove.
+        return {
+          installed: false,
+          running: false,
+          where,
+          detail: "an agent of " + (old.config ?? "an unknown configuration") + " is registered under the buddy's task name (" + TASK_PATH + TASK_NAME + ") by an earlier build; run 'prime fleets agent install' with that --config to move it",
         };
       }
     }
@@ -747,7 +772,8 @@ export function installService(platform: Platform, spec: ServiceSpec, shell: She
 
 /** Remove the old `\prime\code-mcp` task when it is the fleet agent's. Returns whether it was. */
 function retireOldAgentTask(configPath: string, shell: Shell): boolean {
-  if (!oldAgentTask(shell)) return false;
+  const old = oldAgentTask(shell);
+  if (!old || !oldTaskIsFor(old, configPath)) return false;
   return shell.powershell(renderWindowsRetireOldAgentScript(configPath)).out.trim() === "removed";
 }
 

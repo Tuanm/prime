@@ -19,6 +19,7 @@ import {
   renderLaunchdPlist,
   renderSystemdUnit,
   installService,
+  configOfTaskArguments,
   isFleetAgentAction,
   renderWindowsInstallScript,
   renderWindowsRetireOldAgentScript,
@@ -492,6 +493,34 @@ describe("the fleet agent an earlier Windows build registered as the buddy's tas
   test("the status of the agent does not take the buddy's task for its own, nor does a machine with neither", () => {
     expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler({ argument: buddyArguments }).shell).installed).toBe(false);
     expect(serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler(undefined).shell).installed).toBe(false);
+  });
+
+  test("the configuration an old task runs is read from its command line, quoted or not", () => {
+    expect(configOfTaskArguments(agentArguments)).toBe("C:\\cfg\\config.yaml");
+    expect(configOfTaskArguments('--headless prime.exe __fleet-agent --config "C:\\Users\\a b\\config.yaml"')).toBe("C:\\Users\\a b\\config.yaml");
+    expect(configOfTaskArguments("--headless prime.exe __fleet-agent")).toBeUndefined();
+  });
+
+  test("an old task that runs another configuration is left alone, and status says whose it is", () => {
+    const other = "--headless prime.exe __fleet-agent --config D:\\other\\config.yaml";
+    const s = scheduler({ argument: other, state: "Running" });
+    installService("win32", AGENT, s.shell);
+    expect(s.oldPresent()).toBe(true);
+    expect(s.ownPresent()).toBe(true);
+    expect(uninstallService("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, s.shell)).toBe(true); // its own, removed
+    expect(s.oldPresent()).toBe(true);
+    const status = serviceStatus("win32", "C:\\cfg\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler({ argument: other }).shell);
+    expect(status.installed).toBe(false);
+    expect(status.detail).toContain("D:\\other\\config.yaml");
+    expect(status.detail).toContain("--config");
+    // and it is that configuration's own when asked from it
+    expect(serviceStatus("win32", "D:\\other\\config.yaml", { name: FLEET_AGENT_NAME }, scheduler({ argument: other }).shell).installed).toBe(true);
+  });
+
+  test("an old agent task that does not say its configuration is not taken for this one's", () => {
+    const s = scheduler({ argument: "--headless prime.exe __fleet-agent" });
+    installService("win32", AGENT, s.shell);
+    expect(s.oldPresent()).toBe(true);
   });
 
   test("a task of its own is reported as it is, and the old one is not looked up", () => {
