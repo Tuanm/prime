@@ -13,6 +13,7 @@ import {
   FleetCreationAllowance,
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
+  MAX_PENDING,
   MAX_SNAPSHOT_BYTES,
   REAP_SILENCE_MS,
   RECENT_SNAPSHOTS,
@@ -328,9 +329,10 @@ describe("a member that comes back with a new key", () => {
   test("the owner may approve it too, and a member may not", async () => {
     const { doInstance, keyOf } = await fleetWithKeyedMember();
     await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
-    expect((await call(doInstance, "/approve", { caller: "device", device: "member-1", body: { deviceId: "member-1" } })).status).toBe(403);
+    const key = await keyFingerprint(NEW);
+    expect((await call(doInstance, "/approve", { caller: "device", device: "member-1", body: { deviceId: "member-1", key } })).status).toBe(403);
     expect(keyOf()).not.toBe(NEW);
-    expect((await call(doInstance, "/approve", { caller: "device", device: "owner-1", body: { deviceId: "member-1" } })).status).toBe(200);
+    expect((await call(doInstance, "/approve", { caller: "device", device: "owner-1", body: { deviceId: "member-1", key } })).status).toBe(200);
     expect(keyOf()).toBe(NEW);
   });
 
@@ -363,6 +365,65 @@ describe("a member that comes back with a new key", () => {
     const res = await call(doInstance, "/bootstrap", { caller: "device", device: "keyless", body: { pubkey: NEW } });
     expect(res.status).toBe(409);
     expect((state.data.get("members") as Record<string, { pubkey?: string }>).keyless?.pubkey).toBeUndefined();
+  });
+
+  test("declining a request that is gone never removes the member", async () => {
+    const { doInstance, old, keyOf } = await fleetWithKeyedMember();
+    // A request for another key is made and then cleared by the member's own next round with the key the fleet holds.
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: old.publicKey } });
+    const declined = await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "member-1", keyChange: true } });
+    expect(declined.status).toBe(404);
+    expect(declined.json.error).toBe("no key change waiting");
+    expect(keyOf()).toBe(old.publicKey);
+    // Nor with no request at all, nor for a device that is not a member.
+    expect((await call(doInstance, "/remove", { caller: "admin", device: "operator", body: { deviceId: "nobody", keyChange: true } })).status).toBe(404);
+  });
+
+  test("approving a new key names the key: without it the approval is refused and nothing changes", async () => {
+    const { doInstance, old, keyOf } = await fleetWithKeyedMember();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    const unnamed = await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1" } });
+    expect(unnamed.status).toBe(400);
+    expect(unnamed.json.hint).toContain("fingerprint");
+    expect(keyOf()).toBe(old.publicKey);
+    expect((await call(doInstance, "/pending", { caller: "admin", device: "operator", method: "GET" })).json.pending).toHaveLength(1);
+  });
+
+  test("the device that asks for a key cannot approve it, even when it is the owner: that takes the operator", async () => {
+    const { doInstance, state } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    await call(doInstance, "/bootstrap", { caller: "device", device: "owner-1", body: { pubkey: NEW } });
+    const key = await keyFingerprint(NEW);
+    expect((await call(doInstance, "/approve", { caller: "device", device: "owner-1", body: { deviceId: "owner-1", key } })).status).toBe(403);
+    expect((state.data.get("members") as Record<string, { pubkey?: string }>)["owner-1"]!.pubkey).toBe(TEST_PUBKEY);
+    expect((await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "owner-1", key } })).status).toBe(200);
+    expect((state.data.get("members") as Record<string, { pubkey?: string }>)["owner-1"]!.pubkey).toBe(NEW);
+  });
+
+  test("a new key can be approved in a full fleet: it is not an admission", async () => {
+    const { doInstance, state } = makeDo();
+    await makeFleet(doInstance, "owner-1");
+    const members = state.data.get("members") as Record<string, unknown>;
+    for (let i = 1; i < MAX_MEMBERS; i++) members["m-" + i] = { deviceId: "m-" + i, role: "member", addedAt: i, addedBy: "operator", pubkey: TEST_PUBKEY };
+    state.data.set("members", members);
+    await call(doInstance, "/bootstrap", { caller: "device", device: "m-3", body: { pubkey: NEW } });
+    const approved = await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "m-3", key: await keyFingerprint(NEW) } });
+    expect(approved.status).toBe(200);
+    expect((state.data.get("members") as Record<string, { pubkey?: string }>)["m-3"]!.pubkey).toBe(NEW);
+  });
+
+  test("when the list of requests is full the member is told so, with a 429, instead of that its key waits", async () => {
+    const { doInstance, state, old, keyOf } = await fleetWithKeyedMember();
+    const pending: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_PENDING; i++) pending["w-" + i] = { deviceId: "w-" + i, requestedAt: 1 };
+    state.data.set("pending", pending);
+    const res = await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    expect(res.status).toBe(429);
+    expect(res.json.keyChange).toBeUndefined();
+    const joined = await call(doInstance, "/join", { caller: "device", device: "member-1", body: { code: "pf1_" + "x".repeat(32), pubkey: NEW } });
+    expect(joined.status).toBe(429);
+    expect(keyOf()).toBe(old.publicKey);
   });
 
   test("a device that is not a member is refused, as it was", async () => {
@@ -1137,9 +1198,9 @@ describe("a member that goes while its publish is in flight, or is re-keyed", ()
     const C = "C".repeat(43) + "=";
     const D = "D".repeat(43) + "=";
     await call(doInstance, "/join", { caller: "device", device: "dev-two", body: { code: "pf1_" + "x".repeat(32), pubkey: C } });
-    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two", key: await keyFingerprint(C) } });
     await call(doInstance, "/bootstrap", { caller: "device", device: "dev-two", body: { pubkey: D } });
-    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two" } });
+    await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "dev-two", key: await keyFingerprint(D) } });
     const left = (await roster(doInstance, "dev-owner")).json.left as Array<{ pubkey: string; until: number }>;
     expect(left).toEqual([{ pubkey: PUB_B, until: 1 }, { pubkey: C, until: 1 }]);
   });

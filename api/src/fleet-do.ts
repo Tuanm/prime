@@ -842,7 +842,7 @@ export class FleetDO implements DurableObject {
         // Idempotent re-join: already a member is not an error. A key that is not the one the fleet
         // holds does not replace it on the strength of the device's credential: see `changeKey`.
         const changed = pubkey ? await this.changeKey(members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), request.headers.get("x-prime-fleet") ?? "") : "same";
-        out = changed === "pending" ? this.keyPending(pubkey!) : Response.json({ ok: true, status: "member", member: members[caller.deviceId] });
+        out = changed === "pending" ? this.keyPending() : changed === "full" ? this.tooManyPending() : Response.json({ ok: true, status: "member", member: members[caller.deviceId] });
         return;
       }
 
@@ -925,13 +925,10 @@ export class FleetDO implements DurableObject {
         return;
       }
       const members = await this.members();
-      if (Object.keys(members).length >= MAX_MEMBERS) {
-        out = Response.json({ error: "fleet is full" }, { status: 409 });
-        return;
-      }
-      // A device that is a member asks for another key: approving it is what replaces the key. The
-      // operator may say which key it means (`key`: its fingerprint, as the list shows it), so that a
-      // request that was replaced since it was read is not approved by mistake.
+      // A device that is a member asks for another key: approving it is what replaces the key, and it is
+      // not an admission, so a full fleet may still do it. The approval names the key it means (`key`: its
+      // fingerprint, as the list shows it), so that a request that was replaced since it was read, or that
+      // nobody compared, is not approved by mistake.
       if (request.keyChange) {
         const member = members[deviceId];
         if (!member || !request.pubkey) {
@@ -940,7 +937,19 @@ export class FleetDO implements DurableObject {
           out = Response.json({ error: "no such request" }, { status: 404 });
           return;
         }
-        if (typeof body.key === "string" && body.key !== (await keyFingerprint(request.pubkey))) {
+        // A device that asks for a key does not approve it: whoever holds its credential has it too.
+        if (caller.kind === "device" && caller.deviceId === deviceId) {
+          out = this.deny();
+          return;
+        }
+        if (typeof body.key !== "string" || body.key === "") {
+          out = Response.json(
+            { error: "this request is for a new key of a member: say which key you approve", hint: "pass its fingerprint (the KEY of the request: `prime fleets pending`, or the admin page)" },
+            { status: 400 },
+          );
+          return;
+        }
+        if (body.key !== (await keyFingerprint(request.pubkey))) {
           out = Response.json({ error: "the key waiting is not the one named", hint: "read the list of requests again" }, { status: 409 });
           return;
         }
@@ -948,6 +957,10 @@ export class FleetDO implements DurableObject {
         await this.replaceKey(members, deviceId, request.pubkey, fleetId);
         await this.state.storage.put("pending", pending);
         out = Response.json({ ok: true, member: members[deviceId], keyChanged: true });
+        return;
+      }
+      if (Object.keys(members).length >= MAX_MEMBERS) {
+        out = Response.json({ error: "fleet is full" }, { status: 409 });
         return;
       }
       delete pending[deviceId];
@@ -985,14 +998,26 @@ export class FleetDO implements DurableObject {
     await this.state.blockConcurrencyWhile(async () => {
       const members = await this.members();
       const pending = await this.joinRequests();
-      // A request for another key from a device that is a member is declined with `keyChange`; without
-      // it, the member is what is removed (and its request with it).
-      if (pending[deviceId] && (!members[deviceId] || body.keyChange === true)) {
+      // `keyChange` declines a member's request for another key, and only that: it never removes the member,
+      // so a request that is gone by the time the operator answers (the member's own key came back, or it was
+      // answered elsewhere) is not an eviction.
+      if (body.keyChange === true) {
+        if (pending[deviceId]?.keyChange && members[deviceId]) {
+          delete pending[deviceId];
+          await this.state.storage.put("pending", pending);
+          out = Response.json({ ok: true, removed: "pending" });
+        } else {
+          out = Response.json({ error: "no key change waiting" }, { status: 404 });
+        }
+        return;
+      }
+      if (pending[deviceId] && !members[deviceId]) {
         delete pending[deviceId];
         await this.state.storage.put("pending", pending);
         out = Response.json({ ok: true, removed: "pending" });
         return;
       }
+      // Removing a member takes a request for its key with it.
       if (pending[deviceId]) {
         delete pending[deviceId];
         await this.state.storage.put("pending", pending);
@@ -1119,36 +1144,46 @@ export class FleetDO implements DurableObject {
     if (head === null) {
       return Response.json({ error: "the fleet's head could not be read" }, { status: 503 });
     }
-    const members = await this.members();
-    if (!members[caller.deviceId]) return this.deny();
-
     const pubkey = cleanPubkey(body.pubkey);
     const label = cleanLabel(body.label);
-    // A key other than the one the fleet holds is not taken on the strength of the device's credential
-    // (see `changeKey`): without the old key's proof it is a request for the operator, and the member
-    // does not take a place until it is decided.
-    let membersChanged = false;
-    if (pubkey) {
-      const changed = await this.changeKey(members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), fleetId);
-      if (changed === "pending") return this.keyPending(pubkey);
-    }
-    // A space that is renamed, or an identity that was taken over by another
-    // space, says what it is called now. The name is only for the operator to
-    // read, but it is read on every round of the agent, so a stale one is
-    // corrected the next time the space takes its place.
-    if (label !== undefined && members[caller.deviceId]!.label !== label) {
-      // A name another member already uses is not taken on: the list would
-      // then show two spaces that cannot be told apart.
-      if (!findClash(members, {}, caller.deviceId, label)) {
-        members[caller.deviceId]!.label = label;
-        membersChanged = true;
+    // The roster is read, changed and written in one step: a key change and a name change are made against
+    // the roster as it is when they are written (an operator's removal that commits in between is not undone
+    // by a copy read before it). A key other than the one the fleet holds is not taken on the strength of the
+    // device's credential (see `changeKey`): without the old key's proof it is a request for the operator, and
+    // the member does not take a place until it is decided.
+    let refused: Response | null = null;
+    await this.state.blockConcurrencyWhile(async () => {
+      const roster = await this.members();
+      if (!roster[caller.deviceId]) {
+        refused = this.deny();
+        return;
       }
-    }
-    if (membersChanged) await this.state.storage.put("members", members);
+      if (pubkey) {
+        const changed = await this.changeKey(roster, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), fleetId);
+        if (changed === "pending") refused = this.keyPending();
+        if (changed === "full") refused = this.tooManyPending();
+        if (refused) return;
+      }
+      // A space that is renamed, or an identity that was taken over by another space, says what it is called
+      // now. The name is only for the operator to read, but it is read on every round of the agent, so a
+      // stale one is corrected the next time the space takes its place. A name another member already uses is
+      // not taken on: the list would then show two spaces that cannot be told apart.
+      if (label !== undefined && roster[caller.deviceId]!.label !== label && !findClash(roster, {}, caller.deviceId, label)) {
+        roster[caller.deviceId]!.label = label;
+        await this.state.storage.put("members", roster);
+      }
+    });
+    if (refused) return refused;
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {
       const now = Date.now();
+      // Read again: the roster may have changed since the key and name were settled (a removal).
+      const members = await this.members();
+      if (!members[caller.deviceId]) {
+        out = this.deny();
+        return;
+      }
       const held = await this.lease();
 
       if (held && held.holder !== caller.deviceId) {
@@ -1726,7 +1761,7 @@ export class FleetDO implements DurableObject {
    * member without one) or the proof was missing, stale or wrong: the key waits as a request for the
    * operator or the owner to approve, and the roster is as it was.
    */
-  private async changeKey(members: Members, deviceId: string, pubkey: string, proof: KeyProof | undefined, fleetId: string): Promise<"same" | "changed" | "pending"> {
+  private async changeKey(members: Members, deviceId: string, pubkey: string, proof: KeyProof | undefined, fleetId: string): Promise<"same" | "changed" | "pending" | "full"> {
     const member = members[deviceId]!;
     const pending = await this.joinRequests();
     if (member.pubkey === pubkey) {
@@ -1746,7 +1781,8 @@ export class FleetDO implements DurableObject {
       return "changed";
     }
     if (pending[deviceId]?.pubkey !== pubkey) {
-      if (!pending[deviceId] && Object.keys(pending).length >= MAX_PENDING) return "pending";
+      // Not recorded, and the member is told so rather than that it waits: nobody would ever see the request.
+      if (!pending[deviceId] && Object.keys(pending).length >= MAX_PENDING) return "full";
       pending[deviceId] = {
         deviceId,
         ...(member.label ? { label: member.label } : {}),
@@ -1759,8 +1795,13 @@ export class FleetDO implements DurableObject {
     return "pending";
   }
 
+  /** The answer to a member whose key request could not be kept: the list of requests is full. */
+  private tooManyPending(): Response {
+    return Response.json({ error: "too many pending requests", hint: "the operator has requests to answer first" }, { status: 429, headers: { "retry-after": "60" } });
+  }
+
   /** The answer to a member whose key is not the fleet's: its request waits, and what it does is says so. */
-  private keyPending(_pubkey: string): Response {
+  private keyPending(): Response {
     return Response.json(
       {
         error: "this member's key is not the one the fleet holds, and it could not show that it holds the old one: the new key waits for the operator (or the fleet's owner) to approve it",
