@@ -23,6 +23,7 @@ import {
   hashCode,
   inviteShape,
   MAX_MEMBERS,
+  MAX_SNAPSHOT_BYTES,
   OWNER_SILENCE_MS,
   RECENT_SNAPSHOTS,
   MAX_PENDING,
@@ -1569,6 +1570,8 @@ export class FleetDO implements DurableObject {
       incarnation: await this.incarnation(),
       // This object does not move the head from a sealed snapshot to one that is not (see `advance`).
       sealGate: true,
+      // The most one upload may be: a member says so before it sends what the gateway would refuse.
+      snapshotLimit: MAX_SNAPSHOT_BYTES,
     });
   }
 

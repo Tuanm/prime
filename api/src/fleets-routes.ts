@@ -91,6 +91,20 @@ interface PayloadDeps {
   unauthorized: () => Response;
 }
 
+/** The refusal of an upload bigger than the Worker can hold: what it was, what the limit is, what to do. */
+function uploadTooBig(bytes: number, what: "snapshot" | "change pack"): Response {
+  const mb = (n: number): number => Math.ceil(n / (1024 * 1024));
+  return Response.json(
+    {
+      error:
+        "this " + what + " is " + mb(bytes) + " MB, and the gateway takes at most " + MAX_SNAPSHOT_BYTES / (1024 * 1024) +
+        " MB for one: the work tree is too big to publish (keep what is not the work's, such as build output, out of it with .gitignore)",
+      limit: MAX_SNAPSHOT_BYTES,
+    },
+    { status: 413 },
+  );
+}
+
 /**
  * Publish a snapshot: the sealed pack and its manifest, in one request.
  *
@@ -115,16 +129,7 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   if (!role) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
   if (!role.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
 
-  const tooBig = (bytes: number): Response =>
-    Response.json(
-      {
-        error:
-          "this snapshot is " + Math.ceil(bytes / (1024 * 1024)) + " MB, and the gateway takes at most " + MAX_SNAPSHOT_BYTES / (1024 * 1024) +
-          " MB for one: the work tree is too big to publish whole (keep what is not the work's, such as build output, out of it with .gitignore)",
-        limit: MAX_SNAPSHOT_BYTES,
-      },
-      { status: 413 },
-    );
+  const tooBig = (bytes: number): Response => uploadTooBig(bytes, "snapshot");
   // Said before the body is read, when the sender says how long it is.
   const declared = Number(deps.request.headers.get("content-length") ?? 0);
   if (declared > MAX_SNAPSHOT_BYTES) return tooBig(declared);
@@ -290,7 +295,11 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     if (!role.primary) {
       return Response.json({ error: "only the primary may publish" }, { status: 409 });
     }
+    // Said before the body is read, when the sender says how long it is, and again after.
+    const declared = Number(deps.request.headers.get("content-length") ?? 0);
+    if (declared > MAX_SNAPSHOT_BYTES) return uploadTooBig(declared, "change pack");
     const body = await deps.request.arrayBuffer();
+    if (body.byteLength > MAX_SNAPSHOT_BYTES) return uploadTooBig(body.byteLength, "change pack");
     if (body.byteLength === 0) return Response.json({ error: "empty payload" }, { status: 400 });
     const digest = await sha256Hex(body);
     const key = prefix + digest;
