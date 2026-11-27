@@ -599,6 +599,9 @@ export class FleetDO implements DurableObject {
   }
 
   /** What this fleet served this month, sent on in batches. */
+  // The requests this object is running that are storing a snapshot (see `startStoring`). Memory, not storage:
+  // an object that died has lost it, which is how its entries are known to have no request behind them.
+  private readonly live = new Set<string>();
   private readonly meter = new HitMeter((add) => {
     sendUsage(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global")), add);
   });
@@ -1404,57 +1407,62 @@ export class FleetDO implements DurableObject {
     // again after it was already accepted names the same objects.
     const stored = [manifestKey, packKey, ...extraKeys].filter(Boolean);
     const token = await this.startStoring({ manifestKey, keys: stored, seq: next.seq, headKey: key, meta });
-    let written: R2Object | null;
+    // This request is alive as long as it runs here: only an entry whose request is gone (its object died, or it threw) is settled.
     try {
-      this.meter.r2("write");
-      written = await this.bucket().put(key, JSON.stringify(next), etag ? { onlyIf: { etagMatches: etag } } : { onlyIf: { etagDoesNotMatch: "*" } });
-    } catch {
-      await this.endStoring(token);
-      return Response.json({ error: "head write refused" }, { status: 409 });
-    }
-    // A failed conditional write returns null rather than throwing: that is the
-    // CAS losing the race, not an error.
-    if (!written) {
-      await this.endStoring(token);
-      return Response.json({ error: "head changed" }, { status: 409 });
-    }
-    // The write above gave other requests room to run, and one of them may have removed this member. Its
-    // key is recorded as left up to the head as that request saw it, which does not have this snapshot;
-    // it is a member's up to this one, which the member made while it was one.
-    const rostered = await this.members();
-    if (!rostered[caller.deviceId]) {
-      const left = (await this.state.storage.get<LeftKey[]>("left")) ?? [];
-      let raised = false;
-      for (const k of left) {
-        if (k.device === caller.deviceId && k.until < next.seq) {
-          k.until = next.seq;
-          raised = true;
-        }
+      let written: R2Object | null;
+      try {
+        this.meter.r2("write");
+        written = await this.bucket().put(key, JSON.stringify(next), etag ? { onlyIf: { etagMatches: etag } } : { onlyIf: { etagDoesNotMatch: "*" } });
+      } catch {
+        await this.endStoring(token);
+        return Response.json({ error: "head write refused" }, { status: 409 });
       }
-      if (raised) await this.state.storage.put("left", left);
+      // A failed conditional write returns null rather than throwing: that is the
+      // CAS losing the race, not an error.
+      if (!written) {
+        await this.endStoring(token);
+        return Response.json({ error: "head changed" }, { status: 409 });
+      }
+      // The write above gave other requests room to run, and one of them may have removed this member. Its
+      // key is recorded as left up to the head as that request saw it, which does not have this snapshot;
+      // it is a member's up to this one, which the member made while it was one.
+      const rostered = await this.members();
+      if (!rostered[caller.deviceId]) {
+        const left = (await this.state.storage.get<LeftKey[]>("left")) ?? [];
+        let raised = false;
+        for (const k of left) {
+          if (k.device === caller.deviceId && k.until < next.seq) {
+            k.until = next.seq;
+            raised = true;
+          }
+        }
+        if (raised) await this.state.storage.put("left", left);
+      }
+      await this.state.storage.put("epoch", next.epoch);
+      // The publisher holds the state it has just published: it needs no report to
+      // say so. Without this a member whose own report was lost (a timeout, a 503)
+      // would be refused its next publish as "catch up first", with nothing it
+      // could catch up to.
+      // Read again, with no other I/O between that and the write: the write to R2
+      // above gave other requests (a member's report, in particular) room to run, and
+      // the map read before it would put their change back as it was.
+      const now_ = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+      now_[caller.deviceId] = Math.max(now_[caller.deviceId] ?? 0, next.seq);
+      await this.state.storage.put("applied", now_);
+      // The members that listen pull now instead of at their next look; the one that
+      // published already has it.
+      this.broadcast({ type: "head", seq: next.seq, manifestKey }, caller.deviceId);
+
+      // Keep a bounded number of snapshots: more than the newest whole tree and
+      // the changes after it, which is all a member far behind needs. The old
+      // ones are of no use.
+      await this.keepSnapshot({ manifestKey, keys: stored, seq: next.seq, meta });
+      await this.endStoring(token);
+
+      return Response.json({ ok: true, head: next });
+    } finally {
+      this.live.delete(token);
     }
-    await this.state.storage.put("epoch", next.epoch);
-    // The publisher holds the state it has just published: it needs no report to
-    // say so. Without this a member whose own report was lost (a timeout, a 503)
-    // would be refused its next publish as "catch up first", with nothing it
-    // could catch up to.
-    // Read again, with no other I/O between that and the write: the write to R2
-    // above gave other requests (a member's report, in particular) room to run, and
-    // the map read before it would put their change back as it was.
-    const now_ = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
-    now_[caller.deviceId] = Math.max(now_[caller.deviceId] ?? 0, next.seq);
-    await this.state.storage.put("applied", now_);
-    // The members that listen pull now instead of at their next look; the one that
-    // published already has it.
-    this.broadcast({ type: "head", seq: next.seq, manifestKey }, caller.deviceId);
-
-    // Keep a bounded number of snapshots: more than the newest whole tree and
-    // the changes after it, which is all a member far behind needs. The old
-    // ones are of no use.
-    await this.keepSnapshot({ manifestKey, keys: stored, seq: next.seq, meta });
-    await this.endStoring(token);
-
-    return Response.json({ ok: true, head: next });
   }
 
   // Which of these stored objects no retained snapshot names. The Worker stores a snapshot's
@@ -1499,6 +1507,7 @@ export class FleetDO implements DurableObject {
     const oldest = Object.keys(storing).sort((a, b) => storing[a]!.at - storing[b]!.at);
     for (const k of oldest.slice(0, Math.max(0, oldest.length - STORING_MAX_ENTRIES))) delete storing[k];
     await this.state.storage.put("storing", storing);
+    this.live.add(token);
     return token;
   }
 
@@ -1549,7 +1558,8 @@ export class FleetDO implements DurableObject {
   private async settleStoring(): Promise<void> {
     const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
     const now = Date.now();
-    const stale = Object.entries(storing).filter(([, v]) => now - v.at > STORING_GRACE_MS);
+    // Not a request this object is still running: a slow head write is not a dead one, whatever its age.
+    const stale = Object.entries(storing).filter(([token, v]) => now - v.at > STORING_GRACE_MS && !this.live.has(token));
     if (stale.length === 0) return;
     const heads = new Map<string, string | undefined | null>();
     for (const [token, entry] of stale) {

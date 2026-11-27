@@ -820,6 +820,38 @@ describe("a member that goes while its publish is in flight, or is re-keyed", ()
         expect(asked.json.keys).toEqual([]);
       });
 
+      test("a request that is still running is not settled, however slow its head write", async () => {
+        const bucket = fakeBucket();
+        const { doInstance, state } = await fleetOfTwo(bucket);
+        const realPut = bucket.put;
+        let release!: () => void;
+        const gate = new Promise<void>((r) => (release = r));
+        let reached!: () => void;
+        const arrived = new Promise<void>((r) => (reached = r));
+        bucket.put = async (...args: Parameters<typeof realPut>) => {
+          reached();
+          await gate;
+          return realPut.apply(bucket, args);
+        };
+        const body = advanceBody("a", 0);
+        const inflight = call(doInstance, "/head/advance", { caller: "device", device: "dev-owner", body });
+        await arrived;
+        const realNow = Date.now;
+        Date.now = () => realNow() + 5 * 60_000; // far past the grace: the write is only slow
+        try {
+          await doInstance.alarm();
+          expect(Object.keys(state.data.get("storing") as object)).toHaveLength(1);
+          const asked = await call(doInstance, "/unreferenced", { caller: "device", device: "dev-owner", body: { keys: [body.packKey, body.manifestKey] } });
+          expect(asked.json.keys).toEqual([]);
+        } finally {
+          Date.now = realNow;
+        }
+        release();
+        expect((await inflight).status).toBe(200);
+        expect(kept(state)).toContain(body.manifestKey);
+        expect(state.data.get("storing")).toBeUndefined();
+      });
+
       test("a publish that is still young is not settled from under its request", async () => {
         const { doInstance, state } = await crashed();
         await doInstance.alarm();
