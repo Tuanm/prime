@@ -94,7 +94,7 @@ const LOCK_CONFLICT = /could not lock config file [^\n]*: File exists|Unable to 
 // On Windows, git that writes an object another git is writing at that moment (two snapshots of the same tree
 // made in the same second make the same commit) is refused the file while the other has it open. The object
 // is content-addressed, so the write is as good as done once the other has finished, and is simply run again.
-const OBJECT_BUSY = /unable to write file [^\n]*[\\/]objects[\\/][^\n]*: Permission denied/;
+const OBJECT_BUSY = /unable to write file [^\n]*[\\/]objects[\\/][0-9a-f]{2}[\\/][0-9a-f]+: Permission denied/;
 
 /**
  * Whether git's message says it could not take a lock file that another git holds, or (on Windows) write an
@@ -112,12 +112,12 @@ async function gitRun(
   /** Told the pid of the git process as soon as it exists. */
   onSpawn?: (pid: number) => void,
 ): Promise<Buffer> {
-  const until = Date.now() + LOCK_RETRY_MS;
+  const until = performance.now() + LOCK_RETRY_MS;
   for (let attempt = 0; ; attempt++) {
     try {
       return await gitRunOnce(gitDir, args, env, input, onSpawn);
     } catch (err) {
-      if (!(err instanceof Error) || !isLockConflict(err.message) || Date.now() > until) throw err;
+      if (!(err instanceof Error) || !isLockConflict(err.message) || performance.now() > until) throw err;
       await new Promise((r) => setTimeout(r, 30 + Math.floor(Math.random() * 90) + Math.min(attempt, 10) * 20));
     }
   }

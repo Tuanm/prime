@@ -1357,6 +1357,9 @@ describe("what is a lock conflict between gits", () => {
     // Another file that cannot be written is not a busy object.
     expect(isLockConflict("error: unable to write file /s/config: Permission denied", "win32")).toBe(false);
     expect(isLockConflict("error: unable to write file /s/objects/e3/ab: No space left on device", "win32")).toBe(false);
+    // Only the loose objects of a store: a folder of that name elsewhere is not one.
+    expect(isLockConflict("error: unable to write file C:\\w\\objects\\notes.txt: Permission denied", "win32")).toBe(false);
+    expect(isLockConflict("error: unable to write file C:\\w\\objects\\e3\\ec49d638ab14ad7c: Permission denied", "win32")).toBe(true);
   });
 });
 
