@@ -5,7 +5,7 @@
 // target precedence, and tool-result rendering.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -156,6 +156,20 @@ describe("spaces and the image they run", () => {
     // A space outside a fleet is the person's own: its image is their choice,
     // and nothing in it goes stale when the CLI is updated.
     expect(fleetSpaceNames(config).sort()).toEqual(["alpha", "beta"]);
+  });
+});
+
+describe("end-to-end runs", () => {
+  // `prime update` restarts the fleet agent of the configuration it runs with: a run of the built CLI that is not given a
+  // configuration of its own would be about the developer's (and their agent).
+  test("every run of the built CLI in the end-to-end script is given a configuration of its own", () => {
+    const lines = readFileSync(join(import.meta.dir, "e2e.ts"), "utf8").split("\n");
+    const runs = lines.flatMap((line, i) => (/Bun\.spawn(Sync)?\(\[(BIN|selfBin)\b/.test(line) ? [i] : []));
+    expect(runs.length).toBeGreaterThan(2);
+    for (const i of runs) {
+      const call = lines.slice(i, i + 20).join("\n");
+      expect(call, "the run at e2e.ts:" + (i + 1)).toMatch(/PRIME_CONFIG|anonEnv/);
+    }
   });
 });
 

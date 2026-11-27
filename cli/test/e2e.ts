@@ -762,7 +762,23 @@ try {
   if (!IS_WINDOWS) chmodSync(selfBin, 0o755);
   // Async: the fake release server runs in this process, so a blocking spawn
   // would leave it unable to answer.
-  const bareProc = Bun.spawn([selfBin, "update"], { env: { ...process.env, ...updateEnv, NO_COLOR: "1" }, stdout: "pipe", stderr: "pipe" });
+  // An update that installs restarts the fleet agent of its configuration, so this one runs against a
+  // configuration and a home of its own: never the developer's (whose agent, if one runs, is theirs).
+  const bareHome = join(installDir, "home");
+  mkdirSync(bareHome);
+  const bareProc = Bun.spawn([selfBin, "update"], {
+    env: {
+      ...process.env,
+      ...updateEnv,
+      PRIME_CONFIG: join(bareHome, "config.yaml"),
+      HOME: bareHome,
+      USERPROFILE: bareHome,
+      XDG_CONFIG_HOME: join(bareHome, ".config"),
+      NO_COLOR: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const bareUpdate = {
     exitCode: await bareProc.exited,
     stdout: await new Response(bareProc.stdout).text(),
