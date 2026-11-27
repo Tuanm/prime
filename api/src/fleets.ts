@@ -7,8 +7,9 @@
 //   of devices with one owner. A *member* is a device admitted to a fleet.
 //
 // Two credentials, two different jobs
-//   - gateway token: operator authority (create a fleet, mint an invite,
-//     approve/remove a member). Never leaves the operator's machine.
+//   - fleet operator token (FLEET_OPERATOR_TOKEN): operator authority (create a fleet, mint an
+//     invite, approve/remove a member). Not the gateway token, which every client of the gateway
+//     holds; the admin page, behind Access, is the operator too.
 //   - device token: the identity of one device. A device can only ever act as
 //     itself, because the Worker proves it against the device registry before
 //     the Durable Object sees the request.

@@ -86,8 +86,8 @@ Files authenticate with the buddy's own id and token, over HTTP Basic. There is 
 
 | Endpoint | Needs | What it does |
 | --- | --- | --- |
-| `GET /fleets` | gateway token | List the fleets. |
-| `POST /fleets/{fleet}` | gateway token, or a buddy's token | Create a fleet. |
+| `GET /fleets` | the fleet operator token | List the fleets. |
+| `POST /fleets/{fleet}` | the fleet operator token (or the admin page) | Create a fleet. |
 | `POST /fleets/{fleet}/join` | a buddy's token and the invite code | Ask to join. It waits until the operator admits it. |
 | `POST /fleets/{fleet}/bootstrap` | a member's token | Take the lease or become a replica, in one step. |
 | `GET /fleets/{fleet}` | a member's token | The roster. Ids are cut short for everyone but the operator. |
@@ -205,6 +205,7 @@ npx wrangler secret put TOKEN_PEPPER       # required, first: 32+ random charact
 npx wrangler secret put GATEWAY_TOKEN      # who may call the gateway
 npx wrangler secret put DEVICE_TOKENS      # JSON map of buddy id to token
 npx wrangler secret put ADMIN_TOKEN        # who may list the online buddies
+npx wrangler secret put FLEET_OPERATOR_TOKEN   # who may run fleets from the command line (optional)
 npx wrangler deploy                        # publish the gateway
 ```
 
@@ -217,6 +218,7 @@ npx wrangler deploy                        # publish the gateway
 | `DEVICE_TOKENS` | unset | JSON map of buddy id to token. Preferred over one shared token. |
 | `DEVICE_TOKEN` | unset | One token for every buddy, used when there is no map. |
 | `ADMIN_TOKEN` | `GATEWAY_TOKEN` | Who may list the online buddies. With neither token set, that endpoint does not exist. |
+| `FLEET_OPERATOR_TOKEN` | unset | Who runs fleets as the operator from the command line: create, invite, approve, remove, delete, list. A secret of its own, and not the gateway token (every client holds that one; the same value is refused). Unset, no token runs fleets: the admin page (behind Access) and a fleet's owner device still do. |
 | `ACCESS_TEAM_DOMAIN` | unset | The Access team whose assertion the gateway verifies. |
 | `ACCESS_AUD` | unset | The Access application's tag. |
 | `ADMIN_ACCESS` | `enforce` | `enforce`, `warn` or `off` for the Access check. |

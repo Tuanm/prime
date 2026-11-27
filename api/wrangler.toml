@@ -6,6 +6,7 @@
 #   wrangler secret put GATEWAY_TOKEN     # optional bearer token for /mcp/*
 #   wrangler secret put DEVICE_TOKEN      # optional bearer token for /ws/* device auth
 #   wrangler secret put ADMIN_TOKEN       # optional; defaults to GATEWAY_TOKEN for /devices
+#   wrangler secret put FLEET_OPERATOR_TOKEN  # optional; runs fleets from the CLI (not GATEWAY_TOKEN)
 #   wrangler deploy
 #
 # Rate limiting note: the in-isolate limiter is a cheap first line. For global
@@ -95,6 +96,7 @@ id = "d36acd23e12945058bf9910182deeec7"
 #   GATEWAY_TOKEN   optional client -> gateway auth for /mcp/*
 #   DEVICE_TOKEN    optional shared fallback token for all devices
 #   ADMIN_TOKEN     optional /devices auth (defaults to GATEWAY_TOKEN)
+#   FLEET_OPERATOR_TOKEN  optional operator credential for fleets; never the same as GATEWAY_TOKEN
 
 # Tunables (mirror the Bun gateway flags). Override via vars / secret per env.
 [vars]

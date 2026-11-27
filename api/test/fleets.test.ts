@@ -1567,6 +1567,89 @@ describe("clearing away a fleet nobody can reach", () => {
   });
 });
 
+describe("who runs fleets as the operator", () => {
+  // The Worker's routes with a stub for the fleet object that records who the Worker said was calling.
+  function ask(opts: { cfg: Record<string, unknown>; bearer?: string; device?: string; path: string; method?: string }) {
+    const callers: Array<{ caller: string | null; device: string | null }> = [];
+    const stub = {
+      async fetch(input: Request | string, init?: RequestInit) {
+        const headers = new Headers(init?.headers ?? (typeof input === "string" ? undefined : input.headers));
+        callers.push({ caller: headers.get("x-prime-caller"), device: headers.get("x-prime-device") });
+        return Response.json({ ok: true });
+      },
+    };
+    const registry = { idFromName: () => "g", get: () => ({ fetch: async () => Response.json({ count: 0 }) }) };
+    const env = { FLEET: { idFromName: (n: string) => n, get: () => stub }, REGISTRY: registry } as never;
+    const headers = new Headers({ "content-type": "application/json" });
+    if (opts.device) headers.set("x-prime-device", opts.device);
+    if (opts.bearer) headers.set("authorization", "Bearer " + opts.bearer);
+    const method = opts.method ?? "POST";
+    const url = new URL("https://gateway" + opts.path);
+    const answer = handleFleetRoutes({
+      request: new Request(url, { method, headers, body: method === "GET" ? undefined : "{}" }),
+      env,
+      url,
+      cfg: opts.cfg as never,
+      authorizeDevice: async () => ({ ok: true as const }),
+      unauthorized: () => new Response(null, { status: 401 }),
+    });
+    return { answer, callers };
+  }
+
+  const cfg = { gatewayToken: "gateway-token", fleetOperatorToken: "operator-token" };
+
+  test("the operator token is the operator: the object is told so", async () => {
+    const { answer, callers } = ask({ cfg, bearer: "operator-token", device: "dev-owner", path: "/fleets/acme/invite" });
+    expect((await answer)!.status).toBe(200);
+    expect(callers).toEqual([{ caller: "admin", device: "dev-owner" }]);
+  });
+
+  test("the gateway token, which every client holds, is not: with a device it is that device and no more", async () => {
+    const { answer, callers } = ask({ cfg, bearer: "gateway-token", device: "dev-member", path: "/fleets/acme/approve" });
+    await answer;
+    expect(callers).toEqual([{ caller: "device", device: "dev-member" }]);
+  });
+
+  test("the gateway token alone gets nothing of a fleet, and is told what changed", async () => {
+    for (const path of ["/fleets/acme/invite", "/fleets/acme/approve", "/fleets/acme/pending", "/fleets/acme/delete"]) {
+      const method = path.endsWith("pending") ? "GET" : "POST";
+      const { answer, callers } = ask({ cfg, bearer: "gateway-token", path, method });
+      const res = (await answer)!;
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { hint: string }).hint).toContain("FLEET_OPERATOR_TOKEN");
+      expect(callers).toEqual([]);
+    }
+  });
+
+  test("it may create a fleet no more than it may run one", async () => {
+    const { answer, callers } = ask({ cfg, bearer: "gateway-token", device: "dev-a", path: "/fleets/acme" });
+    await answer;
+    expect(callers.every((c) => c.caller !== "admin")).toBe(true);
+  });
+
+  test("a gateway with no operator token has no token operator: neither token runs fleets", async () => {
+    for (const bearer of ["gateway-token", "operator-token"]) {
+      const { answer, callers } = ask({ cfg: { gatewayToken: "gateway-token" }, bearer, device: "dev-a", path: "/fleets/acme/invite" });
+      await answer;
+      expect(callers.every((c) => c.caller !== "admin")).toBe(true);
+    }
+    // And an open gateway (no tokens at all) does not make every caller the operator.
+    const open = ask({ cfg: {}, device: "dev-a", path: "/fleets/acme/invite" });
+    await open.answer;
+    expect(open.callers.every((c) => c.caller !== "admin")).toBe(true);
+  });
+
+  test("the configuration reads the operator token from its own secret, and not when it is the gateway token", async () => {
+    const { loadConfig } = await import("../src/config");
+    expect(loadConfig({ GATEWAY_TOKEN: "g", FLEET_OPERATOR_TOKEN: "o" } as never).fleetOperatorToken).toBe("o");
+    expect(loadConfig({ GATEWAY_TOKEN: "g" } as never).fleetOperatorToken).toBeUndefined();
+    expect(loadConfig({ FLEET_OPERATOR_TOKEN: "o" } as never).fleetOperatorToken).toBe("o");
+    expect(loadConfig({ GATEWAY_TOKEN: "same", FLEET_OPERATOR_TOKEN: "same" } as never).fleetOperatorToken).toBeUndefined();
+    // The admin token still falls back to the gateway token, which is why it is not used for this.
+    expect(loadConfig({ GATEWAY_TOKEN: "g" } as never).adminToken).toBe("g");
+  });
+});
+
 describe("caps", () => {
   test("the member cap refuses further admissions", async () => {
     const { doInstance } = makeDo();
@@ -2508,7 +2591,7 @@ describe("the Worker answers for a paused fleet", () => {
       request,
       env,
       url,
-      cfg: { gatewayToken: "op-secret" } as never,
+      cfg: { gatewayToken: "gw-secret", fleetOperatorToken: "op-secret" } as never,
       authorizeDevice: async () => ({ ok: true as const }),
       unauthorized: () => new Response(null, { status: 401 }),
       fleetPaused: async () => opts.paused,

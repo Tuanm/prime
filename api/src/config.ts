@@ -116,6 +116,12 @@ export interface GatewayConfig {
   deviceToken?: string; // shared device -> gateway auth at WS connect (fallback)
   deviceTokens?: Map<string, string>; // per-device token map (preferred over deviceToken)
   adminToken?: string; // /devices endpoint auth (defaults to gatewayToken)
+  /**
+   * The fleet operator's credential. Not the gateway token: that is held by every machine and client that
+   * calls the gateway, and whoever holds this one can admit members to, remove them from and delete any fleet.
+   * Unset: no token runs fleets (the admin page, behind Access, and a fleet's owner device still do).
+   */
+  fleetOperatorToken?: string;
   rateWindowMs: number;
   rateMax: number;
   timeoutMs: number;
@@ -137,6 +143,7 @@ export interface Env {
   DEVICE_TOKEN?: string;
   DEVICE_TOKENS?: string; // JSON map { deviceId: token } - per-device secrets (secret)
   ADMIN_TOKEN?: string;
+  FLEET_OPERATOR_TOKEN?: string; // who runs fleets as the operator, apart from GATEWAY_TOKEN (see GatewayConfig)
   // Keys the verifiers the gateway keeps instead of tokens (src/token-hash.ts).
   // A secret of at least 32 characters; without it no device token is checked.
   TOKEN_PEPPER?: string;
@@ -236,6 +243,9 @@ export function loadConfig(env: Env): GatewayConfig {
     deviceToken: env.DEVICE_TOKEN || undefined,
     deviceTokens: parseDeviceTokens(env.DEVICE_TOKENS),
     adminToken: env.ADMIN_TOKEN || env.GATEWAY_TOKEN || undefined,
+    // The same value as the gateway token is not a separate credential: it is refused, so that setting the
+    // one secret to the other's value does not quietly bring the shared token back as the operator's.
+    fleetOperatorToken: env.FLEET_OPERATOR_TOKEN && env.FLEET_OPERATOR_TOKEN !== env.GATEWAY_TOKEN ? env.FLEET_OPERATOR_TOKEN : undefined,
     rateWindowMs: num(env, "RATE_LIMIT_WINDOW_MS", 60_000),
     rateMax: num(env, "RATE_LIMIT_MAX", 100),
     timeoutMs: num(env, "TIMEOUT_MS", 300_000),

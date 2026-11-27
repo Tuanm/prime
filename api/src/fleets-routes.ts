@@ -1,6 +1,8 @@
 // HTTP surface for fleets. Two kinds of caller, two kinds of proof:
 //
-//   operator (gateway token)  create a fleet, mint an invite, approve, remove.
+//   operator (fleet operator   create a fleet, mint an invite, approve, remove. The operator is the
+//             token, or the    FLEET_OPERATOR_TOKEN, which is not the gateway token (every client holds
+//             admin page)      that one), or the admin page, which is behind Access.
 //   device   (device token)   join with an invite, read my status, read the
 //                             roster if I am in it.
 //
@@ -390,18 +392,24 @@ export interface FleetDeps {
   unauthorized: () => Response;
 }
 
+/**
+ * Whether the request carries the fleet operator's credential.
+ *
+ * Only FLEET_OPERATOR_TOKEN counts. The gateway token is what every machine and MCP client of the gateway
+ * is given, so it is not an authority over fleets: a deployment that sets none has no token operator at
+ * all (the admin page and a fleet's owner device remain).
+ */
 function adminOnly(cfg: GatewayConfig, request: Request, url: URL): boolean {
-  // With no gateway token configured the deployment is open (local dev).
+  if (!cfg.fleetOperatorToken) return false;
+  const t = extractToken(request, url, "auth");
+  return !!t && timingSafeEq(t, cfg.fleetOperatorToken);
+}
+
+/** Whether the request carries the gateway token, which used to be (and no longer is) the operator's. */
+function carriesGatewayToken(cfg: GatewayConfig, request: Request, url: URL): boolean {
   if (!cfg.gatewayToken) return false;
   const t = extractToken(request, url, "auth");
   return !!t && timingSafeEq(t, cfg.gatewayToken);
-}
-
-function isAdminRoute(method: string, action: string | undefined): boolean {
-  if (method !== "POST" && method !== "GET" && method !== "DELETE") return false;
-  if (method === "POST" && (action === "invite" || action === "approve" || action === "remove" || action === "revoke")) return true;
-  if (method === "GET" && action === "pending") return true;
-  return false;
 }
 
 // Creating a fleet is open to a proven device as well as to the operator:
@@ -429,7 +437,6 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   }
 
   const admin = adminOnly(cfg, request, url);
-  const adminRoute = isAdminRoute(request.method, action);
 
   // The routes that run a fleet are open to the operator and to the owner of
   // that fleet. A member it invited would have no way to admit anyone if only
@@ -443,7 +450,17 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   if (!admin) {
     const claimed = request.headers.get("x-prime-device") ?? url.searchParams.get("device") ?? "";
     if (!claimed) {
-      if (adminRoute) return deps.unauthorized();
+      // A caller that came with the gateway token and no device is an operator of an earlier gateway: say
+      // what changed, instead of a bare "unauthorized".
+      if (carriesGatewayToken(cfg, request, url)) {
+        return Response.json(
+          {
+            error: "the gateway token does not run fleets any more",
+            hint: "set FLEET_OPERATOR_TOKEN on the gateway and present that value (prime: --operator-token, or PRIME_FLEET_OPERATOR_TOKEN); the admin page and a fleet's owner device work as before",
+          },
+          { status: 403 },
+        );
+      }
       return deps.unauthorized();
     }
     const verdict = await deps.authorizeDevice(claimed);

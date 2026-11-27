@@ -991,7 +991,7 @@ export default {
         // registry, because the fleet objects cannot be enumerated.
         if (request.method !== "GET") return Response.json({ error: "fleet id required" }, { status: 400 });
         const t = extractToken(request, url, "auth");
-        if (!cfg.gatewayToken || !t || !timingSafeEq(t, cfg.gatewayToken)) {
+        if (!cfg.fleetOperatorToken || !t || !timingSafeEq(t, cfg.fleetOperatorToken)) {
           return Response.json({ error: "only the operator may list the fleets" }, { status: 403 });
         }
         const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
