@@ -489,7 +489,7 @@ leases, per-member revocation, and a name to look at when something went wrong.
 | the invite expired or was used | the request is refused, and the code is gone |
 | the fleet is full | refused, at thirty-two members |
 | the owner leaves | the fleet goes to the member that has been in it longest, and is gone with the last one |
-| a fleet nobody has touched for a day | nothing: only the operator or the fleet's owner may delete a fleet, however long it has been quiet (a paused fleet records no activity at all). `prime fleets reap` clears away one whose members the gateway has all forgotten (an anonymous device is dropped after a week offline): any proven device may ask, but only when the gateway knows none of its members **and** nobody has touched the fleet for a week. A gateway that cannot say who it knows (the registry failed, or answered in part) keeps the fleet |
+| a fleet nobody has touched for a day | nothing: only the operator or the fleet's owner may delete a fleet, however long it has been quiet (a paused fleet records no activity at all). `prime fleets reap` clears away one whose members the gateway has all forgotten (an anonymous device is dropped after a week offline): any proven device may ask, but only when the gateway knows none of its members, nobody has touched the fleet for a week, **and the fleet is not paused** (a paused fleet is the operator's choice, and a member waiting it out keeps telling the gateway it is there: with a socket, once every six hours). A gateway that cannot say who it knows (the registry failed, or answered in part) keeps the fleet |
 | the name a fleet wants is a device's | refused: a fleet is reached under its own name, so the two must not collide |
 | two spaces would share a name | the second is refused when it asks to join, and told to pass `--name`; names are compared without case |
 | a member comes back with a new key | the fleet takes it only on proof that the member holds the old one (the agent makes it after `prime fleets rotate-key`), or when the operator or the owner approves it: without the proof (the old key is lost, the member is an older build) the member is told that its new key waits, and it takes no place until it is decided. The fleet then seals the next snapshot for the new key |
@@ -667,7 +667,7 @@ What is deliberately not done, so that nobody has to find it out:
   has one request waiting for the operator, and a later request from the same device replaces it. An operator
   that approves without comparing the fingerprint with the one the member's own machine prints (`prime fleets
   rotate-key` prints it, and so does the refusal the agent reports for a member whose key waits) approves whoever wrote last. `prime fleets approve --key
-  <fingerprint>` approves exactly the key that was read.
+  <fingerprint>` approves exactly the key that was read, and the gateway requires it: an approval of a new key without it, or with another, is refused, and the device that asked cannot approve its own request (not even the owner: the operator does).
 - **A member that lost its key needs the operator.** Its new key waits, and until it is approved the member
   takes no place in the fleet.
 - **Rollback and split views are not detected.** A member cannot know about a newer head it was never
@@ -751,17 +751,19 @@ you already run (the released 26.11.49 included); none of the changes below need
 - **Only the operator or the fleet's owner may delete a fleet.** A fleet nobody had touched for a day used to
   be deletable by any proven device, and a paused fleet never records activity. `prime fleets reap` still
   clears away a fleet whose members the gateway has all forgotten, but only when the gateway can say who it
-  knows (a registry that fails or answers in part keeps the fleet) and nobody has touched the fleet for a
-  week. Nothing to do.
+  knows (a registry that fails or answers in part keeps the fleet), nobody has touched the fleet for a
+  week and the fleet is not paused. A member of a paused fleet that keeps a socket open asks for its place
+  once every six hours (an older agent did not), so a pause longer than a week no longer lets the gateway
+  forget it. Nothing to do.
 - **A member's key changes only on proof, or on approval.** A member that sends a key other than the one the
   fleet holds - an agent of any build, with a key file that was replaced or deleted - no longer gets it
   taken: it is answered "the new key waits" (HTTP 409; a member of 26.11.49 prints "status 409"), the roster
   keeps the old key, and the member takes no place in the fleet until the operator or the owner approves the
   request (the admin page shows it beside the members, with the key's fingerprint; `prime fleets pending`
-  and `prime fleets approve <fleet> --member <id> [--key <fingerprint>]`). A member that keeps its key file
+  and `prime fleets approve <fleet> --member <id> --key <fingerprint>`, the fingerprint being the KEY of that list; the gateway refuses an approval of a new key that does not name it, or names another; `prime fleets remove <fleet> --member <id> --key-change` declines the request and keeps the member). A member that keeps its key file
   is not affected, and neither is one whose agent sends the key it already had. To rotate a key without
   anyone approving it, upgrade the member and run `prime fleets rotate-key <fleet> --space <name>`: the
-  agent proves the new key with the old. **Nothing is needed for a fleet whose members keep their key
+  agent proves the new key with the old (the proof is stamped with the gateway's clock, so a machine whose clock is off can still make it), and keeps the old pair in its key file until it has taken in what was sealed for it. **Nothing is needed for a fleet whose members keep their key
   files.** A paused fleet (the usual state after an operator has stopped it) needs nothing either: the
   members' keys are what they were. A member that has *no* key on the roster (admitted before keys
   existed) is treated like one that lost its key.
@@ -773,7 +775,7 @@ you already run (the released 26.11.49 included); none of the changes below need
   to set) until you set the secret on the gateway - `npx wrangler secret put FLEET_OPERATOR_TOKEN`, a random
   value that is not the gateway token - and give the same value to the operator's machine
   (`PRIME_FLEET_OPERATOR_TOKEN`, `--operator-token`, or `fleet_operator_token` under `defaults` in the
-  config). The CLI that has the new option is this release's; an older `prime` cannot send it as the
+  config; the last two go only to the gateway the machine is set up with, not to one a space names for itself). A value equal to `GATEWAY_TOKEN` or `DEVICE_TOKEN` is not accepted as the operator's, and the refusal says so. The CLI that has the new option is this release's; an older `prime` cannot send it as the
   operator (it sends the gateway token), but a fleet's owner device works with any build. **A gateway with no
   `GATEWAY_TOKEN`** (the admin page and the owner device are the operator there) **needs nothing**: it had no
   token operator, and has none now. The admin page is unchanged.
