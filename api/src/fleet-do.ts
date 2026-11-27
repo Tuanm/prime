@@ -346,6 +346,30 @@ export class FleetDO implements DurableObject {
     await this.state.storage.put("lastActivity", Date.now());
   }
 
+  // Everything this fleet put in the bucket: the head, and every snapshot's manifest and packs. The
+  // snapshots the fleet still kept are not the only ones there (a publish that was refused or that died
+  // leaves its objects, and an old gateway never cleaned up), so the prefix is listed rather than `recent`.
+  // Best effort: a fleet that cannot be deleted from storage right now is still deleted.
+  private async deleteStored(fleetId: string): Promise<void> {
+    const bucket = this.bucket();
+    const prefix = "fleets/" + fleetId + "/";
+    try {
+      let cursor: string | undefined;
+      for (let page = 0; page < 200; page++) {
+        const listed = await bucket.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+        const keys = listed.objects.map((o) => o.key);
+        if (keys.length > 0) await bucket.delete(keys);
+        if (!listed.truncated) break;
+        cursor = listed.cursor;
+      }
+    } catch {
+      // Whatever is left is only storage: it is no part of a fleet that no longer exists.
+    }
+    try {
+      await bucket.delete(this.headKey(fleetId));
+    } catch {}
+  }
+
   // Forget everything about this fleet.
   private async clear(fleetId: string): Promise<void> {
     this.hangUp("the fleet is gone");
@@ -364,10 +388,9 @@ export class FleetDO implements DurableObject {
     await this.state.storage.delete("claim");
     await this.state.storage.delete("fetched");
     await this.state.storage.delete("index");
+    await this.state.storage.delete("recent");
     await this.state.storage.delete("ownerSeenAt");
-    try {
-      await this.bucket().delete(this.headKey(fleetId));
-    } catch {}
+    await this.deleteStored(fleetId);
     // The fleet is gone, so the registry should stop listing it.
     await this.registerWithRegistry(fleetId, false);
   }

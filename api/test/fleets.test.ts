@@ -55,8 +55,16 @@ function fakeBucket() {
   const etagOf = (body: string) => "e" + body.length + "-" + (n++).toString(16);
   return {
     objects,
-    async delete(key: string) {
-      objects.delete(key);
+    async delete(key: string | string[]) {
+      for (const k of Array.isArray(key) ? key : [key]) objects.delete(k);
+    },
+    async list(opts: { prefix?: string; limit?: number; cursor?: string }) {
+      // As R2's: the cursor is the last key given, so deleting what was listed does not move the next page.
+      const keys = [...objects.keys()].filter((k) => k.startsWith(opts.prefix ?? "") && (opts.cursor === undefined || k > opts.cursor)).sort();
+      const limit = opts.limit ?? 1000;
+      const page = keys.slice(0, limit);
+      const truncated = keys.length > limit;
+      return { objects: page.map((key) => ({ key })), truncated, ...(truncated ? { cursor: page[page.length - 1]! } : {}) };
     },
     async get(key: string) {
       const o = objects.get(key);
@@ -860,6 +868,27 @@ describe("deleting a fleet", () => {
     // The name can be used again.
     const again = await call(doInstance, "/create", { caller: "admin", device: "operator" });
     expect(again.status).toBe(200);
+  });
+});
+
+describe("what a deleted fleet leaves in storage", () => {
+  test("nothing of its own: its head, manifests and packs go, and another fleet's objects stay", async () => {
+    const { doInstance, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    for (const key of ["fleets/acme/head", "fleets/acme/manifests/" + "a".repeat(64), "fleets/acme/packs/" + "b".repeat(64), "fleets/acme/packs/orphan"]) await bucket.put(key, "x");
+    // A name that begins like it, and another fleet altogether.
+    for (const key of ["fleets/acme-two/head", "fleets/acme-two/packs/" + "c".repeat(64), "fleets/other/head"]) await bucket.put(key, "x");
+    const deleted = await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
+    expect(deleted.status).toBe(200);
+    expect([...bucket.objects.keys()].sort()).toEqual(["fleets/acme-two/head", "fleets/acme-two/packs/" + "c".repeat(64), "fleets/other/head"]);
+  });
+
+  test("more than a page of it is all taken", async () => {
+    const { doInstance, bucket } = makeDo();
+    await makeFleet(doInstance, "dev-owner");
+    for (let i = 0; i < 2300; i++) await bucket.put("fleets/acme/packs/p" + i, "x");
+    await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
+    expect(bucket.objects.size).toBe(0);
   });
 });
 
