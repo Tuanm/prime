@@ -1348,6 +1348,16 @@ describe("what is a lock conflict between gits", () => {
     expect(isLockConflict("fatal: cannot lock ref 'refs/prime/fetched/1': unable to resolve reference 'refs/prime/fetched/1': reference broken")).toBe(false);
     expect(isLockConflict("error: cannot lock ref 'refs/x': is at abc but expected def")).toBe(false);
   });
+
+  test("on Windows, an object that another git is writing is waited for; elsewhere a refusal of permission is an error", () => {
+    const winMessage = "git commit-tree 0858 -p 57f0 -m fleet snapshot failed (1): error: unable to write file C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\fleet-sync-XIrQnN\\store/objects/e3/ec49d638ab14ad7c3775b4c07c3550ebcf4f29: Permission denied";
+    expect(isLockConflict(winMessage, "win32")).toBe(true);
+    expect(isLockConflict(winMessage, "linux")).toBe(false);
+    expect(isLockConflict(winMessage, "darwin")).toBe(false);
+    // Another file that cannot be written is not a busy object.
+    expect(isLockConflict("error: unable to write file /s/config: Permission denied", "win32")).toBe(false);
+    expect(isLockConflict("error: unable to write file /s/objects/e3/ab: No space left on device", "win32")).toBe(false);
+  });
 });
 
 describe("two gits at work in one store", () => {

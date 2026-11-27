@@ -91,9 +91,17 @@ function gitEnv(gitDir: string, work: string, indexFile: string): Record<string,
 const LOCK_RETRY_MS = 15_000;
 const LOCK_CONFLICT = /could not lock config file [^\n]*: File exists|Unable to create '[^']*\.lock': File exists/;
 
-/** Whether git's message says it could not take a lock file that another git holds (and nothing else is wrong). */
-export function isLockConflict(message: string): boolean {
-  return LOCK_CONFLICT.test(message);
+// On Windows, git that writes an object another git is writing at that moment (two snapshots of the same tree
+// made in the same second make the same commit) is refused the file while the other has it open. The object
+// is content-addressed, so the write is as good as done once the other has finished, and is simply run again.
+const OBJECT_BUSY = /unable to write file [^\n]*[\\/]objects[\\/][^\n]*: Permission denied/;
+
+/**
+ * Whether git's message says it could not take a lock file that another git holds, or (on Windows) write an
+ * object that another git is writing - and that nothing else is wrong.
+ */
+export function isLockConflict(message: string, platform: NodeJS.Platform = process.platform): boolean {
+  return LOCK_CONFLICT.test(message) || (platform === "win32" && OBJECT_BUSY.test(message));
 }
 
 async function gitRun(
