@@ -181,6 +181,14 @@ describe("a manifest stored under a hash", () => {
     w.gateway.payloads.set(one.manifestKey, w.gateway.payloads.get(two.manifestKey)!);
     await expect(fetchManifest(credsFor("replica-device"), "x", manifestIdOf(one.manifestKey))).rejects.toBeInstanceOf(FleetTransportError);
   });
+
+  test("is not read at all under a name that is not a hash", async () => {
+    const w = await world();
+    const one = await w.next("one\n");
+    // A name of the gateway's own choosing leaves nothing to check the bytes against.
+    w.gateway.payloads.set("fleets/x/manifests/latest", w.gateway.payloads.get(one.manifestKey)!);
+    await expect(fetchManifest(credsFor("replica-device"), "x", "latest")).rejects.toThrow(/not a hash/);
+  });
 });
 
 describe("a snapshot the gateway made up", () => {

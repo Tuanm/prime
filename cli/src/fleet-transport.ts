@@ -164,10 +164,12 @@ export function manifestHashOf(m: FleetManifest): string | undefined {
 }
 
 export async function fetchManifest(creds: FleetCredentials, fleet: string, id: string): Promise<FleetManifest> {
+  // A manifest is stored under the hash of its bytes. A name that is not one leaves nothing to check
+  // what comes back against, so it is not asked for.
+  if (!/^[0-9a-f]{64}$/.test(id)) throw new FleetTransportError("a manifest is named by its hash, and " + id.slice(0, 40) + " is not a hash");
   const bytes = await getPayload(creds, fleet, "manifests", id);
-  // A manifest is stored under the hash of its bytes: what came back is what the
-  // head (or the snapshot after it) named, or it is not this manifest at all.
-  if (/^[0-9a-f]{64}$/.test(id) && payloadHash(bytes) !== id) {
+  // What came back is what the head (or the snapshot after it) named, or it is not this manifest at all.
+  if (payloadHash(bytes) !== id) {
     throw new FleetTransportError("the manifest the gateway returned is not the one that was asked for");
   }
   const manifest = JSON.parse(bytes.toString("utf8")) as FleetManifest;
