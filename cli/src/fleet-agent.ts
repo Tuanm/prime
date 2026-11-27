@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { writeFileAtomic } from "./atomic-write";
 import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
 import { FleetTrust, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, sealFieldsOf, verifySnapshot } from "./fleet-trust";
@@ -66,6 +67,45 @@ export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
   mkdirSync(join(keyFile, ".."), { recursive: true });
   writeFileSync(keyFile, JSON.stringify(pair, null, 2), { mode: 0o600 });
   return pair;
+}
+
+/** The key pair file as it is on disk: the pair, and the one it replaced while the fleet has not yet taken the new one. */
+interface KeyFile extends MemberKeyPair {
+  previous?: MemberKeyPair;
+}
+
+/**
+ * Take a new key pair and keep the one it replaces beside it, so that the fleet can be shown that the new
+ * key is this member's own (see `proveKeyChange`). The old pair stays in the file until the fleet has taken
+ * the new key (`dropPreviousKey`). Rotating again before that keeps the first old pair: the fleet still holds that one.
+ */
+export function rotateKeyPair(keyFile: string): MemberKeyPair {
+  const current = loadOrCreateKeyPair(keyFile) as KeyFile;
+  const previous = current.previous ?? { publicKey: current.publicKey, privateKey: current.privateKey };
+  const pair = generateMemberKeyPair();
+  const next: KeyFile = { ...pair, previous };
+  writeFileAtomic(keyFile, JSON.stringify(next, null, 2), 0o600);
+  return pair;
+}
+
+/** The key pair this member held before it rotated, when the fleet may still hold it. */
+export function previousKeyPair(keyFile: string): MemberKeyPair | undefined {
+  if (!existsSync(keyFile)) return undefined;
+  try {
+    const raw = JSON.parse(readFileSync(keyFile, "utf8")) as KeyFile;
+    const p = raw.previous;
+    return p && typeof p.publicKey === "string" && typeof p.privateKey === "string" ? p : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The fleet holds the new key: the old pair is of no more use, and is not kept. */
+export function dropPreviousKey(keyFile: string): void {
+  if (!previousKeyPair(keyFile)) return;
+  const raw = JSON.parse(readFileSync(keyFile, "utf8")) as KeyFile;
+  const { previous: _gone, ...kept } = raw;
+  writeFileAtomic(keyFile, JSON.stringify(kept, null, 2), 0o600);
 }
 
 /** The members a snapshot is sealed for, as one string: who, and with which key. */

@@ -19,7 +19,7 @@ import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { loadOrCreateKeyPair, pull, publish, rosterOf, type MemberPaths, type Position } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, type MemberPaths, type Position } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { keyIdOf } from "./fleet-crypto.ts";
 import { FleetTrust } from "./fleet-trust.ts";
@@ -374,13 +374,44 @@ export async function fleetsApprove(ctx: Ctx): Promise<void> {
   const deviceId = str(ctx.parsed, "member");
   if (!deviceId) throw new UsageError("missing --member", "The device id of the request to approve, as shown by 'prime fleets pending <fleet>'.");
   const t = target(ctx, spaceArg(ctx));
-  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/approve", { deviceId });
+  // A member that asks to replace its key is approved for the key that was read in the list: `--key` names it
+  // (the KEY column of `prime fleets pending`, to compare with what the member's own machine prints), so that
+  // a request that was replaced since is not approved by mistake.
+  const key = str(ctx.parsed, "key");
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/approve", { deviceId, ...(key ? { key } : {}) });
   failOn(res.status, res.json, "could not approve the request");
   if (ctx.json) {
-    printJson({ fleet: fleetId, member: res.json.member });
+    printJson({ fleet: fleetId, member: res.json.member, ...(res.json.keyChanged ? { keyChanged: true } : {}) });
     return;
   }
-  ctx.out(green("approved") + " " + deviceId);
+  ctx.out(green(res.json.keyChanged ? "replaced the key of" : "approved") + " " + deviceId);
+}
+
+/**
+ * Take a new key pair for a space, and show the fleet that it is the space's own.
+ *
+ * The old pair is kept beside the new one until the fleet has taken it: the agent's next ask for its place
+ * carries a proof made with the old key (the fleet checks it; nobody has to approve), and the old pair is then
+ * dropped. A space that lost its key has no such proof: its new key waits for the operator.
+ */
+export async function fleetsRotateKey(ctx: Ctx): Promise<void> {
+  const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
+  const spaceName = spaceArg(ctx);
+  if (!spaceName) throw new UsageError("missing --space", "Name the space whose key is replaced.");
+  const space = ctx.config.spaces[spaceName];
+  if (!space) throw new UsageError("unknown space \"" + spaceName + "\"", "Run 'prime spaces list' to see the spaces.");
+  if (space.fleet !== fleetId) throw new UsageError("the space \"" + spaceName + "\" is not in the fleet " + fleetId);
+  const keyFile = fleetKeyFile(ctx.configPath, fleetId, spaceName);
+  if (previousKeyPair(keyFile)) {
+    throw new CliError("the last rotation has not reached the fleet yet", "The agent hands it over on its next round: 'prime fleets agent status' shows it. Wait for that before rotating again.");
+  }
+  const pair = rotateKeyPair(keyFile);
+  if (ctx.json) {
+    printJson({ fleet: fleetId, space: spaceName, key: keyIdOf(pair.publicKey) });
+    return;
+  }
+  ctx.out(green("new key for ") + bold(spaceName) + dim("  " + keyIdOf(pair.publicKey)));
+  ctx.out(dim("  the agent shows the fleet it is the space's own on its next round; the KEY column of 'prime fleets members' then changes"));
 }
 
 export async function fleetsPending(ctx: Ctx): Promise<void> {
@@ -388,7 +419,7 @@ export async function fleetsPending(ctx: Ctx): Promise<void> {
   const t = target(ctx, spaceArg(ctx));
   const res = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/pending");
   failOn(res.status, res.json, "could not list the requests");
-  const pending = (res.json.pending ?? []) as Array<{ deviceId: string; label?: string; requestedAt: number }>;
+  const pending = (res.json.pending ?? []) as Array<{ deviceId: string; label?: string; requestedAt: number; pubkey?: string; keyChange?: boolean }>;
   if (ctx.json) {
     printJson({ fleet: fleetId, pending });
     return;
@@ -397,8 +428,10 @@ export async function fleetsPending(ctx: Ctx): Promise<void> {
     ctx.out(dim("no requests waiting"));
     return;
   }
-  ctx.out(table(["DEVICE", "LABEL", "REQUESTED"], [
-    ...pending.map((p) => [p.deviceId, p.label ?? "-", new Date(p.requestedAt).toISOString()]),
+  // The KEY of a request is the fingerprint of the key it offers: for a member that asks to replace its key it is
+  // what `prime fleets approve --key` takes, and the one to compare with the member's own machine.
+  ctx.out(table(["DEVICE", "LABEL", "REQUESTED", "REQUEST", "KEY"], [
+    ...pending.map((p) => [p.deviceId, p.label ?? "-", new Date(p.requestedAt).toISOString(), p.keyChange ? "new key" : "join", p.pubkey ? keyIdOf(p.pubkey) : "-"]),
   ]));
 }
 
@@ -420,7 +453,8 @@ export async function fleetsRemove(ctx: Ctx): Promise<void> {
   const deviceId = str(ctx.parsed, "member");
   if (!deviceId) throw new UsageError("missing --member", "The device id to remove.");
   const t = target(ctx, spaceArg(ctx));
-  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/remove", { deviceId });
+  // `--key-change` declines a member's request for another key and keeps the member.
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/remove", { deviceId, ...(bool(ctx.parsed, "key-change") ? { keyChange: true } : {}) });
   failOn(res.status, res.json, "could not remove the member");
   if (ctx.json) {
     printJson({ fleet: fleetId, removed: res.json.removed });

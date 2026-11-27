@@ -40,6 +40,7 @@ import {
   fleetsPending,
   fleetsRemove,
   fleetsReap,
+  fleetsRotateKey,
   fleetsRevoke,
   fleetsDelete,
   fleetsStatus,
@@ -376,6 +377,8 @@ async function main(argv: string[]): Promise<void> {
           return fleetsTrust(ctx);
         case "reap":
           return fleetsReap(ctx);
+        case "rotate-key":
+          return fleetsRotateKey(ctx);
         default:
           throw new UsageError(`unknown fleets command "${sub}"`, "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|status> [args]");
       }

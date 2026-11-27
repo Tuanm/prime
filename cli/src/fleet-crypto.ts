@@ -77,6 +77,46 @@ export interface WrappedKey {
   mac?: string;
 }
 
+/** The label that separates a key-change proof from every other use of a key; the gateway's copy is `KEY_PROOF_INFO` in api/src/fleets.ts. */
+const KEY_PROOF_INFO = "prime-fleet-key-change-v1";
+
+/** What a key-change proof is a MAC of (the same as `keyChangeMessage` in api/src/fleets.ts: a JSON array, so no field runs into the next). */
+export function keyChangeMessage(newPubkey: string, fleet: string, deviceId: string, ts: number, nonce: string): string {
+  return JSON.stringify([KEY_PROOF_INFO, newPubkey, fleet, deviceId, ts, nonce]);
+}
+
+export interface KeyProof {
+  ts: number;
+  nonce: string;
+  mac: string;
+}
+
+/**
+ * Show the fleet that this member holds the key it has now (`oldPrivateKey`), when it asks for another one.
+ *
+ * The fleet object has an X25519 key pair of its own (`objectPublicKey`, which `/role` gives). The tag is
+ * an HMAC under the Diffie-Hellman secret of the old private key and the object's public key, over the new
+ * key, the fleet, the device, a time and a nonce: only a holder of the old private key can make it, and it
+ * is no use for any other key, fleet, device or moment. A device's token alone is not enough to change a
+ * key; this is what is.
+ */
+export function proveKeyChange(
+  oldPrivateKeyPem: string,
+  objectPublicKey: string,
+  newPubkey: string,
+  fleet: string,
+  deviceId: string,
+  now: number = Date.now(),
+): KeyProof {
+  const priv = createPrivateKey({ key: oldPrivateKeyPem, format: "pem", type: "pkcs8" });
+  const peer = publicKeyFromRaw(Buffer.from(objectPublicKey, "base64"));
+  const secret = diffieHellman({ privateKey: priv, publicKey: peer });
+  const macKey = Buffer.from(hkdfSync("sha256", secret, Buffer.alloc(32), Buffer.from(KEY_PROOF_INFO), 32));
+  const nonce = randomBytes(16).toString("base64");
+  const mac = createHmac("sha256", macKey).update(keyChangeMessage(newPubkey, fleet, deviceId, now, nonce)).digest("base64");
+  return { ts: now, nonce, mac };
+}
+
 /** A short fingerprint of a member's public key (base64), to tell its keys apart. */
 export function keyIdOf(publicKeyB64: string): string {
   return createHash("sha256").update(Buffer.from(publicKeyB64, "base64")).digest().subarray(0, 8).toString("base64");

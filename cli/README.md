@@ -204,6 +204,7 @@ prime fleets invite acme                      # a single-use code
 prime fleets join acme --code <code>          # from the joining machine
 prime fleets pending acme                     # who is waiting
 prime fleets approve acme --member <id>       # the operator's door
+prime fleets rotate-key acme --space <name>   # a new key for a space; the agent proves it is the space's own
 prime fleets members acme
 prime fleets status acme
 ```

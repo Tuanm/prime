@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { chooseRoute } from "../src/fleet-agent";
+import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyFetched, loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
@@ -589,6 +590,123 @@ describe("the agent's round for a replica", () => {
     } finally {
       finish(w);
     }
+  });
+
+  describe("a member that rotated its key", () => {
+    // The object's key pair, as the gateway has one: a proof is checked with the private half.
+    const objectPair = () => {
+      const pair = generateKeyPairSync("x25519");
+      const der = pair.publicKey.export({ type: "spki", format: "der" }) as Buffer;
+      return { publicKey: der.subarray(der.length - 32).toString("base64"), privateKey: pair.privateKey };
+    };
+    // What the object does: DH(its private key, the member's old public key), HKDF, HMAC.
+    const holds = (obj: ReturnType<typeof objectPair>, oldPublicKey: string, newPublicKey: string, device: string, proof: { ts: number; nonce: string; mac: string }) => {
+      const spki = Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from(oldPublicKey, "base64")]);
+      const shared = diffieHellman({ privateKey: obj.privateKey, publicKey: createPublicKey({ key: spki, format: "der", type: "spki" }) });
+      const key = Buffer.from(hkdfSync("sha256", shared, Buffer.alloc(32), Buffer.from("prime-fleet-key-change-v1"), 32));
+      const expected = createHmac("sha256", key).update(JSON.stringify(["prime-fleet-key-change-v1", newPublicKey, "x", device, proof.ts, proof.nonce])).digest("base64");
+      return expected === proof.mac;
+    };
+
+    test("its next ask for a place carries a proof made with the key it had, and the old pair is dropped once the fleet answers", async () => {
+      const { heartbeat } = await import("../src/fleet-daemon");
+      const { previousKeyPair, rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const s = await space(w, "r1");
+        const obj = objectPair();
+        w.gateway.keyProofKey = obj.publicKey;
+        const old = loadOrCreateKeyPair(s.paths.keyFile);
+        const next = rotateKeyPair(s.paths.keyFile);
+        expect(previousKeyPair(s.paths.keyFile)?.publicKey).toBe(old.publicKey);
+        s.loop.lastBootstrap = 1;
+        await heartbeat(s.loop as never, () => undefined);
+        const said = w.gateway.bootstrapBodies.at(-1)!;
+        expect(said.pubkey).toBe(next.publicKey);
+        expect(holds(obj, old.publicKey, next.publicKey, "r1", said.keyProof as never)).toBe(true);
+        expect(previousKeyPair(s.paths.keyFile)).toBeUndefined();
+        expect(loadOrCreateKeyPair(s.paths.keyFile).publicKey).toBe(next.publicKey);
+        // Nothing to prove once the fleet holds it: the next ask carries none.
+        s.loop.lastBootstrap = 1;
+        await heartbeat(s.loop as never, () => undefined);
+        expect(w.gateway.bootstrapBodies.at(-1)!.keyProof).toBeUndefined();
+      } finally {
+        finish(w);
+      }
+    });
+
+    test("a fleet that waits for the operator's approval keeps the old pair, and the refusal says why", async () => {
+      const { heartbeat } = await import("../src/fleet-daemon");
+      const { previousKeyPair, rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const s = await space(w, "r1");
+        w.gateway.keyProofKey = objectPair().publicKey;
+        w.gateway.keyChangePending = true;
+        const old = loadOrCreateKeyPair(s.paths.keyFile);
+        rotateKeyPair(s.paths.keyFile);
+        s.loop.lastBootstrap = 1;
+        expect(await heartbeat(s.loop as never, () => undefined)).toBe(false);
+        expect(previousKeyPair(s.paths.keyFile)?.publicKey).toBe(old.publicKey);
+        expect(s.loop.refusedForMs).toBe(60_000);
+      } finally {
+        finish(w);
+      }
+    });
+
+    test("the key file keeps the pair it replaced until it is dropped, and a second rotation keeps the first", async () => {
+      const { dropPreviousKey, previousKeyPair, rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const file = join(w.root, "rot", "m.key");
+        const first = loadOrCreateKeyPair(file);
+        expect(previousKeyPair(file)).toBeUndefined();
+        const second = rotateKeyPair(file);
+        const third = rotateKeyPair(file);
+        // The fleet still holds the first: it is the one that proves the change.
+        expect(previousKeyPair(file)).toEqual({ publicKey: first.publicKey, privateKey: first.privateKey });
+        expect(loadOrCreateKeyPair(file).publicKey).toBe(third.publicKey);
+        expect(third.publicKey).not.toBe(second.publicKey);
+        expect(statSync(file).mode & 0o777).toBe(process.platform === "win32" ? statSync(file).mode & 0o777 : 0o600);
+        dropPreviousKey(file);
+        expect(previousKeyPair(file)).toBeUndefined();
+        expect(loadOrCreateKeyPair(file)).toEqual({ publicKey: third.publicKey, privateKey: third.privateKey });
+      } finally {
+        finish(w);
+      }
+    });
+
+    test("a gateway that does not ask for a proof takes the key as it always did, and the old pair is dropped", async () => {
+      const { heartbeat } = await import("../src/fleet-daemon");
+      const { previousKeyPair, rotateKeyPair } = await import("../src/fleet-agent");
+      const w = await world();
+      try {
+        const s = await space(w, "r1");
+        rotateKeyPair(s.paths.keyFile);
+        s.loop.lastBootstrap = 1;
+        await heartbeat(s.loop as never, () => undefined);
+        expect(w.gateway.bootstrapBodies.at(-1)!.keyProof).toBeUndefined();
+        expect(previousKeyPair(s.paths.keyFile)).toBeUndefined();
+      } finally {
+        finish(w);
+      }
+    });
+
+    test("a member that lost its key sends no proof, and its new key waits", async () => {
+      const { heartbeat } = await import("../src/fleet-daemon");
+      const w = await world();
+      try {
+        const s = await space(w, "r1");
+        w.gateway.keyProofKey = objectPair().publicKey;
+        w.gateway.keyChangePending = true;
+        rmSync(s.paths.keyFile);
+        s.loop.lastBootstrap = 1;
+        expect(await heartbeat(s.loop as never, () => undefined)).toBe(false);
+        expect(w.gateway.bootstrapBodies.at(-1)!.keyProof).toBeUndefined();
+      } finally {
+        finish(w);
+      }
+    });
   });
 
   test("PRIME_FLEET_REPLICA=mirror writes every snapshot as it arrives", async () => {

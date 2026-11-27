@@ -420,9 +420,10 @@ USAGE
   prime fleets invite <fleet-id> [options]      Mint a single-use invite code
   prime fleets join <fleet-id> --code <code>     Join with an invite code
   prime fleets pending <fleet-id>                List the requests waiting for approval
-  prime fleets approve <fleet-id> --member <id> Admit a waiting device
+  prime fleets approve <fleet-id> --member <id> [--key <fp>]   Admit a waiting device, or a member's new key
+  prime fleets rotate-key <fleet-id> --space <name>   New key pair for a space; the agent proves it is the space's own
   prime fleets members <fleet-id>                Show the roster
-  prime fleets remove <fleet-id> --member <id>  Remove a member
+  prime fleets remove <fleet-id> --member <id> [--key-change]  Remove a member (or decline its request for a new key)
   prime fleets leave <fleet-id>                  Leave the fleet
   prime fleets revoke <fleet-id>                 Invalidate every outstanding invite
   prime fleets delete <fleet-id>                  Remove the fleet and everything in it

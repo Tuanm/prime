@@ -48,6 +48,12 @@ export class FakeGateway {
   advanceMarksApplied = false;
   /** How many times a member asked for its place. */
   bootstraps = 0;
+  /** What each ask for a place said. */
+  bootstrapBodies: Array<Record<string, unknown>> = [];
+  /** The key the gateway's object makes key-change proofs with (what /role says); undefined for a gateway that predates it. */
+  keyProofKey: string | undefined = undefined;
+  /** A key other than the one on the roster waits for the operator: the ask is refused, as the real object does without a proof. */
+  keyChangePending = false;
   /** Requests of each kind, by route. */
   requests = new Map<string, number>();
   /** Pack downloads, by the pack's key. */
@@ -89,7 +95,22 @@ export class FakeGateway {
     }
     if (kind === "bootstrap" && method === "POST") {
       this.bootstraps++;
+      const said = (() => {
+        try {
+          return JSON.parse(String(body ?? "{}")) as Record<string, unknown>;
+        } catch {
+          return {};
+        }
+      })();
+      this.bootstrapBodies.push(said);
       if (!this.members.has(creds.deviceId)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const held = this.members.get(creds.deviceId)!.pubkey;
+      if (this.keyChangePending && typeof said.pubkey === "string" && said.pubkey !== held) {
+        return Response.json(
+          { error: "this member's key is not the one the fleet holds, and it could not show that it holds the old one: the new key waits for the operator (or the fleet's owner) to approve it", keyChange: "pending", retryAfterMs: 60_000 },
+          { status: 409, headers: { "retry-after": "60" } },
+        );
+      }
       // Whoever holds the lease keeps it; the others are told so.
       if (this.primary && this.primary !== creds.deviceId) {
         return Response.json({ ok: true, role: "replica", reason: "lease-held", holder: this.primary, head: this.head ?? { seq: 0 } });
@@ -127,7 +148,7 @@ export class FakeGateway {
     }
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);
-      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}) });
+      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) });
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });

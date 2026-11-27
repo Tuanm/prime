@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { generateMemberKeyPair, openForMember, openPayload, sealForMembers, sealManyForMembers } from "../src/fleet-crypto";
+import { generateMemberKeyPair, keyChangeMessage, openForMember, openPayload, proveKeyChange, sealForMembers, sealManyForMembers } from "../src/fleet-crypto";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -161,5 +161,29 @@ describe("the seal of a manifest", () => {
   test("the payload still opens for a reader that does not look at the seal", () => {
     const { sealed, alice, sender } = make();
     expect(openForMember(sealed.ciphertexts[0]!, sealed.wrapped, sender.publicKey, "alice", alice.privateKey)?.toString()).toBe("x");
+  });
+});
+
+describe("the proof that a key change is the member's own", () => {
+  const object = generateMemberKeyPair();
+
+  test("is a tag that only the holder of the old private key can make, for one key, fleet, device and moment", () => {
+    const old = generateMemberKeyPair();
+    const next = generateMemberKeyPair();
+    const now = 1_700_000_000_000;
+    const a = proveKeyChange(old.privateKey, object.publicKey, next.publicKey, "acme", "dev-1", now);
+    expect(a.ts).toBe(now);
+    expect(Buffer.from(a.mac, "base64").length).toBe(32);
+    // Every proof has a nonce of its own, so two for the same change differ.
+    expect(proveKeyChange(old.privateKey, object.publicKey, next.publicKey, "acme", "dev-1", now).mac).not.toBe(a.mac);
+    // The tag is over the whole message: another key, fleet or device is another tag (same nonce and time, so only the fields differ).
+    const message = (key: string, fleet: string, device: string) => keyChangeMessage(key, fleet, device, a.ts, a.nonce);
+    expect(message(next.publicKey, "acme", "dev-1")).not.toBe(message(old.publicKey, "acme", "dev-1"));
+    expect(message(next.publicKey, "acme", "dev-1")).not.toBe(message(next.publicKey, "other", "dev-1"));
+    expect(message(next.publicKey, "acme", "dev-1")).not.toBe(message(next.publicKey, "acme", "dev-2"));
+  });
+
+  test("a message is a JSON array, so a field cannot run into the next", () => {
+    expect(keyChangeMessage("k", "ab", "c", 1, "n")).not.toBe(keyChangeMessage("k", "a", "bc", 1, "n"));
   });
 });

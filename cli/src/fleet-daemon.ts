@@ -30,7 +30,8 @@ import { CliError } from "./errors.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { acquireAgentLock, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { NotSealedError, NotSealedYetError, loadOrCreateKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
 import {
   FETCHED_REPORT_MS,
@@ -49,7 +50,7 @@ import {
 import { fleetAgentServiceConfig, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
-import { fetchMemberKeys, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { fetchMemberKeys, fetchRole, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
@@ -1222,7 +1223,7 @@ interface BootstrapResult {
 }
 
 /** Take a place in the fleet, without the CLI's machinery. */
-async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: string, label?: string): Promise<BootstrapResult> {
+async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: string, label?: string, keyProof?: KeyProof): Promise<BootstrapResult> {
   const res = await fetch(creds.gateway + "/fleets/" + encodeURIComponent(fleet) + "/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json", "x-prime-device": creds.deviceId, "x-device-token": creds.deviceToken },
@@ -1230,7 +1231,8 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     // if the fleet learns the new one. The name travels too, so a space that
     // was renamed - or an identity another space took over - reads correctly
     // in the operator's list.
-    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(label ? { label } : {}), seals: true }),
+    // A key other than the one the fleet holds is taken only on the old key's proof, or the operator's say-so.
+    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(keyProof ? { keyProof } : {}), ...(label ? { label } : {}), seals: true }),
     // Asking for the place is how the lease is renewed: a request that hangs for
     // a minute would outlast the lease, so it is cut short (and asked again).
     signal: AbortSignal.timeout(Math.min(creds.timeoutMs ?? PLACE_TIMEOUT_MS, PLACE_TIMEOUT_MS)),
@@ -1238,7 +1240,13 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
   if (!res.ok) {
     // A paused fleet answers with a reason and how long to wait: that is not
     // a failure to report, it is the operator's choice.
-    const body = (await res.json().catch(() => undefined)) as { paused?: unknown; retryAfterMs?: unknown } | undefined;
+    const body = (await res.json().catch(() => undefined)) as { paused?: unknown; retryAfterMs?: unknown; keyChange?: unknown; error?: unknown } | undefined;
+    // The fleet holds another key for this member and could not be shown the old one: the new key waits for
+    // the operator. It is said as it is, because it is the one refusal that needs somebody to act.
+    if (body && body.keyChange === "pending" && typeof body.error === "string") {
+      const after = Number(res.headers.get("retry-after"));
+      return { ok: false, primary: false, answered: true, error: body.error, ...(Number.isFinite(after) && after > 0 ? { retryAfterMs: after * 1000 } : {}) };
+    }
     if (body && body.paused === true) {
       const header = Number(res.headers.get("retry-after"));
       const asked =
@@ -1331,12 +1339,25 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
   loop.placing = true;
   try {
     const keys = loadOrCreateKeyPair(loop.paths.keyFile);
-    const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name).catch((err: unknown) => {
+    // A member that rotated its key (`prime fleets rotate-key`) shows the fleet that the new one is its own:
+    // a proof made with the key it had, until the fleet has taken the new one.
+    const before = previousKeyPair(loop.paths.keyFile);
+    let proof: KeyProof | undefined;
+    let asked = false;
+    if (before) {
+      const role = await fetchRole(loop.creds, loop.fleet).catch(() => undefined);
+      asked = role?.keyProofKey !== undefined;
+      if (role?.keyProofKey) proof = proveKeyChange(before.privateKey, role.keyProofKey, keys.publicKey, loop.fleet, loop.creds.deviceId);
+    }
+    const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name, proof).catch((err: unknown) => {
       // The request did not get an answer: what an earlier refusal asked for is history.
       loop.refusedForMs = undefined;
       throw err;
     });
     loop.lastBootstrap = Date.now();
+    // The fleet answered with a place (or a wait for one) rather than a refusal, so it holds the key this
+    // member has now - on the proof, or because a gateway that predates it asks for none: the old pair is spent.
+    if (before && placed.ok && (proof || !asked)) dropPreviousKey(loop.paths.keyFile);
     if (placed.paused) {
       loop.paused = true;
       loop.primary = false;

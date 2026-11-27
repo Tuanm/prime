@@ -286,10 +286,10 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; keyProofKey?: string }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
-  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown };
+  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; keyProofKey?: unknown };
   return {
     member: body.member === true,
     primary: body.primary === true,
@@ -300,6 +300,8 @@ export async function fetchRole(
     ...(body.sealGate === true ? { sealGate: true as const } : {}),
     // The most one upload may be: said by a gateway that has a limit.
     ...(typeof body.snapshotLimit === "number" && body.snapshotLimit > 0 ? { snapshotLimit: body.snapshotLimit } : {}),
+    // The key a member shows that it holds its old key with, when it changes its own: said by a gateway that asks for the proof.
+    ...(typeof body.keyProofKey === "string" && body.keyProofKey ? { keyProofKey: body.keyProofKey } : {}),
   };
 }
 
