@@ -4,8 +4,9 @@
 // ~/.prime, their fleet agent (an update restarts it), their services. Every run of the built binary in the
 // end-to-end scripts goes through `spawnBuilt`/`spawnBuiltSync`, which refuse to start one that is not isolated, and a
 // unit test (see `unit.test.ts`) fails if a script runs the binary any other way.
+import { realpathSync } from "node:fs";
 import { userInfo } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface BuiltOptions {
   /**
@@ -22,8 +23,25 @@ export function isolatedEnv(dir: string, config: string): Record<string, string>
   return { PRIME_CONFIG: config, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: join(home, ".config"), NO_COLOR: "1" };
 }
 
+/** A path as the file system knows it: links followed where it exists (a home reached through a link is the same home). */
+function real(path: string): string {
+  // The longest part of it that exists, with links followed, and the rest as it is.
+  let rest = "";
+  let head = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync.native(head), rest);
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return resolve(path);
+      rest = join(basename(head), rest);
+      head = parent;
+    }
+  }
+}
+
 function inside(path: string, parent: string): boolean {
-  const rel = relative(parent, path);
+  const rel = relative(real(parent), real(path));
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel) && !rel.startsWith(sep));
 }
 
@@ -31,12 +49,15 @@ function inside(path: string, parent: string): boolean {
 export function requireIsolated(env: Record<string, string | undefined> | undefined, built: BuiltOptions = {}): void {
   const config = env?.PRIME_CONFIG;
   if (!config) throw new Error("a run of the built CLI needs PRIME_CONFIG: without it it is about the developer's configuration");
-  const real = userInfo().homedir;
-  if (inside(config, join(real, ".prime"))) throw new Error("a run of the built CLI must not use the developer's configuration: " + config);
+  const home = userInfo().homedir;
+  if (inside(config, join(home, ".prime"))) throw new Error("a run of the built CLI must not use the developer's configuration: " + config);
   if (built.realHome) return;
-  const home = env?.HOME;
-  if (!home) throw new Error("a run of the built CLI needs HOME of its own: without it it is about the developer's services and agent");
-  if (resolve(home) === real) throw new Error("a run of the built CLI must not use the developer's home: " + home);
+  // HOME is what a POSIX program reads for its home, USERPROFILE what Windows does: both are the run's own.
+  for (const name of process.platform === "win32" ? ["HOME", "USERPROFILE"] : ["HOME"]) {
+    const value = env?.[name];
+    if (!value) throw new Error("a run of the built CLI needs " + name + " of its own: without it it is about the developer's services and agent");
+    if (real(value) === real(home)) throw new Error("a run of the built CLI must not use the developer's home (" + name + "): " + value);
+  }
 }
 
 type Env = { env: Record<string, string | undefined> };

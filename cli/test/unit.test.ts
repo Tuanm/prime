@@ -5,7 +5,7 @@
 // target precedence, and tool-result rendering.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -171,8 +171,8 @@ describe("end-to-end runs", () => {
   /** The source without its comments (a comment that mentions PRIME_CONFIG satisfies nothing). */
   const code = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[\s;,(])\/\/.*$/gm, "$1");
 
-  /** The text of the first argument of the call whose "(" is at `open`. */
-  function firstArgument(text: string, open: number): string {
+  /** The text of the call whose "(" is at `open` (its arguments, up to the matching ")"). */
+  function callText(text: string, open: number): string {
     let depth = 0;
     let quote = "";
     for (let i = open + 1; i < text.length; i++) {
@@ -187,12 +187,36 @@ describe("end-to-end runs", () => {
       else if (")]}".includes(ch)) {
         if (depth === 0) return text.slice(open + 1, i);
         depth--;
-      } else if (ch === "," && depth === 0) return text.slice(open + 1, i);
+      }
     }
     return text.slice(open + 1);
   }
 
-  const RAW_SPAWN = /(?<![\w.])(?:Bun\.spawn(?:Sync)?|spawn(?:Sync)?|execFile(?:Sync)?|execSync|exec|fork)\s*\(/g;
+  /** The first argument of a call, given its text. */
+  function firstArgument(call: string): string {
+    let depth = 0;
+    let quote = "";
+    for (let i = 0; i < call.length; i++) {
+      const ch = call[i]!;
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+      else if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) depth--;
+      else if (ch === "," && depth === 0) return call.slice(0, i);
+    }
+    return call;
+  }
+
+  // A call that starts a program, by whatever name it is reached: `Bun.spawn(`, `cp.spawn(`, `childProcess.execFile(`, a
+  // bare `spawn(`, or `Bun["spawn"](`. (`spawnBuilt(` is another name, and is the way.)
+  const NAMES = "spawn|spawnSync|execFile|execFileSync|exec|execSync|fork";
+  const RAW_SPAWN = new RegExp("(?<![\\w$])(?:(?:[\\w$]+\\s*\\.\\s*)?(?:" + NAMES + ")|[\\w$]+\\s*\\[\\s*[\"'](?:" + NAMES + ")[\"']\\s*\\])\\s*\\(", "g");
+  // What names the built CLI in these scripts.
+  const BUILT = /\b(?:BIN|BUNDLE|selfBin|dist\/prime)\b/;
 
   test("the scripts are found, and run the built CLI through the helper", () => {
     expect(scripts).toContain("e2e.ts");
@@ -202,17 +226,27 @@ describe("end-to-end runs", () => {
     }
   });
 
-  test("no script starts a program from anything but a literal: a command in a variable, an object, or a path could be the built CLI", () => {
+  test("no script starts a program from anything but a literal, and none that names the built CLI but the helper", () => {
     for (const name of scripts) {
       const text = code(readFileSync(join(dir, name), "utf8"));
       for (const found of text.matchAll(RAW_SPAWN)) {
-        const first = firstArgument(text, found.index! + found[0].length - 1).trim();
-        const line = text.slice(0, found.index).split("\n").length;
-        // A program named by a string, or a list that starts with one: ps, bun build, node, powershell.
-        expect(/^(?:\[\s*)?["'`][^"'`]*["'`]/.test(first), name + ":" + line + " starts " + first.slice(0, 60)).toBe(true);
+        const call = callText(text, found.index! + found[0].length - 1);
+        const first = firstArgument(call).trim();
+        const where = name + ":" + text.slice(0, found.index).split("\n").length;
+        // A program named by a string, or a list that starts with one: ps, node, powershell, bun build.
+        expect(/^(?:\[\s*)?["'`][^"'`]*["'`]/.test(first), where + " starts " + first.slice(0, 60)).toBe(true);
+        // Not the built CLI by way of a launcher ("bun", BUNDLE, ...): only `bun build`, which makes it, may name it.
+        if (!/^\[\s*["']bun["']\s*,\s*["']build["']/.test(first)) expect(BUILT.test(call), where + " runs the built CLI: " + call.slice(0, 60)).toBe(false);
       }
       expect(/\bBun\.\$|(?<![\w$])\$`/.test(text), name + " runs a shell command").toBe(false);
     }
+  });
+
+  test("the guard sees a call however it is reached", () => {
+    const calls = ['cp.spawn(BIN, ["x"])', 'childProcess.execFile(BIN)', 'Bun["spawn"]([BIN])', 'spawn(BIN)', 'Bun.spawnSync(["bun", BUNDLE, "update"])', "Bun.spawn({ cmd: [BIN] })"];
+    for (const call of calls) expect([...call.matchAll(RAW_SPAWN)].length, call).toBe(1);
+    expect([..."spawnBuilt([BIN])".matchAll(RAW_SPAWN)].length).toBe(0);
+    expect(BUILT.test('["bun", BUNDLE, "update"]')).toBe(true);
   });
 
   test("a run that is not isolated is refused before anything starts", () => {
@@ -221,6 +255,11 @@ describe("end-to-end runs", () => {
     expect(() => requireIsolated({ PRIME_CONFIG: join(tmpdir(), "c.yaml") })).toThrow(/HOME of its own/);
     expect(() => requireIsolated({ PRIME_CONFIG: join(real, ".prime", "config.yaml"), HOME: join(tmpdir(), "h") })).toThrow(/developer's configuration/);
     expect(() => requireIsolated({ PRIME_CONFIG: join(tmpdir(), "c.yaml"), HOME: real })).toThrow(/developer's home/);
+    // A home reached through a link is the same home.
+    const alias = join(mkdtempSync(join(tmpdir(), "home-link-")), "home");
+    symlinkSync(real, alias);
+    expect(() => requireIsolated({ PRIME_CONFIG: join(tmpdir(), "c.yaml"), HOME: alias, USERPROFILE: alias })).toThrow(/developer's home/);
+    expect(() => requireIsolated({ PRIME_CONFIG: join(alias, ".prime", "config.yaml"), HOME: join(tmpdir(), "h") })).toThrow(/developer's configuration/);
     expect(() => requireIsolated(isolatedEnv(tmpdir(), join(tmpdir(), "c.yaml")))).not.toThrow();
     // The one script about the real service manager needs a configuration of its own, and says that it keeps the real home.
     expect(() => requireIsolated({ PRIME_CONFIG: join(tmpdir(), "c.yaml"), HOME: real }, { realHome: true })).not.toThrow();
