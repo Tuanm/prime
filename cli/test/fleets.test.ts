@@ -196,7 +196,12 @@ describe("the member's state, written by the agent and by `prime fleets sync`", 
       const script =
         // The module is named by a JSON string, so that a Windows path's backslashes are not read as escapes.
         "import { updateFleetState } from " + JSON.stringify(join(import.meta.dir, "../src/fleets.ts")) + ";" +
-        "const i = Number(process.argv[1]); for (let k = 0; k < 15; k++) updateFleetState(process.argv[2], 'f', 's', { fetchedSeq: i * 100 + k, fetchedCommit: 'c' + (i * 100 + k) });";
+        "import { LockBusyError } from " + JSON.stringify(join(import.meta.dir, "../src/dir-lock.ts")) + ";" +
+        // A writer that cannot get the lock in the time it is given is tried again at the next round (see `withStateLock`):
+        // here the next try is the same write again. Six processes that do nothing else take turns at a lock that
+        // each hand-over costs tens of milliseconds on a slow file system, and one of them can be kept waiting for a
+        // couple of seconds. Anything that is not a busy lock (a refusal that reached the caller) is a failure.
+        "const i = Number(process.argv[1]); for (let k = 0; k < 15; k++) { for (let tries = 0; ; tries++) { try { updateFleetState(process.argv[2], 'f', 's', { fetchedSeq: i * 100 + k, fetchedCommit: 'c' + (i * 100 + k) }); break; } catch (e) { if (!(e instanceof LockBusyError) || tries >= 10) throw e; } } }";
       const children = [1, 2, 3, 4, 5, 6].map((i) => Bun.spawn([process.execPath, "-e", script, String(i), config], { env: process.env, stdout: "ignore", stderr: "pipe" }));
       // A writer that fails says why: what it printed is shown with its exit code.
       for (const c of children) {
