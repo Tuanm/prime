@@ -568,6 +568,8 @@ accepts a chain whose genesis names another key.
   first signed chain it sees and prints its fingerprint; compare it with `prime fleets roster show` where the key is.
 - **A snapshot is taken in only if the chain says its key was a member's (not a viewer's) at that sequence**: from the
   `add` to the `remove`, with the `seqAt` the owner signed. What the gateway lists no longer decides.
+- **A viewer never writes.** With a signed roster the chain's role decides; with the gateway's own roster, a key of a member whose role is
+  `viewer` is not a key a snapshot may come from. A viewer is still sealed for, and reads.
 - **A publisher seals only for the members the chain names, with the keys it names.** A key the gateway adds to its list, or
   puts in place of a member's, is skipped and named ("the gateway lists a key the signed roster does not"); the
   publisher itself must be a member in the chain.
@@ -575,6 +577,9 @@ accepts a chain whose genesis names another key.
   name is refused without having to have been learnt first.
 - **No way back.** A member that pinned an owner key or saw a signed chain refuses a gateway that says the roster is not
   signed, a chain that does not contain the newest entry it saw, and a chain of another owner.
+
+`prime fleets members --space <name>` and `status` print this machine's own key and signing key fingerprints from its key file, which an
+operator compares with what the gateway lists before signing them into the roster.
 
 The witness (a second place a member's newest snapshot is recorded) follows in its own package.
 
