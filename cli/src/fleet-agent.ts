@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write";
 import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
+import { KEPT_MAX, findSecrets, readAllow, secretGateMode, type SecretHit } from "./fleet-secrets";
 import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
 import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
@@ -278,6 +279,22 @@ export async function rosterMembers<M extends { deviceId: string; pubkey?: strin
   return { sealFor, skipped, signing };
 }
 
+const warnedSecrets = new Set<string>();
+
+function noteSecrets(fleet: string, hits: SecretHit[], left: boolean): void {
+  const said = fleet + (left ? " out " : " in ") + hits.map((h) => h.path).join("\n");
+  if (warnedSecrets.has(said)) return;
+  warnedSecrets.add(said);
+  const list = hits
+    .slice(0, 8)
+    .map((h) => "  " + h.path + " (" + h.why + ")")
+    .join("\n");
+  process.stderr.write(
+    "prime: fleet " + fleet + ": " + (left ? "left out of the snapshot" : "published although it looks like a secret (PRIME_FLEET_SECRET_GATE=warn)") + ":\n" + list + (hits.length > 8 ? "\n  ... and " + (hits.length - 8) + " more" : "") +
+      "\n  To publish one: prime fleets secrets allow <fleet> --space <space> <path>\n",
+  );
+}
+
 export interface PublishResult {
   seq: number;
   commit: string;
@@ -287,6 +304,8 @@ export interface PublishResult {
   members: number;
   /** The gateway listed these devices (a key the signed roster does not name for them), and the snapshot was not sealed for them. */
   unrostered?: string[];
+  /** The files left out of the snapshot because they look like secrets (see fleet-secrets.ts). */
+  kept?: string[];
   /** The members this snapshot was sealed for (see `rosterOf`). */
   roster: string;
   /** Where the manifest of this snapshot is stored. */
@@ -523,15 +542,29 @@ export async function publish(
   // files would be staged again and come out as the same tree. When they have, or when this publish
   // is not built on what the caller's snapshot was, the work tree is taken again, as it is now.
   const reuse = known !== undefined && !caughtUp && (await treeUnchanged) && (known.quiet?.() ?? true);
+  const taken = { work: paths.work, gitDir: paths.gitDir, base, seq, ...(paths.nested ? { nested: paths.nested } : {}) };
+  // What looks like a secret is left out of the snapshot (see fleet-secrets.ts): the tree is taken first, looked at, and taken
+  // again without those files when there are some; the packs are made from the tree that is kept.
+  const gate = secretGateMode();
+  let tree = reuse && known ? known.tree : undefined;
+  let kept: SecretHit[] = [];
+  if (gate !== "off") {
+    const first = await snapshot({ ...taken, treeOnly: true, ...(tree !== undefined ? { tree } : {}) });
+    const hits = await findSecrets(paths.gitDir, first.tree, readAllow(paths.keyFile));
+    if (hits.length > 0 && gate === "exclude") {
+      kept = hits;
+      tree = (await snapshot({ ...taken, treeOnly: true, exclude: hits.map((h) => h.path) })).tree;
+    } else {
+      tree = first.tree;
+      if (hits.length > 0) noteSecrets(fleet, hits, false);
+    }
+    if (kept.length > 0) noteSecrets(fleet, kept, true);
+  }
   const snap = await snapshot({
-    work: paths.work,
-    gitDir: paths.gitDir,
-    base,
-    seq,
+    ...taken,
     wantFull,
     withDelta,
-    ...(reuse && known ? { tree: known.tree } : {}),
-    ...(paths.nested ? { nested: paths.nested } : {}),
+    ...(tree !== undefined ? { tree } : {}),
   });
   // A member that has an epoch key the fleet can show is signed by its signing key has the snapshot key wrapped to that.
   const epochOf = epochsToWrapTo(members, signing, fleet, incarnation);
@@ -645,6 +678,7 @@ export async function publish(
     tipCommit: manifest.tipCommit,
     tree: manifest.tree,
     roster: manifest.roster,
+    ...(kept.length > 0 ? { kept: kept.slice(0, KEPT_MAX).map((h) => h.path) } : {}),
   });
   if (hideMeta) {
     manifest.tipCommit = "";
@@ -706,6 +740,7 @@ export async function publish(
     ...(delta ? { deltaBytes: delta.bytes } : {}),
     members: sealed.wrapped.length,
     ...(skipped.length > 0 ? { unrostered: skipped } : {}),
+    ...(kept.length > 0 ? { kept: kept.map((h) => h.path) } : {}),
     roster,
     manifestKey: moved.manifestKey ?? "",
     full: wantFull,

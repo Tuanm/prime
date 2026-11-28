@@ -692,6 +692,26 @@ prime fleets invite acme --sso      # or PRIME_FLEET_SSO=1 for every fleet comma
 `cloudflared access login` in the browser the first time) and sends it as `cf-access-token`; the operator token is not sent. The gateway records
 the person's email as the actor. The token is not printed or stored by prime.
 
+## Secrets are left out
+
+A snapshot is mirrored to every member and kept by the gateway, and a `.env` or a private key in the work tree is not the work. Each
+publish looks at the tree it is about to publish and leaves out the files that look like secrets: by name (`.env` and `.env.*`, except
+`.example`/`.sample`/`.template`; `id_rsa`, `id_ecdsa`, `id_ed25519` and their kind but not `.pub`; `*.pem`, `*.key`, `*.p12`, `*.pfx`; `.netrc`; `credentials.json`;
+`.aws/credentials`) and by content (a text file of at most 1 MiB that holds a private key block, an AWS key id, a GitHub, Slack or Google token or an `sk-` key, or a long random value assigned to a name such as
+`secret`, `token`, `password` or `api_key`). The files stay where they are on the machine that has them; the agent says which were left out and why, and
+the snapshot records the list in its sealed metadata (`kept`, never in the clear).
+
+```bash
+prime fleets secrets list acme --space work                # what is allowed through
+prime fleets secrets allow acme --space work test/fixtures/** src/.env.test
+prime fleets secrets disallow acme --space work src/.env.test
+PRIME_FLEET_SECRET_GATE=off|warn|exclude                   # exclude is the default; warn publishes and says so
+```
+
+The allow list belongs to the member that publishes (it is kept beside its key). This is a net for accidents: a secret in a file the rules do not
+recognise goes through, and so does anything the operator allowed. Where a replica holds its own `.env`, a snapshot that leaves the file out does
+not delete it (the `kept` list is what an apply leaves alone); a replica of an earlier build deletes a `.env` it received before, once.
+
 ## Use cases
 
 - **A repository that follows you.** A fleet of three spaces on three machines,

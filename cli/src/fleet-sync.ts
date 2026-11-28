@@ -580,9 +580,11 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
       // A path the fleet leaves alone may already be in the index, from before it
       // became a nested repository (or was excluded): add -A with an exclusion
       // leaves such entries as they were, and the old contents would be
-      // published for ever.
+      // published for ever. (-f: the index is only this store's, and a file that was changed since it
+      // was staged is not a reason to keep it: without it git refuses to drop an entry that differs
+      // from both the file and the last commit.)
       if (left.length > 0) {
-        await gitText(gitDir, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--"].concat(left.map((p) => ":(literal)" + p)), env);
+        await gitText(gitDir, ["rm", "-r", "-f", "--cached", "-q", "--ignore-unmatch", "--"].concat(left.map((p) => ":(literal)" + p)), env);
       }
       if (opts.paths !== undefined && (await stagePaths(gitDir, work, env, opts.paths, left))) return;
       await gitText(gitDir, ["add", "-A", "--", "."].concat(left.map((p) => ":(exclude)" + p)), env);
