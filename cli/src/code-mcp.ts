@@ -222,6 +222,8 @@ const token: string | undefined = args.token;
 // device id in the gateway is what authenticates the tunnel).
 const gatewayToken: string | undefined = args["gateway-token"] ?? token;
 const activityJournal = typeof args["activity-log"] === "string" && args["activity-log"] ? new ActivityJournal(resolve(args["activity-log"]), { onError: (message) => console.error(message) }) : undefined;
+// Calls still queued when the process leaves cleanly are written then.
+if (activityJournal) process.on("exit", () => activityJournal.flushSync());
 const callerAuthMode = args["caller-auth"] === undefined ? "warn" : parseCallerAuthMode(args["caller-auth"]);
 if (!callerAuthMode) {
   console.error(`error: invalid --caller-auth: ${args["caller-auth"]} (use off, warn or enforce)`);

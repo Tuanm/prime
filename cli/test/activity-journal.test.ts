@@ -17,27 +17,74 @@ applyTestTimeout();
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const scratch = () => mkdtempSync(join(tmpdir(), "prime-activity-"));
 
+/** Wait (up to 10 s) until `done()`: the journal of a running code-mcp is written a moment after the answer. */
+async function waitFor(done: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setTimeout(r, 50));
+}
+
+/** Fill a journal with `n` calls and wait until they are in the file. */
+async function fill(journal: ActivityJournal, n: number, name = (i: number) => `tool${i}`): Promise<void> {
+  for (let i = 0; i < n; i++) journal.record(name(i), "unsigned");
+  await journal.flush();
+}
+
 describe("ActivityJournal", () => {
-  test("writes one line per call with its number, the time, the tool and the caller, and nothing else", () => {
+  test("writes one line per call with its number, the file's id, the time, the tool and the caller, and nothing else", async () => {
     const file = join(scratch(), "state", "activity.jsonl");
     let now = Date.parse("2026-12-01T10:00:00.000Z");
     const journal = new ActivityJournal(file, { now: () => now });
     journal.record("write", "keyA");
     now += 1000;
     journal.record("bash", "unsigned");
+    await journal.flush();
     const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines[0].fid).toMatch(/^[0-9a-f]{8}$/);
     expect(lines).toEqual([
-      { seq: 1, ts: "2026-12-01T10:00:00.000Z", tool: "write", caller: "keyA" },
-      { seq: 2, ts: "2026-12-01T10:00:01.000Z", tool: "bash", caller: "unsigned" },
+      { seq: 1, fid: lines[0].fid, ts: "2026-12-01T10:00:00.000Z", tool: "write", caller: "keyA" },
+      { seq: 2, fid: lines[0].fid, ts: "2026-12-01T10:00:01.000Z", tool: "bash", caller: "unsigned" },
     ]);
     if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 
-  test("is a ring: it never grows past the limit and the oldest lines go first", () => {
+  test("a call is only queued when it is noted: nothing is on disk until the queue is written, and flushSync writes it", () => {
+    const file = join(scratch(), "a.jsonl");
+    const journal = new ActivityJournal(file);
+    journal.record("a", "k");
+    journal.record("b", "k");
+    expect(existsSync(file)).toBe(false);
+    journal.flushSync();
+    expect(readActivity(file).entries.map((e) => e.tool)).toEqual(["a", "b"]);
+  });
+
+  test("noting a call is cheap and does not block: back to back, p95 under 1 ms, and the event loop keeps turning", async () => {
+    const file = join(scratch(), "a.jsonl");
+    const journal = new ActivityJournal(file);
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 1);
+    const times: number[] = [];
+    for (let i = 0; i < 1500; i++) {
+      const t = performance.now();
+      journal.record(`tool${i}`, "unsigned");
+      times.push(performance.now() - t);
+      if (i % 100 === 99) await new Promise((r) => setTimeout(r, 2)); // calls arrive over time, as they do
+    }
+    const wrote = performance.now();
+    await journal.flush();
+    clearInterval(timer);
+    times.sort((x, y) => x - y);
+    expect(times[Math.floor(times.length * 0.95)]!).toBeLessThan(1);
+    expect(times[times.length - 1]!).toBeLessThan(50);
+    expect(ticks).toBeGreaterThan(5); // the loop was not held by the writing
+    expect(performance.now() - wrote).toBeLessThan(5000);
+    expect(readActivity(file).entries).toHaveLength(1500);
+  });
+
+  test("is a ring: it never grows past the limit and the oldest lines go first", async () => {
     const file = join(scratch(), "activity.jsonl");
     const journal = new ActivityJournal(file, { limit: 2000 });
     for (let i = 0; i < 60; i++) {
       journal.record(`tool${i}`, "unsigned");
+      await journal.flush();
       expect(statSync(file).size).toBeLessThanOrEqual(2000);
     }
     const { entries } = readActivity(file);
@@ -47,14 +94,25 @@ describe("ActivityJournal", () => {
     const first = Number(entries[0]!.tool.slice(4));
     expect(entries.map((e) => e.tool)).toEqual(Array.from({ length: 60 - first }, (_, i) => `tool${first + i}`));
     expect(entries.map((e) => e.seq)).toEqual(Array.from({ length: 60 - first }, (_, i) => first + i + 1));
+    expect(new Set(entries.map((e) => e.fid)).size).toBe(1);
   });
 
-  test("the limit is in bytes: a name of multi-byte characters does not take the file past it", () => {
+  test("a batch bigger than the ring keeps its newest calls, and the file still stays within the limit", async () => {
+    const file = join(scratch(), "activity.jsonl");
+    const journal = new ActivityJournal(file, { limit: 2000 });
+    await fill(journal, 100);
+    expect(statSync(file).size).toBeLessThanOrEqual(2000);
+    const { entries } = readActivity(file);
+    expect(entries[entries.length - 1]).toMatchObject({ seq: 100, tool: "tool99" });
+  });
+
+  test("the limit is in bytes: a name of multi-byte characters does not take the file past it", async () => {
     const file = join(scratch(), "activity.jsonl");
     const limit = 4000;
     const journal = new ActivityJournal(file, { limit });
     for (let i = 0; i < 40; i++) {
       journal.record("日本語".repeat(30) + i, "unsigned");
+      await journal.flush();
       expect(statSync(file).size).toBeLessThanOrEqual(limit);
     }
     expect(readActivity(file).entries.length).toBeGreaterThan(2);
@@ -64,105 +122,127 @@ describe("ActivityJournal", () => {
     expect(ACTIVITY_LIMIT_BYTES).toBe(1024 * 1024);
   });
 
-  test("a tool name is cut to a sane length", () => {
+  test("a tool name is cut to a sane length", async () => {
     const file = join(scratch(), "a.jsonl");
-    new ActivityJournal(file).record("x".repeat(500), "unsigned");
+    const journal = new ActivityJournal(file);
+    journal.record("x".repeat(500), "unsigned");
+    await journal.flush();
     expect(readActivity(file).entries[0]!.tool).toHaveLength(128);
   });
 
-  test("never throws when the file cannot be written, and says why once", () => {
+  test("never throws when the file cannot be written, and says why once", async () => {
     const dir = scratch();
     const blocker = join(dir, "blocker");
     writeFileSync(blocker, "a file where a directory is needed");
     const said: string[] = [];
     const journal = new ActivityJournal(join(blocker, "activity.jsonl"), { onError: (m) => said.push(m) });
     expect(() => journal.record("bash", "unsigned")).not.toThrow();
+    await journal.flush();
     journal.record("bash", "unsigned");
+    await journal.flush();
     expect(said).toHaveLength(1);
     expect(said[0]).toContain("cannot be written");
   });
 
-  test("a reader resumes from a number, and is told when lines went before it read them: two calls in the same millisecond are not split", () => {
+  test("a reader resumes from its position, and two calls in the same millisecond are not split", async () => {
     const file = join(scratch(), "a.jsonl");
     const journal = new ActivityJournal(file, { now: () => 1_000_000 }); // a clock that does not move
-    journal.record("a", "k");
+    await fill(journal, 1, () => "a");
     const first = readActivity(file);
     expect(first.entries.map((e) => e.tool)).toEqual(["a"]);
-    journal.record("b", "k"); // the same millisecond as the one just read
-    journal.record("c", "k");
-    const next = readActivity(file, first.lastSeq);
+    await fill(journal, 2, (i) => ["b", "c"][i]!); // the same millisecond as the one just read
+    const next = readActivity(file, first.position);
     expect(next.entries.map((e) => e.tool)).toEqual(["b", "c"]);
     expect(next.gap).toBe(false);
-    expect(readActivity(file, next.lastSeq).entries).toEqual([]);
+    expect(readActivity(file, next.position).entries).toEqual([]);
     // the clock stepping back changes nothing
     const back = new ActivityJournal(file, { now: () => 5 });
-    back.record("d", "k");
-    expect(readActivity(file, next.lastSeq).entries.map((e) => e.tool)).toEqual(["d"]);
+    await fill(back, 1, () => "d");
+    expect(readActivity(file, next.position).entries.map((e) => e.tool)).toEqual(["d"]);
   });
 
-  test("a reader that fell behind the ring sees a gap; one whose file was replaced by a newer count is told, and gets all of it", () => {
+  test("a reader that fell behind the ring sees a gap", async () => {
     const file = join(scratch(), "a.jsonl");
     const journal = new ActivityJournal(file, { limit: 1500 });
-    journal.record("t0", "k");
-    const seen = readActivity(file).lastSeq;
-    for (let i = 1; i < 40; i++) journal.record(`t${i}`, "k");
+    await fill(journal, 1, () => "t0");
+    const seen = readActivity(file).position;
+    for (let i = 1; i < 40; i++) {
+      journal.record(`t${i}`, "k");
+      await journal.flush();
+    }
     const behind = readActivity(file, seen);
     expect(behind.gap).toBe(true);
     expect(behind.entries[behind.entries.length - 1]!.tool).toBe("t39");
-    // a file that is deleted and made again counts from 1: the reader's position is past its end
-    rmSync(file);
-    new ActivityJournal(file).record("fresh", "k");
-    const reset = readActivity(file, 39);
-    expect(reset.gap).toBe(true);
-    expect(reset.entries.map((e) => e.tool)).toEqual(["fresh"]);
-    expect(readActivity(join(scratch(), "missing.jsonl"), 5)).toEqual({ entries: [], lastSeq: 5, gap: false });
   });
 
-  test("skips what is not an entry, and carries on counting from the last good line", () => {
+  test("a file that was deleted and made again is another file, even when it has grown past the reader's position", async () => {
     const file = join(scratch(), "a.jsonl");
+    const journal = new ActivityJournal(file);
+    await fill(journal, 5);
+    const seen = readActivity(file).position;
+    expect(seen.seq).toBe(5);
+    rmSync(file);
+    await fill(new ActivityJournal(file), 20, (i) => `new${i}`);
+    const reread = readActivity(file, seen);
+    expect(reread.gap).toBe(true); // the position was 5 and the file now has 20: by number alone nothing would show
+    expect(reread.entries).toHaveLength(20);
+    expect(reread.entries[0]!.tool).toBe("new0");
+    expect(reread.position.fid).not.toBe(seen.fid);
+    // the same file, read again, is not a gap
+    expect(readActivity(file, reread.position).gap).toBe(false);
+    expect(readActivity(join(scratch(), "missing.jsonl"), { seq: 5, fid: "aa" })).toEqual({ entries: [], position: { seq: 5, fid: "aa" }, gap: false });
+  });
+
+  test("skips what is not an entry, and carries on counting from the last good line", async () => {
+    const file = join(scratch(), "a.jsonl");
+    const l = (o: object) => JSON.stringify(o);
     writeFileSync(
       file,
       [
-        '{"seq":1,"ts":"2026-12-01T10:00:00.000Z","tool":"a","caller":"k"}',
+        l({ seq: 1, fid: "aabbccdd", ts: "2026-12-01T10:00:00.000Z", tool: "a", caller: "k" }),
         "garbage",
-        '{"seq":2,"ts":"2026-12-01T11:00:00.000Z","tool":"b","caller":"k"}',
-        '{"seq":3,"ts":1,"tool":"c","caller":"k"}',
-        '{"ts":"2026-12-01T12:00:00.000Z","tool":"d","caller":"k"}',
-        '{"seq":0,"ts":"2026-12-01T12:00:00.000Z","tool":"e","caller":"k"}',
+        l({ seq: 2, fid: "aabbccdd", ts: "2026-12-01T11:00:00.000Z", tool: "b", caller: "k" }),
+        l({ seq: 3, fid: "aabbccdd", ts: 1, tool: "c", caller: "k" }),
+        l({ fid: "aabbccdd", ts: "2026-12-01T12:00:00.000Z", tool: "d", caller: "k" }),
+        l({ seq: 0, fid: "aabbccdd", ts: "2026-12-01T12:00:00.000Z", tool: "e", caller: "k" }),
+        l({ seq: 4, ts: "2026-12-01T12:00:00.000Z", tool: "no file id", caller: "k" }),
         "",
       ].join("\n"),
     );
     expect(readActivity(file).entries.map((e) => e.tool)).toEqual(["a", "b"]);
-    new ActivityJournal(file).record("f", "k");
-    expect(readActivity(file).entries.map((e) => [e.seq, e.tool])).toEqual([[1, "a"], [2, "b"], [3, "f"]]);
+    await fill(new ActivityJournal(file), 1, () => "f");
+    expect(readActivity(file).entries.map((e) => [e.seq, e.fid, e.tool])).toEqual([[1, "aabbccdd", "a"], [2, "aabbccdd", "b"], [3, "aabbccdd", "f"]]);
   });
 
   test("several processes writing one file lose no line and take no number twice", async () => {
     const file = join(scratch(), "shared.jsonl");
     const script = `import { ActivityJournal } from ${JSON.stringify(join(ROOT, "src", "activity-journal.ts"))};
       const j = new ActivityJournal(process.argv[1], { limit: 60000 });
-      for (let i = 0; i < 15; i++) j.record(process.argv[2] + "-" + i, "k");`;
+      for (let i = 0; i < 30; i++) { j.record(process.argv[2] + "-" + i, "k"); if (i % 5 === 4) await j.flush(); }
+      await j.flush();`;
     const procs = Array.from({ length: 4 }, (_, i) => Bun.spawn(["bun", "-e", script, file, `p${i}`], { stdout: "ignore", stderr: "pipe" }));
     for (const p of procs) expect(await p.exited).toBe(0);
     const { entries } = readActivity(file);
-    expect(entries).toHaveLength(60);
-    expect(entries.map((e) => e.seq)).toEqual(Array.from({ length: 60 }, (_, i) => i + 1));
-    expect(new Set(entries.map((e) => e.tool)).size).toBe(60);
+    expect(entries).toHaveLength(120);
+    expect(entries.map((e) => e.seq)).toEqual(Array.from({ length: 120 }, (_, i) => i + 1));
+    expect(new Set(entries.map((e) => e.tool)).size).toBe(120);
+    expect(new Set(entries.map((e) => e.fid)).size).toBe(1);
   });
 
   test("two processes with a ring that keeps compacting lose no number either", async () => {
     const file = join(scratch(), "ring.jsonl");
     const script = `import { ActivityJournal } from ${JSON.stringify(join(ROOT, "src", "activity-journal.ts"))};
       const j = new ActivityJournal(process.argv[1], { limit: 1500 });
-      for (let i = 0; i < 20; i++) j.record(process.argv[2] + "-" + i, "k");`;
+      for (let i = 0; i < 30; i++) { j.record(process.argv[2] + "-" + i, "k"); if (i % 3 === 2) await j.flush(); }
+      await j.flush();`;
     const procs = Array.from({ length: 3 }, (_, i) => Bun.spawn(["bun", "-e", script, file, `p${i}`], { stdout: "ignore", stderr: "pipe" }));
     for (const p of procs) expect(await p.exited).toBe(0);
-    const { entries, lastSeq } = readActivity(file);
-    expect(lastSeq).toBe(60); // every call took a number, in the order the lock gave them
+    const { entries, position } = readActivity(file);
+    expect(position.seq).toBe(90); // every call took a number, in the order the lock gave them
     const seqs = entries.map((e) => e.seq);
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
     expect(new Set(seqs).size).toBe(seqs.length);
-    expect(seqs[seqs.length - 1]).toBe(60);
+    expect(seqs[seqs.length - 1]).toBe(90);
   });
 });
 
@@ -257,6 +337,7 @@ describe("code-mcp journals the calls it runs", () => {
       });
       expect(local.status).toBe(200);
 
+      await waitFor(() => existsSync(journal) && readActivity(journal).entries.length >= 3);
       const { entries } = readActivity(journal);
       expect(entries.map((e) => [e.tool, e.caller])).toEqual([
         ["write", key.keyId],
@@ -294,6 +375,7 @@ describe("code-mcp journals the calls it runs", () => {
       // and one that does run is
       const raw = JSON.stringify(writeCall(dir, "ok.txt"));
       await r.send({ request: JSON.parse(raw), raw, callerSig: signCall(key, "device:laptop", raw) });
+      await waitFor(() => existsSync(journal));
       expect(readActivity(journal).entries.map((e) => [e.tool, e.caller])).toEqual([["write", key.keyId]]);
     } finally {
       r.stop();
