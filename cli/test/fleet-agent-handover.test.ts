@@ -84,7 +84,7 @@ function agentScript(configPath: string, log: string): string {
     const lock = await acquireStarting(${JSON.stringify(dir)}, { waitMs: Number(process.env.PRIME_FLEET_LOCK_WAIT_MS ?? 0), startedAt, replaces, onWait: () => say("rearm") });
     if (!lock.held) { say("stopped" in lock ? "stopped" : "gave-up"); process.exit(1); }
     say("took");
-    writeFileSync(${JSON.stringify(fleetAgentStatePath(configPath))}, JSON.stringify({ pid: process.pid, started_at: "x", config_path: ${JSON.stringify(configPath)}, replica: "lazy", settings: { replica: "lazy", cacheMb: 512, pollMs: 1500, heartbeatMs: 15000 } }));
+    writeFileSync(${JSON.stringify(fleetAgentStatePath(configPath))}, JSON.stringify({ pid: process.pid, started_at: "x", config_path: ${JSON.stringify(configPath)}, replica: "lazy", settings: { replica: "lazy", cacheMb: 512, pollMs: 1500, heartbeatMs: 60000 } }));
     let asked = false;
     const finish = (how) => { if (asked) return; asked = true; say(how); const r = process.env.ROUND_MS;
       if (r === "never") return;

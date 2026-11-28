@@ -1750,6 +1750,136 @@ describe("a claim and the pace of the agent's rounds", () => {
   }, 60_000);
 });
 
+describe("a renewal that hangs", () => {
+  test("is given up after a sixth of the lease, at most ten seconds, so two in a row cannot use up the lease", async () => {
+    const { placeTimeoutMs } = await import("../src/fleet-daemon");
+    expect(placeTimeoutMs(30_000)).toBe(5_000);
+    expect(placeTimeoutMs(45_000)).toBe(7_500);
+    expect(placeTimeoutMs(60_000)).toBe(10_000);
+    expect(placeTimeoutMs(180_000)).toBe(10_000);
+    expect(placeTimeoutMs(undefined)).toBe(7_500);
+    expect(placeTimeoutMs(1_000)).toBe(500);
+    // Two hung renewals and the retries between them, at the shortest lease the gateway keeps, are well inside it.
+    expect(2 * (placeTimeoutMs(30_000) + 2_000)).toBeLessThan(30_000 - 10_000);
+  });
+
+  test("ends with the request, frees the ask for a place, and the next beat comes at the interval from the start of this one", async () => {
+    const { heartbeat, nextBeatDelayMs } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "p1", { connected: false });
+      s.loop.primary = true;
+      s.loop.leaseMs = 3_000; // a request is cut at half a second
+      s.loop.lastBootstrap = 1;
+      w.gateway.hangBootstraps = true;
+      const began = Date.now();
+      expect(await heartbeat(s.loop as never, () => undefined)).toBe(false);
+      expect(Date.now() - began).toBeLessThan(2_500);
+      expect(s.loop.placing).toBeFalsy();
+      // The gateway answers again: the next renewal goes through.
+      w.gateway.hangBootstraps = false;
+      expect(await heartbeat(s.loop as never, () => undefined)).toBe(true);
+    } finally {
+      finish(w);
+    }
+    // The interval counts from the start of the beat before: a renewal that took 4 s of 10 is followed 6 s later.
+    expect(nextBeatDelayMs(true, 10_000, 2_000, 4_000)).toBe(6_000);
+    expect(nextBeatDelayMs(true, 10_000, 2_000, 12_000)).toBe(0);
+    expect(nextBeatDelayMs(true, 10_000, 2_000)).toBe(10_000);
+    // A renewal that failed is tried again after the retry, whatever it took.
+    expect(nextBeatDelayMs(false, 10_000, 2_000, 4_000)).toBe(2_000);
+  }, 30_000);
+});
+
+describe("the lease the fleet reports", () => {
+  test("is taken from every word of it, the newest first, and a change sets the heartbeat's timer again", async () => {
+    const { acceptedLeaseMs, adoptLease } = await import("../src/fleet-daemon");
+    let rearmed = 0;
+    const loop: { leaseMs?: number; rebeat?: () => void } = { rebeat: () => void rearmed++ };
+    adoptLease(loop, 45_000);
+    expect(loop.leaseMs).toBe(45_000);
+    expect(rearmed).toBe(1);
+    adoptLease(loop, 45_000); // the same: nothing to set again
+    expect(rearmed).toBe(1);
+    adoptLease(loop, 90_000); // the operator made it longer (a hello after the socket was down, or a lease frame)
+    expect(loop.leaseMs).toBe(90_000);
+    expect(rearmed).toBe(2);
+    adoptLease(loop, 30_000);
+    expect(loop.leaseMs).toBe(30_000);
+    for (const junk of [undefined, null, 0, -1, "90000", Number.NaN, Infinity]) {
+      adoptLease(loop, junk);
+      expect(loop.leaseMs).toBe(30_000);
+    }
+    expect(rearmed).toBe(3);
+    // A gateway cannot make the pace absurd: a lease is believed within a second and ten minutes.
+    expect(acceptedLeaseMs(1)).toBe(1_000);
+    expect(acceptedLeaseMs(86_400_000)).toBe(600_000);
+    expect(acceptedLeaseMs(90_000.4)).toBe(90_000);
+    expect(adoptLease({}, 45_000)).toBeUndefined(); // no timer to set again: not an error
+  });
+
+  test("sets the pace of a primary's renewals in the round too: a third of the lease, whatever the ceiling", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "p1", { connected: false });
+      const asked = async (leaseMs: number | undefined, secondsAgo: number): Promise<boolean> => {
+        const { round } = await import("../src/fleet-daemon");
+        s.loop.primary = true;
+        s.loop.leaseMs = leaseMs;
+        s.loop.lastBootstrap = Date.now() - secondsAgo * 1000;
+        const before = w.gateway.bootstraps;
+        // What the round does after the place is none of this test's business (there is nothing to publish here).
+        await round(s.loop as never, { heartbeatMs: 60_000 }, () => undefined).catch(() => undefined);
+        return w.gateway.bootstraps > before;
+      };
+      // The ceiling is a minute (the default now): the lease sets the pace under it.
+      expect(await asked(45_000, 10)).toBe(false);
+      expect(await asked(45_000, 20)).toBe(true); // over 15 s: it was 60 s before, and the lease was left to lapse
+      expect(await asked(90_000, 25)).toBe(false);
+      expect(await asked(90_000, 35)).toBe(true);
+      expect(await asked(180_000, 50)).toBe(false);
+      expect(await asked(180_000, 65)).toBe(true); // and a minute is the most, for the longest lease
+      expect(await asked(undefined, 20)).toBe(true); // a lease nobody told is the default one
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("the ceiling is a minute unless a person lowers it, and a lease of 180 s is renewed every 60", async () => {
+    const { effectiveSettings, heartbeatIntervalMs } = await import("../src/fleet-daemon");
+    expect(effectiveSettings({}).heartbeatMs).toBe(60_000);
+    expect(effectiveSettings({ heartbeatMs: 5_000 }).heartbeatMs).toBe(5_000);
+    expect(heartbeatIntervalMs(180_000, effectiveSettings({}).heartbeatMs)).toBe(60_000);
+    expect(heartbeatIntervalMs(90_000, effectiveSettings({}).heartbeatMs)).toBe(30_000);
+    expect(heartbeatIntervalMs(45_000, effectiveSettings({}).heartbeatMs)).toBe(15_000);
+    expect(heartbeatIntervalMs(90_000, 15_000)).toBe(15_000); // lowered: the old pace
+  });
+
+  test("what the member can do is said in the ask the heartbeat makes", async () => {
+    const { heartbeat } = await import("../src/fleet-daemon");
+    const { MEMBER_CAPS } = await import("../src/fleet-transport");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: false });
+      s.loop.lastBootstrap = 1;
+      s.loop.primary = true;
+      await heartbeat(s.loop as never, () => undefined, 10_000_000);
+      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toBeUndefined(); // nothing to say yet
+      const caps = MEMBER_CAPS as string[];
+      caps.push("test1");
+      try {
+        s.loop.lastBootstrap = 1;
+        await heartbeat(s.loop as never, () => undefined, 20_000_000);
+      } finally {
+        caps.pop();
+      }
+      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["test1"]);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
 describe("the heartbeat against the lease", () => {
   test("a renewal that fails is tried again in two seconds, and one that hangs is cut off", async () => {
     const { BEAT_RETRY_MS, PLACE_TIMEOUT_MS, heartbeat, heartbeatIntervalMs, nextBeatDelayMs } = await import("../src/fleet-daemon");

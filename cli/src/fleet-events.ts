@@ -18,6 +18,8 @@ export type FleetEvent =
   | { type: "resumed" }
   | { type: "head"; seq: number; manifestKey?: string }
   | { type: "lease-free" }
+  /** The operator or the owner changed how long a place lasts. */
+  | { type: "lease"; leaseMs: number }
   | { type: "bye"; reason: string };
 
 /** The small part of a WebSocket that is used, so a test can stand in for it. */
@@ -112,7 +114,7 @@ export function roundSleepMs(input: {
   return Math.max(base, Math.min(FAILING_MAX_MS, input.pollMs * 2 ** failures));
 }
 
-const KNOWN = new Set(["hello", "paused", "resumed", "head", "lease-free", "bye"]);
+const KNOWN = new Set(["hello", "paused", "resumed", "head", "lease-free", "lease", "bye"]);
 
 /** Read one text message. Anything that is not a known event is ignored. */
 export function parseFleetEvent(text: string): FleetEvent | undefined {
@@ -133,6 +135,8 @@ export function parseFleetEvent(text: string): FleetEvent | undefined {
         leaseHolder: typeof o.leaseHolder === "string" ? o.leaseHolder : null,
         leaseMs: typeof o.leaseMs === "number" ? o.leaseMs : 0,
       };
+    case "lease":
+      return typeof o.leaseMs === "number" && Number.isFinite(o.leaseMs) && o.leaseMs > 0 ? { type: "lease", leaseMs: o.leaseMs } : undefined;
     case "head":
       return typeof o.seq === "number"
         ? { type: "head", seq: o.seq, ...(typeof o.manifestKey === "string" && o.manifestKey ? { manifestKey: o.manifestKey } : {}) }

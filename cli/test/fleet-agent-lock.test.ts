@@ -483,7 +483,7 @@ describe("switching the replica mode of a running agent", () => {
   const withMode = (mode: string): void => withEnv("PRIME_FLEET_REPLICA", mode);
   function running(configPath: string, pid: number, replica: "lazy" | "mirror", cacheMb = 512): void {
     mkdirp(fleetAgentDir(configPath));
-    const settings = { replica, cacheMb, pollMs: 1500, heartbeatMs: 15000 };
+    const settings = { replica, cacheMb, pollMs: 1500, heartbeatMs: 60000 }; // what an agent of this build runs with: the ceiling is a minute
     writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath, replica, settings }));
     // An agent holds its lock (where the process list cannot be asked, that is what says it is one).
     writeFileSync(agentLockPath(fleetAgentDir(configPath)), pid + "\n");
@@ -1368,7 +1368,7 @@ describe("asking the service manager", () => {
 describe("stopping an agent that a service runs", () => {
   function running(configPath: string, pid: number): void {
     mkdirSync(fleetAgentDir(configPath), { recursive: true });
-    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath, replica: "lazy", settings: { replica: "lazy", cacheMb: 512, pollMs: 1500, heartbeatMs: 15000 } }));
+    writeFileSync(fleetAgentStatePath(configPath), JSON.stringify({ pid, started_at: "x", config_path: configPath, replica: "lazy", settings: { replica: "lazy", cacheMb: 512, pollMs: 1500, heartbeatMs: 60000 } }));
     writeFileSync(agentLockPath(fleetAgentDir(configPath)), pid + "\n");
   }
   const gone = async (pid: number): Promise<boolean> => {
