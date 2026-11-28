@@ -8,7 +8,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import type { CallerEntry } from "./caller-key.ts";
 import { loadOrCreateSignKey } from "./fleet-agent.ts";
 import { readControlledFile } from "./safe-file.ts";
-import { REPLY_CERT_RENEW_MS, REPLY_CERT_TTL_MS, publicKeyOfPem, signReplyCert } from "./fleet-reply-cert.ts";
+import { REPLY_CERT_RENEW_MS, REPLY_CERT_TTL_MS, parseReplyCert, publicKeyOfPem, signReplyCert } from "./fleet-reply-cert.ts";
 import { type FleetCallersFile, FLEET_CALLERS_FILE, FLEET_CALLERS_RENEW_MS, FLEET_ROSTER_KEEP_MS, FLEET_ROSTER_REFRESH_MS, FLEET_CALLERS_VERSION, callersOfRoster, replyKeyFileOf } from "./fleet-callers.ts";
 import type { FleetCredentials } from "./fleet-transport.ts";
 import { FleetTrust, RosterRefusedError } from "./fleet-trust.ts";
@@ -175,9 +175,11 @@ export function issueReplyCert(loop: CallersLoop & { creds: { deviceId: string }
     return;
   }
   const held = writer.currentReplyCert();
-  if (held && held.key === replyKey && held.until - now > REPLY_CERT_RENEW_MS) return;
   try {
     const sign = loadOrCreateSignKey(loop.paths.keyFile);
+    // A certificate made with a signing key that is not the member's now (the member rotated its keys) is one the roster no longer vouches for.
+    const heldBy = held ? parseReplyCert(held.cert)?.spub : undefined;
+    if (held && held.key === replyKey && heldBy === sign.publicKey && held.until - now > REPLY_CERT_RENEW_MS) return;
     const until = now + REPLY_CERT_TTL_MS;
     writer.setReplyCert({ key: replyKey, until, cert: signReplyCert(sign.privateKey, { fleet: loop.fleet, device: loop.creds.deviceId, replyKey }, until) });
   } catch (err) {

@@ -177,6 +177,19 @@ describe("what the agent writes and the space adds", () => {
     expect(m.writer.currentReplyCert()!.key).not.toBe(first.key);
   });
 
+  test("a member that rotated its keys (a new signing key) certifies the reply key again, with the new one, at once", () => {
+    const caller = loadOrCreateCallerKey(join(scratch(), "c.pem"));
+    const m = memberSpace("space-1", caller, { primary: true });
+    const first = m.writer.currentReplyCert()!;
+    expect(parseReplyCert(first.cert)!.spub).toBe(m.sign.publicKey);
+    const next = generateOwnerKey();
+    writeFileSync(m.keyFile, JSON.stringify({ publicKey: "x", privateKey: "y", sign: { publicKey: next.publicKey, privateKey: next.privateKeyPem } }), { mode: 0o600 });
+    issueReplyCert(m.loop, m.writer, m.secretDir, () => undefined);
+    const after = m.writer.currentReplyCert()!;
+    expect(after.cert).not.toBe(first.cert);
+    expect(parseReplyCert(after.cert)!.spub).toBe(next.publicKey);
+  });
+
   test("no key to certify, no certificate", () => {
     const caller = loadOrCreateCallerKey(join(scratch(), "c.pem"));
     const m = memberSpace("space-1", caller, { primary: true });
