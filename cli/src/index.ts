@@ -21,7 +21,16 @@ import { vaultsCommand } from "./vaults.ts";
 import { serveCommand } from "./serve.ts";
 import { type Ctx, makeCtx } from "./context.ts";
 import { defaultConfigPath } from "./config.ts";
-import { devicesConnect, devicesDisconnect, devicesList, devicesRotateCode, devicesStatus } from "./devices.ts";
+import {
+  devicesAllowCaller,
+  devicesCallers,
+  devicesConnect,
+  devicesDisconnect,
+  devicesList,
+  devicesRevokeCaller,
+  devicesRotateCode,
+  devicesStatus,
+} from "./devices.ts";
 import { filesDownload, filesList, filesUpload } from "./files.ts";
 import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
@@ -82,6 +91,17 @@ const LIST_FLAGS: FlagSpec[] = [
   flag("timeout", "number", "Probe timeout in milliseconds", { placeholder: "<ms>" }),
 ];
 
+const CALLERS_FLAGS: FlagSpec[] = [
+  flag("callers", "string", "The callers file to use (default: callers.json beside the config)", { placeholder: "<path>" }),
+];
+
+const ALLOW_CALLER_FLAGS: FlagSpec[] = [
+  ...CALLERS_FLAGS,
+  flag("label", "string", "A name for the key, to tell it apart in 'prime devices callers'", { placeholder: "<text>" }),
+  flag("tools", "string", "Allow only these tools, comma separated (default: all)", { placeholder: "<a,b>" }),
+  flag("self", "boolean", "Allow this machine's own caller key"),
+];
+
 const TOOL_FLAGS: FlagSpec[] = [
   ...GATEWAY_FLAGS,
   flag("handshake", "string", "When to send the MCP initialize handshake: auto|always|never", { placeholder: "<mode>" }),
@@ -96,6 +116,7 @@ const CALL_FLAGS: FlagSpec[] = [
   flag("concurrency", "number", "Max calls in flight with --parallel (default 8)", { placeholder: "<n>" }),
   flag("device", "string", "Force the device id for an ambiguous label", { placeholder: "<id>" }),
   flag("tool", "string", "Force the tool name for an ambiguous label", { placeholder: "<name>" }),
+  flag("no-sign", "boolean", "Do not sign the calls with this machine's caller key (debugging)"),
 ];
 
 const VIEW_FLAGS: FlagSpec[] = [...TOOL_FLAGS, flag("device", "string", "Force the device id", { placeholder: "<id>" }), flag("tool", "string", "Force the tool name", { placeholder: "<name>" })];
@@ -351,8 +372,17 @@ async function main(argv: string[]): Promise<void> {
           return devicesList(ctx);
         case "rotate-code":
           return devicesRotateCode(ctx);
+        case "allow-caller":
+          return devicesAllowCaller(ctx);
+        case "callers":
+          return devicesCallers(ctx);
+        case "revoke-caller":
+          return devicesRevokeCaller(ctx);
         default:
-          throw new UsageError(`unknown devices command "${sub}"`, `Valid: connect, disconnect, status, list, rotate-code. ${usageLine("devices")}`);
+          throw new UsageError(
+            `unknown devices command "${sub}"`,
+            `Valid: connect, disconnect, status, list, rotate-code, allow-caller, callers, revoke-caller. ${usageLine("devices")}`,
+          );
       }
     case "fleets":
       switch (sub) {
@@ -498,6 +528,8 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "list") return LIST_FLAGS;
     if (sub === "status" || sub === "disconnect") return GATEWAY_FLAGS;
     if (sub === "rotate-code") return ROTATE_FLAGS;
+    if (sub === "allow-caller") return ALLOW_CALLER_FLAGS;
+    if (sub === "callers" || sub === "revoke-caller") return CALLERS_FLAGS;
     return [];
   }
   if (topic === "tools") {

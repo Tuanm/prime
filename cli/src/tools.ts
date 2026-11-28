@@ -1,6 +1,7 @@
 // `prime tools ...` - list, view and call device tools.
 
 import { bool, num, str, strList } from "./args.ts";
+import { CALLER_REFUSED_CODE, CallSigner, callerRefusedHint } from "./caller-key.ts";
 import { type HandshakeMode, GatewayClient } from "./client.ts";
 import { type Ctx, fleetTargetFor, overridesFrom, targetFor } from "./context.ts";
 import { EXIT, McpError, UsageError } from "./errors.ts";
@@ -413,6 +414,8 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
 
   // One client per device, reused across calls so a batch pays connection setup
   // once per device rather than once per call.
+  // Every call is signed with this machine's caller key (--no-sign sends it bare, for debugging).
+  const signer = bool(ctx.parsed, "no-sign") ? undefined : new CallSigner({ warn: (text) => ctx.note(text) });
   const clients = new Map<string, GatewayClient>();
   const plan = await Promise.all(
     requests.map(async (request) => {
@@ -420,7 +423,7 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
       let client = clients.get(deviceId);
       if (!client) {
         const target = await targetForRef(ctx, deviceId);
-        client = new GatewayClient(target);
+        client = new GatewayClient(target, { signer });
         clients.set(deviceId, client);
       }
       return { request, deviceId, toolName, client };
@@ -443,6 +446,14 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
     };
   };
 
+  // A device that only runs signed calls says so once per call; the way to let this machine in is shown once.
+  let refusedHinted = false;
+  const hintRefused = (err: unknown): void => {
+    if (refusedHinted || !(err instanceof McpError) || err.code !== CALLER_REFUSED_CODE) return;
+    refusedHinted = true;
+    ctx.note(dim(callerRefusedHint(signer)));
+  };
+
   const run = async (item: PlanItem): Promise<CallOutcome> => {
     try {
       const result = await item.client.callTool(item.toolName, item.request.arguments, { handshake: mode, timeoutMs });
@@ -454,6 +465,7 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
         result,
       };
     } catch (err) {
+      hintRefused(err);
       if (single) throw err;
       return toFailure(item, err);
     }

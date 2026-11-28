@@ -13,6 +13,7 @@
 // through GatewayClient, returning the device's result verbatim.
 
 import { bool, num, str } from "./args.ts";
+import { CALLER_REFUSED_CODE, CallSigner, callerRefusedHint } from "./caller-key.ts";
 import { GatewayClient } from "./client.ts";
 import { type Ctx, overridesFrom, targetFor } from "./context.ts";
 import { McpError, UsageError } from "./errors.ts";
@@ -124,6 +125,8 @@ export interface ServeOptions {
   version: string;
   note: (text: string) => void;
   listTtlMs?: number;
+  /** Signs the calls; its key is named in the answer to a client whose call a device refused for want of a trusted key. */
+  signer?: CallSigner;
 }
 
 /** The transport-independent MCP server: tool aggregation and routing. */
@@ -249,7 +252,11 @@ export class AggregateServer {
           const result = await this.client(target.deviceId).callTool(target.toolName, params.arguments ?? {});
           return rpcResult(id, result ?? { content: [] });
         } catch (err) {
-          if (err instanceof McpError) return rpcError(id, err.code, err.message, err.data);
+          if (err instanceof McpError) {
+            // A device that only runs signed calls says so; the client that reads this can tell its user what to run.
+            const hint = err.code === CALLER_REFUSED_CODE ? ` (${callerRefusedHint(this.opts.signer)})` : "";
+            return rpcError(id, err.code, err.message + hint, err.data);
+          }
           // Transport failure (offline, timeout, auth): a tool-level error the
           // model can read and react to, rather than a protocol failure.
           const message = err instanceof Error ? err.message : String(err);
@@ -384,11 +391,13 @@ export async function serveCommand(ctx: Ctx, version: string): Promise<void> {
 
   // Resolve every target up front so a broken config fails loudly at start.
   const targets = new Map(deviceIds.map((id) => [id, targetFor(ctx, id, overrides)]));
+  const signer = new CallSigner({ warn: note });
   const server = new AggregateServer({
     deviceIds,
-    clientFor: (id) => new GatewayClient(targets.get(id)!),
+    clientFor: (id) => new GatewayClient(targets.get(id)!, { signer }),
     version,
     note,
+    signer,
   });
   if (deviceIds.length === 0) {
     note("prime serve: no devices configured - serving an empty tool list (add one with 'prime connect' or 'prime devices connect').");

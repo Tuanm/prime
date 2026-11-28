@@ -1,6 +1,17 @@
 // `prime devices ...` - connect, disconnect, status, list, rotate-code.
 
+import { existsSync } from "node:fs";
 import { bool, num, str } from "./args.ts";
+import {
+  addCaller,
+  callerKeyPath,
+  callersPath,
+  loadOrCreateCallerKey,
+  parsePublicKey,
+  readCallers,
+  removeCaller,
+  keyIdOf,
+} from "./caller-key.ts";
 import { GatewayClient } from "./client.ts";
 import { type Ctx, overridesFrom, targetFor } from "./context.ts";
 import { saveConfig, updateConfig } from "./config.ts";
@@ -342,4 +353,99 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
   ctx.out(dim(`  the old code keeps working for ${grace}`));
   if (spaces.length > 0) ctx.out(`  spaces exposed as it: ${spaces.join(", ")} - stop and start each within ${grace}, so that it holds the new code`);
   ctx.out(`  anything else that holds the old code (a running buddy, 'prime fleets' agent) - restart it within ${grace}`);
+}
+
+// ---- who may call this device's tools -----------------------------------------
+
+/** The callers file this command works on: --callers, else the one the device on this machine reads. */
+function callersFile(ctx: Ctx): string {
+  return str(ctx.parsed, "callers") ?? callersPath();
+}
+
+/** The file's callers, or a usage error that names the file when it cannot be read. */
+function callersOrFail(path: string) {
+  try {
+    return readCallers(path);
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err), "Fix or delete the file, then run the command again.");
+  }
+}
+
+export async function devicesAllowCaller(ctx: Ctx): Promise<void> {
+  const positionals = ctx.parsed.positionals.slice(2);
+  const self = bool(ctx.parsed, "self");
+  if (positionals.length > 1) throw new UsageError(`unexpected argument "${positionals[1]}"`);
+  if (self === (positionals.length === 1)) {
+    throw new UsageError(
+      "give the public key to allow, or --self for this machine's own",
+      "Usage: prime devices allow-caller <public-key> [--label <text>] [--tools a,b]   (the key is what a refused call prints)",
+    );
+  }
+  let pub: Buffer;
+  if (self) {
+    pub = loadOrCreateCallerKey().publicKey;
+  } else {
+    const given = parsePublicKey(positionals[0]!);
+    if (!given) {
+      throw new UsageError(
+        "that is not a public key",
+        "Pass the caller's public key: 43-44 characters of base64, as printed by a refused call. A key id alone is not enough.",
+      );
+    }
+    pub = given;
+  }
+  const tools = str(ctx.parsed, "tools")
+    ?.split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const path = callersFile(ctx);
+  callersOrFail(path); // a malformed file is reported, not overwritten
+  const { entry, added } = addCaller(path, { pub, ...(str(ctx.parsed, "label") !== undefined ? { label: str(ctx.parsed, "label")! } : {}), ...(tools ? { tools } : {}) });
+  if (ctx.json) {
+    printJson({ key_id: entry.keyId, label: entry.label, tools: entry.tools ?? null, added, callers_file: path });
+    return;
+  }
+  ctx.out(`${green("✓")} ${added ? "allowed" : "updated"} ${bold(entry.keyId)}${entry.label ? ` (${entry.label})` : ""}`);
+  ctx.out(`  callers file  ${dim(path)}`);
+  ctx.out(`  tools         ${entry.tools ? entry.tools.join(", ") : "all"}`);
+}
+
+export async function devicesCallers(ctx: Ctx): Promise<void> {
+  const path = callersFile(ctx);
+  const callers = callersOrFail(path);
+  const keyPath = callerKeyPath();
+  // This machine's own key is shown when it exists; listing must not make one.
+  const own = existsSync(keyPath) ? loadOrCreateCallerKey(keyPath) : undefined;
+  if (ctx.json) {
+    printJson({
+      callers_file: path,
+      this_machine: own ? { key_id: own.keyId, public_key: own.publicKeyB64 } : null,
+      callers: callers.map((c) => ({ key_id: c.keyId, label: c.label, added_at: c.addedAt, tools: c.tools ?? null })),
+    });
+    return;
+  }
+  if (callers.length === 0) {
+    ctx.out(dim(`No callers allowed in ${path}`));
+    ctx.out(dim("A device with no callers runs every call; allow one with: prime devices allow-caller <public-key>"));
+  } else {
+    ctx.out(table(["KEY", "LABEL", "ADDED", "TOOLS"], callers.map((c) => [bold(c.keyId), c.label || dim("-"), dim(c.addedAt || "-"), c.tools ? c.tools.join(", ") : dim("all")])));
+  }
+  if (own) ctx.note(dim(`this machine's caller key: ${own.keyId}  ${own.publicKeyB64}`));
+}
+
+export async function devicesRevokeCaller(ctx: Ctx): Promise<void> {
+  const positionals = ctx.parsed.positionals.slice(2);
+  if (positionals.length === 0) throw new UsageError("missing <key-id>", "Usage: prime devices revoke-caller <key-id>   (see 'prime devices callers')");
+  const given = positionals[0]!;
+  // A public key is accepted for its id, so what was passed to allow-caller can be passed back.
+  const raw = parsePublicKey(given);
+  const keyId = raw ? keyIdOf(raw) : given;
+  const path = callersFile(ctx);
+  callersOrFail(path);
+  const removed = removeCaller(path, keyId);
+  if (ctx.json) {
+    printJson({ key_id: keyId, removed, callers_file: path });
+    return;
+  }
+  ctx.out(removed ? `${green("✓")} revoked ${bold(keyId)}` : dim(`${keyId} was not in ${path}`));
 }

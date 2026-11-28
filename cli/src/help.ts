@@ -23,6 +23,7 @@ COMMANDS
   devices status <device-id>              Probe one device
   devices list                            List configured devices
   devices rotate-code <device-id>         Give an anonymous device a new 25-character code
+  devices allow-caller|callers|revoke-caller  Which keys may run this device's tools
   tools list <device-id>                  List a device's MCP tools
   tools view <device-id>.<tool-id>        Show one tool's schema
   tools call <device-id>.<tool-id> [json] Call one or more tools
@@ -87,6 +88,9 @@ USAGE
   prime devices status <device-id> [--json]
   prime devices list [--no-probe] [--json]
   prime devices rotate-code <device-id> [--operator [--revoke-previous]] [--json]
+  prime devices allow-caller <public-key> | --self [--label <text>] [--tools a,b]
+  prime devices callers [--json]
+  prime devices revoke-caller <key-id>
 
 ${bold("rotate-code")}
   A device made when codes were six characters keeps a code that can be guessed
@@ -131,6 +135,21 @@ ${bold("status")}
 ${bold("list")}
   Lists configured devices and probes them concurrently. --no-probe skips the
   probes for an instant, offline listing.
+
+${bold("allow-caller, callers, revoke-caller")}
+  Every tool call that 'prime serve' and 'prime tools call' send is signed with
+  this machine's caller key (made on first use, kept in ~/.prime/caller-ed25519.pem,
+  never printed), so a device can tell a call from your machine from one the
+  gateway made up. A device runs the calls of the keys in its callers file
+  (callers.json beside its config; --callers <path> to use another) and lets you
+  put the file to work with its --caller-auth setting.
+  Run these on the machine the device runs on:
+    allow-caller <public-key>   Allow a key (a refused call prints it); --self allows
+                                this machine's own key. --label names it, --tools a,b
+                                limits it to those tools.
+    callers                     List the allowed keys.
+    revoke-caller <key-id>      Stop trusting a key.
+  Only a person at that machine edits the file; nothing a gateway sends can.
 `;
 
 const TOOLS = `prime tools - list, inspect and call device tools
@@ -180,6 +199,10 @@ ${bold("call")}
     --timeout <ms>      Per-call timeout
     --device <device>   Force the device id when the label is ambiguous
     --tool <tool>       Force the tool name when the label is ambiguous
+    --no-sign           Do not sign the calls with this machine's caller key
+                        (debugging). A device that only runs signed calls then
+                        refuses them; the refusal prints the key to allow
+                        ('prime devices allow-caller').
 
   A single reference without arguments calls the tool with {}.
 
