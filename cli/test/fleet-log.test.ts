@@ -202,6 +202,68 @@ describe("prime fleets log", () => {
   });
 });
 
+describe("a rewrite older than the page that was read", () => {
+  let dir: string;
+  let gw: ReturnType<typeof auditServer>;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "fleet-log-old-"));
+    gw = auditServer();
+  });
+  afterAll(() => {
+    gw.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const out: string[] = [];
+  const run = (flags: Record<string, string | number | boolean> = {}) => {
+    out.length = 0;
+    return fleetsLog({
+      config: { defaults: { gateway: gw.url, fleet_operator_token: "op" }, devices: {}, spaces: {}, codeMcp: {} },
+      configPath: join(dir, "config.yaml"),
+      json: false,
+      out: (l: string) => out.push(l),
+      parsed: { positionals: ["fleets", "log", "acme"], flags: new Map(Object.entries(flags)), help: false },
+    } as never);
+  };
+  const rebuild = (actions: string[]) => {
+    gw.state.entries = [];
+    for (const a of actions) gw.add(a);
+  };
+
+  test("is found even when the page read holds neither the pinned entry nor the one after it, and the pin does not follow the rewrite", async () => {
+    const actions = Array.from({ length: 10 }, (_, i) => "a" + i);
+    rebuild(actions);
+    await run({ tail: 10 }); // pins head 10
+    const rewritten = [...actions];
+    rewritten[2] = "something-else";
+    rebuild([...rewritten, ...Array.from({ length: 60 }, (_, i) => "b" + i)]);
+    gw.state.seen.length = 0;
+    await expect(run()).rejects.toThrow(/does not verify/); // tail 50: entries 21..70
+    expect(out.join("\n")).toContain("rewritten");
+    // the two entries were asked for, and nothing else beyond the page
+    expect(gw.state.seen.some((r) => r.path.includes("after=9&limit=2"))).toBe(true);
+    // the pin stayed at 10, so a full read finds it too
+    await expect(run({ all: true })).rejects.toThrow(/does not verify/);
+  });
+
+  test("an honest log that has only grown since is read as before: one more request for the two entries, and the pin moves", async () => {
+    rmSync(join(dir, "fleet-audit"), { recursive: true, force: true }); // a log that this machine has not seen
+    const actions = Array.from({ length: 10 }, (_, i) => "c" + i);
+    rebuild(actions);
+    await run({ tail: 10 });
+    for (let i = 0; i < 60; i++) gw.add("d" + i);
+    gw.state.seen.length = 0;
+    await run();
+    expect(out.join("\n")).toContain("chain intact");
+    expect(gw.state.seen.filter((r) => r.path.includes("limit=2")).length).toBe(1);
+    // the pin is at 70 now: the next page is one entry
+    gw.add("e");
+    gw.state.seen.length = 0;
+    await run();
+    expect(gw.state.seen.filter((r) => r.path.includes("limit=2")).length).toBe(0);
+    expect(out.join("\n")).toContain("chain intact");
+  });
+});
+
 describe("the Access token", () => {
   afterEach(() => forgetAccessTokens());
   const jwt = "xxxx.yyyy.zzzz";
