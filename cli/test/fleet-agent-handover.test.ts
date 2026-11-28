@@ -694,12 +694,15 @@ withProcesses("an update only signals what is still the agent it meant to stop",
 });
 
 describe("what `agent status` says of a successor", () => {
-  test("it names the process that waits to take over, while it does", () => {
+  test.skipIf(process.platform === "win32")("it names the process that waits to take over, while it does", () => {
     const root = scratch();
     const configPath = join(root, "config.json");
     expect(fleetAgentStatus(configPath).successor).toBeUndefined();
-    registerSuccessor(fleetAgentDir(configPath), process.pid);
-    expect(fleetAgentStatus(configPath)).toMatchObject({ running: false, successor: process.pid });
+    // A process that is an agent to the process list.
+    const waiting = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdout: "ignore", stderr: "ignore" });
+    cleanups.push(() => waiting.kill("SIGKILL"));
+    registerSuccessor(fleetAgentDir(configPath), waiting.pid);
+    expect(fleetAgentStatus(configPath)).toMatchObject({ running: false, successor: waiting.pid });
     stopSuccessor(fleetAgentDir(configPath), () => false);
     expect(fleetAgentStatus(configPath).successor).toBeUndefined();
   });
