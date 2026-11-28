@@ -596,7 +596,7 @@ export class DeviceDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    return this.meter.busy(() => this.onAlarm());
+    return this.meter.alarm(() => this.onAlarm());
   }
 
   private async onAlarm(): Promise<void> {

@@ -211,6 +211,25 @@ export class HitMeter {
     if (this.requests >= 100 || now - this.at >= 60_000) this.flush(now);
   }
 
+  /**
+   * Run an alarm: it is a request to the object (billed as one), its work is measured, and what was
+   * counted is sent when it is done. An object that only ever wakes for its alarm, as a FilesDO does,
+   * has no request to send the counts with, and an hour's count would never leave it.
+   */
+  async alarm<T>(work: () => Promise<T>): Promise<T> {
+    this.requests += 1;
+    try {
+      return await this.busy(work);
+    } finally {
+      this.tick();
+    }
+  }
+
+  /** Send what has been counted if it has not been sent for a minute. */
+  tick(now = Date.now()): void {
+    if (now - this.at >= 60_000) this.flush(now);
+  }
+
   /** Note that the object took up some work; call what it returns when it is done. */
   begin(now = Date.now()): (end?: number) => void {
     if (this.working === 0) this.since = now;

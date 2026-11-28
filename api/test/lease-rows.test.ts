@@ -72,7 +72,16 @@ function world(opts: { socket: boolean }) {
     const sum = (k: string) => usage.reduce((n, u) => n + (u[k] ?? 0), 0);
     return { written: sum("doRowsWritten"), read: sum("doRowsRead") };
   };
-  return { fleet, data, writes, alarms, rows };
+  // The runtime has one alarm: the last one set, until it fires.
+  let pending = false;
+  const set = storage.setAlarm as ((at: number) => Promise<void>) | undefined;
+  if (set) {
+    storage.setAlarm = async (at: number) => {
+      await set(at);
+      pending = true;
+    };
+  }
+  return { fleet, data, writes, alarms, rows, storage, alarmPending: () => pending, firedAlarm: () => void (pending = false) };
 }
 
 type World = ReturnType<typeof world>;
@@ -102,7 +111,7 @@ beforeEach(() => setSystemTime(new Date("2026-12-01T10:00:00Z")));
 afterEach(() => setSystemTime());
 
 describe("what a renewal costs in storage rows", () => {
-  test("a renewal with a listening socket writes two rows: the lease and the alarm", async () => {
+  test("a renewal with a listening socket writes one row: the lease, the alarm that is set already being left as it is", async () => {
     const w = await fleetOf(true);
     expect((await ask(w, "a")).json.role).toBe("primary");
     w.rows();
@@ -110,11 +119,12 @@ describe("what a renewal costs in storage rows", () => {
     w.writes.length = 0;
     const renewed = await ask(w, "a");
     expect(renewed.json.role).toBe("primary");
-    expect(w.writes).toEqual(["put:lease", "alarm"]);
+    expect(w.writes).toEqual(["put:lease"]);
     const counted = w.rows();
-    // Five rows written and seven read before; two written and nine read now. A row read costs a
-    // thousandth of a row written, and the two reads are what keeps the epoch and the claim exact.
-    expect(counted.written).toBe(2);
+    // Five rows written and seven read before the first change, two written and nine read after it,
+    // one written now. A row read costs a thousandth of a row written, and the reads are what keeps the
+    // epoch and the claim exact.
+    expect(counted.written).toBe(1);
     expect(counted.read).toBeLessThanOrEqual(9);
   });
 
@@ -159,6 +169,109 @@ describe("what a renewal costs in storage rows", () => {
     w.writes.length = 0;
     await call(w, "/join", "a", "device", { code: invite.json.code });
     expect(w.writes).toContain("put:lastActivity");
+  });
+});
+
+describe("the alarm that says the lease has run out", () => {
+  /** What a fleet writes in a stretch of renewals, with the alarm fired when its time comes. */
+  async function run(seconds: number, every: number) {
+    const w = await fleetOf(true);
+    await ask(w, "a");
+    w.writes.length = 0;
+    const start = Date.now();
+    let renewals = 0;
+    let fired = 0;
+    for (let t = every; t <= seconds; t += every) {
+      setSystemTime(start + t * 1000);
+      // An alarm that is due is fired before the next ask, as the runtime would.
+      const due = w.alarms.at(-1);
+      if (due !== undefined && due <= Date.now() && w.alarmPending()) {
+        fired += 1;
+        w.firedAlarm();
+        await w.fleet.alarm();
+      }
+      await ask(w, "a");
+      renewals += 1;
+    }
+    return { w, renewals, fired, start };
+  }
+
+  test("renewing every fifteen seconds sets one alarm per lease period and not one per renewal", async () => {
+    const { w, renewals, fired } = await run(900, 15);
+    const alarmRows = w.writes.filter((x) => x === "alarm").length;
+    const leaseRows = w.writes.filter((x) => x === "put:lease").length;
+    expect(leaseRows).toBe(renewals);
+    // Before: one alarm row for each renewal. Now: one for each alarm that fires, about a third.
+    expect(alarmRows).toBeLessThan(renewals / 2);
+    expect(alarmRows).toBeGreaterThanOrEqual(fired);
+    expect((leaseRows + alarmRows) / renewals).toBeLessThan(1.5);
+  });
+
+  test("an alarm that fires while the lease lives sets the next from the lease, and tells nobody", async () => {
+    const w = await fleetOf(true);
+    const told: string[] = [];
+    (w.fleet as unknown as { broadcast: (m: { type: string }) => void }).broadcast = (m) => told.push(m.type);
+    await ask(w, "a");
+    const firstAlarm = w.alarms.at(-1)!;
+    setSystemTime(Date.now() + 30_000);
+    await ask(w, "a"); // renewed: the alarm set at first is now early, and is not moved
+    expect(w.alarms).toHaveLength(1);
+    setSystemTime(firstAlarm + 1);
+    w.firedAlarm();
+    await w.fleet.alarm();
+    expect(told).toEqual([]);
+    const lease = w.data.get("lease") as { expiresAt: number };
+    expect(w.alarms).toHaveLength(2);
+    expect(w.alarms.at(-1)).toBe(lease.expiresAt + 250);
+  });
+
+  test("when the lease lapses the members are told it is free, at the time it ran out and not later", async () => {
+    const w = await fleetOf(true);
+    const told: string[] = [];
+    (w.fleet as unknown as { broadcast: (m: { type: string }) => void }).broadcast = (m) => told.push(m.type);
+    await ask(w, "a");
+    setSystemTime(Date.now() + 15_000);
+    await ask(w, "a"); // renewed, then silence
+    const expiresAt = (w.data.get("lease") as { expiresAt: number }).expiresAt;
+    // The alarm set at first goes off early: it finds the lease alive and sets the one for its end.
+    setSystemTime(w.alarms[0]!);
+    w.firedAlarm();
+    await w.fleet.alarm();
+    expect(told).toEqual([]);
+    expect(w.alarms.at(-1)).toBe(expiresAt + 250);
+    setSystemTime(expiresAt + 250);
+    w.firedAlarm();
+    await w.fleet.alarm();
+    expect(told).toEqual(["lease-free"]);
+  });
+
+  test("an alarm that could not be set is tried again by the next renewal", async () => {
+    const w = await fleetOf(true);
+    const real = (w.storage as { setAlarm: (at: number) => Promise<void> }).setAlarm;
+    let failing = true;
+    (w.storage as { setAlarm: (at: number) => Promise<void> }).setAlarm = async (at) => {
+      if (failing) throw new Error("storage busy");
+      return real(at);
+    };
+    await ask(w, "a");
+    expect(w.alarms).toHaveLength(0);
+    failing = false;
+    setSystemTime(Date.now() + 15_000);
+    await ask(w, "a");
+    expect(w.alarms).toHaveLength(1);
+  });
+
+  test("an object woken again after it was evicted sets the alarm once more, and then leaves it", async () => {
+    const w = await fleetOf(true);
+    await ask(w, "a");
+    // Evicted: what the object remembered is gone, the alarm in the runtime is not.
+    (w.fleet as unknown as { alarmAt: number | null }).alarmAt = null;
+    setSystemTime(Date.now() + 15_000);
+    await ask(w, "a");
+    expect(w.alarms).toHaveLength(2);
+    setSystemTime(Date.now() + 15_000);
+    await ask(w, "a");
+    expect(w.alarms).toHaveLength(2);
   });
 });
 

@@ -252,17 +252,32 @@ export class FleetDO implements DurableObject {
    */
   private async scheduleLeaseAlarm(expiresAt: number): Promise<void> {
     if (this.sockets().length === 0) return;
+    const target = expiresAt + 250;
+    // An alarm already set for this moment or an earlier one is left as it is: setting one is a row
+    // written, and a holder renews every fifteen seconds. An earlier one is no loss: it finds the lease
+    // alive when it fires and sets the next one from the lease it finds (see `onAlarm`), so the call that
+    // the place is free is never later than the lease. What is remembered is only what this object
+    // set: after it has been evicted it sets one again, which costs a row and is safe.
+    if (this.alarmAt !== null && this.alarmAt <= target) return;
     const s = this.storage as unknown as { setAlarm?: (at: number) => Promise<void> };
     try {
-      await s.setAlarm?.(expiresAt + 250);
-    } catch {}
+      await s.setAlarm?.(target);
+      this.alarmAt = target;
+    } catch {
+      // Not set, so not remembered: the next renewal tries again.
+    }
   }
 
+  /** When the alarm this object set will fire, if it has set one that has not yet. */
+  private alarmAt: number | null = null;
+
   async alarm(): Promise<void> {
-    return this.meter.busy(() => this.onAlarm());
+    return this.meter.alarm(() => this.onAlarm());
   }
 
   private async onAlarm(): Promise<void> {
+    // This one is spent: whatever is set from here is a new one.
+    this.alarmAt = null;
     await this.settleStoring().catch(() => undefined);
     const raw = await this.storage.get<Lease>("lease");
     if (raw && raw.expiresAt + 250 > Date.now()) {
@@ -1343,7 +1358,7 @@ export class FleetDO implements DurableObject {
       // only a grant to another holder, or a new one after the lease lapsed, is a new epoch.
       // Every write below is a row that is billed, and a holder renews every fifteen seconds: what is
       // already as it should be is not written again. The epoch and the claim are read first (a row read
-      // costs a twentieth of that), so a stored epoch that is not the lease's is still put right.
+      // costs a thousandth of that), so a stored epoch that is not the lease's is still put right.
       const storedEpoch = await this.storage.get<number>("epoch");
       const epoch = held && held.holder === caller.deviceId ? held.epoch : Math.max(storedEpoch ?? 0, head.epoch) + 1;
       const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs, since: held && held.holder === caller.deviceId ? (held.since ?? now) : now };

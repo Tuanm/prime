@@ -104,7 +104,7 @@ export class FilesDO extends DurableObject<Env> {
 
   /** Wake hourly at minimum so an idle device still purges expiring files. */
   async alarm(): Promise<void> {
-    await this.meter.busy(async () => {
+    await this.meter.alarm(async () => {
       await this.reap();
     });
   }

@@ -279,3 +279,36 @@ describe("where the month is going", () => {
     expect(p.usd).toBe(PRICES.planMonthly + 0.15);
   });
 });
+
+describe("HitMeter alarms", () => {
+  test("an alarm is a request, its work and rows go with it, and nothing is held back when the minute is up", async () => {
+    const sent: Array<Record<string, number>> = [];
+    const meter = new HitMeter((add) => sent.push(add as Record<string, number>));
+    (meter as unknown as { at: number }).at = Date.now() - 120_000;
+    await meter.alarm(async () => {
+      meter.rows("write", 2);
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ doRequests: 1, doRowsWritten: 2 });
+  });
+
+  test("alarms within a minute of the last send are batched, and the count goes out with the next one that is a minute on", async () => {
+    const sent: Array<Record<string, number>> = [];
+    const meter = new HitMeter((add) => sent.push(add as Record<string, number>));
+    await meter.alarm(async () => {});
+    await meter.alarm(async () => {});
+    expect(sent).toHaveLength(0);
+    (meter as unknown as { at: number }).at = Date.now() - 61_000;
+    await meter.alarm(async () => {});
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.doRequests).toBe(3);
+  });
+
+  test("an alarm that fails is still counted and the error is not swallowed", async () => {
+    const sent: Array<Record<string, number>> = [];
+    const meter = new HitMeter((add) => sent.push(add as Record<string, number>));
+    (meter as unknown as { at: number }).at = Date.now() - 120_000;
+    await expect(meter.alarm(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    expect(sent[0]!.doRequests).toBe(1);
+  });
+});
