@@ -49,6 +49,7 @@ import {
 } from "./fleets.ts";
 import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 import type { AgentRestart } from "./fleet-daemon.ts";
+import { agentRestartJson } from "./fleet-agent-handover.ts";
 
 // Replaced at build time by scripts/build.ts (--define). The fallback keeps
 // `bun run src/index.ts` working during development.
@@ -451,7 +452,7 @@ async function main(argv: string[]): Promise<void> {
         const { restartFleetAgentAfterUpdate } = await import("./fleet-daemon.ts");
         agentRestart = await restartFleetAgentAfterUpdate(ctx.configPath, undefined, { target: outcome.target }).catch((err: unknown) => ({ error: err instanceof Error ? err.message + ((err as { hint?: string }).hint ? " (" + (err as { hint?: string }).hint + ")" : "") : String(err) }));
       }
-      if (ctx.json) process.stdout.write(`${JSON.stringify({ ...outcome, ...("error" in agentRestart ? { agent_restart_error: agentRestart.error } : agentRestart.restarted ? { agent_restarted: agentRestart.via, ...(agentRestart.pending ? { agent_restart_pending: true } : {}), ...(agentRestart.inProgress ? { agent_restart_in_progress: true } : {}) } : {}) }, null, 2)}\n`);
+      if (ctx.json) process.stdout.write(`${JSON.stringify({ ...outcome, ...agentRestartJson(agentRestart) }, null, 2)}\n`);
       else process.stdout.write(`${renderUpdate(outcome)}\n`);
       if (!ctx.json) {
         if ("error" in agentRestart) {

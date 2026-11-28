@@ -83,6 +83,7 @@ function run(bin: string, args: string[], stdin?: string): { code: number; out: 
       stdin: stdin === undefined ? "ignore" : "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      env: process.env,
       ...(stdin === undefined ? {} : { input: stdin }),
     });
     return { code: proc.exitCode ?? 1, out: proc.stdout ? proc.stdout.toString() : "", err: proc.stderr ? proc.stderr.toString() : "" };

@@ -15,6 +15,7 @@ import { mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } 
 import { join } from "node:path";
 
 import { currentBoot, fromEarlierBoot } from "./boot.ts";
+import type { AgentRestart } from "./fleet-daemon.ts";
 import { acquireAgentLock, commandOf, isFleetAgentProcess, runsHere, type AgentLock, type AgentLockOptions } from "./fleet-agent-lock.ts";
 
 export const SUCCESSOR_FILE = "successor";
@@ -104,7 +105,11 @@ export function claimSuccessor(
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
     const there = readSuccessor(agentDir);
-    if (there && there.pid > 0 && there.pid !== running && isAgent(there.pid)) return { claimed: false, pid: there.pid };
+    // (One that was started for another agent than the one that runs is not waiting for this one's round: it does not
+    // stand in the way of an update that goes on from here.)
+    if (there && there.pid > 0 && there.pid !== running && (there.replaces === undefined || there.replaces === running) && isAgent(there.pid)) {
+      return { claimed: false, pid: there.pid };
+    }
     if (there && there.pid === 0 && now - there.at < CLAIM_MS) return { claimed: false, pid: 0 };
     // Left by a successor that is gone, or by one that took over: not waiting for anything.
     rmSync(successorPath(agentDir), { force: true });
@@ -157,6 +162,12 @@ export function mayAskAgainToStop(agentDir: string, running: number, startCheckM
   const there = readSuccessor(agentDir);
   if (!there || there.pid <= 0 || there.replaces !== running) return false;
   return now - there.at > startCheckMs && isAgent(there.pid);
+}
+
+/** The process an update has registered as the successor in place of this one, if one has. */
+function supersededBy(agentDir: string): number | undefined {
+  const there = readSuccessor(agentDir);
+  return there && there.pid > 0 && there.pid !== process.pid ? there.pid : undefined;
 }
 
 /** The values an update hands to the agent it starts (read once; see `takeHandoverEnv`). */
@@ -318,9 +329,11 @@ export async function acquireStarting(agentDir: string, o: StartingOptions): Pro
           }
           continue;
         }
-        // Another agent has the lock, and the one that was to be replaced is gone (someone started one meanwhile): there
-        // is nothing here to take over from, and waiting for a stranger's round would keep every later update waiting too.
-        if (lock.holder > 0 && lock.holder !== o.replaces) break;
+        // Another agent has the lock, and the one that was to be replaced is gone (someone started one meanwhile). This
+        // one waits on for what is left of its time, as the agent may be gone before long (and then nothing runs
+        // unless this one does); it leaves if an update has put another successor in its place, which is what stops it
+        // standing in the way of the updates after it.
+        if (lock.holder > 0 && lock.holder !== o.replaces && supersededBy(agentDir) !== undefined) break;
         if (Date.now() >= until) break;
       }
     }
@@ -357,4 +370,15 @@ export function watchForStop(agentDir: string, since: number, onStop: () => void
     done = true;
     clearInterval(timer);
   };
+}
+
+/**
+ * What `prime update --json` says of the agent restart. `agent_restarted` is only there when this update restarted (or
+ * asked to restart) the agent: when another update is at it, this one did nothing, and says so alone.
+ */
+export function agentRestartJson(restart: AgentRestart | { error: string }): Record<string, unknown> {
+  if ("error" in restart) return { agent_restart_error: restart.error };
+  if (!restart.restarted) return {};
+  if (restart.inProgress) return { agent_restart_in_progress: true };
+  return { agent_restarted: restart.via, ...(restart.pending ? { agent_restart_pending: true } : {}) };
 }

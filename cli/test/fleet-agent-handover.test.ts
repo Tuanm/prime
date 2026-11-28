@@ -10,6 +10,7 @@ import { acquireAgentLock, agentLockPath } from "../src/fleet-agent-lock";
 import {
   acquireStarting,
   claimSuccessor,
+  agentRestartJson,
   isSuccessorProcess,
   mayAskAgainToStop,
   readSuccessor,
@@ -707,12 +708,10 @@ withProcesses("an update only signals what is still the agent it meant to stop",
     expect(said(log, old.pid)).not.toContain("sigterm");
   }, 20_000);
 
-  test("a successor that was not started for the agent that runs does not have that agent stopped", async () => {
-    const { result, old, log } = await secondUpdate((dir, _o, w) => registerSuccessor(dir, w.pid, Date.now() - 10_000, 4_000_000));
+  test("a successor that does not say whom it was started for does not have the agent stopped either", async () => {
+    const { result, old, log } = await secondUpdate((dir, _o, w) => registerSuccessor(dir, w.pid, Date.now() - 10_000));
     expect(result).toMatchObject({ restarted: true, pending: true, inProgress: true });
     expect(said(log, old.pid)).not.toContain("sigterm");
-    const { result: noName } = await secondUpdate((dir, _o, w) => registerSuccessor(dir, w.pid, Date.now() - 10_000));
-    expect(noName).toMatchObject({ inProgress: true });
   }, 30_000);
 
   test("the new agent is told when its claim was made, so that a stop from then on is for it", async () => {
@@ -751,6 +750,51 @@ describe("what `agent status` says of a successor", () => {
   });
 });
 
+describe("a successor that is waiting for another agent than the one that runs", () => {
+  test("does not stand in the way of a new claim, and one for the agent that runs still does", () => {
+    const dir = join(scratch(), "a", "fleet-agent");
+    registerSuccessor(dir, process.pid, Date.now(), 555);
+    // The agent that runs now is 777, not the 555 it was started for.
+    expect(claimSuccessor(dir, 777, Date.now(), () => true).claimed).toBe(true);
+    registerSuccessor(dir, process.pid, Date.now(), 777);
+    expect(claimSuccessor(dir, 777, Date.now(), () => true)).toEqual({ claimed: false, pid: process.pid });
+    // An entry that does not say whom it replaces is taken as it always was.
+    registerSuccessor(dir, process.pid, Date.now());
+    expect(claimSuccessor(dir, 777, Date.now(), () => true).claimed).toBe(false);
+  });
+});
+
+describe("what `prime update --json` says when another update is at the agent", () => {
+  test("it does not say that this one restarted anything", () => {
+    expect(agentRestartJson({ restarted: true, via: "direct", pending: true, inProgress: true })).toEqual({ agent_restart_in_progress: true });
+    expect(agentRestartJson({ restarted: true, via: "direct", pending: true })).toEqual({ agent_restarted: "direct", agent_restart_pending: true });
+    expect(agentRestartJson({ restarted: true, via: "service", pid: 4 })).toEqual({ agent_restarted: "service" });
+    expect(agentRestartJson({ restarted: false, reason: "x" })).toEqual({});
+    expect(agentRestartJson({ error: "no" })).toEqual({ agent_restart_error: "no" });
+  });
+});
+
+withProcesses("what the agent starts after it has read the handover variables", () => {
+  test("a container runtime it runs does not have them in its environment", async () => {
+    const root = scratch();
+    const out = join(root, "seen");
+    const fake = join(root, "fake-runtime");
+    writeFileSync(fake, `#!/bin/sh\necho "since=$PRIME_FLEET_SINCE replaces=$PRIME_FLEET_REPLACES wait=$PRIME_FLEET_LOCK_WAIT_MS" >> ${JSON.stringify(out)}\necho '[]'\n`, { mode: 0o755 });
+    const script = `import { takeHandoverEnv } from ${HANDOVER}; import { spaceContainerRunning } from ${JSON.stringify(join(import.meta.dir, "../src/spaces.ts"))};
+      takeHandoverEnv(process.env, Date.now());
+      spaceContainerRunning({ kind: "docker", bin: ${JSON.stringify(fake)} }, { container: "c" });`;
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      env: { ...process.env, PRIME_FLEET_SINCE: String(Date.now() - 1000), PRIME_FLEET_REPLACES: "321", PRIME_FLEET_LOCK_WAIT_MS: "900000" },
+      stdout: "ignore",
+      stderr: "ignore",
+      timeout: 20_000,
+      killSignal: "SIGKILL",
+    });
+    expect(await child.exited).toBe(0);
+    expect(readFileSync(out, "utf8").trim().split("\n")).toEqual(["since= replaces= wait="]);
+  }, 30_000);
+});
+
 describe("when an update asks the agent again", () => {
   const dir = (): string => join(scratch(), "a", "fleet-agent");
   const alive3 = () => true;
@@ -774,22 +818,60 @@ describe("when an update asks the agent again", () => {
 describe("a successor whose agent has left", () => {
   const dirOf = (): string => join(scratch(), "a", "fleet-agent");
 
-  test("does not wait out its time for a stranger's lock: it leaves at once, and its entry goes", async () => {
+  test("waits on for what is left of its time while a stranger holds the lock, and takes it if it is free in a later turn", async () => {
     const dir = dirOf();
     registerSuccessor(dir, process.pid, Date.now(), 555);
-    const turns: number[] = [];
-    const began = Date.now();
+    let calls = 0;
     const r = await acquireStarting(dir, {
       waitMs: 60_000,
+      turnMs: 20,
       startedAt: Date.now(),
       replaces: 555,
       isAgent: () => false,
-      acquire: async (_d, o) => (turns.push(o?.waitMs ?? -1), { held: false as const, holder: 777 }),
+      // A short-lived agent that someone started has the lock for two turns; then it is free.
+      acquire: async () => (await Bun.sleep(5), ++calls <= 2 ? { held: false as const, holder: 777 } : { held: true as const, release: () => {} }),
+    });
+    expect(r.held).toBe(true);
+    expect(calls).toBe(3);
+  });
+
+  test("gives up, and clears its entry, when its time is out", async () => {
+    const dir = dirOf();
+    registerSuccessor(dir, process.pid, Date.now(), 555);
+    const began = Date.now();
+    const r = await acquireStarting(dir, {
+      waitMs: 120,
+      turnMs: 20,
+      startedAt: Date.now(),
+      replaces: 555,
+      isAgent: () => false,
+      acquire: async () => (await Bun.sleep(5), { held: false as const, holder: 777 }),
     });
     expect(r.held).toBe(false);
-    expect(Date.now() - began).toBeLessThan(2000);
-    expect(turns).toHaveLength(1);
+    expect(Date.now() - began).toBeGreaterThanOrEqual(100);
     expect(existsSync(successorPath(dir))).toBe(false);
+  });
+
+  test("leaves when an update has put another successor in its place", async () => {
+    const dir = dirOf();
+    registerSuccessor(dir, process.pid, Date.now(), 555);
+    let calls = 0;
+    const r = await acquireStarting(dir, {
+      waitMs: 60_000,
+      turnMs: 20,
+      startedAt: Date.now(),
+      replaces: 555,
+      isAgent: () => false,
+      acquire: async () => {
+        await Bun.sleep(5);
+        if (++calls === 2) registerSuccessor(dir, 4_000_000, Date.now(), 777);
+        return { held: false as const, holder: 777 };
+      },
+    });
+    expect(r.held).toBe(false);
+    expect(calls).toBe(2);
+    // The entry is the other successor's now, and is left to it.
+    expect(readSuccessor(dir)?.pid).toBe(4_000_000);
   });
 
   test("takes the lock when the agent it waited for has gone, in the turn after, and not at the end of its wait", async () => {

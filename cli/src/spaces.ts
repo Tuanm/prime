@@ -56,7 +56,9 @@ function exec(
       stderr: "pipe",
       stdin: "ignore",
       timeout: timeoutMs,
-      ...(env ? { env } : {}),
+      // Always given: Bun hands a child the environment the process started with unless it is told otherwise, whatever
+      // was removed from `process.env` since (the handover variables of an update, see `takeHandoverEnv`).
+      env: env ?? process.env,
     });
     return {
       code: proc.exitCode ?? 1,
@@ -70,7 +72,7 @@ function exec(
 }
 
 async function execStream(bin: string, args: string[]): Promise<number> {
-  const proc = Bun.spawn({ cmd: [bin, ...args], stdout: "inherit", stderr: "inherit", stdin: "ignore" });
+  const proc = Bun.spawn({ cmd: [bin, ...args], stdout: "inherit", stderr: "inherit", stdin: "ignore", env: process.env });
   return await proc.exited;
 }
 

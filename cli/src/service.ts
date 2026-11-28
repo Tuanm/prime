@@ -746,7 +746,7 @@ interface RunResult {
 }
 
 function run(cmd: string[], opts: { timeoutMs?: number } = {}): RunResult {
-  const result = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: opts.timeoutMs ?? 60_000 });
+  const result = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: opts.timeoutMs ?? 60_000, env: process.env });
   return { code: result.exitCode ?? 1, out: result.stdout.toString(), err: result.stderr.toString() };
 }
 
