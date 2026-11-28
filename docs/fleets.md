@@ -221,6 +221,18 @@ rules the snapshot uses (every `.gitignore` of the tree, the store's `info/exclu
 holds is never left out, ignored or not. A path git cannot say anything of, or does not
 answer about in a moment, is not left out.
 
+**A change costs what changed, not the size of the tree.** The primary notes the paths the file watcher
+names, and a change to a few files waits for and stages only those (`git add` by name, literally: a file called
+`:x` or `*.q` is a file): in a tree of 100 000 files one edit is taken in about 0.3 s (0.7 s the first time, before the
+repositories left alone are known), where looking at every file took about 1.8 s. The whole tree is still looked at when a change names nothing, when a `.gitignore` or
+`.gitattributes` changed, when more than 256 paths (or 24 KB of names) changed (git matches every named path against every file, so past that the whole tree is quicker), after the member was a replica, after a failed
+snapshot, with a git older than 2.25, and every minute whatever the watcher said (so an event the system lost
+is found within a minute: a change the file system did not report is published up to a minute late, not lost).
+A replica looks the same way at its own work tree before it writes a newer snapshot over it: files
+whose size and times are as the last apply wrote them, and no file there that git would add, mean there is
+nothing of its own to keep, and nothing is staged or hashed. Anything else (a changed file, a file of its own,
+a doubt) is looked at as before.
+
 When a snapshot arrives, the replica writes the files it has and removes the
 files the *previous* snapshot had and this one does not: the ones the primary
 deleted. A removal stays inside the work tree (a directory turned into a symlink
