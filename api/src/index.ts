@@ -27,6 +27,7 @@ import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, tokenVerifi
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { readBounded, readBoundedText } from "./body";
+import { describeCall } from "./fleet-audit";
 import { INVITE_CHECK_BODY_MAX, limitAsk } from "./fleet-limits";
 import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
@@ -307,11 +308,19 @@ async function relayToFleet(
   headers.set("x-prime-caller", "device");
   headers.set("x-prime-device", callerId);
   headers.set("x-prime-fleet", fleetId);
+  // The body is read before the fleet is asked, because the fleet's audit log is told what the call is - its method and
+  // the tool's name, and how large it is - in the very question that asks who the primary is: no request of its own.
+  // (Read before the membership check, which the answer to this question makes: the caller has proved it is a device, and the body
+  // is held to the same cap as before, so a non-member costs one bounded read more than it did.)
+  const relayBody = await readBounded(request, cfg.maxBodyBytes);
+  if (relayBody instanceof Response) return relayBody;
   // A member asks as itself; a fleet's own token has already been proved by
   // the gateway, so the fleet answers the gateway itself.
-  const info = await stub.fetch("https://fleet/primary", {
+  const askHeaders = asBuddy ? adminHeaders(headers) : headers;
+  if (asBuddy) askHeaders.set("x-prime-actor", "fleet-token");
+  const info = await stub.fetch("https://fleet/primary?audit=" + encodeURIComponent(describeCall(relayBody)) + "&bytes=" + relayBody.byteLength, {
     method: "GET",
-    headers: asBuddy ? adminHeaders(headers) : headers,
+    headers: askHeaders,
   });
   if (!info.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
   const body = (await info.json()) as { member?: boolean; primary?: string | null; since?: number };
@@ -363,8 +372,6 @@ async function relayToFleet(
   if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) relayHeaders.set("mcp-session-id", sid);
   forwardCallerSig(request, relayHeaders);
   markAnonymous(relayHeaders, request, cfg, env);
-  const relayBody = await readBounded(request, cfg.maxBodyBytes);
-  if (relayBody instanceof Response) return relayBody;
   const relayed = await deviceStub.fetch(new Request(doUrl, { method: "POST", headers: relayHeaders, body: relayBody }));
   // A primary that cannot be reached is the fleet's problem, not the
   // caller's: say so, and say which member it was.
@@ -493,7 +500,7 @@ async function vacateSilentPrimary(env: Env, fleetId: string, holder: string | n
   if (!env.FLEET || !holder) return null;
   if (await deviceOnline(env, holder, since)) return null;
   const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
-  const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId });
+  const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId, "x-prime-actor": "gateway" });
   await stub
     .fetch("https://fleet/vacate", { method: "POST", headers, body: JSON.stringify({ deviceId: holder }) })
     .catch(() => null);
@@ -1052,6 +1059,8 @@ export default {
           const stub = env.FLEET.get(env.FLEET.idFromName(fleet));
           const headers = new Headers({ "content-type": "application/json" });
           headers.set("x-prime-caller", "admin");
+          // Said, so that an object this wakes knows whose it is (the log's files are named by it).
+          headers.set("x-prime-fleet", fleet);
           const checked = await stub.fetch("https://fleet/invite-check", {
             method: "POST",
             headers,
@@ -1312,6 +1321,23 @@ export default {
       // ---- fleets ----
       // The operator's view of the fleets: who is in them, which member
       // holds the lease, and which of them are connected right now.
+      // The log of a fleet that has been deleted (or the older part of one that is not): the files its object copied to the
+      // bucket. Without `file` it lists them; with one it is the file's lines.
+      if (request.method === "GET" && url.pathname.startsWith("/admin/api/audit-archive/")) {
+        const id = url.pathname.slice("/admin/api/audit-archive/".length);
+        if (!validFleetId(id)) return Response.json({ error: "invalid fleet id" }, { status: 400 });
+        if (!env.BUCKET) return Response.json({ error: "no bucket on this gateway" }, { status: 503 });
+        const file = url.searchParams.get("file");
+        if (file === null) {
+          const listed = await env.BUCKET.list({ prefix: "audit/" + id + "/", limit: 1000 });
+          return Response.json({ ok: true, files: listed.objects.map((o) => ({ name: o.key.slice(("audit/" + id + "/").length), bytes: o.size })), truncated: listed.truncated });
+        }
+        if (!/^\d{13}-\d{12}\.jsonl$/.test(file)) return Response.json({ error: "not a file of the log" }, { status: 400 });
+        const got = await env.BUCKET.get("audit/" + id + "/" + file);
+        if (!got) return Response.json({ error: "no such file" }, { status: 404 });
+        return new Response(got.body, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" } });
+      }
+
       if (request.method === "GET" && url.pathname === "/admin/api/fleets") {
         return await adminFleets(env);
       }
@@ -1337,6 +1363,17 @@ export default {
         }
         if (request.method === "DELETE" && step === "") {
           return await adminFleetAction(env, fleetId, "delete", {}, adminActor);
+        }
+        if (request.method === "GET" && step === "audit") {
+          // What was done to the fleet, from the entry after `after`.
+          if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+          const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
+          const asked = new URL("https://fleet/audit");
+          for (const name of ["after", "limit", "tail"]) {
+            const v = url.searchParams.get(name);
+            if (v !== null) asked.searchParams.set(name, v);
+          }
+          return await stub.fetch(asked.toString(), { method: "GET", headers: { "x-prime-caller": "admin", "x-prime-fleet": fleetId } });
         }
         if (request.method === "POST" && step === "invite") {
           return await adminFleetAction(env, fleetId, "invite", {}, adminActor);
@@ -1364,6 +1401,17 @@ export default {
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ token }),
           });
+          // The fleet's own record says it was done (that it was, never the token or anything made from it). Told after the
+          // registry took it, and only when it did; a fleet that does not exist, or a note that fails, changes nothing of the answer.
+          if (res.ok && env.FLEET) {
+            await env.FLEET.get(env.FLEET.idFromName(fleetId))
+              .fetch("https://fleet/note", {
+                method: "POST",
+                headers: { "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId, ...(adminActor ? { "x-prime-actor": adminActor } : {}) },
+                body: JSON.stringify({ action: token ? "fleet-token-set" : "fleet-token-cleared" }),
+              })
+              .catch(() => null);
+          }
           return new Response(res.body, { status: res.status, headers: res.headers });
         }
         if (request.method === "POST" && step === "meta") {

@@ -22,6 +22,7 @@ import {
   cleanLabel,
   cleanPubkey,
   keyChangeMessage,
+  keyFingerprintLong,
   keyFingerprintMatches,
   KEY_PROOF_INFO,
   KEY_PROOF_WINDOW_MS,
@@ -41,6 +42,7 @@ import {
   newInviteCode,
   validFleetId,
 } from "./fleets";
+import { AUDIT_PAGE_MAX, AuditLog, type AuditDetail, actorOf, auditLimits } from "./fleet-audit";
 import { HitMeter, meterStorage, sendUsage } from "./usage";
 import type { Env } from "./config";
 
@@ -83,6 +85,10 @@ const PAUSED_RETRY_MS = 60_000;
 interface Caller {
   kind: "admin" | "device";
   deviceId: string;
+  /** `x-prime-actor`, which the Worker sets on an operator's call: who the operator is (see `actorOf`). */
+  actorHeader?: string | null;
+  /** Set when the call was let in because the device owns the fleet, so the log says the owner did it. */
+  asOwner?: boolean;
 }
 
 type Members = Record<string, Member>;
@@ -425,8 +431,20 @@ export class FleetDO implements DurableObject {
   }
 
   // Forget everything about this fleet.
-  private async clear(fleetId: string): Promise<void> {
+  // Resolves whether the fleet's audit log was kept: it is copied to the bucket, outside what is cleared here.
+  private async clear(fleetId: string): Promise<boolean> {
     this.hangUp("the fleet is gone");
+    // A log that could not be copied to the bucket stays in the object (its rows and the fleet's name are not cleared): the
+    // history of a fleet is not lost to a bucket that was down at the moment it was deleted, and a fleet made again under the
+    // name carries on from it.
+    const kept = await this.auditLog().retire().catch((e) => {
+      console.error("audit: could not retire the log: " + String(e));
+      return false;
+    });
+    if (kept) {
+      await this.storage.delete("fleetName");
+      this.fleetName = "";
+    }
     // A fleet that is deleted is not still paused: the name can be made again.
     await this.storage.delete("meta");
     this.metaKept = undefined;
@@ -455,6 +473,7 @@ export class FleetDO implements DurableObject {
     await this.deleteStored(fleetId);
     // The fleet is gone, so the registry should stop listing it.
     await this.registerWithRegistry(fleetId, false);
+    return kept;
   }
 
 
@@ -478,12 +497,15 @@ export class FleetDO implements DurableObject {
   // anybody still wants it; and on a gateway that gives devices to anyone, "a proven device" is
   // anyone. An abandoned fleet is cleared away by `reap`, which the Worker allows only when the
   // gateway knows none of its members.
-  private async delete(caller: Caller, request: Request): Promise<Response> {
+  private async delete(caller: Caller, request: Request, body: Record<string, unknown>): Promise<Response> {
     const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
-    await this.clear(fleetId);
-    return Response.json({ ok: true, deleted: fleetId });
+    // A delete of a name that is no fleet (a retry, a reap of one already gone) leaves no entry and no file.
+    if (await this.exists()) await this.audit(caller, "fleet-deleted", undefined, typeof body.reason === "string" ? { reason: body.reason } : undefined);
+    const kept = await this.clear(fleetId);
+    // `auditKept: false`: the log could not be copied to the bucket and stays in the object, to be copied by a later trim.
+    return Response.json({ ok: true, deleted: fleetId, ...(kept ? {} : { auditKept: false }) });
   }
 
   //
@@ -506,10 +528,11 @@ export class FleetDO implements DurableObject {
   //
   // A client that is not a member learns nothing: it is told that there is
   // no primary, not who it is.
-  private async primary(caller: Caller): Promise<Response> {
+  private async primary(caller: Caller, request: Request): Promise<Response> {
     const held = await this.lease();
     // The operator may ask: the admin interface shows who holds the lease.
     if (caller.kind === "admin") {
+      await this.auditRelay(caller, request, held ? held.holder : null);
       return Response.json({
         member: true,
         primary: held ? held.holder : null,
@@ -520,12 +543,69 @@ export class FleetDO implements DurableObject {
     if (caller.kind !== "device") return this.deny();
     const members = await this.members();
     if (!members[caller.deviceId]) return Response.json({ member: false, primary: null });
+    await this.auditRelay(caller, request, held ? held.holder : null);
     return Response.json({
       member: true,
       primary: held ? held.holder : null,
       epoch: held ? held.epoch : 0,
       ...(held?.since !== undefined ? { since: held.since } : {}),
     });
+  }
+
+  /**
+   * The call the gateway is about to relay to the primary, said in the question that asks who the primary is: `audit` is
+   * `<method>:<tool>` and `bytes` the size of the body, set by the Worker and by nobody else. What the call asks of the
+   * tool is not logged, nor is anything of what it carries. A call that comes by a member is its entry; one that comes by
+   * the fleet's token is the gateway's, and says so. Off with FLEET_AUDIT_RELAY=0, for a fleet whose calls are many and
+   * whose cost is not worth a row each.
+   */
+  private async auditRelay(caller: Caller, request: Request, holder: string | null): Promise<void> {
+    const asked = new URL(request.url).searchParams.get("audit");
+    // Only a call that has a primary to go to: with none, the Worker answers 503 and nothing is relayed.
+    if (asked === null || holder === null || this.env.FLEET_AUDIT_RELAY === "0") return;
+    const colon = asked.indexOf(":");
+    const plain = (v: string): string => (/^[A-Za-z0-9_.\-/]{1,64}$/.test(v) ? v : "?");
+    const method = plain(colon === -1 ? asked : asked.slice(0, colon));
+    const tool = colon === -1 ? undefined : plain(asked.slice(colon + 1));
+    const bytes = Number(new URL(request.url).searchParams.get("bytes"));
+    await this.audit(caller, "relayed", holder, {
+      method,
+      ...(tool !== undefined ? { tool } : {}),
+      ...(Number.isFinite(bytes) && bytes >= 0 ? { bytes: Math.floor(bytes) } : {}),
+    });
+  }
+
+  /**
+   * The log, from the entry after `after` (or the newest `tail`): the operator's, or the owner's (who is let in to everything else of the fleet
+   * as well). `head` is where it stands now, the number and hash a reader keeps to check what it reads next against, and
+   * `first` the oldest entry the object still holds: the ones before it are in the bucket (see fleet-audit.ts), and the
+   * first one held carries the hash of the last that went. `unrecorded` is how many entries could not be stored since
+   * the object woke.
+   */
+  private async readAudit(caller: Caller, url: URL): Promise<Response> {
+    const denied = await this.requireOperatorOrOwner(caller);
+    if (denied) return denied;
+    if (!(await this.exists())) return Response.json({ error: "no such fleet" }, { status: 404 });
+    const num = (name: string, fallback: number): number => {
+      const n = Number(url.searchParams.get(name));
+      return Number.isFinite(n) && n >= 0 ? n : fallback;
+    };
+    // `tail=n` is the newest n, for a page that shows what happened last.
+    const read = url.searchParams.has("tail") ? await this.auditLog().readLast(num("tail", 50) || 50) : await this.auditLog().read(num("after", 0), num("limit", 100) || 100);
+    return Response.json({ ok: true, ...read, limit: AUDIT_PAGE_MAX, ...(this.auditFailures > 0 ? { unrecorded: this.auditFailures } : {}) });
+  }
+
+  /**
+   * Something the operator did that the object has no other way to know: the fleet's own token was set or cleared, which
+   * the registry holds (nothing of the token is said). Only the gateway says it, and only a few things are taken.
+   */
+  private async note(caller: Caller, body: Record<string, unknown>): Promise<Response> {
+    if (caller.kind !== "admin") return this.deny();
+    const what = body.action;
+    if (what !== "fleet-token-set" && what !== "fleet-token-cleared") return Response.json({ error: "not a note" }, { status: 400 });
+    if (!(await this.exists())) return Response.json({ error: "no such fleet" }, { status: 404 });
+    await this.audit(caller, what);
+    return Response.json({ ok: true });
   }
 
   // The head, for a member that wants to know what state the fleet is at.
@@ -668,6 +748,7 @@ export class FleetDO implements DurableObject {
       const meta = await this.meta();
       const wasPaused = meta.disabled === true;
       const wasLease = effectiveLeaseMs(meta.leaseMs, this.env);
+      const wasLabel = meta.label;
       if (typeof body.label === "string") {
         const label = cleanLabel(body.label);
         if (label === undefined) delete meta.label;
@@ -688,6 +769,11 @@ export class FleetDO implements DurableObject {
       this.metaKept = { ...meta };
       leaseChanged = effectiveLeaseMs(meta.leaseMs, this.env) !== wasLease;
       if ((meta.disabled === true) !== wasPaused) pauseChanged = meta.disabled === true;
+      const changed: AuditDetail = {};
+      if (pauseChanged !== undefined) changed.paused = pauseChanged;
+      if (leaseChanged) changed.leaseMs = meta.leaseMs ?? null;
+      if (meta.label !== wasLabel) changed.label = meta.label ?? null;
+      if (Object.keys(changed).length > 0) await this.audit(caller, "fleet-changed", undefined, changed);
       out = Response.json({ ok: true, meta, leaseMs: effectiveLeaseMs(meta.leaseMs, this.env) });
     });
     // Told after the decision is stored, outside the block that made it.
@@ -714,7 +800,67 @@ export class FleetDO implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     this.meter.hit();
-    return this.meter.busy(() => this.serve(request));
+    const answer = await this.meter.busy(() => this.serve(request));
+    // Outside every decision, and not waited for by the caller: moving old entries to the bucket reaches the network. It
+    // holds nothing that a decision waits for (see AuditLog), and a trim that is cut short is done again.
+    if (this.auditLog().due()) void this.meter.busy(() => this.auditLog().trim()).catch(() => undefined);
+    return answer;
+  }
+
+  // ---- the audit log (see fleet-audit.ts) ----
+
+  /** The fleet's name, as the Worker last said it: the log's files in the bucket are named by it. */
+  private fleetName = "";
+  private auditKept?: AuditLog;
+  /** Entries that could not be stored since this object woke. Said by the log's reader, so a gap is not silent. */
+  private auditFailures = 0;
+
+  private auditLog(): AuditLog {
+    return (this.auditKept ??= new AuditLog(
+      this.storage as never,
+      async (name, body, meta) => {
+        // A seam for a smoke test that must see a decision made while a copy to the bucket is in flight.
+        const slow = Number(this.env.FLEET_AUDIT_ARCHIVE_DELAY_MS);
+        if (Number.isFinite(slow) && slow > 0) await new Promise((r) => setTimeout(r, Math.min(slow, 10_000)));
+        const incarnation = await this.storage.get<string>("incarnation");
+        this.meter.r2("write");
+        await this.bucket().put(name, body, { customMetadata: { ...meta, ...(incarnation ? { incarnation } : {}) } });
+      },
+      () => this.auditPrefix(),
+      Date.now,
+      auditLimits(this.env),
+    ));
+  }
+
+  /**
+   * Where this fleet's old entries are kept in the bucket: outside `fleets/<id>/`, which is cleared when the fleet is,
+   * because what was done to a fleet must outlive it. The name is the one the Worker last said, else the one stored when
+   * the fleet was made; with neither, null, and nothing is archived (never under a name that is not the fleet's).
+   */
+  private async auditPrefix(): Promise<string | null> {
+    if (!this.fleetName) {
+      const stored = await this.storage.get<string>("fleetName");
+      if (stored && validFleetId(stored)) this.fleetName = stored;
+    }
+    return this.fleetName ? "audit/" + this.fleetName + "/" : null;
+  }
+
+  /**
+   * Record what was done. It never throws: an entry that cannot be stored is logged and counted (the reader is told),
+   * because the decision it records is already made, and failing inside one that holds the object shut would reset it.
+   */
+  private async audit(caller: Caller, action: string, target?: string, detail?: AuditDetail): Promise<void> {
+    try {
+      await this.auditLog().append({
+        actor: actorOf(caller.kind, caller.deviceId, caller.actorHeader ?? null, caller.asOwner === true),
+        action,
+        ...(target !== undefined ? { target } : {}),
+        ...(detail ? { detail } : {}),
+      });
+    } catch (e) {
+      this.auditFailures++;
+      console.error("audit: could not record " + action + ": " + String(e));
+    }
   }
 
   private async serve(request: Request): Promise<Response> {
@@ -725,15 +871,19 @@ export class FleetDO implements DurableObject {
     // The Worker has already proved the caller; these headers are internal.
     const kind = request.headers.get("x-prime-caller") === "admin" ? "admin" : "device";
     const deviceId = request.headers.get("x-prime-device") ?? "";
-    const caller: Caller = { kind, deviceId };
+    const caller: Caller = { kind, deviceId, actorHeader: request.headers.get("x-prime-actor") };
 
     // The operator lists the fleets from the registry, because the objects
     // cannot be enumerated. A fleet made before the registry existed, or one
     // whose registration was lost, would be invisible to the operator for
     // ever; it puts itself back on the first request the object sees.
+    // The name, from any request that carries one: an object that was woken by a request that does not (the check of an
+    // invite) learns it from the next.
+    const named = request.headers.get("x-prime-fleet") ?? "";
+    if (!this.fleetName && validFleetId(named)) this.fleetName = named;
     if (!this.announced) {
       this.announced = true;
-      const name = request.headers.get("x-prime-fleet") ?? "";
+      const name = named;
       if (validFleetId(name)) {
         void this.exists().then((there) => (there ? this.registerWithRegistry(name, true) : undefined)).catch(() => {});
       }
@@ -767,7 +917,7 @@ export class FleetDO implements DurableObject {
     if (path === "/pending" && request.method === "GET") return this.listPending(caller);
     if (path === "/me" && request.method === "GET") return this.me(caller);
     if (path === "/role") return this.role(caller);
-    if (path === "/primary" && request.method === "GET") return this.primary(caller);
+    if (path === "/primary" && request.method === "GET") return this.primary(caller, request);
     if (path === "/reap" && request.method === "POST") return this.reap(caller);
     if (path === "/meta" && request.method === "POST") return this.setMeta(caller, body);
     if (path === "/bootstrap" && request.method === "POST") {
@@ -787,7 +937,9 @@ export class FleetDO implements DurableObject {
       return this.applied(caller, body, request);
     }
     if (path === "/unreferenced" && request.method === "POST") return this.unreferenced(caller, body, request);
-    if (path === "/delete" && request.method === "POST") return this.delete(caller, request);
+    if (path === "/delete" && request.method === "POST") return this.delete(caller, request, body);
+    if (path === "/audit" && request.method === "GET") return this.readAudit(caller, url);
+    if (path === "/note" && request.method === "POST") return this.note(caller, body);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
     if (path === "/vacate" && request.method === "POST") return this.vacate(caller, body);
 
@@ -816,6 +968,7 @@ export class FleetDO implements DurableObject {
     const member = members[caller.deviceId];
     if (!member || member.role !== "owner") return this.deny();
     // The owner speaks for its fleet by acting on it.
+    caller.asOwner = true;
     await this.touch();
     return null;
   }
@@ -850,6 +1003,10 @@ export class FleetDO implements DurableObject {
       // it: a fleet with nobody in it cannot be run by anybody, so the
       // first one in takes it.
       await this.storage.put("created", Date.now());
+      await this.storage.put("fleetName", fleetId);
+      // A log that was kept when the fleet before it was deleted (the bucket was down then) is carried on, and says so.
+      const carried = await this.auditLog().held();
+      await this.audit(caller, carried > 0 ? "fleet-recreated" : "fleet-created", undefined, caller.deviceId ? { for: caller.deviceId } : undefined);
       out = Response.json({ ok: true, fleet: fleetId });
       // The registry keeps the list of fleets, so the operator can see them.
       await this.registerWithRegistry(fleetId, true);
@@ -898,6 +1055,8 @@ export class FleetDO implements DurableObject {
       const invite: Invite = { codeHash, expiresAt: now + ttlMs, createdBy: caller.deviceId, createdAt: now };
       invites[codeHash] = invite;
       await this.storage.put("invites", invites);
+      // The code is never written down: only that one was made, and for how long.
+      await this.audit(caller, "invite-created", undefined, { ttlMs, expiresAt: invite.expiresAt });
       out = Response.json({ ok: true, code, expiresAt: invite.expiresAt });
     });
     return out;
@@ -937,7 +1096,7 @@ export class FleetDO implements DurableObject {
       if (existing) {
         // Idempotent re-join: already a member is not an error. A key that is not the one the fleet
         // holds does not replace it on the strength of the device's credential: see `changeKey`.
-        const changed = pubkey ? await this.changeKey(members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), request.headers.get("x-prime-fleet") ?? "") : "same";
+        const changed = pubkey ? await this.changeKey(caller, members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), request.headers.get("x-prime-fleet") ?? "") : "same";
         out = changed === "pending" ? this.keyPending() : changed === "full" ? this.tooManyPending() : Response.json({ ok: true, status: "member", member: members[caller.deviceId] });
         return;
       }
@@ -1002,6 +1161,7 @@ export class FleetDO implements DurableObject {
         requestedAt: now,
       };
       await this.storage.put("pending", pending);
+      await this.audit(caller, "join-requested", caller.deviceId, { ...(label ? { label } : {}), ...(pubkey ? { key: await keyFingerprintLong(pubkey) } : {}) });
       out = Response.json({ ok: true, status: "pending", requestedAt: now });
     });
     return out;
@@ -1056,7 +1216,7 @@ export class FleetDO implements DurableObject {
           return;
         }
         delete pending[deviceId];
-        await this.replaceKey(members, deviceId, request.pubkey, fleetId);
+        await this.replaceKey(members, deviceId, request.pubkey, fleetId, caller, "approved");
         await this.storage.put("pending", pending);
         out = Response.json({ ok: true, member: members[deviceId], keyChanged: true });
         return;
@@ -1080,6 +1240,7 @@ export class FleetDO implements DurableObject {
       members[deviceId] = member;
       await this.storage.put("members", members);
       await this.storage.put("pending", pending);
+      await this.audit(caller, "member-admitted", deviceId, { role: member.role, ...(member.pubkey ? { key: await keyFingerprintLong(member.pubkey) } : {}) });
       out = Response.json({ ok: true, member });
     });
     return out;
@@ -1107,6 +1268,7 @@ export class FleetDO implements DurableObject {
         if (pending[deviceId]?.keyChange && members[deviceId]) {
           delete pending[deviceId];
           await this.storage.put("pending", pending);
+          await this.audit(caller, "request-declined", deviceId, { keyChange: true });
           out = Response.json({ ok: true, removed: "pending" });
         } else {
           out = Response.json({ error: "no key change waiting" }, { status: 404 });
@@ -1116,6 +1278,7 @@ export class FleetDO implements DurableObject {
       if (pending[deviceId] && !members[deviceId]) {
         delete pending[deviceId];
         await this.storage.put("pending", pending);
+        await this.audit(caller, "request-declined", deviceId, { keyChange: false });
         out = Response.json({ ok: true, removed: "pending" });
         return;
       }
@@ -1144,16 +1307,25 @@ export class FleetDO implements DurableObject {
       // Removing the owner hands the fleet to the member that has been in it
       // the longest. A fleet whose owner is gone and that nobody can take
       // over is a fleet nobody can run.
+      let ownerTo: string | undefined;
       if (member.role === "owner") {
         const rest = Object.values(members).sort((a, b) => a.addedAt - b.addedAt);
         if (rest.length > 0) {
           const next = rest[0]!;
           members[next.deviceId] = { ...next, role: "owner" };
+          ownerTo = next.deviceId;
         }
       }
+      await this.audit(caller, "member-removed", deviceId, {
+        self: caller.kind === "device" && caller.deviceId === deviceId,
+        wasOwner: member.role === "owner",
+        freedLease,
+        ...(ownerTo ? { ownerTo } : {}),
+      });
       // A fleet with no members is not a fleet: it goes away with the last
       // one, rather than sitting there with nobody able to run it.
       if (Object.keys(members).length === 0) {
+        await this.audit(caller, "fleet-deleted", undefined, { reason: "the last member left" });
         await this.clear(request.headers.get("x-prime-fleet") ?? "");
         out = Response.json({ ok: true, removed: "member", fleet: "gone" });
         return;
@@ -1175,6 +1347,7 @@ export class FleetDO implements DurableObject {
     if (denied) return denied;
     const before = Object.keys((await this.storage.get<Record<string, Invite>>("invites")) ?? {}).length;
     await this.storage.put("invites", {});
+    await this.audit(caller, "invites-revoked", undefined, { count: before });
     return Response.json({ ok: true, revoked: before });
   }
 
@@ -1227,6 +1400,11 @@ export class FleetDO implements DurableObject {
     return lease.expiresAt > Date.now() ? lease : null;
   }
 
+  /** The lease as it is stored, run out or not: who held it last. */
+  private async leaseRow(): Promise<Lease | null> {
+    return (await this.storage.get<Lease>("lease")) ?? null;
+  }
+
   // One atomic decision, so two spaces created at the same moment cannot both
   // conclude that they are the first. Only storage reads inside the lock.
   private async bootstrap(caller: Caller, request: Request, body: Record<string, unknown>): Promise<Response> {
@@ -1264,7 +1442,7 @@ export class FleetDO implements DurableObject {
         return;
       }
       if (pubkey) {
-        const changed = await this.changeKey(roster, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), fleetId);
+        const changed = await this.changeKey(caller, roster, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), fleetId);
         if (changed === "pending") refused = this.keyPending();
         if (changed === "full") refused = this.tooManyPending();
         if (refused) return;
@@ -1298,7 +1476,8 @@ export class FleetDO implements DurableObject {
         out = this.deny();
         return;
       }
-      const held = await this.lease();
+      const row = await this.leaseRow();
+      const held = row && row.expiresAt > Date.now() ? row : null;
 
       if (held && held.holder !== caller.deviceId) {
         out = Response.json({
@@ -1439,6 +1618,12 @@ export class FleetDO implements DurableObject {
       if (storedEpoch !== epoch) await this.storage.put("epoch", epoch);
       if ((await this.storage.get<Claim>("claim")) !== undefined) await this.storage.delete("claim");
       await this.scheduleLeaseAlarm(lease.expiresAt);
+      // Only a new place is written down, never a renewal: the lease is renewed every fifteen seconds. A holder that
+      // had it and let it run out takes it as a new one (a new epoch), and so does the one that takes it from a holder
+      // whose time was up, or from nobody.
+      if (!(held && held.holder === caller.deviceId)) {
+        await this.audit(caller, "lease-taken", caller.deviceId, { epoch, ...(row ? { from: row.holder } : {}), how: row ? "expired" : "free" });
+      }
       out = Response.json({
         ok: true,
         role: "primary",
@@ -1485,6 +1670,7 @@ export class FleetDO implements DurableObject {
       return Response.json({ ok: true, vacated: false, primary: held ? held.holder : null });
     }
     await this.storage.delete("lease");
+    await this.audit(caller, "lease-vacated", deviceId, { quiet: body.quiet === true });
     // The caller that asked for the place right after (the Worker, when a member
     // finds the holder gone) is about to give it to that member itself. Telling
     // everyone else the place is free would send all of them after it at once, and
@@ -1498,6 +1684,7 @@ export class FleetDO implements DurableObject {
     const held = await this.lease();
     if (!held || held.holder !== caller.deviceId) return Response.json({ error: "not the lease holder" }, { status: 409 });
     await this.storage.delete("lease");
+    await this.audit(caller, "lease-released", caller.deviceId, { epoch: held.epoch });
     this.broadcast({ type: "lease-free" });
     return Response.json({ ok: true });
   }
@@ -1645,6 +1832,15 @@ export class FleetDO implements DurableObject {
       // ones are of no use.
       await this.keepSnapshot({ manifestKey, keys: stored, seq: next.seq, meta });
       await this.endStoring(token);
+      // Who published what: the number, the manifest's hash, the epoch, and the key the member held (its snapshots
+      // are signed with it). The head is already moved, so a log that cannot take this is counted, not a failed publish.
+      const publisherKey = rostered[caller.deviceId]?.pubkey;
+      await this.audit(caller, "published", caller.deviceId, {
+        seq: next.seq,
+        manifest: manifestHash,
+        epoch: next.epoch,
+        ...(publisherKey ? { key: await keyFingerprintLong(publisherKey) } : {}),
+      });
 
       return Response.json({ ok: true, head: next });
     } finally {
@@ -1875,11 +2071,13 @@ export class FleetDO implements DurableObject {
   }
 
   /** Put a member's key in its place. The old key made snapshots a replica may not have taken in yet: it is a member's key up to there. */
-  private async replaceKey(members: Members, deviceId: string, pubkey: string, fleetId: string): Promise<void> {
+  private async replaceKey(members: Members, deviceId: string, pubkey: string, fleetId: string, caller: Caller, via: "approved" | "proof"): Promise<void> {
     const member = members[deviceId]!;
+    const was = member.pubkey;
     if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId);
     member.pubkey = pubkey;
     await this.storage.put("members", members);
+    await this.audit(caller, "key-replaced", deviceId, { via, key: await keyFingerprintLong(pubkey), ...(was ? { was: await keyFingerprintLong(was) } : {}) });
   }
 
   /**
@@ -1890,7 +2088,7 @@ export class FleetDO implements DurableObject {
    * member without one) or the proof was missing, stale or wrong: the key waits as a request for the
    * operator or the owner to approve, and the roster is as it was.
    */
-  private async changeKey(members: Members, deviceId: string, pubkey: string, proof: KeyProof | undefined, fleetId: string): Promise<"same" | "changed" | "pending" | "full"> {
+  private async changeKey(caller: Caller, members: Members, deviceId: string, pubkey: string, proof: KeyProof | undefined, fleetId: string): Promise<"same" | "changed" | "pending" | "full"> {
     const member = members[deviceId]!;
     const pending = await this.joinRequests();
     if (member.pubkey === pubkey) {
@@ -1902,7 +2100,7 @@ export class FleetDO implements DurableObject {
       return "same";
     }
     if (member.pubkey && proof && (await this.keyProofHolds(member.pubkey, pubkey, fleetId, deviceId, proof))) {
-      await this.replaceKey(members, deviceId, pubkey, fleetId);
+      await this.replaceKey(members, deviceId, pubkey, fleetId, caller, "proof");
       if (pending[deviceId]?.keyChange) {
         delete pending[deviceId];
         await this.storage.put("pending", pending);
@@ -1920,6 +2118,7 @@ export class FleetDO implements DurableObject {
         keyChange: true,
       };
       await this.storage.put("pending", pending);
+      await this.audit(caller, "key-requested", deviceId, { key: await keyFingerprintLong(pubkey) });
     }
     return "pending";
   }
