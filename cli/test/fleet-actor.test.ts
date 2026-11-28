@@ -152,4 +152,36 @@ describe("publishing with the tool server's journal", () => {
     expect(out.join("\n")).toContain("prime/");
     expect(w.gateway.packReads.length).toBe(packReadsBefore);
   });
+  test("`fleets snapshots` marks a snapshot whose key is not a member's as unverified, and shows nothing it says", async () => {
+    const { fleetsSnapshots } = await import("../src/fleets");
+    const w = world();
+    const file = join(w.root, "activity.jsonl");
+    const journal = new ActivityJournal(file);
+    journal.record("write", "keyA");
+    await journal.flush();
+    await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2, undefined, { activity: { file } });
+    const out: string[] = [];
+    const configPath = join(w.root, "config.yaml");
+    const { fleetKeyFile } = await import("../src/fleets");
+    // the replica's key file is where `fleets snapshots` looks for it
+    const { copyFileSync, mkdirSync: mk } = await import("node:fs");
+    mk(join(configPath, "..", "fleets"), { recursive: true });
+    const keyFile = fleetKeyFile(configPath, "x", "r1");
+    mk(join(keyFile, ".."), { recursive: true });
+    copyFileSync(w.replica.keyFile, keyFile);
+    // The key that signed it is not on the fleet's roster (the gateway made the snapshot up under a key of its own).
+    w.gateway.members.delete("primary-device");
+    const packReadsBefore = w.gateway.packReads.length;
+    await fleetsSnapshots({
+      config: { defaults: {}, devices: {}, spaces: { r1: { fleet: "x", gateway: "https://gw.example", gateway_device: "replica-device", remote_token: "t" } }, codeMcp: {} },
+      configPath,
+      json: false,
+      out: (l: string) => out.push(l),
+      parsed: { positionals: ["fleets", "snapshots", "x"], flags: new Map([["space", "r1"]]), help: false },
+    } as never);
+    expect(out.join("\n")).toContain("unverified");
+    expect(out.join("\n")).not.toContain("write×1");
+    expect(out.join("\n")).not.toContain("prime/");
+    expect(w.gateway.packReads.length).toBe(packReadsBefore);
+  });
 });

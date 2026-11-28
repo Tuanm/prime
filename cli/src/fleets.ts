@@ -24,7 +24,7 @@ import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { loadOrCreateKeyPair, loadOrCreateSignKey, manifestIdOf, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, loadOrCreateSignKey, manifestIdOf, mapLimit, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { keyFingerprintOf, keyIdOf, openSnapshotMeta } from "./fleet-crypto.ts";
 import { actorFrom, type SnapshotActor } from "./fleet-actor.ts";
@@ -51,7 +51,7 @@ import {
   type VerifiedRoster,
 } from "./fleet-roster.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
-import { capsBody, fetchIndex, fetchManifest, fetchMemberKeys, fetchRole, plainText, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchIndex, fetchManifest, fetchMemberKeys, fetchRole, fetchRoster, plainText, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { keyIdOf, loadOrCreateCallerKey, parsePublicKey } from "./caller-key.ts";
 import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
@@ -2084,10 +2084,15 @@ export async function fleetsSnapshots(ctx: Ctx): Promise<void> {
   const role = await fetchRole(creds, fleetId).catch(() => undefined);
   const entries = (await fetchIndex(creds, fleetId, 0)) ?? [];
   const limit = num(ctx.parsed, "limit") ?? 20;
-  const rows: Array<{ seq: number; at: number; by: string; actor?: SnapshotActor; opened: boolean }> = [];
-  for (const e of entries.slice(-limit)) {
-    const m = await fetchManifest(creds, fleetId, manifestIdOf(e.manifestKey)).catch(() => undefined);
+  const rows: Array<{ seq: number; at: number; by: string; actor?: SnapshotActor; opened: boolean; fromMember: boolean }> = [];
+  // Who the fleet's roster says its members' keys are, now and as of those that left: a snapshot is shown as its publisher's only when
+  // its sender is one of them at that sequence. (Read here without noting anything in the trust file: listing is not taking in.)
+  const roster = await fetchRoster(creds, fleetId).catch(() => undefined);
+  const listed = await mapLimit(entries.slice(-limit), 6, async (e) => fetchManifest(creds, fleetId, manifestIdOf(e.manifestKey)).catch(() => undefined));
+  for (const m of listed) {
     if (!m) continue;
+    const left = roster?.left.find((l) => l.pubkey === m.senderPublicKey);
+    const fromMember = roster !== undefined && (roster.keys.includes(m.senderPublicKey) || (left !== undefined && left.until >= m.seq));
     let actor: SnapshotActor | undefined;
     let opened = false;
     if (typeof m.meta === "string") {
@@ -2095,12 +2100,13 @@ export async function fleetsSnapshots(ctx: Ctx): Promise<void> {
         const meta = openSnapshotMeta(m.wrapped, m.senderPublicKey, creds.deviceId, k.privateKey, role?.incarnation ?? m.incarnation, metaBindingOf(m, m.packHash, m.delta?.packHash ?? null), m.meta);
         if (meta) {
           opened = true;
-          actor = actorFrom(meta.actor);
+          // What a key that is not a member's says of itself is not shown as anyone's.
+          if (fromMember) actor = actorFrom(meta.actor);
           break;
         }
       }
     }
-    rows.push({ seq: m.seq, at: m.createdAt, by: keyIdOf(m.senderPublicKey), ...(actor ? { actor } : {}), opened });
+    rows.push({ seq: m.seq, at: m.createdAt, by: keyIdOf(m.senderPublicKey), ...(actor ? { actor } : {}), opened, fromMember });
   }
   if (ctx.json) {
     printJson({ fleet: fleetId, snapshots: rows });
@@ -2110,9 +2116,10 @@ export async function fleetsSnapshots(ctx: Ctx): Promise<void> {
     a?.tools ? a.tools.slice(0, 6).map((t) => t.tool + "×" + t.n + (t.caller === "local" ? "" : " (" + t.caller + ")")).join(", ") + (a.tools.length > 6 ? ", ..." : "") + (a.gap ? " (some calls missing)" : "") : a?.gap ? "(some calls missing)" : "";
   ctx.out(
     table(
-      ["SEQ", "TIME", "PUBLISHED BY", "SOFTWARE", "TOOLS RUN"],
-      rows.map((r) => [String(r.seq), new Date(r.at).toISOString(), r.by, r.actor?.agent ?? (r.opened ? "-" : "(not readable here)"), tools(r.actor)]),
+      ["SEQ", "TIME", "SIGNED BY KEY", "SOFTWARE", "TOOLS RUN"],
+      rows.map((r) => [String(r.seq), new Date(r.at).toISOString(), r.fromMember ? r.by : r.by + "  (not a member's key: unverified)", r.actor?.agent ?? (r.opened ? "-" : "(not readable here)"), tools(r.actor)]),
     ),
   );
-  ctx.out(dim("what the publisher said of itself in the snapshot; nothing proves it"));
+  ctx.out(dim("what the publisher said of itself in the snapshot; nothing proves it. A key the roster does not name as a member's is marked, and what it says is not shown"));
+  if (!roster) ctx.out(yellow("the roster could not be read, so no key was checked as a member's"));
 }

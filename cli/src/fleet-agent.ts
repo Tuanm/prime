@@ -1148,7 +1148,7 @@ async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: nu
 }
 
 // Run `fn` over `items`, a few at a time, keeping the order of the results.
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
   const worker = async (): Promise<void> => {
