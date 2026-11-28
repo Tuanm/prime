@@ -956,11 +956,17 @@ it is said to be (a missing one is named in the answer, `409`, and what was uplo
 `packHash`, which needs the whole pack: the members do, when they join the pieces. A snapshot in pieces is kept, retired and
 deleted as one with all its pieces, and is never given to a member through the head event. **A fleet takes one only when every member
 says it reads them** (`chunks` in its `caps`): otherwise the publish is refused with `409` and `chunks: false`, because a member
-without it could not open the snapshot.
+without it could not open the snapshot. A member that does not say it reads them and asks to take a place in a fleet whose newest
+snapshot is in pieces is answered `role: "replica", reason: "upgrade-required", need: "chunks"` (and asks again after
+`retryAfterMs`, until the fleet's next snapshot is not in pieces or the member is upgraded); admitting one (`POST /approve`, or a
+signed `add`) answers with a `warning` while that is so.
 
-A slow upload does not lose its pieces to the daily sweep: the object notes each pack the primary uploads and the sweep leaves it for a
-day, and what the head names (the manifest, its pack, the pieces of both lists) is always spared. Pieces that nothing names after a
-day are swept.
+A pack upload from a member that is not the primary is refused before its body is read. For the primary the fleet's object notes the pack
+before it is stored, so that the daily sweep does not take a piece of a slow upload from under the publisher: it leaves a pack that was uploaded and that no snapshot
+names yet for a day (up to 768 are remembered, three snapshots' worth), and what the head names (the manifest, its pack, the pieces
+of both lists) is always spared. Pieces that nothing names after a day are swept. A piece may be at most 8 MiB in a snapshot's
+list (`chunkLimit`) whatever a reader would take; a member that sends the size `GET /role` gives is always inside it. Four pieces at a
+time are about 64 MiB held by the Worker (each body is read into one buffer and stored from it), which is what the 128 MB leaves room for.
 
 ## What is left in the bucket
 
@@ -1013,17 +1019,18 @@ done; then it checks the fleet agrees and applies it:
 | entry | the fleet must have | and then |
 | --- | --- | --- |
 | `genesis` (`n` 0, `extra` = the owner key, `seqAt` 0) | a fleet that exists, and no chain | the fleet is in signed mode |
-| `add` | a request waiting from that device for exactly that key and signing key, and `seqAt` **at the head or later**; or, to put the roster over a fleet that is there, a member that is exactly that, with that role (any `seqAt`) | the request becomes a member, with the role the entry says |
+| `add` | a request waiting from that device for exactly that key and signing key, and `seqAt` **at the head as it was when the member asked, or later**; or, to put the roster over a fleet that is there, a member that is exactly that, with that role (any `seqAt`) | the request becomes a member, with the role the entry says |
 | `remove` | a fence for the device (below), and `seqAt` the fence's | the member goes; its key is a former member's key for snapshots up to `seqAt` (the gateway no longer chooses it) |
 | `rotate` | a waiting request from that member for exactly that key and signing key | its key is replaced; the old key is a former member's up to `seqAt` |
 | `rotate-self` | the member, signed with the signing key it holds | its signing key changes (never its sealing key) |
 | `role` | a member (not the owner) | member or viewer, in place |
 | `caller`, `caller-remove`, `owner-rotate` | nothing | kept for the members |
 
-`seqAt` of an entry that changes a member may not be above the head, and the add of a **new** member may not be below it: a
+`seqAt` of an entry that changes a member may not be above the head, and the add of a **new** member may not be below the head it asked at: a
 lower one would make its key a valid sender for snapshots made before it was admitted, which only a member that was in the
-fleet before the roster can have. (So an add is signed at the head; if the head moved on before it was posted, the answer is
-409 with the head, and it is signed again.) A refusal is 400 for an entry that is not one,
+fleet before the roster can have. (So an add is signed at the head as it was when the member asked to join, which the
+gateway recorded with the request, or later: a fleet that publishes every few seconds does not move the head out from under an
+owner who is a minute away from the key.) A refusal is 400 for an entry that is not one,
 401 for a signature that does not verify, 409 for one the chain or the fleet does not agree with, with the reason.
 The same entry sent again (the answer was lost) is answered as it was. A chain may hold 1,000 entries; at that a fleet
 is put under a new genesis.

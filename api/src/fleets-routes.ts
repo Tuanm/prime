@@ -350,17 +350,25 @@ async function dropUnreferenced(
   }
 }
 
-/** Tell the fleet's object that this pack was uploaded. Best effort: the upload is made either way. */
-async function noteUpload(deps: PayloadDeps, deviceId: string, key: string): Promise<void> {
+/**
+ * Tell the fleet's object that this pack is being uploaded, and learn whether the caller still holds the lease (it may have moved
+ * while the body was read). "unavailable" when the object cannot say.
+ */
+async function noteUpload(deps: PayloadDeps, deviceId: string, hash: string): Promise<FleetRole | "unavailable"> {
+  const namespace = deps.env.FLEET;
+  if (!namespace) return "unavailable";
+  const headers = new Headers({ "content-type": "application/json" });
+  headers.set("x-prime-caller", "device");
+  headers.set("x-prime-device", deviceId);
+  headers.set("x-prime-fleet", deps.fleetId);
   try {
-    const namespace = deps.env.FLEET;
-    if (!namespace) return;
-    const headers = new Headers({ "content-type": "application/json" });
-    headers.set("x-prime-caller", "device");
-    headers.set("x-prime-device", deviceId);
-    headers.set("x-prime-fleet", deps.fleetId);
-    await namespace.get(namespace.idFromName(deps.fleetId)).fetch("https://fleet/uploaded", { method: "POST", headers, body: JSON.stringify({ key }) });
-  } catch {}
+    const res = await namespace.get(namespace.idFromName(deps.fleetId)).fetch("https://fleet/uploaded", { method: "POST", headers, body: JSON.stringify({ hash }) });
+    if (!res.ok) return "unavailable";
+    const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number };
+    return { member: body.member === true, primary: body.primary === true, epoch: body.epoch ?? 0 };
+  } catch {
+    return "unavailable";
+  }
 }
 
 async function fleetRole(deps: PayloadDeps, deviceId: string): Promise<FleetRole | null> {
@@ -398,6 +406,7 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
 
   const deviceId = await provenDevice(deps);
   if (!deviceId) return deps.unauthorized();
+  // Asked before the body is read: a member that is not the primary is refused without its (up to 32 MiB) body being read for nothing.
   const role = await fleetRole(deps, deviceId);
   if (!role) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
 
@@ -416,12 +425,18 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     if (body.byteLength === 0) return Response.json({ error: "empty payload" }, { status: 400 });
     const digest = await sha256Hex(body);
     const key = prefix + digest;
+    // A pack that no snapshot names yet is one of the pieces of a snapshot that is being uploaded, or an orphan: the object notes it
+    // before it is stored, so that the sweep does not take a piece of a slow upload from under the publisher. The lease may have
+    // moved while the body was read: then it is not stored.
+    if (parts[0] === "packs") {
+      const noted = await noteUpload(deps, deviceId, digest);
+      // The object could not say (not the same as not being the primary): try again, nothing was stored.
+      if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again" }, { status: 503, headers: { "retry-after": "5" } });
+      if (!noted.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
+    }
     // Content addressed: writing the same bytes twice is free and idempotent.
     countFleetR2("write");
     await bucket.put(key, body, { httpMetadata: { contentType: "application/octet-stream" } });
-    // A pack that no snapshot names yet is one of the pieces of a snapshot that is being uploaded, or an orphan: the object notes it, so
-    // that the sweep does not take a piece of a slow upload (it goes on for hours) from under the publisher.
-    if (parts[0] === "packs") await noteUpload(deps, deviceId, key);
     return Response.json({ ok: true, key, hash: digest, size: body.byteLength, epoch: role.epoch });
   }
 

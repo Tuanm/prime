@@ -422,21 +422,29 @@ describe("admitting a member with a signed add", () => {
     expect((await post(w, ahead)).json.error).toMatch(/head is at 0/);
   });
 
-  test("a new member's add names the head or a later snapshot, never an earlier one (a low one is for the members the roster is put over)", async () => {
+  test("a new member's add names the head as it was when the member asked, or a later snapshot, never an earlier one", async () => {
     const { w, chain } = await signedFleet();
     await lead(w, "dev-a");
     expect((await publish(w, "dev-a", 1)).status).toBe(200);
     expect((await publish(w, "dev-a", 2, "b")).status).toBe(200);
     await knock(w, "dev-b");
+    // The fleet goes on publishing while the owner is away from its key.
+    expect((await publish(w, "dev-a", 3, "c")).status).toBe(200);
+    expect((await publish(w, "dev-a", 4, "d")).status).toBe(200);
     const body = { device: "dev-b", xpub: xpubOf("dev-b"), spub: sKey("dev-b").pub, role: "member" };
     for (const seqAt of [0, 1]) {
       const early = await post(w, chain.make("add", { ...body, seqAt }));
       expect(early.status).toBe(409);
-      expect(early.json.error).toMatch(/head is at 2/);
+      expect(early.json.error).toMatch(/was snapshot 2/);
     }
+    // Signed when the head was 2, and sent when it is 4: still taken.
     const add = chain.make("add", { ...body, seqAt: 2 });
     expect((await post(w, add)).status).toBe(200);
     chain.accept(add);
+    // One that asks later is held to the head of then.
+    await knock(w, "dev-c");
+    expect((await post(w, chain.make("add", { device: "dev-c", xpub: xpubOf("dev-c"), spub: sKey("dev-c").pub, role: "member", seqAt: 3 }))).status).toBe(409);
+    expect((await post(w, chain.make("add", { device: "dev-c", xpub: xpubOf("dev-c"), spub: sKey("dev-c").pub, role: "member", seqAt: 4 }))).status).toBe(200);
   });
 
   test("is the owner device's to post, as well as the operator's, and a plain member's is refused", async () => {
@@ -584,6 +592,35 @@ describe("a member that leaves of its own accord in a signed fleet", () => {
     expect((await left).json.removed).toBe("member");
     const read = (await call(w, "/roster", "owner", "device", {}, "GET")).json;
     expect(read.pendingRemoves.map((p: any) => [p.deviceId, p.seqAt])).toEqual([["dev-a", 1]]);
+  });
+
+  test("the head a request is recorded at is read for a request that will wait, not for a join that is refused", async () => {
+    const { w } = await signedFleet();
+    let reads = 0;
+    const get = w.bucket.get;
+    w.bucket.get = async (k: string) => {
+      reads++;
+      return get(k);
+    };
+    const bad = await call(w, "/join", "dev-x", "device", { code: "pf1_" + "z".repeat(32), pubkey: xpubOf("dev-x"), spub: sKey("dev-x").pub });
+    expect(bad.status).toBeGreaterThanOrEqual(400);
+    expect(reads).toBe(0);
+    await knock(w, "dev-y");
+    expect(reads).toBe(1);
+  });
+
+  test("a leaver whose head could not be read is given its sequence at the next read", async () => {
+    const { w } = await signedFleet(["owner", "dev-a", "dev-b"]);
+    await lead(w, "dev-a");
+    expect((await publish(w, "dev-a", 1)).status).toBe(200);
+    const get = w.bucket.get;
+    w.bucket.get = async () => {
+      throw new Error("bucket down");
+    };
+    expect((await call(w, "/remove", "dev-b", "device", { deviceId: "dev-b" })).json.removed).toBe("member");
+    w.bucket.get = get;
+    const read = (await call(w, "/roster", "dev-a", "device", {}, "GET")).json;
+    expect(read.pendingRemoves.map((p: any) => [p.deviceId, p.seqAt])).toEqual([["dev-b", 1]]);
   });
 
   test("an open fleet has nothing waiting", async () => {

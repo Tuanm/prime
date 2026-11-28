@@ -228,6 +228,29 @@ describe("publishing a snapshot in pieces", () => {
     expect((w.states.get("acme")!.data.get("index") as Array<Record<string, unknown>>)[0]).toMatchObject({ seq: 1, chunked: true, packBytes: 237 });
   });
 
+  test("a manifest alone never has its packKey or packHash taken from the empty frame: the member's packHash stays, packKey is the first piece's", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const pieces = [await w.piece("acme", bytesOf(20, 1)), await w.piece("acme", bytesOf(20, 2))];
+    const EMPTY_SHA256 = sha("");
+    // The member leaves packKey out: the gateway names the first piece. packHash is the whole pack's, as the member said.
+    const { packKey: _omitted, ...bare } = manifestOf("acme", 1, pieces, { packHash: hex("7") });
+    const done = await w.publishManifest("acme", bare);
+    expect(done.status).toBe(200);
+    const stored = JSON.parse(w.bucket.objects.get(done.json.manifestKey)!.body);
+    expect(stored.packHash).toBe(hex("7"));
+    expect(stored.packHash).not.toBe(EMPTY_SHA256);
+    expect(stored.packKey).toBe("fleets/acme/packs/" + pieces[0]!.hash);
+    expect(stored.packKey).not.toBe("fleets/acme/packs/" + EMPTY_SHA256);
+    // The manifest's bytes in the bucket hash to the manifestHash the head carries, so the member's seal still binds them.
+    expect(done.json.head.manifestHash).toBe(sha(w.bucket.objects.get(done.json.manifestKey)!.body));
+    // The pack of the empty frame was never stored.
+    expect(w.bucket.objects.has("fleets/acme/packs/" + EMPTY_SHA256)).toBe(false);
+    // Without a packHash of its own it is refused, not filled in with the hash of nothing.
+    const { packHash: _gone, ...noHash } = manifestOf("acme", 2, pieces);
+    expect((await w.publishManifest("acme", noHash)).status).toBe(400);
+  });
+
   test("a packKey that is not the first piece's, and a frame that has a pack as well as pieces, are refused", async () => {
     const w = world();
     await w.fleet("acme");
@@ -343,15 +366,127 @@ describe("publishing a snapshot in pieces", () => {
   });
 });
 
+describe("a member that does not read pieces, in a fleet whose head is in pieces", () => {
+  async function chunkedFleet() {
+    const w = world();
+    await w.fleet("acme");
+    const pieces = [await w.piece("acme", bytesOf(10, 1))];
+    expect((await w.publishManifest("acme", manifestOf("acme", 1, pieces))).status).toBe(200);
+    return w;
+  }
+  const admitLate = async (w: Awaited<ReturnType<typeof chunkedFleet>>, dev: string) => {
+    const invite = await w.call("acme", "/invite", "admin", "operator", {});
+    await w.call("acme", "/join", "device", dev, { code: invite.json.code });
+    return w.call("acme", "/approve", "admin", "operator", { deviceId: dev });
+  };
+
+  test("is warned of at its admission, and told to upgrade at its bootstrap, without being given the lease", async () => {
+    const w = await chunkedFleet();
+    const approved = await admitLate(w, "dev-old");
+    expect(approved.status).toBe(200);
+    expect(approved.json.warning).toMatch(/in pieces/);
+    const asked = await w.call("acme", "/bootstrap", "device", "dev-old", {});
+    expect(asked.status).toBe(200);
+    expect(asked.json).toMatchObject({ role: "replica", reason: "upgrade-required", need: "chunks", retryAfterMs: 60_000 });
+    expect(typeof asked.json.hint).toBe("string");
+    // The primary is not disturbed, and a member that says it reads pieces is let in as any other.
+    expect((await w.call("acme", "/bootstrap", "device", "dev-a", { caps: ["chunks"] })).json.role).toBe("primary");
+    const reads = await w.call("acme", "/bootstrap", "device", "dev-old", { caps: ["chunks"] });
+    expect(reads.json.reason).not.toBe("upgrade-required");
+  });
+
+  test("is let in again once the fleet's newest snapshot is not in pieces", async () => {
+    const w = await chunkedFleet();
+    await admitLate(w, "dev-old");
+    expect((await w.call("acme", "/bootstrap", "device", "dev-old", {})).json.reason).toBe("upgrade-required");
+    await w.call("acme", "/bootstrap", "device", "dev-a", { caps: ["chunks"] });
+    expect((await w.publishManifest("acme", { seq: 2, seal: "tag", full: false }, bytesOf(5, 9))).status).toBe(200);
+    expect((await w.call("acme", "/bootstrap", "device", "dev-old", {})).json.reason).not.toBe("upgrade-required");
+  });
+
+  test("an ordinary fleet gives no warning and no refusal", async () => {
+    const w = world();
+    await w.fleet("acme");
+    expect((await w.publishManifest("acme", { seq: 1, seal: "tag", full: false }, bytesOf(5, 9))).status).toBe(200);
+    const invite = await w.call("acme", "/invite", "admin", "operator", {});
+    await w.call("acme", "/join", "device", "dev-x", { code: invite.json.code });
+    expect((await w.call("acme", "/approve", "admin", "operator", { deviceId: "dev-x" })).json.warning).toBeUndefined();
+    expect((await w.call("acme", "/bootstrap", "device", "dev-x", {})).json.reason).not.toBe("upgrade-required");
+  });
+});
+
+describe("uploading a piece", () => {
+  test("asks the fleet's object whether the caller is the primary before it reads the body, then notes the pack before it stores it", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const seen: string[] = [];
+    const fleet = (w.env as { FLEET: { get: (n: string) => { fetch: (u: string, i?: RequestInit) => Promise<Response> } } }).FLEET;
+    const get = fleet.get;
+    fleet.get = (n: string) => {
+      const stub = get(n);
+      return { fetch: (u: string, i?: RequestInit) => (seen.push(new URL(u).pathname), stub.fetch(u, i)) };
+    };
+    const piece = await w.piece("acme", bytesOf(10, 1));
+    expect(seen).toEqual(["/role", "/uploaded"]);
+    expect(Object.keys(w.states.get("acme")!.data.get("uploads") as object)).toEqual([piece.hash]);
+  });
+
+  test("is answered 503, with nothing stored, when the fleet's object cannot be asked to note it (not the 409 of a member that is not the primary)", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const fleet = (w.env as { FLEET: { get: (n: string) => { fetch: (u: string, i?: RequestInit) => Promise<Response> } } }).FLEET;
+    const get = fleet.get;
+    fleet.get = (n: string) => {
+      const stub = get(n);
+      return { fetch: (u: string, i?: RequestInit) => (new URL(u).pathname === "/uploaded" ? Promise.reject(new Error("object unavailable")) : stub.fetch(u, i)) };
+    };
+    const res = await w.http("acme", "POST", "/packs", bytesOf(10, 1));
+    expect(res.status).toBe(503);
+    expect([...w.bucket.objects.keys()].filter((k) => k.includes("/packs/"))).toEqual([]);
+    fleet.get = get;
+    expect((await w.http("acme", "POST", "/packs", bytesOf(10, 1))).status).toBe(200);
+  });
+
+  test("is refused to a member that is not the primary and to a stranger, and stores and notes nothing", async () => {
+    const w = world();
+    await w.fleet("acme", { "dev-a": ["chunks"], "dev-b": ["chunks"] });
+    const seen: string[] = [];
+    const fleet = (w.env as { FLEET: { get: (n: string) => { fetch: (u: string, i?: RequestInit) => Promise<Response> } } }).FLEET;
+    const get = fleet.get;
+    fleet.get = (n: string) => {
+      const stub = get(n);
+      return { fetch: (u: string, i?: RequestInit) => (seen.push(new URL(u).pathname), stub.fetch(u, i)) };
+    };
+    const second = await w.http("acme", "POST", "/packs", bytesOf(10, 1), "dev-b");
+    expect(second.status).toBe(409);
+    // Refused on the role alone: the object was not asked to note anything.
+    expect(seen).toEqual(["/role"]);
+    const stranger = await w.http("acme", "POST", "/packs", bytesOf(10, 1), "stranger");
+    expect(stranger.status).toBe(403);
+    expect([...w.bucket.objects.keys()].filter((k) => k.includes("/packs/"))).toEqual([]);
+    expect(w.states.get("acme")!.data.get("uploads")).toBeUndefined();
+    // The primary is still taken.
+    expect((await w.http("acme", "POST", "/packs", bytesOf(10, 1))).status).toBe(200);
+  });
+
+  test("the record holds the pieces of three snapshots' worth, the newest, and is a row a Durable Object can hold", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const { UPLOADS_KEPT } = await import("../src/fleets");
+    expect(UPLOADS_KEPT).toBeGreaterThanOrEqual(3 * MAX_CHUNKS);
+    const rowBytes = JSON.stringify(Object.fromEntries(Array.from({ length: UPLOADS_KEPT }, (_, i) => [i.toString(16).padStart(64, "0"), Date.now()]))).length;
+    expect(rowBytes).toBeLessThan(100 * 1024);
+    for (let i = 0; i < 8; i++) await w.piece("acme", new Uint8Array([i, 7, 7]));
+    expect(Object.keys(w.states.get("acme")!.data.get("uploads") as object).length).toBe(8);
+  });
+});
+
 describe("the sweep and a snapshot in pieces", () => {
   test("the pieces of a slow upload are spared for a day, however old, and then go if nothing names them", async () => {
     setSystemTime(new Date(T0));
     const w = world();
     await w.fleet("acme");
     const pieces = [await w.piece("acme", bytesOf(10, 1)), await w.piece("acme", bytesOf(10, 2))];
-    // Only the lease holder says what was uploaded.
-    expect((await w.call("acme", "/uploaded", "device", "dev-b", { key: "fleets/acme/packs/" + hex("1") })).status).toBe(403);
-    expect((await w.call("acme", "/uploaded", "device", "dev-a", { key: "fleets/other/packs/" + hex("1") })).status).toBe(400);
     // The upload has gone on for three hours: the pieces are old to the sweep, and no snapshot names them yet.
     for (const p of pieces) w.bucket.objects.get("fleets/acme/packs/" + p.hash)!.uploaded = T0 - 3 * HOUR;
     const during = await sweepFleets(w.env, { now: T0 });

@@ -95,6 +95,8 @@ const PAUSED_ROUTES = new Set(["/join", "/bootstrap", "/head/advance"]);
 const PAUSED_RETRY_MS = 60_000;
 /** How long a viewer is told to wait before asking again: it will never be given the lease, so there is no hurry. */
 const VIEWER_RETRY_MS = 30_000;
+/** How long a member that must upgrade is told to wait before it asks again. */
+const UPGRADE_RETRY_MS = 60_000;
 
 interface Caller {
   kind: "admin" | "device";
@@ -223,6 +225,8 @@ interface IndexEntry {
    * this was recorded: `advance` reads the manifest then, once, and fills it in.
    */
   sealed?: boolean;
+  /** Published in pieces (see `chunks` in the manifest). */
+  chunked?: boolean;
 }
 
 /** How long a member that published without a seal after sealed snapshots is kept from the lease. */
@@ -1100,7 +1104,7 @@ export class FleetDO implements DurableObject {
       return this.applied(caller, body, request);
     }
     if (path === "/exists" && request.method === "GET") return caller.kind === "admin" ? Response.json({ exists: await this.exists() }) : this.deny();
-    if (path === "/uploaded" && request.method === "POST") return this.uploaded(caller, body, request);
+    if (path === "/uploaded" && request.method === "POST") return this.uploaded(caller, body);
     if (path === "/unreferenced" && request.method === "POST") return this.unreferenced(caller, body, request);
     if (path === "/delete" && request.method === "POST") return this.delete(caller, request, body);
     if (path === "/audit" && request.method === "GET") return this.readAudit(caller, url);
@@ -1327,6 +1331,10 @@ export class FleetDO implements DurableObject {
         out = Response.json({ error: "too many pending requests" }, { status: 429 });
         return;
       }
+      // Where the fleet's snapshots are as the device asks: a signed add for it may take effect from there on (see `rosterAdd`), however
+      // far the head has moved by the time the owner signs. Read only for a request that is going to wait (the code was good and
+      // nothing else refused it); not read when the head cannot be (the add is then at the head).
+      const askedAt = await this.readHeadOrNull(request.headers.get("x-prime-fleet") ?? "");
       pending[caller.deviceId] = {
         deviceId: caller.deviceId,
         ...(label ? { label } : {}),
@@ -1334,6 +1342,7 @@ export class FleetDO implements DurableObject {
         ...(spub ? { spub } : {}),
         ...(body.role === "viewer" ? { role: "viewer" as const } : {}),
         requestedAt: now,
+        ...(askedAt ? { headSeq: askedAt.seq } : {}),
       };
       await this.storage.put("pending", pending);
       await this.audit(caller, "join-requested", caller.deviceId, { ...(label ? { label } : {}), ...(pubkey ? { key: await keyFingerprintLong(pubkey) } : {}) });
@@ -1438,7 +1447,7 @@ export class FleetDO implements DurableObject {
       await this.storage.put("members", members);
       await this.storage.put("pending", pending);
       await this.audit(caller, "member-admitted", deviceId, { role: member.role, ...(member.pubkey ? { key: await keyFingerprintLong(member.pubkey) } : {}) });
-      out = Response.json({ ok: true, member });
+      out = Response.json({ ok: true, member, ...(await this.chunkedWarning()) });
     });
     // Told after the decision is made and stored, outside the block that made it.
     if (freedLease) this.broadcast({ type: "lease-free" }, deviceId);
@@ -1545,6 +1554,24 @@ export class FleetDO implements DurableObject {
     if (wasMember) this.hangUp("removed", deviceId);
     if (leftSigned) await this.settleLeaverFence(deviceId, request.headers.get("x-prime-fleet") ?? "");
     return out;
+  }
+
+  /** Whether the newest snapshot (the head, at `seq`) is in pieces. */
+  private async headIsChunked(seq: number): Promise<boolean> {
+    if (seq < 1) return false;
+    const index = (await this.storage.get<IndexEntry[]>("index")) ?? [];
+    const tip = index[index.length - 1];
+    return tip !== undefined && tip.seq === seq && tip.chunked === true;
+  }
+
+  /**
+   * What an admission says when the fleet's newest snapshot is in pieces: a member of a build that does not read them cannot open it
+   * (its bootstrap is answered `upgrade-required` until the fleet's next snapshot is not in pieces, or it is upgraded).
+   */
+  private async chunkedWarning(): Promise<{ warning: string } | Record<string, never>> {
+    const index = (await this.storage.get<IndexEntry[]>("index")) ?? [];
+    if (index[index.length - 1]?.chunked !== true) return {};
+    return { warning: "the fleet's newest snapshot is in pieces: a member of a build that does not read them cannot open it, and is told to upgrade" };
   }
 
   /** The sequence the removal of a member that left by itself is signed with: the head once what it had in flight has landed. */
@@ -1765,6 +1792,22 @@ export class FleetDO implements DurableObject {
       // A member that is being removed takes no place: it is a replica until the owner's entry takes it out.
       if ((await this.fences())[caller.deviceId]) {
         out = Response.json({ ok: true, role: "replica", reason: "fenced", head, epoch: head.epoch, ttlMs, retryAfterMs: VIEWER_RETRY_MS });
+        return;
+      }
+      // The fleet's newest snapshot is in pieces, and this member does not say it reads them: it cannot open the head, so it is
+      // a replica that is told what it needs (and asks again, in case the fleet's next snapshot is not in pieces or it was upgraded).
+      if (!caps.includes(CHUNKS_CAP) && (await this.headIsChunked(head.seq))) {
+        out = Response.json({
+          ok: true,
+          role: "replica",
+          reason: "upgrade-required",
+          need: CHUNKS_CAP,
+          hint: "the fleet's newest snapshot is in pieces, which this build does not read: upgrade it",
+          head,
+          epoch: head.epoch,
+          ttlMs,
+          retryAfterMs: UPGRADE_RETRY_MS,
+        });
         return;
       }
       const row = await this.leaseRow();
@@ -2202,7 +2245,7 @@ export class FleetDO implements DurableObject {
     if (gateway) {
       // What was uploaded and not yet named by a snapshot is kept for a day (a snapshot in pieces is uploaded over hours). A member
       // asking about what its own refused publish stored is not held to this: it is the one that uploaded them.
-      for (const key of Object.keys(await this.uploads())) kept.add(key);
+      for (const hash of Object.keys(await this.uploads())) kept.add("fleets/" + fleetId + "/packs/" + hash);
       // What the head names is kept whatever this object remembers: the head is in the bucket, and losing the
       // object's own record of it must not make the snapshot everyone is on look like an orphan. When it cannot
       // be read the answer is an error, so that nothing is deleted on a guess.
@@ -2237,7 +2280,7 @@ export class FleetDO implements DurableObject {
     return keys;
   }
 
-  // The packs the publisher has uploaded and no snapshot names yet, by key, with when: the pieces of a snapshot that is being
+  // The packs the publisher has uploaded and no snapshot names yet, by hash, with when: the pieces of a snapshot that is being
   // uploaded. The sweep leaves them for UPLOAD_KEEP_MS. Pruned as it is read.
   private async uploads(): Promise<Record<string, number>> {
     const held = (await this.storage.get<Record<string, number>>("uploads")) ?? {};
@@ -2245,20 +2288,25 @@ export class FleetDO implements DurableObject {
     return Object.fromEntries(Object.entries(held).filter(([, at]) => typeof at === "number" && now - at < UPLOAD_KEEP_MS));
   }
 
-  /** The lease holder says it has put a pack in the bucket. */
-  private async uploaded(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+  /**
+   * A pack is being uploaded to the fleet (the Worker asks before it stores it). The answer is also the role the upload needs, so that
+   * one request does the check and the note: whether the caller is a member, and the primary. Only the primary's uploads are noted.
+   */
+  private async uploaded(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
+    const member = (await this.members())[caller.deviceId];
+    if (!member) return Response.json({ member: false, primary: false, epoch: 0 });
     const held = await this.lease();
-    if (!held || held.holder !== caller.deviceId) return this.deny();
-    const fleetId = request.headers.get("x-prime-fleet") ?? "";
-    const key = typeof body.key === "string" ? body.key : "";
-    if (!new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/packs/[0-9a-f]{64}$").test(key)) return Response.json({ error: "not a pack of this fleet" }, { status: 400 });
-    const now = Date.now();
-    const uploads = await this.uploads();
-    uploads[key] = now;
-    const newest = Object.entries(uploads).sort((a, b) => b[1] - a[1]).slice(0, UPLOADS_KEPT);
-    await this.storage.put("uploads", Object.fromEntries(newest));
-    return Response.json({ ok: true });
+    const primary = held !== null && held.holder === caller.deviceId;
+    const epoch = held ? held.epoch : 0;
+    const hash = typeof body.hash === "string" ? body.hash : "";
+    if (primary && /^[0-9a-f]{64}$/.test(hash)) {
+      const uploads = await this.uploads();
+      uploads[hash] = Date.now();
+      const newest = Object.entries(uploads).sort((a, b) => b[1] - a[1]).slice(0, UPLOADS_KEPT);
+      await this.storage.put("uploads", Object.fromEntries(newest));
+    }
+    return Response.json({ ok: true, member: true, primary, epoch });
   }
 
   // The join requests waiting for the operator. Read tolerantly: an earlier build kept the keys of a
@@ -2464,7 +2512,11 @@ export class FleetDO implements DurableObject {
     const state = entries.length === 0 ? null : await foldTrusted(entries, String(entries[0]!.entry[1]), await this.incarnation()).catch(() => null);
     if (!state) return [];
     const members = await this.members();
-    const fences = await this.fences();
+    let fences = await this.fences();
+    // A member that left when the head could not be read has a fence with no sequence: it is read now.
+    const unsettled = [...state.live.keys()].filter((d) => !members[d] && fences[d]?.left === true && fences[d]!.seqAt === null);
+    for (const d of unsettled) await this.settleLeaverFence(d, String(entries[0]!.entry[1]));
+    if (unsettled.length > 0) fences = await this.fences();
     return [...state.live.keys()]
       .filter((d) => !members[d])
       .map((deviceId) => ({ deviceId, seqAt: fences[deviceId]?.seqAt ?? null, left: true as const, ...(fences[deviceId] ? { at: fences[deviceId]!.at } : {}) }));
@@ -2601,7 +2653,7 @@ export class FleetDO implements DurableObject {
     entries.push(signed);
     await this.storage.put("roster", entries);
     await this.audit(caller, "roster-entry", typeof e[7] === "string" ? e[7] : undefined, { op, n: e[3] as number, ...(typeof e[11] === "number" ? { seqAt: e[11] } : {}) });
-    return { out: Response.json({ ok: true, n: e[3], hash: next.head.hash }), ...effect };
+    return { out: Response.json({ ok: true, n: e[3], hash: next.head.hash, ...(op === "add" ? await this.chunkedWarning() : {}) }), ...effect };
   }
 
   private async rosterAdd(caller: Caller, signed: SignedEntry, headSeq: number): Promise<void> {
@@ -2623,9 +2675,13 @@ export class FleetDO implements DurableObject {
     const pending = await this.joinRequests();
     const request = pending[device];
     if (!request || request.keyChange) throw new RosterRefusal("no request from " + device + " is waiting", 409);
-    // A member that is new takes effect from the head on: an earlier sequence would make its key a valid sender for snapshots
-    // that were made before it was admitted. (A low one is for a member that was in the fleet before the roster, above.)
-    if ((signed.entry[11] as number) < headSeq) throw new RosterRefusal("an add for a new member takes effect from the head or later: the head is at " + headSeq + ", and the entry says " + String(signed.entry[11]) + " (sign it again at the head)", 409);
+    // A member that is new takes effect from where the fleet's head was when it asked to join, or later: an earlier sequence would make
+    // its key a valid sender for snapshots made before it was in the fleet. (Not from the head as it is now: on a fleet that publishes
+    // every few seconds the owner could never sign in time. A low one is for a member that was in the fleet before the roster, above.)
+    const floor = Math.min(request.headSeq ?? headSeq, headSeq);
+    if ((signed.entry[11] as number) < floor) {
+      throw new RosterRefusal("an add for a new member takes effect from where the head was when it asked, or later: that was snapshot " + floor + ", and the entry says " + String(signed.entry[11]), 409);
+    }
     if (request.pubkey !== xpub || request.spub !== spub) throw new RosterRefusal("the entry is for another key than the request of " + device + " offers (it was replaced since)", 409);
     if (Object.keys(members).length >= MAX_MEMBERS) throw new RosterRefusal("fleet is full", 409);
     const owned = Object.values(members).some((m) => m.role === "owner");
