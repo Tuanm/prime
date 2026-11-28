@@ -300,9 +300,13 @@ describe("an apply writes the names that differ", () => {
     } finally {
       chmodSync(join(m.work, "b"), 0o755);
     }
+    // The index was changed before the work tree was: the sidecar must not say it is still the snapshot before.
     expect(existsSync(join(m.gitDir, "apply.commit"))).toBe(false);
-    // The same apply again, as the agent does when it comes back.
-    await applyCommit(m.work, m.gitDir, second.commit, [], f.first.commit);
+    expect(indexTree(m.gitDir, m.work)).not.toBe(f.first.tree);
+    // The same apply again, as the agent does when it comes back: the index is not trusted, so it is made again from the
+    // snapshot before (and the files that are not as that snapshot wrote them are looked at), then the change is written.
+    const again = await traced(() => applyCommit(m.work, m.gitDir, second.commit, [], f.first.commit));
+    expect(again.commands.some((c) => /^read-tree [0-9a-f]{40,64}$/.test(c))).toBe(true);
     expect(contents(m.work)).toEqual(contents(f.work));
     expect(indexTree(m.gitDir, m.work)).toBe(second.tree);
   });
@@ -333,6 +337,90 @@ describe("an apply writes the names that differ", () => {
     expect(indexTree(m.gitDir, m.work)).toBe(second.tree);
   });
 });
+
+describe("a folder the fleet leaves alone, then does not", () => {
+  /** The replica's two folders `proj` and `other` are repositories of its own; the fleet has files in both. */
+  async function dropped(mode: "tree" | "walk") {
+    if (mode === "walk") process.env.PRIME_FLEET_TREE_APPLY = "0";
+    else delete process.env.PRIME_FLEET_TREE_APPLY;
+    const f = await fleetOf({ "a.txt": "1", "proj/x.txt": "fleet-x", "other/y.txt": "fleet-y" }, 0);
+    const root = scratch();
+    const rw = join(root, "r");
+    const rg = join(root, "rg");
+    for (const d of ["proj", "other"]) {
+      mkdirSync(join(rw, d), { recursive: true });
+      gitSync(["-C", join(rw, d), "init", "-q", "."]);
+    }
+    await ingestPack(rw, rg, f.first.commit, f.first.pack);
+    await applyCommit(rw, rg, f.first.commit, ["proj", "other"], null);
+    put(f.work, "proj/x.txt", "fleet-x2");
+    const s15 = await snapshot({ work: f.work, gitDir: f.gitDir, base: f.first.commit, wantFull: false });
+    await ingestPack(rw, rg, s15.commit, s15.delta!, { tree: s15.tree });
+    await applyCommit(rw, rg, s15.commit, ["proj", "other"], f.first.commit);
+    const mid = existsSync(join(rw, "proj/x.txt")) ? readFileSync(join(rw, "proj/x.txt"), "utf8") : null;
+    // The member drops the repository of proj: it is the fleet's again; other stays a repository of the member's.
+    rmSync(join(rw, "proj/.git"), { recursive: true, force: true });
+    put(f.work, "a.txt", "2");
+    const s2 = await snapshot({ work: f.work, gitDir: f.gitDir, base: s15.commit, wantFull: false });
+    await ingestPack(rw, rg, s2.commit, s2.delta!, { tree: s2.tree });
+    await applyCommit(rw, rg, s2.commit, ["other"], s15.commit);
+    const env = gitEnv(rg, rw, join(rg, "apply.index"));
+    const idx = gitSync(["--git-dir=" + rg, "ls-files"], env).trim().split("\n");
+    const held = contents(rw);
+    return { mid, a: held["a.txt"], projX: held["proj/x.txt"] ?? null, otherY: held["other/y.txt"] ?? null, idx, tree: indexTree(rg, rw), want: s2.tree };
+  }
+
+  test("the files of the fleet are not written into a repository of the member's, by either way of writing", async () => {
+    const tree = await dropped("tree");
+    const walk = await dropped("walk");
+    expect(tree.mid).toBeNull();
+    expect(walk.mid).toBeNull();
+    expect(tree.otherY).toBeNull();
+    expect(walk.otherY).toBeNull();
+  });
+
+  test("a folder that stops being left alone gets the fleet's files, whichever way the apply goes, and the two ways agree", async () => {
+    const tree = await dropped("tree");
+    const walk = await dropped("walk");
+    expect(tree.projX).toBe("fleet-x2");
+    expect(tree.a).toBe("2");
+    expect(tree.idx).toEqual(["a.txt", "proj/x.txt"]);
+    expect(tree).toEqual(walk);
+  });
+
+  test("a sidecar that names the snapshot before, over an index that is not that snapshot, is not trusted", async () => {
+    const f = await fleetOf({ "a.txt": "1", "b.txt": "b", "dir/c.txt": "c" });
+    const m = f.members[0]!;
+    put(f.work, "a.txt", "2");
+    const second = await f.next();
+    // The index lost an entry (as after an apply that was stopped part way): the sidecar still says it is the first snapshot.
+    const env = gitEnv(m.gitDir, m.work, join(m.gitDir, "apply.index"));
+    gitSync(["--git-dir=" + m.gitDir, "update-index", "--force-remove", "dir/c.txt"], env);
+    expect(readFileSync(join(m.gitDir, "apply.commit"), "utf8")).toContain(f.first.commit);
+    rmSync(join(m.work, "dir"), { recursive: true });
+    await applyCommit(m.work, m.gitDir, second.commit, [], f.first.commit);
+    expect(readFileSync(join(m.work, "dir/c.txt"), "utf8")).toBe("c");
+    expect(indexTree(m.gitDir, m.work)).toBe(second.tree);
+  });
+
+  test("with a folder left alone the result is still checked, and the index is the snapshot without it", async () => {
+    const f = await fleetOf({ "a.txt": "1", "proj/x.txt": "x", "dir/c.txt": "c" });
+    const m = f.members[0]!;
+    mkdirSync(join(m.work, "proj"), { recursive: true });
+    put(f.work, "dir/c.txt", "c2");
+    const second = await f.next();
+    const done = await traced(() => applyCommit(m.work, m.gitDir, second.commit, ["proj"], f.first.commit));
+    expect(readTrees(done.commands)).toEqual([]);
+    expect(done.commands.some((c) => /^write-tree/.test(c))).toBe(true);
+    expect(readFileSync(join(m.work, "dir/c.txt"), "utf8")).toBe("c2");
+    expect(indexTree(m.gitDir, m.work)).not.toBe(second.tree);
+    expect(gitSync(["--git-dir=" + m.gitDir, "ls-files"], env0(m)).trim().split("\n")).toEqual(["a.txt", "dir/c.txt"]);
+  });
+});
+
+function env0(m: { work: string; gitDir: string }): Record<string, string> {
+  return gitEnv(m.gitDir, m.work, join(m.gitDir, "apply.index"));
+}
 
 describe("the result is what read-tree gives, over many changes", () => {
   /** A deterministic stream of numbers: the same changes on every run. */
