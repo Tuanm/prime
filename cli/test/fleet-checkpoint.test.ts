@@ -178,6 +178,33 @@ describe("publishing", () => {
     }
   }, 120_000);
 
+  test("a gateway that lists a recent whole tree it was not does not put the checkpoint off: this member's own record bounds the chain", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-ckpt-"));
+    try {
+      Object.assign(checkpointPolicy, { maxSinceWhole: 6, minSinceWhole: 0, stepCost: 0 });
+      const { gateway, work, primary, noise } = await fleet(root);
+      let last = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+      let kept: Awaited<ReturnType<typeof publish>>["sinceWhole"];
+      for (let seq = 2; seq <= 7; seq++) {
+        writeFileSync(join(work, "f" + (seq % FILES) + ".txt"), noise());
+        last = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster, last.sinceWhole ? { sinceWhole: last.sinceWhole } : {});
+        if (seq === 3) kept = last.sinceWhole;
+        expect(last.full).toBe(false);
+      }
+      expect(kept?.seq).toBe(3);
+      // The gateway shows the head as a whole tree, big: the chain looks empty to anyone who believes the index. (This member's record
+      // is the one from snapshot 3: another member published since, so it asks.)
+      const shown = gateway.indexEntries[gateway.indexEntries.length - 1]!;
+      shown.full = true;
+      shown.packBytes = 50_000_000;
+      writeFileSync(join(work, "f9.txt"), noise());
+      const next = await publish(credsFor("primary-device"), "x", primary, last.commit, last.seq, 2, last.roster, kept ? { sinceWhole: kept } : {});
+      expect(next.full).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   test("a fleet whose gateway has no index is counted by sequence, every fourth here", async () => {
     const root = mkdtempSync(join(tmpdir(), "fleet-ckpt-"));
     try {
