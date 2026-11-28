@@ -74,7 +74,7 @@ export interface SnapshotOptions {
   nested?: NestedRepoCache;
 }
 
-function gitEnv(gitDir: string, work: string, indexFile: string): Record<string, string> {
+export function gitEnv(gitDir: string, work: string, indexFile: string): Record<string, string> {
   return {
     ...process.env,
     GIT_DIR: gitDir,

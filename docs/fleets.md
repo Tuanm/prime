@@ -166,6 +166,13 @@ back (it looks at neither the change time nor the identity there), so such an ed
 replicate until the next change to the content. That is git's own behaviour, and it was so
 before the quiet period was shortened.
 
+The primary also leaves what git ignores out of what makes it look at the work tree: a
+build writing into `node_modules` wakes nothing. That is asked of git itself, with the
+rules the snapshot uses (every `.gitignore` of the tree, the store's `info/exclude`,
+`core.excludesFile` and what its configuration includes), and a file the last snapshot
+holds is never left out, ignored or not. A path git cannot say anything of, or does not
+answer about in a moment, is not left out.
+
 When a snapshot arrives, the replica writes the files it has and removes the
 files the *previous* snapshot had and this one does not: the ones the primary
 deleted. A removal stays inside the work tree (a directory turned into a symlink

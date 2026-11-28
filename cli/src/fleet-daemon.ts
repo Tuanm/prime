@@ -51,6 +51,7 @@ import {
 import { fleetAgentServiceConfig, fleetAgentServiceRuns, fleetAgentServiceStatus, startFleetAgentTask, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
+import { IgnoreFilter } from "./fleet-ignore.ts";
 import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
@@ -1077,16 +1078,44 @@ export function insideGitDir(filename: string | null | undefined): boolean {
   return parts.includes(".git") && parts[parts.length - 1] !== ".git";
 }
 
+/** How long a path waits for git to say whether it is ignored before it wakes the primary regardless. */
+const WAKE_PATIENCE_MS = 250;
+
 export function watchTree(
   work: string,
   onChange: (eventType?: string, filename?: string | null) => void,
+  opts: {
+    /**
+     * What the snapshot would leave out: a change to it does not wake anything. Asked of git, so it takes a
+     * moment longer than a path that nothing is asked about; a path it cannot say anything of is not left out.
+     */
+    ignore?: IgnoreFilter;
+    /** A path git has not answered about by then is let through as not ignored (milliseconds; default 250). */
+    patienceMs?: number;
+  } = {},
 ): { stop: () => void } {
   let watcher: FSWatcher | undefined;
+  let stopped = false;
+  const { ignore } = opts;
   try {
     watcher = watch(work, { recursive: true }, (eventType, filename) => {
       // Nothing in a repository's own files is the fleet's: it would wake the primary for a look at nothing.
       if (insideGitDir(filename)) return;
-      onChange(eventType, filename);
+      if (!ignore || !filename) {
+        onChange(eventType, filename);
+        return;
+      }
+      // The rules are told first (a `.gitignore` that changed changes the answer), then the path is asked about.
+      // A git that is slow to answer does not make the primary deaf: the path is let through after a moment.
+      ignore.noteChange(eventType, filename);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      void Promise.race([
+        ignore.isIgnored(filename).catch(() => false),
+        new Promise<boolean>((resolve) => void (timer = setTimeout(() => resolve(false), opts.patienceMs ?? WAKE_PATIENCE_MS))),
+      ]).then((ignored) => {
+        clearTimeout(timer);
+        if (!ignored && !stopped) onChange(eventType, filename);
+      });
     });
   } catch {
     // A platform that cannot watch recursively: the agent falls back to
@@ -1094,6 +1123,8 @@ export function watchTree(
   }
   return {
     stop: () => {
+      stopped = true;
+      ignore?.close();
       try {
         watcher?.close();
       } catch {}
@@ -2058,22 +2089,27 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
     };
     beatTick();
     loop.events.start();
-    const watcher = watchTree(work, (eventType, filename) => {
-      // A repository that appeared or went away changes what is left alone.
-      loop.paths.nested?.noteChange(eventType, filename);
-      loop.dirty = true;
-      // A change held back by a rush of publishes wakes the round once the hold is over, not at every write.
-      const held = (loop.holdUntil ?? 0) - Date.now();
-      if (held > 0) {
-        loop.holdTimer ??= setTimeout(() => {
-          loop.holdTimer = undefined;
-          wake(name);
-        }, held + 5);
-        loop.holdTimer.unref?.();
-        return;
-      }
-      wake(name);
-    });
+    const watcher = watchTree(
+      work,
+      (eventType, filename) => {
+        // A repository that appeared or went away changes what is left alone.
+        loop.paths.nested?.noteChange(eventType, filename);
+        loop.dirty = true;
+        // A change held back by a rush of publishes wakes the round once the hold is over, not at every write.
+        const held = (loop.holdUntil ?? 0) - Date.now();
+        if (held > 0) {
+          loop.holdTimer ??= setTimeout(() => {
+            loop.holdTimer = undefined;
+            wake(name);
+          }, held + 5);
+          loop.holdTimer.unref?.();
+          return;
+        }
+        wake(name);
+      },
+      // What git leaves out of a snapshot (a build's output, `node_modules`) wakes nothing.
+      { ignore: new IgnoreFilter(work, loop.paths.gitDir) },
+    );
     watchers.set(name, watcher);
 
     while (!stopping) {
