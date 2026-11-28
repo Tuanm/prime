@@ -821,7 +821,10 @@ you already run (the released 26.11.49 included); none of the changes below need
   once a second (`fleet-agent/stop`), so that it finishes its round; only an agent that is still at it after the time
   it is given (15 seconds for `stop`, a minute for an update) is ended, as is an agent of an older build, which does
   not look at the file, when that time is up. With a Scheduled Task installed the update starts that task (and only
-  that one) when the agent has left; without one it starts the new build first, as elsewhere.
+  that one) when the agent has left; without one it starts the new build first, as elsewhere. The first update from a
+  build before 26.11.50 therefore waits the whole minute and then ends the old agent in the middle of its round (the
+  round is picked up again; nothing is lost). With a task installed, `agent stop` is followed by the task's own
+  watchdog starting an agent again within a minute, as it always was.
 - **On Windows**, an agent installed by an earlier build is registered under the buddy's task name,
   `\prime\code-mcp`. `prime fleets agent install` (or `uninstall`) for the configuration it runs finds
   it by what it runs, removes it and registers `\prime\prime-fleet-agent` in its place; `agent status`

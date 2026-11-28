@@ -27,8 +27,10 @@
 
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync, type Stats } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { hostname, uptime } from "node:os";
+import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
+
+import { currentBoot, fromEarlierBoot, type Boot } from "./boot.ts";
 
 /** Replaced in tests: the file system calls that fail in ways only another platform shows. */
 export interface DirLockHooks {
@@ -111,27 +113,11 @@ const TAKEN_CODES = new Set(["EEXIST", "ENOTEMPTY", "ENOTDIR"]);
 
 /** A gate is held for microseconds: one that a breaker died inside is removed after this long. */
 const BREAK_GATE_MS = 2_000;
-/**
- * A lock whose note records a longer uptime than this machine has now (by this much) was made in an earlier
- * boot, and the pid in it is another process's now. Uptime only grows within a boot, and it is not read from
- * the wall clock that is stepped when a machine without a clock gets the time. Where the system has a boot id
- * (Linux), that is compared instead and the margin is not needed.
- */
-const BOOT_MARGIN_S = 10 * 60;
 /** Leftovers of a process killed mid-way (`.new`, `.gone`, `.broken`) are removed after this long. */
 const LITTER_MS = 60_000;
 
-let bootId: string | null | undefined;
-function thisBoot(opts: DirLockOptions): { id?: string; up: number } {
-  if (opts.hooks?.boot) return opts.hooks.boot();
-  if (bootId === undefined) {
-    try {
-      bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null;
-    } catch {
-      bootId = null;
-    }
-  }
-  return { ...(bootId ? { id: bootId } : {}), up: uptime() };
+function thisBoot(opts: DirLockOptions): Boot {
+  return opts.hooks?.boot ? opts.hooks.boot() : currentBoot();
 }
 
 const HOST = hostname();
@@ -248,7 +234,7 @@ function judge(lock: string, st: Pick<Stats, "mtimeMs" | "isDirectory">, opts: D
   if (!running(owner.pid) || old) return { token: owner.token };
   // Made in an earlier boot of this machine: every process of that time is gone, and the pid is another's now.
   const now = thisBoot(opts);
-  if (owner.boot !== undefined && now.id !== undefined ? owner.boot !== now.id : owner.up !== undefined && owner.up > now.up + BOOT_MARGIN_S) return { token: owner.token };
+  if (fromEarlierBoot(owner, now)) return { token: owner.token };
   return null;
 }
 

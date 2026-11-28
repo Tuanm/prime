@@ -115,7 +115,7 @@ export function configOfCommand(command: string): string | undefined {
  * it is not this one's holder (the agent directory is beside the configuration). A command line
  * that names no absolute `--config` cannot say, and is taken as a yes.
  */
-function runsHere(command: string, agentDir: string | undefined): boolean {
+export function runsHere(command: string, agentDir: string | undefined): boolean {
   if (agentDir === undefined) return true;
   const config = configOfCommand(command);
   if (config === undefined || !isAbsolute(config)) return true;

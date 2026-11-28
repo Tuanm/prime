@@ -570,6 +570,7 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
     : "not installed as a service: run 'prime fleets agent install'";
   if (!status.running) {
     ctx.out(dim("the fleet agent is not running"));
+    if (status.successor) ctx.out(dim("  a new build (pid " + status.successor + ") is waiting to take over: 'prime fleets agent stop' stops it"));
     if (!service.installed) ctx.out(dim("  " + notInstalled));
     return;
   }
@@ -577,6 +578,7 @@ export async function fleetsAgent(ctx: Ctx): Promise<void> {
   if (service.installed) ctx.out(dim("  service   " + service.where + (service.config ? " (runs " + service.config + ")" : "")));
   else if (elsewhere) ctx.out(yellow("  service   " + notInstalled));
   else ctx.out(yellow("  service   not installed: it stops when this machine logs out (run 'prime fleets agent install')"));
+  if (status.successor) ctx.out(yellow("  restarting a new build (pid " + status.successor + ") waits for this agent to finish its round and take over"));
   ctx.out(dim("  started   " + (status.started_at ?? "-")));
   ctx.out(dim("  spaces    " + (status.spaces ?? 0)));
   ctx.out(dim("  rounds    " + (status.rounds ?? 0)));

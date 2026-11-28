@@ -337,7 +337,11 @@ output says what was done.
     that the git and container commands of its round are not stopped beside it.
   - On Windows with a Scheduled Task: the agent is asked to stop in a file it
     looks at between rounds, the task is started again when it has left, and the
-    agent is ended only if it is still at its round after a minute.
+    agent is ended only if it is still at its round after a minute. An agent
+    of a build before 26.11.50 does not look at that file, so the first update
+    from one waits the whole minute and then ends it in the middle of its round
+    (the round is picked up again, nothing is lost). The task's own watchdog
+    starts an agent again within a minute of 'prime fleets agent stop'.
   - Otherwise the new build is started first and waits for the agent's lock; the
     old agent is then asked to stop, finishes its round, and the new one takes
     over (for as long as that takes). If the new build does not start, the old

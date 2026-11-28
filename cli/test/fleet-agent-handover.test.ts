@@ -5,22 +5,26 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { currentBoot } from "../src/boot";
 import { acquireAgentLock, agentLockPath } from "../src/fleet-agent-lock";
 import {
   acquireStarting,
   claimSuccessor,
+  isSuccessorProcess,
   readSuccessor,
   registerSuccessor,
   requestStop,
   stopPath,
   stopRequestedSince,
   stopSuccessor,
+  stopWaitingSuccessor,
   successorPath,
   watchForStop,
 } from "../src/fleet-agent-handover";
 import {
   fleetAgentDir,
   fleetAgentStatePath,
+  fleetAgentStatus,
   installFleetAgent,
   restartFleetAgentAfterUpdate,
   runFleetAgent,
@@ -260,17 +264,17 @@ withProcesses("two updates at the same moment", () => {
 
   test("a claim that nobody followed with a process, and a successor that is gone, do not keep an update from starting one", () => {
     const dir = join(scratch(), "fleet-agent");
-    expect(claimSuccessor(dir, undefined, 1_000_000)).toEqual({ claimed: true });
+    expect(claimSuccessor(dir, undefined, 1_000_000)).toEqual({ claimed: true, at: 1_000_000 });
     // Somebody is starting one just now.
     expect(claimSuccessor(dir, undefined, 1_000_500)).toEqual({ claimed: false, pid: 0 });
     // Nobody did, and it is long ago.
-    expect(claimSuccessor(dir, undefined, 1_100_000)).toEqual({ claimed: true });
+    expect(claimSuccessor(dir, undefined, 1_100_000)).toEqual({ claimed: true, at: 1_100_000 });
     // A successor that is a live agent is waited for; one that is not, or that is the agent that runs, is not.
     registerSuccessor(dir, 4242, 1_100_000);
     expect(claimSuccessor(dir, undefined, 1_100_100, () => true)).toEqual({ claimed: false, pid: 4242 });
-    expect(claimSuccessor(dir, 4242, 1_100_100, () => true)).toEqual({ claimed: true });
+    expect(claimSuccessor(dir, 4242, 1_100_100, () => true)).toEqual({ claimed: true, at: 1_100_100 });
     registerSuccessor(dir, 4243, 1_100_000);
-    expect(claimSuccessor(dir, undefined, 1_100_100, () => false)).toEqual({ claimed: true });
+    expect(claimSuccessor(dir, undefined, 1_100_100, () => false)).toEqual({ claimed: true, at: 1_100_100 });
   });
 });
 
@@ -514,5 +518,189 @@ describe("stopping the agent from a command", () => {
     expect(stopFleetAgent(configPath)).toBe(false);
     expect(existsSync(stopPath(dir))).toBe(true);
     expect(existsSync(successorPath(dir))).toBe(false);
+  });
+});
+
+describe("a request to stop that cannot be believed", () => {
+  const heldLock = async () => ({ held: true as const, release: () => {} });
+
+  test("one from the future (a clock that was stepped back) stops nobody, and is cleared", async () => {
+    const dir = join(scratch(), "fleet-agent");
+    requestStop(dir, Date.now() + 120_000);
+    expect(stopRequestedSince(dir, Date.now())).toBe(false);
+    const outcomes: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await acquireStarting(dir, { waitMs: 0, startedAt: Date.now(), acquire: heldLock });
+      outcomes.push("stopped" in r ? "stopped" : r.held ? "runs" : "other");
+    }
+    expect(outcomes).toEqual(["runs", "runs", "runs"]);
+    expect(existsSync(stopPath(dir))).toBe(false);
+  });
+
+  test("one from an earlier boot is not applied either, and one a moment ahead of the clock still is", async () => {
+    const dir = join(scratch(), "fleet-agent");
+    mkdirSync(dir, { recursive: true });
+    // Another boot: a different id, or (where the system has none) a longer uptime than there is now.
+    if (currentBoot().id) {
+      writeFileSync(stopPath(dir), JSON.stringify({ at: Date.now() + 1000, boot: "another boot", up: 5 }));
+      expect(stopRequestedSince(dir, 0)).toBe(false);
+    }
+    writeFileSync(stopPath(dir), JSON.stringify({ at: Date.now() + 1000, up: 100 * 24 * 3600 }));
+    expect(stopRequestedSince(dir, 0)).toBe(false);
+    // The same boot, a second ahead (two clocks that are not the same): it is a stop.
+    requestStop(dir, Date.now() + 1000);
+    expect(stopRequestedSince(dir, 0)).toBe(true);
+  });
+});
+
+describe("a successor entry that is no longer one", () => {
+  const dirOf = (): string => join(scratch(), "a", "fleet-agent");
+
+  test("is cleared when the successor gives up, so that its pid is not taken for a successor later", async () => {
+    const dir = dirOf();
+    registerSuccessor(dir, process.pid);
+    const gaveUp = await acquireStarting(dir, { waitMs: 0, startedAt: Date.now(), acquire: async () => ({ held: false, holder: 4242 }) });
+    expect(gaveUp.held).toBe(false);
+    expect(existsSync(successorPath(dir))).toBe(false);
+  });
+
+  test("names a process only if it is an agent of THIS configuration", () => {
+    const dir = dirOf();
+    const live = process.pid;
+    registerSuccessor(dir, live);
+    const ours = "bun __fleet-agent --config " + join(dir, "..", "config.yaml");
+    const theirs = "bun __fleet-agent --config " + join(dir, "..", "..", "b", "config.yaml");
+    expect(isSuccessorProcess(dir, live, () => ours)).toBe(true);
+    expect(isSuccessorProcess(dir, live, () => theirs)).toBe(false);
+    expect(isSuccessorProcess(dir, live, () => "sleep 60")).toBe(false);
+    // Where the process list cannot say, an entry that was touched lately does.
+    expect(isSuccessorProcess(dir, live, () => undefined)).toBe(true);
+    expect(isSuccessorProcess(dir, 99_999_999, () => ours)).toBe(false);
+  });
+
+  test("another configuration's agent is not signalled by a stop, and does not keep an update waiting", () => {
+    const dir = dirOf();
+    const killed: number[] = [];
+    registerSuccessor(dir, process.pid);
+    const theirs = (pid: number) => isSuccessorProcess(dir, pid, () => "bun __fleet-agent --config " + join(dir, "..", "..", "b", "config.yaml"));
+    expect(stopSuccessor(dir, theirs, (pid) => void killed.push(pid))).toBeUndefined();
+    expect(killed).toEqual([]);
+    registerSuccessor(dir, process.pid);
+    expect(claimSuccessor(dir, undefined, Date.now(), theirs).claimed).toBe(true);
+  });
+
+  test("a stale entry is removed without a stop request that would restart the agent that runs", () => {
+    const dir = dirOf();
+    registerSuccessor(dir, 99_999_999);
+    expect(stopWaitingSuccessor(dir)).toBe(false);
+    expect(existsSync(successorPath(dir))).toBe(false);
+    expect(existsSync(stopPath(dir))).toBe(false);
+  });
+});
+
+describe("a stop between the update's claim and its start", () => {
+  test("is for the successor that is started after it", async () => {
+    const dir = join(scratch(), "fleet-agent");
+    const claim = claimSuccessor(dir, 1);
+    expect(claim.claimed).toBe(true);
+    const at = claim.claimed ? claim.at : 0;
+    // `agent stop` now: the claim has no process to signal, and the request is what is left.
+    await Bun.sleep(60);
+    expect(stopWaitingSuccessor(dir)).toBe(false);
+    expect(existsSync(stopPath(dir))).toBe(true);
+    // The update starts it a moment later, on behalf of the claim.
+    await Bun.sleep(60);
+    registerSuccessor(dir, process.pid);
+    const r = await acquireStarting(dir, { waitMs: 0, startedAt: Math.min(Date.now(), at - 100), acquire: async () => ({ held: true as const, release: () => {} }) });
+    expect("stopped" in r && r.stopped).toBe(true);
+  });
+});
+
+withProcesses("an update only signals what is still the agent it meant to stop", () => {
+  test("a pid that is not the agent any more (it left, and another process has the number) is not signalled", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const log = join(root, "log");
+    const old = await oldAgent(configPath, log, "never");
+    let fresh: Spawned | undefined;
+    await restartFleetAgentAfterUpdate(
+      configPath,
+      unsupervised((env) => (fresh = startAgent(configPath, log, env)), { stopWaitMs: 400 }),
+      { platform: "linux", startCheckMs: 300, lockWaitMs: 20_000, isAgent: () => false },
+    );
+    await Bun.sleep(300);
+    expect(said(log, old.pid)).not.toContain("sigterm");
+    expect(alive(old.pid)).toBe(true);
+    expect(alive(fresh!.pid)).toBe(true);
+  }, 20_000);
+
+  test("on Windows neither the wait nor the end of the old agent is about a pid that has left", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const log = join(root, "log");
+    const old = await oldAgent(configPath, log, "never");
+    let started = 0;
+    const began = Date.now();
+    await restartFleetAgentAfterUpdate(
+      configPath,
+      { installed: () => false, pid: () => undefined, restart: () => false, task: () => true, startTask: () => (started++, true), stopWaitMs: 600 },
+      { platform: "win32", isAgent: () => false },
+    ).catch(() => undefined);
+    expect(started).toBe(1);
+    expect(Date.now() - began).toBeLessThan(3000);
+    expect(said(log, old.pid)).not.toContain("sigterm");
+    expect(alive(old.pid)).toBe(true);
+  }, 20_000);
+
+  test("an update that finds a successor already there asks the old agent to stop again, in case the first update died before it did", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const log = join(root, "log");
+    const old = await oldAgent(configPath, log, "5000");
+    // The successor of an update that died: a process that is an agent to the process list, and an entry that was just touched.
+    const waiting = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdout: "ignore", stderr: "ignore" });
+    cleanups.push(() => waiting.kill("SIGKILL"));
+    registerSuccessor(fleetAgentDir(configPath), waiting.pid);
+    let spawned = 0;
+    const result = await restartFleetAgentAfterUpdate(
+      configPath,
+      unsupervised(() => (spawned++, waiting as unknown as StartedAgent)),
+      { platform: "linux", startCheckMs: 100, isAgent: () => true },
+    );
+    expect(spawned).toBe(0);
+    expect(result).toEqual({ restarted: true, via: "direct", pid: waiting.pid, pending: true });
+    expect(await until(() => said(log, old.pid).includes("sigterm"))).toBe(true);
+  }, 20_000);
+
+  test("the new agent is told when its claim was made, so that a stop from then on is for it", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const log = join(root, "log");
+    await oldAgent(configPath, log, "never");
+    const before = Date.now();
+    const envs: Array<Record<string, string | undefined>> = [];
+    await restartFleetAgentAfterUpdate(
+      configPath,
+      unsupervised((env) => {
+        envs.push(env);
+        return startAgent(configPath, log, env);
+      }, { stopWaitMs: 300 }),
+      { platform: "linux", startCheckMs: 100, lockWaitMs: 20_000 },
+    );
+    const since = Number(envs[0]!.PRIME_FLEET_SINCE);
+    expect(since).toBeGreaterThanOrEqual(before);
+    expect(since).toBeLessThanOrEqual(Date.now());
+  }, 20_000);
+});
+
+describe("what `agent status` says of a successor", () => {
+  test("it names the process that waits to take over, while it does", () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    expect(fleetAgentStatus(configPath).successor).toBeUndefined();
+    registerSuccessor(fleetAgentDir(configPath), process.pid);
+    expect(fleetAgentStatus(configPath)).toMatchObject({ running: false, successor: process.pid });
+    stopSuccessor(fleetAgentDir(configPath), () => false);
+    expect(fleetAgentStatus(configPath).successor).toBeUndefined();
   });
 });

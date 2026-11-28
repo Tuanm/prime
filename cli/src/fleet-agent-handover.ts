@@ -14,7 +14,8 @@
 import { mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { acquireAgentLock, commandOf, isFleetAgentProcess, type AgentLock, type AgentLockOptions } from "./fleet-agent-lock.ts";
+import { currentBoot, fromEarlierBoot } from "./boot.ts";
+import { acquireAgentLock, commandOf, isFleetAgentProcess, runsHere, type AgentLock, type AgentLockOptions } from "./fleet-agent-lock.ts";
 
 export const SUCCESSOR_FILE = "successor";
 export const STOP_FILE = "stop";
@@ -38,10 +39,11 @@ function pidAlive(pid: number): boolean {
  * while it waits, and an entry that was touched lately names a process that is alive. Where the process list can be asked
  * it is asked, and the process must be an agent.
  */
-export function isSuccessorProcess(agentDir: string, pid: number): boolean {
+export function isSuccessorProcess(agentDir: string, pid: number, commandOfPid: (pid: number) => string | undefined = commandOf): boolean {
   if (!pidAlive(pid)) return false;
-  const command = commandOf(pid);
-  if (command !== undefined) return command.includes("__fleet-agent");
+  const command = commandOfPid(pid);
+  // An agent of THIS configuration: another configuration's agent may have been given the pid since.
+  if (command !== undefined) return command.includes("__fleet-agent") && runsHere(command, agentDir);
   try {
     return Date.now() - statSync(successorPath(agentDir)).mtimeMs < FRESH_MS;
   } catch {
@@ -88,12 +90,12 @@ export function claimSuccessor(
   running: number | undefined,
   now: number = Date.now(),
   isAgent: (pid: number) => boolean = (pid) => isSuccessorProcess(agentDir, pid),
-): { claimed: true } | { claimed: false; pid: number } {
+): { claimed: true; at: number } | { claimed: false; pid: number } {
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
       writeFileSync(successorPath(agentDir), JSON.stringify({ pid: 0, at: now }), { flag: "wx", mode: 0o600 });
-      return { claimed: true };
+      return { claimed: true, at: now };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
@@ -141,33 +143,76 @@ export function stopSuccessor(
 }
 
 /**
+ * Stop the successor that waits for the lock, if there is one, with the request written first (see `requestStop`). A
+ * claim that has no process yet is stopped too: the request is what the successor, which is started after it, finds. An
+ * entry that names nothing live is only removed, and asks nobody to stop. True when a live successor was signalled.
+ */
+export function stopWaitingSuccessor(agentDir: string, now: number = Date.now()): boolean {
+  const there = readSuccessor(agentDir);
+  if (!there) return false;
+  const live = there.pid > 0 ? isSuccessorProcess(agentDir, there.pid) : now - there.at < CLAIM_MS;
+  if (live) requestStop(agentDir, now);
+  return stopSuccessor(agentDir) !== undefined;
+}
+
+/**
  * Ask for the agents that were started before now to stop (whether they are running, or waiting for the lock). With
  * `only`, for that one agent: an update asks the agent it replaces, and not the successor it started before asking.
  */
 export function requestStop(agentDir: string, now: number = Date.now(), only?: number): void {
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  writeFileSync(stopPath(agentDir), JSON.stringify({ at: now, ...(only !== undefined ? { only } : {}) }), { mode: 0o600 });
+  const boot = currentBoot();
+  writeFileSync(
+    stopPath(agentDir),
+    JSON.stringify({ at: now, ...(only !== undefined ? { only } : {}), ...(boot.id ? { boot: boot.id } : {}), up: boot.up }),
+    { mode: 0o600 },
+  );
+}
+
+/** How far ahead of the clock a request may be before it is taken for impossible (a clock that was stepped back). */
+const FUTURE_MS = 5_000;
+
+interface StopRequest {
+  at: number;
+  only?: number;
+  boot?: string;
+  up?: number;
+}
+
+/**
+ * The request in the agent's directory, if it can be believed. The time in it is the wall clock of whoever wrote it, and
+ * a clock is stepped: a request from the future, or from an earlier boot, was not written to the agents that are starting
+ * now, and one that was kept would stop every one of them until the clock caught up with it.
+ */
+function readStop(agentDir: string, now: number = Date.now()): { request: StopRequest | undefined; unusable: boolean } {
+  let raw: { at?: unknown; only?: unknown; boot?: unknown; up?: unknown };
+  try {
+    raw = JSON.parse(readFileSync(stopPath(agentDir), "utf8"));
+  } catch {
+    return { request: undefined, unusable: false };
+  }
+  if (typeof raw.at !== "number") return { request: undefined, unusable: true };
+  const request: StopRequest = {
+    at: raw.at,
+    ...(typeof raw.only === "number" ? { only: raw.only } : {}),
+    ...(typeof raw.boot === "string" ? { boot: raw.boot } : {}),
+    ...(typeof raw.up === "number" ? { up: raw.up } : {}),
+  };
+  if (request.at > now + FUTURE_MS || fromEarlierBoot(request, currentBoot())) return { request: undefined, unusable: true };
+  return { request, unusable: false };
 }
 
 /** Whether a stop was asked for after `since` (when the asking agent was started), of this agent (`pid`, when it is told). */
 export function stopRequestedSince(agentDir: string, since: number, pid?: number): boolean {
-  try {
-    const raw = JSON.parse(readFileSync(stopPath(agentDir), "utf8")) as { at?: unknown; only?: unknown };
-    if (typeof raw.at !== "number" || raw.at <= since + SLACK_MS) return false;
-    return raw.only === undefined || pid === undefined || raw.only === pid;
-  } catch {
-    return false;
-  }
+  const { request } = readStop(agentDir);
+  if (!request || request.at <= since + SLACK_MS) return false;
+  return request.only === undefined || pid === undefined || request.only === pid;
 }
 
-/** A request that is older than the agent that finds it is of no use to anybody. */
+/** A request that is older than the agent that finds it, or that cannot be believed, is of no use to anybody. */
 export function dropOldStopRequest(agentDir: string, since: number): void {
-  try {
-    const at = (JSON.parse(readFileSync(stopPath(agentDir), "utf8")) as { at?: unknown }).at;
-    if (typeof at !== "number" || at <= since + SLACK_MS) rmSync(stopPath(agentDir), { force: true });
-  } catch {
-    // None, or unreadable: nothing to drop.
-  }
+  const { request, unusable } = readStop(agentDir);
+  if (unusable || (request && request.at <= since + SLACK_MS)) rmSync(stopPath(agentDir), { force: true });
 }
 
 export interface StartingOptions {
@@ -214,7 +259,11 @@ export async function acquireStarting(agentDir: string, o: StartingOptions): Pro
   } finally {
     clearInterval(touch);
   }
-  if (!lock.held) return lock;
+  // Gave up: its entry is not a successor's any more, and its pid is any process's before long.
+  if (!lock.held) {
+    clearSuccessor(agentDir, process.pid);
+    return lock;
+  }
   clearSuccessor(agentDir, process.pid);
   if (stopRequestedSince(agentDir, o.startedAt, process.pid)) {
     lock.release();
