@@ -166,7 +166,7 @@ in the store, never behind it. `prime fleets agent status` shows what the agent 
 Fetching is cheap: a replica that is up to date asks nothing, a socket that says "the
 head moved" starts one fetch, and the route to the head is the cheapest the replica can
 find (see "A replica that fell behind"). A change small enough (a delta whose sealed pack is at most
-64 KiB) comes with the news itself: the gateway puts the manifest and the pack in the socket message, and the
+64 KiB) comes with the news itself: the gateway puts the manifest and the pack in the socket message (only for members that say they read it: `inline` among the capabilities in the bootstrap), and the
 replica asks for neither. What it is told is kept for five minutes under the hash of its own bytes, so it can
 only answer an ask for exactly those bytes, and the snapshot is then checked as any other (the seal, the
 sender, the key): a pack or manifest the gateway made up is refused as a forged fetch is. A member that does

@@ -7,6 +7,9 @@
 
 import { createHash } from "node:crypto";
 
+/** What a member says it can read, by name: a small snapshot that comes with the news of the head (`head` event's `inline`). The gateway sends it only to members that say so. */
+export const INLINE_CAP = "inline";
+
 /**
  * What a member says it can read, by name (`meta2`: a manifest whose commit, tree and roster are sealed, see `SnapshotMeta`): a
  * format is published only when every member of the fleet lists it (the keys listed for the snapshot carry each member's).
@@ -19,7 +22,7 @@ export const META_CAP = "meta2";
  * fleet lists its name (`role.fleetCaps`; see `fleetHas`). Short lower-case names, added here as the code that
  * reads and writes the form lands, and nowhere else: this build says only what it does.
  */
-export const MEMBER_CAPS: readonly string[] = [META_CAP];
+export const MEMBER_CAPS: readonly string[] = [META_CAP, INLINE_CAP];
 
 /** What a capability's name looks like: the pattern the gateway keeps (`^[a-z0-9][a-z0-9-]{0,23}$`), so that both sides read the same names. */
 export const CAP_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/;
