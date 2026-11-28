@@ -19,7 +19,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, join, relative, sep } from "node:path";
+import { basename, join, relative, resolve as absolute, sep } from "node:path";
 
 import { withDirLock } from "./dir-lock";
 
@@ -155,7 +155,17 @@ function gitRunOnce(
   onSpawn?: (pid: number) => void,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const child = spawn("git", ["--git-dir=" + gitDir].concat(args), { env, stdio: ["pipe", "pipe", "pipe"] });
+    // git reads the names it is given (a pathspec, a list on stdin) from where it is run: from the folder of the work tree
+    // the process happens to be in, not from the top of it. It is run from the top, so that a name means the same wherever
+    // the agent was started. The places it is told of are made absolute first, as they were meant from where the agent is.
+    const top = env.GIT_WORK_TREE !== undefined ? absolute(env.GIT_WORK_TREE) : undefined;
+    const where: Record<string, string> = { ...env };
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]) if (where[key] !== undefined) where[key] = absolute(where[key]!);
+    const child = spawn("git", ["--git-dir=" + absolute(gitDir)].concat(args), {
+      env: where,
+      cwd: top !== undefined && existsSync(top) ? top : undefined,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     if (child.pid !== undefined) onSpawn?.(child.pid);
     const out: Buffer[] = [];
     const err: Buffer[] = [];

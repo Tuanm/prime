@@ -449,3 +449,22 @@ describe("a replica's look at its work tree before it writes", () => {
     expect(await workTreeMatchesApply(r.work, r.gitDir, r.commit)).toBe(false);
   });
 });
+
+describe("a name means the same wherever the agent was started", () => {
+  test("a named path is staged from the top of the work tree, though the process is inside a folder of it", async () => {
+    const m = await member();
+    const before = process.cwd();
+    try {
+      await new Promise((r) => setTimeout(r, 1100));
+      put(m.work, "a.txt", "alpha, edited\n");
+      put(m.work, "src/b.ts", "export const b = 2;\n");
+      process.chdir(join(m.work, "src"));
+      const snap = await snapshot({ work: m.work, gitDir: m.gitDir, base: m.first.commit, wantFull: false, paths: ["a.txt", "src/b.ts"] });
+      process.chdir(before);
+      expect(gitSync(["--git-dir=" + m.gitDir, "show", snap.commit + ":a.txt"], { encoding: "utf8" })).toBe("alpha, edited\n");
+      expect(gitSync(["--git-dir=" + m.gitDir, "show", snap.commit + ":src/b.ts"], { encoding: "utf8" })).toBe("export const b = 2;\n");
+    } finally {
+      process.chdir(before);
+    }
+  });
+});
