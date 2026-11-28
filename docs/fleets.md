@@ -164,7 +164,9 @@ in the store, never behind it. `prime fleets agent status` shows what the agent 
 ("fetched 41", "applied 41", "took over at 41").
 
 Fetching is cheap: a replica that is up to date asks nothing, a socket that says "the
-head moved" starts one fetch, and the route to the head is the cheapest the replica can
+head moved" starts one fetch (and when the edit is small - a pack of at most 64 KiB that is not a whole tree - the event
+carries the manifest and the pack themselves, so the replica asks the gateway for neither; the object sends them only if
+they are what the manifest's key says, and the replica checks them again against the hashes it would have asked for), and the route to the head is the cheapest the replica can
 find (see "A replica that fell behind"). A replica takes its place in the fleet when the
 agent starts, when the fleet says the lease is free, and as a safety: every fifteen seconds
 without a socket (the answer says where the head is, so it asks for nothing else), every five

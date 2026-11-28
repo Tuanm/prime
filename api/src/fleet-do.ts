@@ -27,6 +27,7 @@ import {
   KEY_PROOF_INFO,
   KEY_PROOF_WINDOW_MS,
   clampTtl,
+  checkedInline,
   cleanCaps,
   commonCaps,
   effectiveLeaseMs,
@@ -1893,7 +1894,9 @@ export class FleetDO implements DurableObject {
       await this.storage.put("applied", now_);
       // The members that listen pull now instead of at their next look; the one that
       // published already has it.
-      this.broadcast({ type: "head", seq: next.seq, manifestKey }, caller.deviceId);
+      // A small snapshot rides in the event itself, when someone is listening and what is offered is what the key says it is.
+      const inline = this.sockets().length > 0 ? await checkedInline(body.inline, manifestKey, manifestHash, fleetId, meta.full) : undefined;
+      this.broadcast({ type: "head", seq: next.seq, manifestKey, ...(inline ? { inline } : {}) }, caller.deviceId);
 
       // Keep a bounded number of snapshots: more than the newest whole tree and
       // the changes after it, which is all a member far behind needs. The old
