@@ -11,7 +11,9 @@ import {
   OfflineError,
   TimeoutError,
 } from "./errors.ts";
-import { CALL_SIG_HEADER, type CallSigner } from "./caller-key.ts";
+import { REPLY_SIG_HEADER, verifyReplySig } from "./caller-auth.ts";
+import { CALL_SIG_HEADER, type CallSigner, parseCallSig } from "./caller-key.ts";
+import { checkDeviceKey, deviceKeyLabel } from "./device-pins.ts";
 import type { Target } from "./target.ts";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
@@ -70,14 +72,18 @@ export class GatewayClient {
   private handshaken = false;
   private localSid?: string;
   private readonly signer: CallSigner | undefined;
+  private readonly notice: (text: string) => void;
+  private readonly noticed = new Set<string>();
 
   /**
    * `signer` signs each call that needs it with this machine's caller key (see caller-key.ts), so a device
    * that only runs calls signed by a key it trusts accepts it. Without one the call goes out unsigned.
+   * `notice` hears of a reply that a device signed wrongly or with a key other than the one it first used.
    */
-  constructor(target: Target, options: { signer?: CallSigner } = {}) {
+  constructor(target: Target, options: { signer?: CallSigner; notice?: (text: string) => void } = {}) {
     this.target = target;
     this.signer = options.signer;
+    this.notice = options.notice ?? ((text) => process.stderr.write(`${text}\n`));
   }
 
   get lastRoundTripMs(): number {
@@ -187,8 +193,9 @@ export class GatewayClient {
     for (let attempt = 1; ; attempt++) {
       this.lastAttempts = attempt;
       let response: Response;
+      const headers = this.headers(method, body);
       try {
-        response = await fetch(this.endpoint(), { method: "POST", headers: this.headers(method, body), body, signal });
+        response = await fetch(this.endpoint(), { method: "POST", headers, body, signal });
       } catch (err) {
         this.lastMs = Math.round(performance.now() - started);
         // Never retried: a dropped connection may have reached the device, and
@@ -208,7 +215,33 @@ export class GatewayClient {
         await sleep(backoffMs);
         continue;
       }
+      this.checkReply(headers[CALL_SIG_HEADER], response.headers.get(REPLY_SIG_HEADER), text);
       return this.parseBody(response.status, text);
+    }
+  }
+
+  /** A device signs its reply to a signed call: say so if it is signed wrongly, or by a key that is not the one it had. */
+  private checkReply(callSig: string | undefined, replySig: string | null, text: string): void {
+    if (!callSig || !replySig) return;
+    const nonce = parseCallSig(callSig)?.nonce;
+    if (!nonce) return;
+    const device = this.target.deviceId;
+    const pub = verifyReplySig(replySig, nonce, text);
+    let problem: string | undefined;
+    if (!pub) {
+      problem = `the reply from ${device} carries a signature that does not match it`;
+    } else {
+      try {
+        if (checkDeviceKey(this.target.gateway, device, pub) === "changed") {
+          problem = `${device} answered with a different key (${deviceKeyLabel(pub)}) from the one it first used`;
+        }
+      } catch {
+        // The pin cannot be kept (a read-only home): the signature itself was good.
+      }
+    }
+    if (problem && !this.noticed.has(problem)) {
+      this.noticed.add(problem);
+      this.notice(`prime: warning: ${problem}; the gateway may have changed the answer`);
     }
   }
 

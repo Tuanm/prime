@@ -7,6 +7,7 @@
 
 import { type CodeMcpSection } from "./config.ts";
 import { UsageError } from "./errors.ts";
+import { CALLER_AUTH_MODES } from "./caller-auth.ts";
 
 export type OptionType = "string" | "boolean";
 
@@ -23,6 +24,8 @@ export const CODE_MCP_OPTIONS: Readonly<Record<string, OptionType>> = {
   gateway: "string",
   id: "string",
   "gateway-token": "string",
+  "caller-auth": "string",
+  callers: "string",
 };
 
 /** Options whose values are credentials: never echoed back in full. */
@@ -36,6 +39,12 @@ export type OptionMap = Record<string, string | boolean>;
 function unknownOption(name: string, where: string): UsageError {
   const known = Object.keys(CODE_MCP_OPTIONS).join(", ");
   return new UsageError(`unknown code-mcp option "${name}" ${where}`, `Known options: ${known}.`);
+}
+
+function checkValue(name: string, value: string, where: string): void {
+  if (name === "caller-auth" && !(CALLER_AUTH_MODES as readonly string[]).includes(value)) {
+    throw new UsageError(`code-mcp ${name} ${where} must be off, warn or enforce, not "${value}"`, "e.g. caller-auth: warn");
+  }
 }
 
 /** Validate the config section (key names and value types). */
@@ -53,6 +62,7 @@ export function optionsFromConfig(section: CodeMcpSection, source: string): Opti
       if (typeof value !== "string" || value.length === 0) {
         throw new UsageError(`code-mcp.${key} in ${source} must be a non-empty string`, `e.g. ${key}: "value"`);
       }
+      checkValue(key, value, `in ${source}`);
       out[key] = value;
     }
   }
@@ -91,6 +101,7 @@ export function parseCodeMcpArgs(args: string[]): { options: OptionMap; help: bo
       continue;
     }
     if (eq !== -1) {
+      checkValue(name, arg.slice(eq + 1), "on the command line");
       options[name] = arg.slice(eq + 1);
       continue;
     }
@@ -102,6 +113,7 @@ export function parseCodeMcpArgs(args: string[]): { options: OptionMap; help: bo
       }
       throw new UsageError(`--${name} needs a value`);
     }
+    checkValue(name, next, "on the command line");
     options[name] = next;
     i++;
   }

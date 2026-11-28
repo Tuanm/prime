@@ -18,6 +18,8 @@
 //   --mcp <path>       aggregate tools from external MCP servers defined in the given JSON config (Claude Desktop format).
 
 import { loadRunVault, runCodeInChild } from "./run-tool.ts";
+import { CallerAuth, parseCallerAuthMode } from "./caller-auth.ts";
+import { callersPath } from "./caller-key.ts";
 import { spawn, spawnSync, file, write } from "bun";
 import { chmodSync, mkdtempSync, readdirSync, statSync, mkdirSync, rmdirSync, rmSync, realpathSync, lstatSync, constants as fsConstants } from "node:fs";
 import { opendir as fsOpenDir, open as fsOpen, rename as fsRename, unlink as fsUnlink, stat as fsStat } from "node:fs/promises";
@@ -153,6 +155,11 @@ Options:
   --gateway-token <s>    Device credential sent to the gateway on connect
                          (defaults to --token; must match the token registered
                          for --id in the gateway device registry)
+  --caller-auth <mode>   Tool calls that come through the gateway: off (not
+                         checked), warn (default: a call not signed by a trusted
+                         key runs and is logged) or enforce (refused)
+  --callers <file>       Keys trusted to sign calls (default: callers.json beside
+                         the config); edit it with 'prime devices allow-caller'
   -h, --help             Show this help and exit`;
 
 // Bare --gateway (no value) connects to the default managed gateway.
@@ -181,6 +188,8 @@ try {
       gateway: { type: "string" },
       id: { type: "string" },
       "gateway-token": { type: "string" },
+      "caller-auth": { type: "string" },
+      callers: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     strict: true,
@@ -207,6 +216,11 @@ const token: string | undefined = args.token;
 // --gateway-token wins, otherwise --token (the token registered for the
 // device id in the gateway is what authenticates the tunnel).
 const gatewayToken: string | undefined = args["gateway-token"] ?? token;
+const callerAuthMode = args["caller-auth"] === undefined ? "warn" : parseCallerAuthMode(args["caller-auth"]);
+if (!callerAuthMode) {
+  console.error(`error: invalid --caller-auth: ${args["caller-auth"]} (use off, warn or enforce)`);
+  process.exit(2);
+}
 const memoryEnabled = args["enable-memory"] === true;
 const disallowedTools: string[] = args["disallowed-tools"]
   ? args["disallowed-tools"].split(",").map((s: string) => s.trim()).filter(Boolean)
@@ -6181,6 +6195,14 @@ function gatewayConnectHint(error: string): string {
 // tunnel remote requests to the local MCP handler.
 if (gatewayDomain) {
   const deviceId = assignedDeviceId ?? randomUUID();
+  // Which tool calls the gateway tunnels in are signed by a key this device trusts (see caller-auth.ts).
+  const callerAuth = new CallerAuth({
+    mode: callerAuthMode,
+    deviceId,
+    callersFile: typeof args.callers === "string" ? resolve(args.callers) : callersPath(),
+    parse: (text) => parseMcpJson(text),
+    log: (text) => console.error(`[${deviceId}] ${text}`),
+  });
   const BASE_DELAY_MS = 1000;
   const MAX_DELAY_MS = 60_000;
   let retries = 0;
@@ -6250,21 +6272,30 @@ if (gatewayDomain) {
       armWatchdog();
       try {
         // One additional container belongs to the gateway envelope.
-        const msg = parseMcpJson(e.data as string, 257) as { id?: string; request?: Json; token?: string; type?: string };
+        const msg = parseMcpJson(e.data as string, 257) as { id?: string; request?: Json; raw?: string; callerSig?: string; token?: string; type?: string };
         if (msg.type === "keepalive-ack") return;
         if (msg.id == null || !Object.hasOwn(msg, "request")) return;
+        // A call runs only if a key this device trusts signed it (a signed call runs from the body
+        // that was signed, not from `request`), unless the mode lets it through.
+        const admission = callerAuth.admit(msg);
+        if (admission.action === "refuse") {
+          ws.send(JSON.stringify({ id: msg.id, response: admission.response }));
+          return;
+        }
         // In-process dispatch: handle() mirrors the /mcp HTTP handler exactly
         // (initialize, ping, tools/list, tools/call, raw methods, aggregated
         // tools). Bypassing the local HTTP round trip removes per-call TCP +
         // HTTP overhead and keeps the relay responsive under heavy load.
-        const resp = await handle(msg.request as Json);
+        const resp = await handle(admission.request as Json);
         if (resp === null) {
           // Notification: acknowledge with response:null so the gateway
           // answers 204 No Content (strict clients reject error bodies).
           ws.send(JSON.stringify({ id: msg.id, response: null }));
           return;
         }
-        ws.send(JSON.stringify({ id: msg.id, response: resp }));
+        // The reply to a signed call is signed too, so its sender can tell this device answered.
+        const replySig = admission.nonce !== undefined ? callerAuth.replySig(admission.nonce, JSON.stringify(resp)) : undefined;
+        ws.send(JSON.stringify({ id: msg.id, response: resp, ...(replySig ? { replySig } : {}) }));
       } catch (err) {
         console.error(`[${deviceId}] handle error:`, err);
         // A frame rejected before parsing has no trustworthy correlation ID.
