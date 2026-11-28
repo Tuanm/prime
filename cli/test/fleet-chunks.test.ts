@@ -109,7 +109,7 @@ describe("a snapshot bigger than one request", () => {
     expect(manifestOf(small, tiny.manifestKey).chunks).toBeUndefined();
   }, 60_000);
 
-  test("a piece whose body broke off on the way is sent again, and one refused for another reason is not", async () => {
+  test("a piece whose body did not arrive as it was named is sent again, and one refused for another reason is not", async () => {
     pieceRetry.delayMs = 1;
     try {
       const w = await world();
@@ -117,12 +117,46 @@ describe("a snapshot bigger than one request", () => {
       const first = await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2);
       expect(manifestOf(w, first.manifestKey).chunks!.length).toBeGreaterThan(8);
       expect((await pull(credsFor("replica-device"), "x", w.replica, 0)).applied).toBe(true);
+      // A gateway from before the code says only the sentence: read as it was.
+      const old = await world();
+      old.gateway.breakOffCode = false;
+      old.gateway.breakOffPacks = 2;
+      expect((await publish(credsFor("primary-device"), "x", old.primary, null, 0, 2)).seq).toBe(1);
       // Always broken: given up on after three tries, and said so.
       const again = await world();
       again.gateway.breakOffPacks = 100;
-      await expect(publish(credsFor("primary-device"), "x", again.primary, null, 0, 2)).rejects.toThrow(/could not store the payload: 400 \(the body broke off/);
+      await expect(publish(credsFor("primary-device"), "x", again.primary, null, 0, 2)).rejects.toThrow(/could not store the payload: 400 \(the body is not the pack whose hash was named/);
     } finally {
       pieceRetry.delayMs = 1000;
+    }
+  });
+
+  test("a 503 is asked again only when it is the gateway that answered, and not the platform's own page", async () => {
+    pieceRetry.delayMs = 1;
+    const real = globalThis.fetch;
+    try {
+      const w = await world({ files: 1, snapshotLimit: 600 * KB });
+      const send = async (answers: Response[]): Promise<number> => {
+        let asks = 0;
+        const handler = w.gateway.handle.bind(w.gateway);
+        w.gateway.handle = async (creds, method, path, body, search) => {
+          if (method === "POST" && path.endsWith("/packs") && answers.length > 0) {
+            asks++;
+            return answers.shift()!;
+          }
+          return handler(creds, method, path, body, search);
+        };
+        await putChunks(credsFor("primary-device"), "x", randomBytes(10 * KB), 48 * KB).catch(() => undefined);
+        return asks;
+      };
+      // The gateway's own 503, with its code: tried three times in all, then given up.
+      const own = () => Response.json({ error: "the fleet could not be reached to note the upload: try again", code: "fleet-unreachable" }, { status: 503 });
+      expect(await send([own(), own(), own(), own()])).toBe(3);
+      // The platform's page: once.
+      expect(await send([new Response("<html>error code: 1102</html>", { status: 503 }), own()])).toBe(1);
+    } finally {
+      pieceRetry.delayMs = 1000;
+      globalThis.fetch = real;
     }
   });
 

@@ -242,6 +242,17 @@ export async function fetchHead(creds: FleetCredentials, fleet: string): Promise
 }
 
 /**
+ * Whether an upload that was refused is worth sending again: the body did not arrive as it was named (`body-mismatch`), or the fleet could not be asked
+ * just then (`fleet-unreachable`, a 503). The gateway says which with a code; one from before it said only a sentence, and that is read as it was.
+ */
+function uploadMayWork(status: number, code: unknown, said: unknown): boolean {
+  // A 503 the gateway itself answered (it says why, in a code or a sentence) is worth asking again; one with no JSON at all is the platform's verdict (its own error page), and is not.
+  if (status === 503) return code === "fleet-unreachable" || code === "bucket-unavailable" || (typeof code !== "string" && typeof said === "string");
+  if (typeof code === "string") return status === 400 && code === "body-mismatch";
+  return status === 400 && typeof said === "string" && /not the pack whose hash was named|not as long as it said|broke off/i.test(said);
+}
+
+/**
  * Store a sealed payload. The gateway keeps bytes it cannot open.
  *
  * A pack says its own hash (`x-prime-sha256`; the length goes with a Buffer body): a gateway that can then streams it to the bucket and
@@ -264,9 +275,10 @@ export async function putPayload(
   );
   if (res.status === 409) throw new FleetTransportError("only the primary may publish");
   if (!res.ok) {
-    const said = ((await res.json().catch(() => ({}))) as { error?: unknown }).error;
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown; code?: unknown };
+    const said = body.error;
     const err = new FleetTransportError("could not store the payload: " + res.status + (typeof said === "string" ? " (" + said.slice(0, 160) + ")" : ""));
-    err.retryable = res.status === 503 || (res.status === 400 && typeof said === "string" && /broke off/i.test(said));
+    err.retryable = uploadMayWork(res.status, body.code, said);
     throw err;
   }
   return (await res.json()) as { key: string; hash: string; size: number };
