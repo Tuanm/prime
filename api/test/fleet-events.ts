@@ -188,6 +188,12 @@ try {
   // ---- a small snapshot rides in the event ------------------------------------------------
   // Through the Worker, as a member publishes: the manifest and a small pack in one request. The other member is
   // handed both in the event that announces it, and they are what the manifest key says.
+  // The other member says it takes a small snapshot in the event (the cap), as a build that does would.
+  const firstB = await member("/fleets/e2e/bootstrap", "dev-b", "token-b-1234", { caps: ["inline"] });
+  check("the other member says what it can take", firstB.status === 200, JSON.stringify(firstB.json));
+  // (If that took the lease, it gives it back, and the publisher takes it again.)
+  if (firstB.json.role === "primary") await member("/fleets/e2e/lease/release", "dev-b", "token-b-1234", {});
+  await member("/fleets/e2e/bootstrap", "dev-a", "token-a-1234", {});
   const pack = new TextEncoder().encode("a small sealed pack");
   const manifestBytes = new TextEncoder().encode(JSON.stringify({ seq: 2, full: false, seal: "tag", packBytes: pack.length }));
   const frame = new Uint8Array(4 + manifestBytes.length + pack.length);
