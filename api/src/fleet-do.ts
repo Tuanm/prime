@@ -28,6 +28,7 @@ import {
   KEY_PROOF_WINDOW_MS,
   clampTtl,
   checkedInline,
+  INLINE_CAP,
   cleanCaps,
   commonCaps,
   effectiveLeaseMs,
@@ -231,6 +232,35 @@ export class FleetDO implements DurableObject {
       return s.getWebSockets ? s.getWebSockets(tag) : [];
     } catch {
       return [];
+    }
+  }
+
+  /** The members, other than `except`, that listen and say they take a small snapshot in the event that announces it. */
+  private async inlineListeners(except: string): Promise<Set<string>> {
+    const listening = new Set<string>();
+    for (const ws of this.sockets()) {
+      try {
+        const id = (ws.deserializeAttachment?.() as { deviceId?: string } | null | undefined)?.deviceId;
+        if (id && id !== except) listening.add(id);
+      } catch {}
+    }
+    if (listening.size === 0) return listening;
+    const members = await this.members();
+    return new Set([...listening].filter((id) => members[id]?.caps?.includes(INLINE_CAP)));
+  }
+
+  /** Tell every listening member, except the one named, what `make` says for it (the same text is made once). */
+  private broadcastEach(make: (deviceId: string | undefined) => Record<string, unknown>, except?: string): void {
+    const texts = new Map<Record<string, unknown>, string>();
+    for (const ws of this.sockets()) {
+      try {
+        const id = (ws.deserializeAttachment?.() as { deviceId?: string } | null | undefined)?.deviceId;
+        if (except && id === except) continue;
+        const event = make(id);
+        let text = texts.get(event);
+        if (text === undefined) texts.set(event, (text = JSON.stringify(event)));
+        ws.send(text);
+      } catch {}
     }
   }
 
@@ -1894,9 +1924,13 @@ export class FleetDO implements DurableObject {
       await this.storage.put("applied", now_);
       // The members that listen pull now instead of at their next look; the one that
       // published already has it.
-      // A small snapshot rides in the event itself, when someone is listening and what is offered is what the key says it is.
-      const inline = this.sockets().length > 0 ? await checkedInline(body.inline, manifestKey, manifestHash, fleetId, meta.full) : undefined;
-      this.broadcast({ type: "head", seq: next.seq, manifestKey, ...(inline ? { inline } : {}) }, caller.deviceId);
+      // A small snapshot rides in the event itself, to the listeners whose member says it takes it in (the `inline` cap) and
+      // only when what is offered is what the key says it is: the others are told as they always were, and when nobody
+      // else could use it nothing is hashed.
+      const takers = await this.inlineListeners(caller.deviceId);
+      const inline = takers.size > 0 ? await checkedInline(body.inline, manifestKey, manifestHash, fleetId, meta.full) : undefined;
+      const plain = { type: "head", seq: next.seq, manifestKey };
+      this.broadcastEach((id) => (inline && id !== undefined && takers.has(id) ? { ...plain, inline } : plain), caller.deviceId);
 
       // Keep a bounded number of snapshots: more than the newest whole tree and
       // the changes after it, which is all a member far behind needs. The old

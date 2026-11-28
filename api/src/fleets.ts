@@ -401,6 +401,8 @@ export async function keyFingerprintMatches(named: string, pubkeyB64: string): P
   return given !== "" && (given === full || given === full.slice(0, 11));
 }
 
+/** What a member says (in `caps`) when it takes a small snapshot from the event that announces it, instead of asking for it. */
+export const INLINE_CAP = "inline";
 /** The most a pack may be and still ride in the socket message that announces its snapshot. */
 export const INLINE_PACK_BYTES = 64 * 1024;
 /** The most of a manifest that rides there (its text, in characters). */

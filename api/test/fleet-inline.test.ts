@@ -1,4 +1,5 @@
 // A small snapshot rides in the event that announces it, and only when what rides is what its key says.
+import { deleteRows, listRows } from "./fake-list";
 import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } from "bun:test";
 
 mock.module("cloudflare:workers", () => ({
@@ -20,8 +21,9 @@ const { INLINE_PACK_BYTES } = await import("../src/fleets");
 const KEY = "A".repeat(43) + "=";
 
 /** A fleet object over storage that lists what is written, with the environment it is given. */
-function world(env: Record<string, unknown> = {}, socket = false) {
+function world(env: Record<string, unknown> = {}, listeners: string[] = []) {
   const sent: string[] = [];
+  const sentTo: Record<string, string[]> = {};
   // A fleet object runs one block at a time, as the platform does: a test that races two changes needs that to be so.
   let tail: Promise<unknown> = Promise.resolve();
   const data = new Map<string, unknown>();
@@ -35,12 +37,15 @@ function world(env: Record<string, unknown> = {}, socket = false) {
       writes.push("put:" + key);
       data.set(key, JSON.parse(JSON.stringify(value)));
     },
-    async delete(key: string) {
+    async delete(key: string | string[]) {
       writes.push("delete:" + key);
-      return data.delete(key);
+      return Array.isArray(key) ? deleteRows(data, key) : data.delete(key);
+    },
+    async list(o: { prefix?: string; start?: string; limit?: number; reverse?: boolean }) {
+      return listRows(data, o);
     },
   };
-  if (socket) storage.setAlarm = async () => {};
+  if (listeners.length > 0) storage.setAlarm = async () => {};
   const objects = new Map<string, { body: string; etag: string }>();
   const bucket = {
     async get(key: string) {
@@ -64,10 +69,18 @@ function world(env: Record<string, unknown> = {}, socket = false) {
       tail = run.catch(() => undefined);
       return run;
     },
-    getWebSockets: () => (socket ? [{ send: (m: string) => void sent.push(m), close() {} }] : []),
+    getWebSockets: () =>
+      listeners.map((id) => ({
+        send: (m: string) => {
+          sent.push(m);
+          (sentTo[id] ??= []).push(m);
+        },
+        close() {},
+        deserializeAttachment: () => ({ deviceId: id }),
+      })),
   };
   const fleet = new FleetDO(state as never, { BUCKET: bucket, REGISTRY: registry, ...env } as never);
-  return { fleet, data, writes, bucket, objects, sent };
+  return { fleet, data, writes, bucket, objects, sent, sentTo };
 }
 type World = ReturnType<typeof world>;
 
@@ -79,8 +92,8 @@ async function call(w: World, path: string, device: string, caller: "admin" | "d
 }
 
 /** A fleet owned by `owner`, with the members `ids` admitted. */
-async function fleetOf(ids: string[], env: Record<string, unknown> = {}, socket = false): Promise<World> {
-  const w = world(env, socket);
+async function fleetOf(ids: string[], env: Record<string, unknown> = {}, listeners: string[] = []): Promise<World> {
+  const w = world(env, listeners);
   await call(w, "/create", "owner", "admin");
   for (const id of ["owner", ...ids]) {
     const invite = await call(w, "/invite", "owner", "admin", {});
@@ -107,8 +120,9 @@ async function snapshot(pack: Uint8Array, over: Record<string, unknown> = {}) {
   return { packHash, manifestText, manifestHash, manifestKey, b64: Buffer.from(pack).toString("base64") };
 }
 
-async function primary(socket = true) {
-  const w = world({}, socket);
+/** dev-a holds the lease; `listeners` have a socket open; dev-b says it takes a small snapshot in the event, unless `caps` says otherwise. */
+async function primary(listeners: string[] = ["dev-b"], caps: string[] = ["inline"]) {
+  const w = world({}, listeners);
   await call(w, "/create", "owner", "admin");
   const invite = await call(w, "/invite", "owner", "admin", {});
   await call(w, "/join", "dev-a", "device", { code: invite.json.code });
@@ -117,7 +131,9 @@ async function primary(socket = true) {
   await call(w, "/join", "dev-b", "device", { code: inv2.json.code });
   await call(w, "/approve", "operator", "admin", { deviceId: "dev-b" });
   expect((await call(w, "/bootstrap", "dev-a", "device", { seals: true })).json.role).toBe("primary");
+  await call(w, "/bootstrap", "dev-b", "device", { seals: true, caps });
   w.sent.length = 0;
+  for (const k of Object.keys(w.sentTo)) delete w.sentTo[k];
   return w;
 }
 const advance = (w: World, s: Awaited<ReturnType<typeof snapshot>>, inline: unknown, meta: Record<string, unknown> = { sealed: true }) =>
@@ -151,7 +167,7 @@ describe("the head event of a small snapshot", () => {
     await advance(chunked, c, { manifest: c.manifestText, pack: c.b64 });
     expect(heads(chunked)[0]!.inline).toBeUndefined();
 
-    const quiet = await primary(false);
+    const quiet = await primary([]);
     const q = await snapshot(new TextEncoder().encode("sealed pack bytes"));
     expect((await advance(quiet, q, { manifest: q.manifestText, pack: q.b64 })).status).toBe(200);
     expect(heads(quiet)).toEqual([]);
@@ -183,6 +199,53 @@ describe("the head event of a small snapshot", () => {
     const res = await call(w, "/head/advance", "dev-a", "device", { expectedSeq: 0, manifestKey: "fleets/acme/manifests/" + "f".repeat(64), manifestHash: s.manifestHash, packKey: "", meta: { sealed: true }, inline: { manifest: s.manifestText, pack: s.b64 } });
     expect(res.status).toBe(200);
     expect(heads(w)[0]!.inline).toBeUndefined();
+  });
+
+  test("rides only to the listeners whose member says it takes it; the others are told as they always were", async () => {
+    // dev-b says it takes it; dev-c listens too and says nothing (an earlier build); the publisher is not told at all.
+    const w = await primary(["dev-b", "dev-c", "dev-a"]);
+    await call(w, "/join", "dev-c", "device", { code: (await call(w, "/invite", "owner", "admin", {})).json.code });
+    await call(w, "/approve", "operator", "admin", { deviceId: "dev-c" });
+    await call(w, "/bootstrap", "dev-c", "device", { seals: true });
+    const s = await snapshot(new TextEncoder().encode("sealed pack bytes"));
+    expect((await advance(w, s, { manifest: s.manifestText, pack: s.b64 })).status).toBe(200);
+    const told = (id: string) => (w.sentTo[id] ?? []).map((m) => JSON.parse(m));
+    expect(told("dev-b")).toEqual([{ type: "head", seq: 1, manifestKey: s.manifestKey, inline: { manifest: s.manifestText, pack: s.b64 } }]);
+    expect(told("dev-c")).toEqual([{ type: "head", seq: 1, manifestKey: s.manifestKey }]);
+    expect(told("dev-a")).toEqual([]);
+  });
+
+  test("a member that went back to a build without the cap is not sent it", async () => {
+    const w = await primary();
+    await call(w, "/bootstrap", "dev-b", "device", { seals: true });
+    const s = await snapshot(new TextEncoder().encode("sealed pack bytes"));
+    await advance(w, s, { manifest: s.manifestText, pack: s.b64 });
+    expect(heads(w)[0]).toEqual({ type: "head", seq: 1, manifestKey: s.manifestKey });
+  });
+
+  test("nothing is hashed when nobody else could use it: only the publisher listens, or nobody that takes it", async () => {
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let calls = 0;
+    (crypto.subtle as { digest: unknown }).digest = (...args: Parameters<typeof digest>) => {
+      calls++;
+      return digest(...args);
+    };
+    try {
+      const s = await snapshot(new TextEncoder().encode("sealed pack bytes"));
+      for (const [listeners, caps] of [[["dev-a"], ["inline"]], [["dev-b"], []]] as Array<[string[], string[]]>) {
+        const w = await primary(listeners, caps);
+        calls = 0;
+        await advance(w, s, { manifest: s.manifestText, pack: s.b64 });
+        // What the object hashes for its own bookkeeping is a constant few; the two passes over the inline are not among them.
+        const without = calls;
+        const taker = await primary(["dev-b"], ["inline"]);
+        calls = 0;
+        await advance(taker, s, { manifest: s.manifestText, pack: s.b64 });
+        expect(calls).toBeGreaterThan(without);
+      }
+    } finally {
+      (crypto.subtle as { digest: unknown }).digest = digest;
+    }
   });
 
   test("a pack of exactly 64 KiB rides, and the whole event is below what a socket message may be", async () => {
