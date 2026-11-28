@@ -180,11 +180,13 @@ async function request(
   path: string,
   body?: Buffer | string,
   contentType?: string,
+  /** More request headers (the hash a pack says it has: see `putPayload`). */
+  moreHeaders: Record<string, string> = {},
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), creds.timeoutMs ?? 120_000);
   try {
-    const extra: Record<string, string> = {};
+    const extra: Record<string, string> = { ...moreHeaders };
     if (contentType) extra["content-type"] = contentType;
     return await fetch(creds.gateway + path, {
       method,
@@ -211,7 +213,13 @@ export async function fetchHead(creds: FleetCredentials, fleet: string): Promise
   return body.head;
 }
 
-/** Store a sealed payload. The gateway keeps bytes it cannot open. */
+/**
+ * Store a sealed payload. The gateway keeps bytes it cannot open.
+ *
+ * A pack says its own hash (`x-prime-sha256`; the length goes with a Buffer body): a gateway that can then streams it to the bucket and
+ * hashes it on the way, keeps nothing of a body whose hash is another, and does not write again a pack it already holds. One that does
+ * not know the header ignores it and holds the body whole, as it did.
+ */
 export async function putPayload(
   creds: FleetCredentials,
   fleet: string,
@@ -224,6 +232,7 @@ export async function putPayload(
     "/fleets/" + encodeURIComponent(fleet) + "/" + kind,
     bytes,
     "application/octet-stream",
+    kind === "packs" ? { "x-prime-sha256": payloadHash(bytes) } : {},
   );
   if (res.status === 409) throw new FleetTransportError("only the primary may publish");
   if (!res.ok) throw new FleetTransportError("could not store the payload: " + res.status);
@@ -310,6 +319,9 @@ function inlineFor(fleet: string, kind: "packs" | "manifests", id: string, now: 
   return Buffer.from(held.bytes);
 }
 
+/** How many pieces are uploaded at once: the gateway's Worker shares its memory with every other request. */
+export const CHUNK_UPLOADS_AT_ONCE = 2;
+
 /**
  * Store a sealed pack as pieces of at most `chunkBytes`, at most `inFlight` at a time. Each piece is stored under
  * its own hash, and the hash the gateway answers with has to be the one computed here. Nothing is cleaned up on a
@@ -321,7 +333,7 @@ export async function putChunks(
   fleet: string,
   pack: Buffer,
   chunkBytes: number = CHUNK_BYTES,
-  inFlight = 4,
+  inFlight = CHUNK_UPLOADS_AT_ONCE,
 ): Promise<{ chunks: Chunk[]; firstKey: string }> {
   const size = Math.max(1, Math.min(chunkBytes, CHUNK_BYTES_MAX));
   const pieces: Buffer[] = [];
