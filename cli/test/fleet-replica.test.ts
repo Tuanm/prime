@@ -1792,6 +1792,141 @@ describe("a renewal that hangs", () => {
   }, 30_000);
 });
 
+describe("a whole tree that is published", () => {
+  test("is said in the round's report with why, and in the agent's log", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+      await s.round();
+      expect(s.said).toContain("published 1");
+      // A member joins: the next snapshot is sealed for it, as a whole tree.
+      w.gateway.seed("newcomer", loadOrCreateKeyPair(join(w.root, "newcomer.key")).publicKey);
+      writeFileSync(join(s.paths.work, "made.txt"), "changed\n");
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      await s.round();
+      const said = s.said.find((t) => t.startsWith("published 2"));
+      expect(said).toMatch(/^published 2 \(whole tree: the members changed \(/);
+    } finally {
+      finish(w);
+    }
+  }, 30_000);
+});
+
+describe("a publish that is left for the next round", () => {
+  test("keeps what the round took pending, and the next round publishes it as a delta", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+      await s.round();
+      expect(s.said).toContain("published 1");
+      writeFileSync(join(s.paths.work, "made.txt"), "changed once\n");
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      w.gateway.failManifestReads = 2;
+      await expect(s.round()).rejects.toThrow(/left for the next round/);
+      expect(s.loop.dirty).toBe(true);
+      expect(w.gateway.head!.seq).toBe(1);
+      s.loop.lastBootstrap = Date.now();
+      await s.round();
+      expect(s.said).toContain("published 2");
+      expect(w.gateway.head!.seq).toBe(2);
+    } finally {
+      finish(w);
+    }
+  }, 30_000);
+});
+
+describe("a gateway that keeps answering 503 for the head's manifest", () => {
+  async function primaryAtOne(w: World) {
+    const s = await space(w, "r1");
+    w.gateway.primary = "r1";
+    s.loop.primary = true;
+    s.loop.dirty = true;
+    s.loop.lastBootstrap = Date.now();
+    writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+    await s.round();
+    expect(s.said).toContain("published 1");
+    return s;
+  }
+  const edit = (s: Awaited<ReturnType<typeof primaryAtOne>>, n: number): void => {
+    writeFileSync(join(s.paths.work, "made.txt"), "edit " + n + "\n");
+    s.loop.dirty = true;
+    s.loop.lastBootstrap = Date.now();
+  };
+
+  test("holds the publish for three rounds, names the same paths again, and then publishes a whole tree that says why", async () => {
+    const { noteChangedPath } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await primaryAtOne(w);
+      w.gateway.manifestStatus = 503;
+      for (let n = 1; n <= 3; n++) {
+        edit(s, n);
+        noteChangedPath(s.loop, "made.txt");
+        await expect(s.round()).rejects.toThrow(/left for the next round/);
+        expect(s.loop.dirty).toBe(true);
+        expect([...(s.loop.changed ?? [])]).toEqual(["made.txt"]);
+        expect(s.loop.postponed?.count).toBe(n);
+      }
+      expect(w.gateway.head!.seq).toBe(1);
+      // The fourth is made: the gateway has not got better in three rounds.
+      s.loop.lastBootstrap = Date.now();
+      await s.round();
+      const said = s.said.find((t) => t.startsWith("published 2"));
+      expect(said).toMatch(/^published 2 \(whole tree: the head: its manifest could not be asked for in 4 rounds/);
+      expect(s.loop.postponed).toBeUndefined();
+      expect(w.gateway.head!.seq).toBe(2);
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+
+  test("is waited for no longer than two minutes either", async () => {
+    const w = await world();
+    try {
+      const s = await primaryAtOne(w);
+      w.gateway.manifestStatus = 503;
+      edit(s, 1);
+      await expect(s.round()).rejects.toThrow(/left for the next round/);
+      s.loop.postponed = { count: 1, since: Date.now() - 121_000 };
+      s.loop.lastBootstrap = Date.now();
+      await s.round();
+      expect(s.said.find((t) => t.startsWith("published 2"))).toContain("whole tree");
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+
+  test("a gateway that recovers ends the wait, and the publish is a delta", async () => {
+    const w = await world();
+    try {
+      const s = await primaryAtOne(w);
+      w.gateway.manifestStatus = 503;
+      edit(s, 1);
+      await expect(s.round()).rejects.toThrow(/left for the next round/);
+      w.gateway.manifestStatus = undefined;
+      s.loop.lastBootstrap = Date.now();
+      await s.round();
+      expect(s.said).toContain("published 2");
+      expect(s.loop.postponed).toBeUndefined();
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+});
+
+
 describe("a fleet whose newest snapshot this build cannot read", () => {
   test("gives no place: nothing is fetched, the hint is shown, and it is asked again after the time it names", async () => {
     const { round } = await import("../src/fleet-daemon");

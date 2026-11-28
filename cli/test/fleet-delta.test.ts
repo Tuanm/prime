@@ -5,8 +5,9 @@ import { readFileSync as readSource } from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RETAINED_SNAPSHOTS, ROUTE_STEP_COST, checkpointPolicy, chooseRoute, loadOrCreateKeyPair, manifestIdOf, openStep, publish, pull, rosterGained, type MemberPaths } from "../src/fleet-agent";
+import { PublishPostponed, RETAINED_SNAPSHOTS, ROUTE_STEP_COST, checkpointPolicy, chooseRoute, loadOrCreateKeyPair, manifestIdOf, openStep, publish, pull, rosterGained, type MemberPaths } from "../src/fleet-agent";
 import { applyPack } from "../src/fleet-sync";
+import { forgetIncarnationAnswers } from "../src/fleet-trust";
 import type { FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
@@ -192,6 +193,7 @@ describe("incremental snapshots", () => {
       // checkpoint and beyond; each publish is a delta, the checkpoint apart.
       rmSync(join(primaryWork, "doomed.txt"));
       const publishedFull: number[] = [];
+      const whyFull: string[] = [];
       const deltaBytes: number[] = [];
       let checkpointBytes = 0;
       for (let seq = 2; seq <= FULL_PACK_WINDOW + 3; seq++) {
@@ -200,10 +202,13 @@ describe("incremental snapshots", () => {
         expect(last.seq).toBe(seq);
         if (last.full) {
           publishedFull.push(seq);
+          whyFull.push(seq + ": " + last.fullBecause);
           checkpointBytes = last.bytes;
         } else deltaBytes.push(last.bytes);
       }
       // Only the checkpoint was a whole tree, and a delta is a fraction of it.
+      // (what the reason says is what a failure shows: the one whole tree there should be is the checkpoint)
+      if (whyFull.length !== 1 || !whyFull[0]!.startsWith(FULL_PACK_WINDOW + ": a checkpoint")) throw new Error("whole trees that should be the checkpoint alone: " + whyFull.join(" | "));
       expect(publishedFull).toEqual([FULL_PACK_WINDOW]);
       expect(Math.max(...deltaBytes)).toBeLessThan(checkpointBytes / 4);
 
@@ -263,6 +268,7 @@ describe("incremental snapshots", () => {
       const third = await publish(
         credsFor("primary-device"), "x", primaryPaths, second.commit, second.seq, second.members, second.roster,
       );
+      expect(third.fullBecause).toBeUndefined();
       expect(third.full).toBe(false);
     } finally {
       (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
@@ -331,6 +337,7 @@ describe("incremental snapshots", () => {
       writeFileSync(join(B.work, "g.txt"), "from B");
       const published = await publish(credsFor("B"), "x", B, b1.commit, b1.seq, 2, last.roster);
       expect(published.seq).toBe(3);
+      expect(published.fullBecause).toBeUndefined();
       // Its snapshot follows the one it caught up to, not the one it held before.
       const parent = gitSync(["--git-dir=" + B.gitDir, "rev-parse", published.commit + "^"], { encoding: "utf8" }).trim();
       expect(parent).toBe(last.commit);
@@ -426,6 +433,188 @@ function lastPackKey(gateway: FakeGateway): string {
   const manifest = JSON.parse(gateway.payloads.get(gateway.head!.manifestKey)!.toString("utf8")) as { packKey: string };
   return manifest.packKey;
 }
+
+describe("a publish that cannot find something out", () => {
+  legacyChain();
+  async function fleet() {
+    const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
+    const gateway = new FakeGateway();
+    const work = join(root, "primary");
+    mkdirSync(work, { recursive: true });
+    for (let i = 0; i < 10; i++) writeFileSync(join(work, "file-" + i + ".txt"), "content ".repeat(100) + i);
+    const paths: MemberPaths = { work, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+    useFakeGateway(gateway);
+    forgetIncarnationAnswers();
+    gateway.seed("primary-device", loadOrCreateKeyPair(paths.keyFile).publicKey);
+    const first = await publish(credsFor("primary-device"), "x", paths, null, 0, 1);
+    const publishNext = (last: Awaited<ReturnType<typeof publish>>, n: number, options?: { giveUp?: number }) => {
+      writeFileSync(join(work, "file-0.txt"), "edit " + n);
+      return publish(credsFor("primary-device"), "x", paths, last.commit, last.seq, 1, last.roster, options);
+    };
+    const done = (): void => {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    };
+    return { gateway, first, publishNext, done };
+  }
+
+  test("a request for the head's manifest that fails once is asked again, and the publish is a delta", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.failManifestReads = 1;
+      const second = await f.publishNext(f.first, 2);
+      expect(f.gateway.failManifestReads).toBe(0);
+      expect(second.fullBecause).toBeUndefined();
+      expect(second.full).toBe(false);
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("one that fails twice leaves the publish for the next round: nothing is written to the fleet, and the next is a delta", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.failManifestReads = 2;
+      const writes = f.gateway.indexEntries.length;
+      await expect(f.publishNext(f.first, 2)).rejects.toBeInstanceOf(PublishPostponed);
+      expect(f.gateway.head!.seq).toBe(f.first.seq);
+      expect(f.gateway.indexEntries.length).toBe(writes);
+      const second = await f.publishNext(f.first, 3);
+      expect(second.seq).toBe(f.first.seq + 1);
+      expect(second.fullBecause).toBeUndefined();
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("a manifest the gateway no longer has is an answer, and the publish is a whole tree that says so", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.payloads.delete(f.gateway.head!.manifestKey);
+      const second = await f.publishNext(f.first, 2);
+      expect(second.full).toBe(true);
+      expect(second.fullBecause).toContain("gone from the gateway");
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("only a request that asking again can change is left for the next round: a refusal, a mismatch and a gone manifest are answers", async () => {
+    const { isDoubt, FleetStatusError, FleetTransportError, HashMismatchError, PayloadGoneError } = await import("../src/fleet-transport");
+    expect(isDoubt(new TypeError("fetch failed"))).toBe(true);
+    expect(isDoubt(new DOMException("aborted", "AbortError"))).toBe(true);
+    expect(isDoubt(new FleetStatusError("busy", 503))).toBe(true);
+    expect(isDoubt(new FleetStatusError("slow down", 429))).toBe(true);
+    expect(isDoubt(new FleetStatusError("refused", 403))).toBe(false);
+    expect(isDoubt(new PayloadGoneError())).toBe(false);
+    expect(isDoubt(new HashMismatchError("other bytes"))).toBe(false);
+    expect(isDoubt(new FleetTransportError("not a hash"))).toBe(false);
+    expect(isDoubt(new SyntaxError("not json"))).toBe(false);
+  });
+
+  test("a head whose manifest comes back as other bytes is built on as a whole tree, at once, and says it may be tampered", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.corruptManifests = true;
+      const second = await f.publishNext(f.first, 2);
+      expect(second.full).toBe(true);
+      expect(second.fullBecause).toContain("not the one that was asked for");
+      expect(second.fullBecause).toContain("tampered or damaged");
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("a refusal that does not change (403) is an answer: a whole tree, not a wait", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.manifestStatus = 403;
+      const second = await f.publishNext(f.first, 2);
+      expect(second.full).toBe(true);
+      expect(second.fullBecause).toContain("cannot be read");
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("a gateway that keeps answering 503 is waited for, and past the limit the publish is made as a whole tree that says so", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.manifestStatus = 503;
+      await expect(f.publishNext(f.first, 2)).rejects.toBeInstanceOf(PublishPostponed);
+      const given = await f.publishNext(f.first, 3, { giveUp: 3 });
+      expect(given.full).toBe(true);
+      expect(given.fullBecause).toContain("could not be asked for in 4 rounds");
+      expect(given.fullBecause).toContain("503");
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("a busy gateway's answer to the role question is not 'not a member': it is asked again, and then left for the next round", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.roleStatus = 503;
+      await expect(f.publishNext(f.first, 2)).rejects.toBeInstanceOf(PublishPostponed);
+      expect(f.gateway.head!.seq).toBe(f.first.seq);
+      // A refusal is an answer: not a member, as it always was.
+      f.gateway.roleStatus = 403;
+      const second = await f.publishNext(f.first, 3);
+      expect(second.seq).toBe(f.first.seq + 1);
+      // Past the limit it is published, without what it could not ask.
+      f.gateway.roleStatus = 429;
+      const third = await f.publishNext(second, 4, { giveUp: 3 });
+      expect(third.seq).toBe(second.seq + 1);
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("a request for which fleet this is that fails once is asked again, and the publish is a delta", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.failRoleReads = 1;
+      const second = await f.publishNext(f.first, 2);
+      expect(f.gateway.failRoleReads).toBe(0);
+      expect(second.fullBecause).toBeUndefined();
+      expect(second.full).toBe(false);
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("one that fails twice leaves the publish for the next round, and never publishes a snapshot that leaves out which fleet it is of", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.failRoleReads = 2;
+      await expect(f.publishNext(f.first, 2)).rejects.toBeInstanceOf(PublishPostponed);
+      expect(f.gateway.head!.seq).toBe(f.first.seq);
+      const second = await f.publishNext(f.first, 3);
+      expect(second.seq).toBe(f.first.seq + 1);
+      expect(second.fullBecause).toBeUndefined();
+      // And the one after it, which reads the head the guess would have spoiled, is a delta too.
+      const third = await f.publishNext(second, 4);
+      expect(third.fullBecause).toBeUndefined();
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+
+  test("a gateway that does not say which fleet it is (so it is not asked again for a while) is not held up", async () => {
+    const f = await fleet();
+    try {
+      f.gateway.incarnation = undefined;
+      forgetIncarnationAnswers();
+      const second = await f.publishNext(f.first, 2);
+      f.gateway.failRoleReads = 5; // never asked: it is known not to say
+      const third = await f.publishNext(second, 3);
+      expect(f.gateway.failRoleReads).toBe(5);
+      expect(third.seq).toBe(second.seq + 1);
+    } finally {
+      f.done();
+    }
+  }, 30_000);
+});
 
 describe("the gateway keeps what the checkpoint interval needs", () => {
   test("it keeps more snapshots than a whole tree is ever back", () => {

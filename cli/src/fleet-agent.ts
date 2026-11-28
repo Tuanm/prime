@@ -21,7 +21,9 @@ import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealMany
 import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
 import { FleetTrust, RosterRefusedError, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
+  HashMismatchError,
   PayloadGoneError,
+  isDoubt,
   type IndexEntry,
   fetchHead,
   fetchIndex,
@@ -231,6 +233,11 @@ export interface PublishOptions {
   known?: KnownTree;
   /** How the chain of deltas stood after this member's last publish (see `SinceWhole`); asked of the fleet when it is not the head's. */
   sinceWhole?: SinceWhole;
+  /**
+   * Publish whatever cannot be found out, instead of leaving it for the next round: set by a caller whose publishes have been
+   * left that many times in a row (see `PublishPostponed`). A head that cannot be read is then built on as a whole tree.
+   */
+  giveUp?: number;
 }
 
 const warnedUnrostered = new Set<string>();
@@ -312,6 +319,8 @@ export interface PublishResult {
   manifestKey: string;
   /** True when the pack carries the whole tree rather than only the change. */
   full: boolean;
+  /** When `full`: why (no base, the members changed, a checkpoint, or what is wrong with the head). */
+  fullBecause?: string;
   /** How the chain of deltas stands now, for the next publish; absent when it could not be told (the next publish counts by sequence). */
   sinceWhole?: SinceWhole;
 }
@@ -430,6 +439,36 @@ export function chainWantsWhole(chain: SinceWhole, policy = checkpointPolicy): b
   return chain.count >= policy.maxSinceWhole || (policy.byBytes && chain.count >= policy.minSinceWhole && chain.chainBytes >= chain.wholeBytes);
 }
 
+/** How long a request that failed waits before it is asked once more. */
+const RETRY_PAUSE_MS = 200;
+
+/**
+ * A publish that was not made because something it needs to know could not be found out (a request that did not get an
+ * answer), and that is better left for the next round than made on a guess: the guess would be a whole tree, or a snapshot
+ * that leaves out what the next one needs. Nothing was written to the fleet; the changes stay pending.
+ */
+export class PublishPostponed extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PublishPostponed";
+  }
+}
+
+/**
+ * The head's manifest, for the question whether it is sealed the way a delta needs. A request that did not get an answer
+ * (or a busy gateway's) is asked again once; anything else (a manifest the gateway no longer has, other bytes than were asked
+ * for, bytes that do not read) is an answer, and is not asked again.
+ */
+export async function fetchHeadManifest(creds: FleetCredentials, fleet: string, manifestKey: string, pauseMs = RETRY_PAUSE_MS): Promise<FleetManifest> {
+  try {
+    return await fetchManifest(creds, fleet, manifestIdOf(manifestKey));
+  } catch (err) {
+    if (!isDoubt(err)) throw err;
+    await new Promise((r) => setTimeout(r, pauseMs));
+    return await fetchManifest(creds, fleet, manifestIdOf(manifestKey));
+  }
+}
+
 /**
  *  Publish the current work tree as the fleet's new state.
  *
@@ -461,12 +500,25 @@ export async function publish(
   const known = options.known;
   const treeUnchanged: Promise<boolean> = known && known.base === base ? known.unchanged().catch(() => false) : Promise.resolve(false);
   let caughtUp = false;
-  const [listed, head, role] = await Promise.all([
+  // Which fleet of this name it is, for the seal: asked of a gateway that has not lately been found not to say. A gateway that
+  // does not say leaves it out (and is known not to); one that did not ANSWER leaves it unknown, which is not the same.
+  const asksRole = !gatewayHasNoIncarnation(creds, fleet);
+  const [listed, head, firstRole] = await Promise.all([
     fetchMemberKeys(creds, fleet),
     fetchHead(creds, fleet).catch(() => null),
-    // Which fleet of this name it is, for the seal; a gateway that does not say, or does not answer, leaves it out.
-    gatewayHasNoIncarnation(creds, fleet) ? Promise.resolve(undefined) : fetchRole(creds, fleet).catch(() => undefined),
+    asksRole ? fetchRole(creds, fleet).catch(() => undefined) : Promise.resolve(undefined),
   ]);
+  let role = firstRole;
+  if (asksRole && role === undefined) {
+    // A snapshot that leaves out which fleet it is of would be one the next publish takes for unsealed, and makes a whole
+    // tree of: the fleet is asked again, and if it still does not answer this publish waits for the next round.
+    await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
+    role = await fetchRole(creds, fleet).catch(() => undefined);
+    // (fetchRole fails only for a request that got no answer, or a busy gateway: a refusal is an answer, and says not a member.)
+    if (role === undefined && options.giveUp === undefined) {
+      throw new PublishPostponed("the fleet could not be asked which one it is, so this snapshot is left for the next round");
+    }
+  }
   if (role?.member) noteIncarnationAnswer(creds, fleet, role.incarnation !== undefined);
   const incarnation = role?.member ? role.incarnation : undefined;
 
@@ -520,17 +572,35 @@ export async function publish(
   // read that (the gateway says so in `fleetCaps`). A fleet that has a member that cannot is published as it always was,
   // and a snapshot that is built on one in the other form is a whole tree, which the member that cannot read it needs.
   const hideMeta = role?.member === true && members.length > 0 && members.every((m) => m.caps?.includes(META_CAP) === true);
-  const headUnsealed =
+  // Why the head cannot be built on, when it cannot (the answer is the reason, kept so a whole tree can say why it is one).
+  const headUnsealedWhy: string | undefined =
     head !== null && !(noBase || membershipChanged || checkpoint)
-      ? await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey)).then(
+      ? await fetchHeadManifest(creds, fleet, head.manifestKey).then(
           (m) =>
-            m.seal === undefined ||
-            !m.wrapped.some((w) => w.mac !== undefined) ||
-            (incarnation !== undefined && m.incarnation === undefined) ||
-            (m.meta !== undefined && hidesMeta(m) !== hideMeta),
-          () => true,
+            m.seal === undefined
+              ? "it has no seal"
+              : !m.wrapped.some((w) => w.mac !== undefined)
+                ? "it has no tags for its members"
+                : incarnation !== undefined && m.incarnation === undefined
+                  ? "it does not say which fleet it is of"
+                  : m.meta !== undefined && hidesMeta(m) !== hideMeta
+                    ? "its metadata is in the other form"
+                    : undefined,
+          (err: unknown) => {
+            const said = (err instanceof Error ? err.message : String(err)).slice(0, 160);
+            // The gateway no longer has it, or what came back is not what was asked for, or does not read: answers, the same
+            // every time, and the way round them is a whole tree (the mismatch is said as what it may be).
+            if (err instanceof PayloadGoneError) return "its manifest is gone from the gateway";
+            if (err instanceof HashMismatchError) return "its manifest is not the one that was asked for: the gateway, or what it relayed, returned other bytes (tampered or damaged)";
+            if (!isDoubt(err)) return "its manifest cannot be read (" + said + ")";
+            // A request that did not get an answer (twice) says nothing about the head: a whole tree for it would cost the fleet
+            // a pack for a hiccup. It is left for the next round, until that has gone on too long to be a hiccup.
+            if (options.giveUp !== undefined) return "its manifest could not be asked for in " + (options.giveUp + 1) + " rounds (" + said + ")";
+            throw new PublishPostponed("the head's manifest could not be read (" + said + "), so this snapshot is left for the next round");
+          },
         )
-      : false;
+      : undefined;
+  const headUnsealed = headUnsealedWhy !== undefined;
   const wantFull = noBase || membershipChanged || checkpoint || headUnsealed;
 
   // The snapshot builds the packs that will travel: the whole tree when a member
@@ -744,6 +814,9 @@ export async function publish(
     roster,
     manifestKey: moved.manifestKey ?? "",
     full: wantFull,
+    ...(wantFull
+      ? { fullBecause: noBase ? "no base" : membershipChanged ? "the members changed (" + (lastRoster ?? String(lastMemberCount)) + " -> " + roster + ")" : checkpoint ? "a checkpoint (" + (chain === null ? "by sequence: " + seq + " every " + checkpointPolicy.fallbackModulo + ", policy " + JSON.stringify(checkpointPolicy) : "the chain has " + chain.count + " after the last whole tree, " + chain.chainBytes + " bytes against its " + chain.wholeBytes + ", at least " + checkpointPolicy.minSinceWhole + " and at most " + checkpointPolicy.maxSinceWhole) + ")" : "the head: " + headUnsealedWhy }
+      : {}),
     ...(wantFull
       ? { sinceWhole: { seq, wholeBytes: main.length, chainBytes: 0, count: 0 } }
       : chain !== null

@@ -373,6 +373,15 @@ checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
    `macFrom`). A snapshot that is refused this way is gone around, not waited for: the
    replica plans its route again from the next whole tree, and a publisher that finds an
    unsealed head publishes a whole tree for that reason.
+   A head that could not be *read* (a request that got no answer, asked twice) is not an unsealed one, and nor is a fleet
+   that could not be asked which one it is: that publish is left for the next round (the changes stay pending, and the
+   agent says why), since a whole tree for a hiccup costs the fleet a whole pack, and a snapshot that leaves out which fleet
+   it is of would make the next one a whole tree. Only a request that asking again can change counts (one that got no
+   answer, a busy gateway's 5xx, a 429): a refusal, a manifest that is gone, bytes that are not the ones asked for (said as
+   possibly tampered) or that do not read are answers, and are built on as a whole tree at once. A publish is left for the
+   next round at most three times in a row, or for two minutes; after that it is made, as a whole tree for a head that cannot
+   be read, and says why. The first postponement and the recovery are in the agent's log, and the next round stages the same
+   paths again. Every whole tree published says why in the agent's log.
 
 What the gateway is shown in a manifest is the least it needs. The commit, the tree and who the
 snapshot is sealed for (the roster, which names devices) are also in a sealed metadata (`meta`: AES-GCM
