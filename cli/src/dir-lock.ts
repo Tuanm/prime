@@ -178,15 +178,30 @@ function readOwner(lock: string): Owner | null {
 function stillHeld(lock: string, token: string, opts: DirLockOptions): boolean {
   const nap = new Int32Array(new SharedArrayBuffer(4));
   for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      return readOwnerRaw(lock, opts.hooks?.readNote)?.token === token;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") return false;
-      Atomics.wait(nap, 0, 0, 20 * (attempt + 1));
-    }
+    const seen = lookAtOwner(lock, token, opts);
+    if (seen !== "unreadable") return seen === "mine";
+    Atomics.wait(nap, 0, 0, 20 * (attempt + 1));
   }
   return true;
+}
+
+/** `stillHeld` for the lock that is waited for without blocking the event loop: it naps with a timer. */
+async function stillHeldAsync(lock: string, token: string, opts: DirLockOptions): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const seen = lookAtOwner(lock, token, opts);
+    if (seen !== "unreadable") return seen === "mine";
+    await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+  }
+  return true;
+}
+
+function lookAtOwner(lock: string, token: string, opts: DirLockOptions): "mine" | "not mine" | "unreadable" {
+  try {
+    return readOwnerRaw(lock, opts.hooks?.readNote)?.token === token ? "mine" : "not mine";
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "not mine" : "unreadable";
+  }
 }
 
 function running(pid: number): boolean {
@@ -435,6 +450,16 @@ function tryTake(lock: string, token: string, opts: DirLockOptions, until: numbe
     }
     if (!breakStale(lock, stale, opts)) return false;
   }
+  // The deadline came while the name was being cleared: it is free now, and one try at it is owed to the caller, who
+  // would otherwise be told the lock is held when nothing holds it.
+  if (!exists(lock)) {
+    const made = publish(lock, token, opts, last);
+    if (made === "made") {
+      held.add(token);
+      sweepLitter(lock, opts);
+      return true;
+    }
+  }
   return false;
 }
 
@@ -542,7 +567,7 @@ export async function withDirLock<T>(lock: string, fn: (held: HeldLock) => Promi
   let lost = false;
   try {
     result = await fn(holdOf(lock, token, opts));
-    lost = !stillHeld(lock, token, opts);
+    lost = !(await stillHeldAsync(lock, token, opts));
   } finally {
     await releaseAsync(lock, token, opts);
   }

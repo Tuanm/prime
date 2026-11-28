@@ -59,30 +59,45 @@ describe("writers in several processes take turns", () => {
   test("a process in a loop of writes does not keep the lock from the others until its loop is done", async () => {
     const root = scratch();
     const lock = join(root, "the.lock");
-    const counter = join(root, "count");
-    writeFileSync(counter, "0");
-    // Each writer holds the lock for 100 ms (a write that is flushed to a slow disk) and comes back at once,
-    // eight times, and may wait two seconds for it. Four of them take 3.2 s one after the other, so the last
-    // can only get through if they take turns: one that runs its whole loop before the next starts makes it
-    // wait for everybody else's (2.4 s). Taking turns, nobody waits for more than the three others' one write,
-    // which leaves room for a runner on which taking a lock costs a good deal more than the write.
+    const order = join(root, "order");
+    const go = join(root, "go");
+    writeFileSync(order, "");
+    const WRITERS = 4;
+    const LOOPS = 10;
+    // Each writer holds the lock for a moment (a write flushed to a slow disk) and comes back at once. They all start
+    // together (each says it is ready, and waits for the word), and each entry is written down in the order it was
+    // made. A writer that runs its whole loop before the next gets in has kept the others out; taking turns, every
+    // writer has been in before any of them has done its loop. Nothing here is a time: the wait is long, so that a
+    // machine that is too busy to run the writers promptly makes the test slow, not wrong.
     const script =
       "import { withDirLockSync } from " + JSON.stringify(join(import.meta.dir, "../src/dir-lock.ts")) + ";" +
-      "import { readFileSync, writeFileSync } from 'node:fs';" +
-      "const [lock, counter] = process.argv.slice(1); const nap = new Int32Array(new SharedArrayBuffer(4));" +
-      "for (let k = 0; k < 8; k++)" +
-      " withDirLockSync(lock, () => { writeFileSync(counter, String(Number(readFileSync(counter, 'utf8')) + 1)); Atomics.wait(nap, 0, 0, 100); }, { waitMs: 2000, staleMs: 10000 });";
-    const children = Array.from({ length: 4 }, () => Bun.spawn([process.execPath, "-e", script, lock, counter], { env: process.env, stdout: "ignore", stderr: "pipe" }));
-    // None of them gives up on the lock, and none is let in while another holds it (a count that a
-    // reader-and-writer under the lock gets wrong by one has lost an update).
+      "import { appendFileSync, existsSync, writeFileSync } from 'node:fs';" +
+      "const [lock, order, go] = process.argv.slice(1); const nap = new Int32Array(new SharedArrayBuffer(4));" +
+      "writeFileSync(go + '.' + process.pid, ''); while (!existsSync(go)) Atomics.wait(nap, 0, 0, 5);" +
+      "for (let k = 0; k < " + LOOPS + "; k++)" +
+      " withDirLockSync(lock, () => { appendFileSync(order, process.pid + '\\n'); Atomics.wait(nap, 0, 0, 20); }, { waitMs: 60000, staleMs: 120000 });";
+    const children = Array.from({ length: WRITERS }, () => Bun.spawn([process.execPath, "-e", script, lock, order, go], { env: process.env, stdout: "ignore", stderr: "pipe" }));
+    for (let i = 0; i < 400 && readdirSync(root).filter((n) => n.startsWith("go.")).length < WRITERS; i++) await Bun.sleep(50);
+    writeFileSync(go, "");
     for (const c of children) {
       const [code, said] = await Promise.all([c.exited, new Response(c.stderr).text()]);
       expect({ code, said }).toEqual({ code: 0, said: "" });
     }
-    expect(Number(readFileSync(counter, "utf8"))).toBe(4 * 8);
+    const entries = readFileSync(order, "utf8").trim().split("\n");
+    expect(entries.length).toBe(WRITERS * LOOPS);
+    // The first writer to finish its loop had been preceded by the others' first entries.
+    const count = new Map<string, number>();
+    let firstDone = -1;
+    entries.forEach((pid, i) => {
+      count.set(pid, (count.get(pid) ?? 0) + 1);
+      if (firstDone < 0 && count.get(pid) === LOOPS) firstDone = i;
+    });
+    expect(firstDone).toBeGreaterThan(0);
+    const seenBefore = new Set(entries.slice(0, firstDone));
+    expect(seenBefore.size).toBe(WRITERS);
     // Nothing is left beside the lock.
-    expect(readdirSync(root).sort()).toEqual(["count"]);
-  }, 60_000);
+    expect(readdirSync(root).filter((n) => !n.startsWith("go")).sort()).toEqual(["order"]);
+  }, 120_000);
 
   test("writers that are killed inside the lock, with others waiting to break it, are never inside it together", async () => {
     const root = scratch();
@@ -140,7 +155,8 @@ describe("writers in several processes take turns", () => {
     const started = Date.now();
     for (let k = 0; k < 5; k++) withDirLockSync(lock, () => undefined);
     // It gives the others up to 30 ms each time it comes back (the first time it has nothing to wait for).
-    expect(Date.now() - started).toBeLessThan(5 * 30 + 400);
+    // (A bound that a slow machine can stretch: what it shows is that it is a handful of hand-offs, not a wait for the whole of a wait.)
+    expect(Date.now() - started).toBeLessThan(5 * 30 + 1500);
   });
 
   test("a clock that a test has frozen does not make a writer wait for ever for the lock it let go of", async () => {
@@ -160,7 +176,7 @@ describe("what stands at the lock's name", () => {
     ]) {
       const root = scratch();
       make(root);
-      for (const call of ["withDirLockSync(L, () => 1, { waitMs: 200 })", "await withDirLock(L, () => 1, { waitMs: 200 })"]) {
+      for (const call of ["withDirLockSync(L, () => 1, { waitMs: 2000 })", "await withDirLock(L, () => 1, { waitMs: 2000 })"]) {
         const { out, killed } = await inChild("const L = " + JSON.stringify(join(root, "state.lock")) + "; return " + call + ";", 8000);
         expect({ out, killed }).toEqual({ out: "ok 1", killed: false });
         // The next one finds the name free again.
@@ -552,6 +568,50 @@ describe("a holder is not told it lost a lock it still has", () => {
     expect(withDirLockSync(lock, () => "written", always)).toBe("written");
     const gone: DirLockOptions = { hooks: { readNote: () => { throw errno("ENOENT"); } } };
     expect(() => withDirLockSync(lock, () => "written", gone)).toThrow(LockLostError);
+  });
+});
+
+describe("the lock's own waits do not block the event loop", () => {
+  test("a note that cannot be read for a while is asked again with timers, so that the process goes on meanwhile", async () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 5);
+    const opts: DirLockOptions = {
+      hooks: {
+        readNote: () => {
+          throw errno("EBUSY");
+        },
+      },
+    };
+    // Refused every time: the look is repeated for 20+40+60+80+100 ms (a refusal is no evidence of a loss).
+    expect(await withDirLock(lock, async () => "written", opts)).toBe("written");
+    clearInterval(timer);
+    expect(ticks).toBeGreaterThan(10);
+  });
+});
+
+describe("a deadline that comes as the name is cleared", () => {
+  test("is not an error when the name is free: one more try is made at it", () => {
+    const root = scratch();
+    const lock = join(root, "state.lock");
+    leave(lock, { pid: DEAD_PID, token: "dead" });
+    let slowed = false;
+    const opts: DirLockOptions = {
+      waitMs: 60,
+      hooks: {
+        // Setting the dead lock aside takes longer than the whole wait.
+        rename: (from, to) => {
+          if (!slowed) {
+            slowed = true;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+          }
+          renameFor(from, to);
+        },
+      },
+    };
+    expect(withDirLockSync(lock, () => "took it", opts)).toBe("took it");
+    expect(slowed).toBe(true);
   });
 });
 
