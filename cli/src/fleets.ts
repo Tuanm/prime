@@ -453,6 +453,16 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   }
 }
 
+/**
+ * Whether the gateway refused a new member's add for its place in the sequence, which signing it again at the head puts right. A gateway that
+ * says so with a code (`head-moved`) is believed by the code; one from before it said only a sentence, and that is read as it was.
+ */
+function headMoved(json: Record<string, unknown> | undefined): boolean {
+  if (json?.code === "head-moved") return true;
+  if (typeof json?.code === "string") return false;
+  return /head is at|was snapshot \d+/i.test(String(json?.error ?? ""));
+}
+
 export async function fleetsApprove(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
   const deviceId = str(ctx.parsed, "member");
@@ -1352,7 +1362,7 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
       ...(live ? {} : { role }),
       seqAt,
     });
-    if (sent.res.status === 409 && /head is at|was snapshot \d+/i.test(String(sent.res.json?.error ?? "")) && attempt < 3) continue;
+    if (sent.res.status === 409 && headMoved(sent.res.json) && attempt < 3) continue;
     failOn(sent.res.status, sent.res.json, "the gateway did not take the roster entry " + sent.entry[3] + " (" + sent.entry[6] + ")");
     done = { n: sent.entry[3], hash: entryHash(sent.signed), signed: sent.signed };
   }
