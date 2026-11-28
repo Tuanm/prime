@@ -22,6 +22,17 @@ export const SWEEP_MIN_AGE_MS = 60 * 60 * 1000;
 export const SWEEP_ORPHAN_AGE_MS = 24 * 60 * 60 * 1000;
 export const SWEEP_PER_FLEET = 1000;
 export const SWEEP_TOTAL = 10_000;
+/**
+ * The most calls to the bucket and to other objects one run makes (Workers allow 1,000 subrequests to an invocation on a paid
+ * plan; this keeps well below). A run that reaches it stops, and the next begins at the fleet it stopped at, so that the fleets
+ * late in the registry's order are not left out every day. A fifth of it is kept for the names of fleets that are gone.
+ */
+export const SWEEP_SUBREQUESTS = 600;
+/** Where the next run begins (the bucket, outside `fleets/` and `audit/`). */
+export const SWEEP_CURSOR_KEY = "sweep/cursor";
+/** How many of the keys a dry run would delete it names. */
+export const SWEEP_SAMPLE = 20;
+class OutOfCalls extends Error {}
 // Pages of a listing (1,000 objects each) read for one fleet, and of fleet prefixes read in all.
 const LIST_PAGES_PER_FLEET = 30;
 const LIST_PAGES_PREFIXES = 20;
@@ -30,6 +41,8 @@ export interface SweepOptions {
   /** Count what would be deleted and delete nothing. */
   dryRun?: boolean;
   now?: number;
+  /** The most calls this run makes (see `SWEEP_SUBREQUESTS`). */
+  subrequests?: number;
 }
 
 export interface SweepReport {
@@ -44,6 +57,10 @@ export interface SweepReport {
   goneFleets: number;
   /** Whether a cap stopped the run early, so that the rest waits for tomorrow. */
   capped: boolean;
+  /** Some of the keys that were (or, in a dry run, would be) deleted. */
+  sample: string[];
+  /** The fleet the next run begins at, when this one stopped before the end of the list. */
+  next?: string;
   /** What could not be read: a fleet or a prefix that was left alone. */
   skipped: Array<{ fleet: string; why: string }>;
 }
@@ -61,14 +78,26 @@ function adminHeaders(fleetId: string): Headers {
 export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise<SweepReport> {
   const dryRun = options.dryRun === true;
   const now = options.now ?? Date.now();
-  const report: SweepReport = { dryRun, fleets: 0, orphans: 0, goneObjects: 0, goneFleets: 0, capped: false, skipped: [] };
+  const report: SweepReport = { dryRun, fleets: 0, orphans: 0, goneObjects: 0, goneFleets: 0, capped: false, sample: [], skipped: [] };
   const bucket = env.BUCKET;
   const namespace = env.FLEET;
   if (!bucket || !namespace || !env.REGISTRY) return report;
 
+  const limit = options.subrequests ?? SWEEP_SUBREQUESTS;
+  const fleetPhase = Math.floor(limit * 0.8);
+  let calls = 0;
+  const spend = (n = 1, ceiling = limit): void => {
+    if (calls + n > ceiling) throw new OutOfCalls();
+    calls += n;
+  };
+  const sample = (keys: string[]): void => {
+    for (const k of keys) if (report.sample.length < SWEEP_SAMPLE) report.sample.push(k);
+  };
+
   // Which fleets there are. Without that, nothing is known to be an orphan.
   let registered: string[];
   try {
+    spend();
     const answer = await env.REGISTRY.get(env.REGISTRY.idFromName("global")).fetch("https://registry/fleets");
     if (!answer.ok) throw new Error("registry " + answer.status);
     registered = ((await answer.json()) as { fleets?: string[] }).fleets ?? [];
@@ -77,27 +106,47 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
     return report;
   }
 
+  // Where the last run stopped: this one begins there and goes on to the end of the list, which ends the round: the next day
+  // begins again at the first.
+  let begin = "";
+  try {
+    spend();
+    countFleetR2("read");
+    const kept = await bucket.get(SWEEP_CURSOR_KEY);
+    const said = kept ? ((await kept.json()) as { next?: unknown }).next : undefined;
+    if (typeof said === "string") begin = said;
+  } catch {
+    // No cursor is a run from the start.
+  }
+  const ordered = registered.filter((f) => f >= begin);
+
   let budget = SWEEP_TOTAL;
 
-  const remove = async (keys: string[]): Promise<void> => {
+  const remove = async (keys: string[], ceiling = limit): Promise<void> => {
     for (let at = 0; at < keys.length; at += 1000) {
       const batch = keys.slice(at, at + 1000);
+      spend(1, ceiling);
       countFleetR2("write");
       await bucket.delete(batch);
     }
   };
 
   // ---- Fleets that exist: what none of their snapshots keeps ------------------------------------------------
-  for (const fleetId of registered) {
+  let stoppedAt: string | undefined;
+  for (const fleetId of ordered) {
     if (budget <= 0) {
       report.capped = true;
+      stoppedAt = fleetId;
       break;
     }
-    report.fleets += 1;
     try {
+      // A fleet is begun only when its listing, the question to its object and a delete can all be made.
+      spend(3, fleetPhase);
+      report.fleets += 1;
       const candidates: string[] = [];
       let cursor: string | undefined;
       for (let page = 0; page < LIST_PAGES_PER_FLEET; page++) {
+        if (page > 0) spend(1, fleetPhase);
         countFleetR2("write"); // a listing is a Class A operation
         const listed = await bucket.list({ prefix: "fleets/" + fleetId + "/", limit: 1000, ...(cursor ? { cursor } : {}) });
         for (const o of listed.objects) {
@@ -112,6 +161,7 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
       const stub = namespace.get(namespace.idFromName(fleetId));
       const doomed: string[] = [];
       for (let at = 0; at < candidates.length; at += 1000) {
+        if (at > 0) spend(1, fleetPhase);
         const asked = await stub.fetch("https://fleet/unreferenced", {
           method: "POST",
           headers: adminHeaders(fleetId),
@@ -125,10 +175,13 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
       }
       const take = doomed.slice(0, Math.min(SWEEP_PER_FLEET, budget));
       if (take.length < doomed.length) report.capped = true;
+      sample(dryRun ? take : []);
       if (!dryRun) {
-        await remove(take);
+        await remove(take, fleetPhase);
+        sample(take);
         // The fleet's own log says what was cleared from it. Best effort: the objects are gone either way.
-        if (take.length > 0) {
+        if (take.length > 0 && calls < limit) {
+          calls++;
           const headers = adminHeaders(fleetId);
           headers.set("x-prime-actor", "gateway");
           await stub.fetch("https://fleet/note", { method: "POST", headers, body: JSON.stringify({ action: "bucket-swept", count: take.length }) }).catch(() => undefined);
@@ -137,9 +190,16 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
       report.orphans += take.length;
       budget -= take.length;
     } catch (error) {
+      if (error instanceof OutOfCalls) {
+        // Not this fleet's fault: it is the first of tomorrow's.
+        report.capped = true;
+        stoppedAt = fleetId;
+        break;
+      }
       report.skipped.push({ fleet: fleetId, why: error instanceof Error ? error.message : String(error) });
     }
   }
+  if (stoppedAt !== undefined) report.next = stoppedAt;
 
   // ---- Fleets that are gone: what is left under their names ----------------------------------------------------
   try {
@@ -147,6 +207,7 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
     const prefixes: string[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < LIST_PAGES_PREFIXES; page++) {
+      spend();
       countFleetR2("write");
       const listed = await bucket.list({ prefix: "fleets/", delimiter: "/", limit: 1000, ...(cursor ? { cursor } : {}) });
       prefixes.push(...(listed.delimitedPrefixes ?? []));
@@ -162,6 +223,7 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
         break;
       }
       try {
+        spend();
         const asked = await namespace.get(namespace.idFromName(fleetId)).fetch("https://fleet/exists", { method: "GET", headers: adminHeaders(fleetId) });
         if (!asked.ok) throw new Error("the fleet answered " + asked.status);
         // A fleet the registry does not list but which exists (a registration that is still on its way) is not gone.
@@ -171,6 +233,7 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
         let more: string | undefined;
         let young = false;
         for (let page = 0; page < LIST_PAGES_PER_FLEET; page++) {
+          spend();
           countFleetR2("write");
           const listed = await bucket.list({ prefix, limit: 1000, ...(more ? { cursor: more } : {}) });
           for (const o of listed.objects) {
@@ -184,15 +247,32 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
         const take = old.slice(0, budget);
         if (take.length < old.length) report.capped = true;
         if (!dryRun) await remove(take);
+        sample(take);
         report.goneObjects += take.length;
         budget -= take.length;
         if (!young && take.length === old.length && take.length > 0) report.goneFleets += 1;
       } catch (error) {
+        if (error instanceof OutOfCalls) {
+          report.capped = true;
+          break;
+        }
         report.skipped.push({ fleet: fleetId, why: error instanceof Error ? error.message : String(error) });
       }
     }
   } catch (error) {
-    report.skipped.push({ fleet: "*", why: "the fleets in the bucket could not be listed: " + (error instanceof Error ? error.message : String(error)) });
+    if (error instanceof OutOfCalls) report.capped = true;
+    else report.skipped.push({ fleet: "*", why: "the fleets in the bucket could not be listed: " + (error instanceof Error ? error.message : String(error)) });
+  }
+
+  // Where tomorrow's run begins: at the fleet this one stopped at, or from the start when it got to the end.
+  if (!dryRun && (report.next !== undefined || begin !== "")) {
+    try {
+      countFleetR2("write");
+      if (report.next !== undefined) await bucket.put(SWEEP_CURSOR_KEY, JSON.stringify({ next: report.next }), { httpMetadata: { contentType: "application/json" } });
+      else await bucket.delete(SWEEP_CURSOR_KEY);
+    } catch (error) {
+      report.skipped.push({ fleet: "*", why: "the place to begin at could not be kept: " + (error instanceof Error ? error.message : String(error)) });
+    }
   }
   return report;
 }
