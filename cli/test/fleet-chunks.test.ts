@@ -2,13 +2,14 @@
 // them, and comes back the same: each piece checked as it arrives, and the whole against what the seal binds.
 import { createHash, randomBytes } from "node:crypto";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import { TamperedSnapshotError, forgetIncarnationAnswers } from "../src/fleet-trust";
-import { CHUNKS_CAP, CHUNKED_BYTES_MAX, CHUNKS_MAX, chunkListProblem, getChunks, putChunks, type FleetManifest } from "../src/fleet-transport";
+import { CHUNK_BYTES, CHUNKS_CAP, CHUNKED_BYTES_MAX, CHUNKS_MAX, chunkListProblem, getChunks, putChunks, type FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
 import { applyTestTimeout } from "./setup";
@@ -245,5 +246,46 @@ describe("the list of pieces", () => {
     const asked = w.gateway.requests.get("GET packs") ?? 0;
     await expect(getChunks(creds, "x", [{ hash: "nope", bytes: 3 }])).rejects.toThrow(/not named by a hash/);
     expect(w.gateway.requests.get("GET packs") ?? 0).toBe(asked);
+  });
+});
+
+describe("the gateway's own check of a list of pieces", () => {
+  // The gateway side (`checkChunkList` in api/src/fleets.ts) is in this repository once it has landed; until then there is nothing to compare with.
+  const file = process.env.PRIME_GATEWAY_FLEETS ?? join(import.meta.dir, "..", "..", "api", "src", "fleets.ts");
+  type Gateway = {
+    checkChunkList(raw: unknown, whole: unknown, what: string): { ok: true; hashes: string[]; bytes: number[] } | { ok: false; error: string };
+    CHUNK_BYTES: number;
+    MAX_CHUNKS: number;
+    MAX_CHUNKED_SNAPSHOT_BYTES: number;
+    CHUNKS_CAP: string;
+  };
+  const load = async (): Promise<Gateway | undefined> => {
+    if (!existsSync(file)) return undefined;
+    const mod = (await import(pathToFileURL(file).href)) as Partial<Gateway>;
+    return typeof mod.checkChunkList === "function" ? (mod as Gateway) : undefined;
+  };
+
+  test("agrees with this side on the numbers, takes what putChunks lists, and refuses what this side refuses", async () => {
+    const g = await load();
+    if (!g) return; // the gateway's code is not in this checkout yet: nothing to compare with
+    expect(g.CHUNK_BYTES).toBe(CHUNK_BYTES);
+    expect(g.MAX_CHUNKS).toBe(CHUNKS_MAX);
+    expect(g.MAX_CHUNKED_SNAPSHOT_BYTES).toBe(CHUNKED_BYTES_MAX);
+    expect(g.CHUNKS_CAP).toBe(CHUNKS_CAP);
+    const w = await world();
+    const pack = randomBytes(200 * KB);
+    const { chunks } = await putChunks(credsFor("primary-device"), "x", pack, 48 * KB);
+    const taken = g.checkChunkList(chunks, pack.length, "the pack");
+    expect(taken.ok).toBe(true);
+    expect(chunkListProblem(chunks)).toBeUndefined();
+    const ok = chunks[0]!;
+    const bad: unknown[] = [[], [{ hash: "A".repeat(64), bytes: 5 }], [{ hash: ok.hash, bytes: 0 }], [{ hash: ok.hash, bytes: CHUNK_BYTES + 1 }], [{ hash: ok.hash }], [{ hash: 7, bytes: 5 }], "x", Array.from({ length: CHUNKS_MAX + 1 }, () => ok)];
+    for (const list of bad) {
+      expect(g.checkChunkList(list, 5, "the pack").ok, JSON.stringify(list).slice(0, 60)).toBe(false);
+      // (This side reads a piece up to twice the size it sends: a gateway may one day advertise a bigger one. The gateway refuses it today.)
+      const tolerated = Array.isArray(list) && list.length === 1 && (list[0] as { bytes?: number }).bytes === CHUNK_BYTES + 1;
+      expect(chunkListProblem(list) === undefined, JSON.stringify(list).slice(0, 60)).toBe(tolerated);
+    }
+    void w;
   });
 });
