@@ -298,6 +298,125 @@ describe("the lock on a member's state file", () => {
   });
 });
 
+describe("what a member says it can do", () => {
+  test("nothing is said while this build does nothing beyond the first form of the wire, and a list is said as it is", async () => {
+    const { MEMBER_CAPS, capsBody, fleetHas } = await import("../src/fleet-transport");
+    expect(MEMBER_CAPS).toEqual([]);
+    expect(capsBody()).toEqual({});
+    expect(capsBody(["meta2", "inline"])).toEqual({ caps: ["meta2", "inline"] });
+    expect(fleetHas({ fleetCaps: ["meta2"] }, "meta2")).toBe(true);
+    expect(fleetHas({ fleetCaps: ["inline"] }, "meta2")).toBe(false);
+    expect(fleetHas({}, "meta2")).toBe(false); // a gateway that says nothing of it: the old form
+  });
+
+  test("a capability's name is the gateway's pattern, here and in everything this build says or reads", async () => {
+    const { CAP_NAME, MEMBER_CAPS } = await import("../src/fleet-transport");
+    for (const ok of ["meta2", "chunks", "a", "0", "tree-diff", "a".repeat(24), "x1-y2-z3"]) expect(CAP_NAME.test(ok), ok).toBe(true);
+    for (const bad of ["", "-a", "A", "Meta2", "a b", "a_b", "a".repeat(25), "meta2\n", "é"]) expect(CAP_NAME.test(bad), bad).toBe(false);
+    expect(CAP_NAME.source).toBe("^[a-z0-9][a-z0-9-]{0,23}$");
+    for (const cap of MEMBER_CAPS) expect(CAP_NAME.test(cap), cap).toBe(true);
+  });
+
+  test("the list of this build goes in the body of every ask for a place, wherever it is made", async () => {
+    const { MEMBER_CAPS } = await import("../src/fleet-transport");
+    const caps = MEMBER_CAPS as string[];
+    caps.push("test1");
+    const real = globalThis.fetch;
+    const sent: unknown[] = [];
+    (globalThis as { fetch: unknown }).fetch = async (_url: string, init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return Response.json({ ok: true, role: "primary" });
+    };
+    try {
+      await bootstrap({ gateway: "https://gw.example", deviceId: "d", deviceToken: "t" } as never, "x");
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+      caps.pop();
+    }
+    expect(sent).toEqual([{ seals: true, caps: ["test1"] }]);
+  });
+
+  test("every place in the source that asks for a place says what the member can do", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const src = join(import.meta.dir, "../src");
+    const asking = readdirSync(src).filter((f) => f.endsWith(".ts") && /["`]\/bootstrap["`]/.test(readFileSync(join(src, f), "utf8")));
+    expect(asking.sort()).toEqual(["fleet-daemon.ts", "fleet-space.ts", "fleets.ts"]);
+    for (const f of asking) expect(readFileSync(join(src, f), "utf8"), f).toContain("capsBody()");
+  });
+
+  test("the role says what every member can do, and nothing that is not a name of one", async () => {
+    const { fetchRole } = await import("../src/fleet-transport");
+    const real = globalThis.fetch;
+    let answer: unknown = { member: true, primary: true, epoch: 1, fleetCaps: ["meta2", "Bad Name", 7, "inline", "tree-diff", "a".repeat(24), "a".repeat(25), "-x"] };
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json(answer);
+    try {
+      const creds = { gateway: "https://gw.example", deviceId: "d", deviceToken: "t" } as never;
+      expect((await fetchRole(creds, "x")).fleetCaps).toEqual(["meta2", "inline", "tree-diff", "a".repeat(24)]);
+      answer = { member: true, primary: true, epoch: 1 };
+      expect("fleetCaps" in (await fetchRole(creds, "x"))).toBe(false);
+      answer = { member: true, primary: true, epoch: 1, fleetCaps: [] };
+      expect((await fetchRole(creds, "x")).fleetCaps).toEqual([]);
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+  });
+});
+
+describe("`prime fleets set`: how long a place lasts", () => {
+  test("a lease is written as a person writes a time, and anything else is refused", async () => {
+    const { parseLease } = await import("../src/fleets");
+    expect(parseLease("90s")).toBe(90_000);
+    expect(parseLease("2m")).toBe(120_000);
+    expect(parseLease("90")).toBe(90_000); // seconds, never milliseconds
+    expect(parseLease("1500ms")).toBe(1500);
+    expect(parseLease("1.5m")).toBe(90_000);
+    expect(parseLease(" 45S ")).toBe(45_000);
+    expect(parseLease("default")).toBeNull();
+    for (const bad of ["", "soon", "-5s", "0", "0s", "9x", "1h", "NaN"]) expect(() => parseLease(bad)).toThrow(/not a time/);
+  });
+
+  test("sends the lease to the fleet's meta route, as the operator or owner, and says what the gateway made of it", async () => {
+    const { fleetsSet } = await import("../src/fleets");
+    const sent: Array<{ path: string; method: string; body: unknown }> = [];
+    const real = globalThis.fetch;
+    let answer: { status: number; json: unknown } = { status: 200, json: { ok: true, leaseMs: 90_000 } };
+    (globalThis as { fetch: unknown }).fetch = async (url: string, init: { method: string; body: string }) => {
+      sent.push({ path: new URL(url).pathname, method: init.method, body: JSON.parse(init.body) });
+      return Response.json(answer.json, { status: answer.status });
+    };
+    const out: string[] = [];
+    try {
+      const ctx = (flags: Record<string, string | boolean>, json = false) =>
+        ({ config: config({ defaults: { gateway: "https://g.example", fleet_operator_token: "op" } }), configPath: "/nowhere", json, out: (l: string) => out.push(l), parsed: { positionals: ["fleets", "set", "acme"], flags: new Map<string, string | boolean>(Object.entries(flags)) } }) as never;
+      await fleetsSet(ctx({ lease: "90s", device: "d1", token: "t1" }));
+      expect(sent[0]).toEqual({ path: "/fleets/acme/meta", method: "POST", body: { leaseMs: 90_000 } });
+      expect(out.join("\n")).toContain("90 s");
+      expect(out.join("\n")).toContain("every 30 s");
+      answer = { status: 200, json: { ok: true, leaseMs: 45_000 } };
+      await fleetsSet(ctx({ lease: "default", device: "d1", token: "t1" }));
+      expect(sent[1]!.body).toEqual({ leaseMs: null });
+      // The gateway's bounds are its own: what it refuses is said as it said it.
+      answer = { status: 400, json: { error: "leaseMs must be a number between 30000 and 180000" } };
+      await expect(fleetsSet(ctx({ lease: "5s", device: "d1", token: "t1" }))).rejects.toThrow(/could not set the lease: leaseMs must be a number between 30000 and 180000/);
+      // Nothing asked is not a request.
+      const before = sent.length;
+      await expect(fleetsSet(ctx({ device: "d1", token: "t1" }))).rejects.toThrow(/nothing to set/);
+      await expect(fleetsSet(ctx({ lease: "soon", device: "d1", token: "t1" }))).rejects.toThrow(/not a time/);
+      expect(sent.length).toBe(before);
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+  });
+
+  test("is a command with its own flag, listed in the help", async () => {
+    const { fleetFlagsFor } = await import("../src/fleet-flags");
+    expect(fleetFlagsFor("set").map((f) => f.name)).toContain("lease");
+    expect(fleetFlagsFor("members").map((f) => f.name)).not.toContain("lease");
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(join(import.meta.dir, "../src/help.ts"), "utf8")).toContain("prime fleets set <fleet-id> --lease <time>");
+  });
+});
+
 describe("taking a place in the fleet", () => {
   test("says that this build seals what it publishes, so a bar for an older build does not keep it from the lease", async () => {
     const real = globalThis.fetch;

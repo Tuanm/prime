@@ -48,6 +48,8 @@ export class FakeGateway {
   advanceMarksApplied = false;
   /** How many times a member asked for its place. */
   bootstraps = 0;
+  /** An ask for a place is never answered (a gateway that hangs): only the caller's own time limit ends it. */
+  hangBootstraps = false;
   /** What each ask for a place said. */
   bootstrapBodies: Array<Record<string, unknown>> = [];
   /** The key the gateway's object makes key-change proofs with (what /role says); undefined for a gateway that predates it. */
@@ -99,6 +101,7 @@ export class FakeGateway {
     }
     if (kind === "bootstrap" && method === "POST") {
       this.bootstraps++;
+      if (this.hangBootstraps) return new Promise<Response>(() => undefined);
       const said = (() => {
         try {
           return JSON.parse(String(body ?? "{}")) as Record<string, unknown>;
@@ -273,11 +276,22 @@ export function useFakeGateway(gateway: FakeGateway): void {
   const g = globalThis as { __realFetch?: typeof fetch };
   g.__realFetch ??= globalThis.fetch;
   const original = g.__realFetch;
-  (globalThis as { fetch: unknown }).fetch = (async (url: string, init: { method: string; headers: Record<string, string>; body?: Buffer | string }) => {
+  (globalThis as { fetch: unknown }).fetch = (async (url: string, init: { method: string; headers: Record<string, string>; body?: Buffer | string; signal?: AbortSignal }) => {
     const parsed = new URL(url);
     const path = parsed.pathname;
     const deviceId = init.headers["x-prime-device"] ?? "";
-    return gateway.handle(credsFor(deviceId), init.method, path, init.body, parsed.search);
+    const answer = gateway.handle(credsFor(deviceId), init.method, path, init.body, parsed.search);
+    const signal = init.signal;
+    if (!signal) return answer;
+    // The caller's own time limit ends the request, as it does a real one.
+    return Promise.race([
+      answer,
+      new Promise<never>((_, reject) => {
+        const abort = (): void => reject(new DOMException("The operation was aborted.", "AbortError"));
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      }),
+    ]);
   }) as unknown as typeof fetch;
   (globalThis as { __restoreFetch?: () => void }).__restoreFetch = () => {
     (globalThis as { fetch: unknown }).fetch = original;

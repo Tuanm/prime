@@ -102,6 +102,16 @@ async function until(check: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
+describe("the lease frame", () => {
+  test("is read as the new length of a place, and one that says nothing usable is ignored", async () => {
+    const { parseFleetEvent } = await import("../src/fleet-events");
+    expect(parseFleetEvent(JSON.stringify({ type: "lease", leaseMs: 90_000 }))).toEqual({ type: "lease", leaseMs: 90_000 });
+    for (const bad of [{ type: "lease" }, { type: "lease", leaseMs: 0 }, { type: "lease", leaseMs: -5 }, { type: "lease", leaseMs: "90" }, { type: "lease", leaseMs: null }]) {
+      expect(parseFleetEvent(JSON.stringify(bad))).toBeUndefined();
+    }
+  });
+});
+
 describe("events", () => {
   test("are parsed and delivered, with the device headers on the right path", async () => {
     const gw = fake({

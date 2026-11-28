@@ -7,6 +7,27 @@
 
 import { createHash } from "node:crypto";
 
+/**
+ * What this build can do beyond the first form of the wire, said to the fleet each time a place is taken (`caps` in
+ * the body of a bootstrap). A format that only some members read is used by a publisher only when every member of the
+ * fleet lists its name (`role.fleetCaps`; see `fleetHas`). Short lower-case names, added here as the code that
+ * reads and writes the form lands, and nowhere else: this build says only what it does.
+ */
+export const MEMBER_CAPS: readonly string[] = [];
+
+/** What a capability's name looks like: the pattern the gateway keeps (`^[a-z0-9][a-z0-9-]{0,23}$`), so that both sides read the same names. */
+export const CAP_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+/** The part of a bootstrap body that says what the member can do: nothing at all while it can do nothing more. */
+export function capsBody(caps: readonly string[] = MEMBER_CAPS): { caps?: string[] } {
+  return caps.length > 0 ? { caps: [...caps] } : {};
+}
+
+/** Whether every member of the fleet has the capability (an advisory answer: it is never what a security rule rests on). */
+export function fleetHas(role: { fleetCaps?: readonly string[] }, cap: string): boolean {
+  return role.fleetCaps?.includes(cap) === true;
+}
+
 export interface FleetCredentials {
   gateway: string;
   deviceId: string;
@@ -286,10 +307,10 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; keyProofKey?: string; serverTimeMs?: number }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; keyProofKey?: string; serverTimeMs?: number; fleetCaps?: string[] }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
-  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; keyProofKey?: unknown };
+  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; keyProofKey?: unknown; fleetCaps?: unknown };
   // The gateway's clock, from the answer's Date header: a proof is only good for a few minutes of its own, so a
   // machine whose clock is off must not make every proof fail.
   const dated = Date.parse(res.headers.get("date") ?? "");
@@ -306,6 +327,8 @@ export async function fetchRole(
     ...(typeof body.snapshotLimit === "number" && body.snapshotLimit > 0 ? { snapshotLimit: body.snapshotLimit } : {}),
     // The key a member shows that it holds its old key with, when it changes its own: said by a gateway that asks for the proof.
     ...(typeof body.keyProofKey === "string" && body.keyProofKey ? { keyProofKey: body.keyProofKey } : {}),
+    // What every member of the fleet can do (what all of them list): said by a gateway that has them.
+    ...(Array.isArray(body.fleetCaps) ? { fleetCaps: body.fleetCaps.filter((c): c is string => typeof c === "string" && CAP_NAME.test(c)) } : {}),
   };
 }
 

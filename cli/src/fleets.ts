@@ -27,7 +27,7 @@ import { positions } from "./fleet-replica.ts";
 import { keyFingerprintOf } from "./fleet-crypto.ts";
 import { FleetTrust } from "./fleet-trust.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
-import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
@@ -311,6 +311,42 @@ export async function fleetsReap(ctx: Ctx): Promise<void> {
     return;
   }
   ctx.out(green("cleared away ") + " " + bold(fleetId) + dim(" (" + (res.json.members ?? 0) + " members, all gone)"));
+}
+
+/**
+ * A lease as a person writes it: `90s`, `2m`, `1500ms`, or a bare number of seconds; `default` for none (the gateway's
+ * own, null on the wire). Anything else is refused here, so that "90" is never taken for milliseconds.
+ */
+export function parseLease(text: string): number | null {
+  const t = text.trim().toLowerCase();
+  if (t === "default") return null;
+  const m = /^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/.exec(t);
+  if (!m) throw new UsageError("not a time: \"" + text + "\"", "Write it as 90s, 2m, 90000ms or a number of seconds, or \"default\".");
+  const n = Number(m[1]);
+  const ms = Math.round(m[2] === "ms" ? n : m[2] === "m" ? n * 60_000 : n * 1000);
+  if (!Number.isFinite(ms) || ms <= 0) throw new UsageError("not a time: \"" + text + "\"", "A lease is longer than nothing.");
+  return ms;
+}
+
+/**
+ * `prime fleets set <fleet-id> --lease 90s`: how long a place in the fleet lasts. The operator's (or the fleet owner's)
+ * to say, within the gateway's bounds; every member takes the new length at once, and renews at a third of it. A longer
+ * lease costs the fleet fewer renewals and takes longer to hand over when the primary is gone.
+ */
+export async function fleetsSet(ctx: Ctx): Promise<void> {
+  const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
+  const asked = str(ctx.parsed, "lease");
+  if (asked === undefined) throw new UsageError("nothing to set", "What can be set: --lease <time>  (30s to 180s, or \"default\").");
+  const leaseMs = parseLease(asked);
+  const t = target(ctx, spaceArg(ctx));
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/meta", { leaseMs });
+  failOn(res.status, res.json, "could not set the lease");
+  const now = typeof res.json?.leaseMs === "number" ? res.json.leaseMs : leaseMs;
+  if (ctx.json) {
+    printJson({ fleet: fleetId, leaseMs: now });
+    return;
+  }
+  ctx.out(green("the lease of ") + bold(fleetId) + green(" is " + (now === null ? "the gateway's own" : now / 1000 + " s")) + (typeof now === "number" ? dim("  (the primary renews every " + Math.round(now / 3000) + " s)") : ""));
 }
 
 export async function fleetsInvite(ctx: Ctx): Promise<void> {
@@ -862,7 +898,7 @@ export async function bootstrap(creds: FleetCredentials, fleet: string): Promise
   const res = await fetch(creds.gateway + "/fleets/" + encodeURIComponent(fleet) + "/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json", "x-prime-device": creds.deviceId, "x-device-token": creds.deviceToken },
-    body: JSON.stringify({ seals: true }),
+    body: JSON.stringify({ seals: true, ...capsBody() }),
     signal: AbortSignal.timeout(creds.timeoutMs ?? 120_000),
   });
   if (!res.ok) {

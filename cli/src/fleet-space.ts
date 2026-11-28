@@ -24,7 +24,7 @@ import type { Ctx } from "./context.ts";
 import { CliError } from "./errors.ts";
 import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
 import { FleetTrust } from "./fleet-trust.ts";
-import { fetchRole, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, resetFleetState, writeFleetState } from "./fleets.ts";
 
 export interface FleetSpaceSetup {
@@ -151,6 +151,7 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
   const bootstrapped = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet) + "/bootstrap", {
     label: opts.spaceName,
     seals: true,
+    ...capsBody(),
   });
   if (bootstrapped.status >= 400) {
     throw new CliError("could not take a place in the fleet: " + (bootstrapped.json?.error ?? bootstrapped.status));
