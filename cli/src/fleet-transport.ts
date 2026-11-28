@@ -144,6 +144,11 @@ export interface FleetManifest {
    * entries of `wrapped` are listed under `wrapIdOf`, not device ids. Absent from snapshots of publishers that predate it.
    */
   meta?: string;
+  /**
+   * The paths the publisher left out of this snapshot because they look like secrets (read from `meta`, never from the clear: the
+   * fleet's own copy of the manifest does not carry it). A member that applies the snapshot does not delete them.
+   */
+  kept?: string[];
   /** Which epoch published this, for the fencing check. */
   epoch: number;
   createdAt: number;

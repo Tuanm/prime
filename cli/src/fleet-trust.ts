@@ -35,6 +35,7 @@ import { dirname } from "node:path";
 
 import { RosterError, isFingerprint, mayPublishAt, normalizeFingerprint, ownerFingerprint, verifyChain, type VerifiedRoster } from "./fleet-roster";
 import { keyFingerprintOf, knownSealKind, wrappedEntryFor, type MetaBinding, type OpenedPayload, type SealFields } from "./fleet-crypto";
+import { keptFrom } from "./fleet-secrets";
 import { fetchRole, fetchRosterChain, fetchRoster, manifestCopy, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
@@ -650,7 +651,7 @@ export function metaBindingOf(m: FleetManifest, packHash: string, deltaHash: str
  * roster say something else. What the metadata says is what is believed; the seal then binds it.
  */
 export function withOpenedMeta(m: FleetManifest, packHash: string, deltaHash: string | null, opened: OpenedPayload): FleetManifest {
-  if (m.meta === undefined) return m;
+  if (m.meta === undefined) return m.kept === undefined ? m : manifestCopy(m, { kept: undefined });
   const meta = typeof m.meta === "string" ? opened.openMeta(metaBindingOf(m, packHash, deltaHash), m.meta) : null;
   if (meta === null) {
     throw new TamperedSnapshotError(m.seq, "its sealed metadata does not open for this manifest (it was damaged, or taken from another snapshot's)");
@@ -663,6 +664,10 @@ export function withOpenedMeta(m: FleetManifest, packHash: string, deltaHash: st
   const read = manifestCopy(m, { tipCommit: meta.tipCommit, tree: meta.tree });
   if (meta.roster !== undefined) read.roster = meta.roster;
   else delete read.roster;
+  // What the publisher left out, only as it sealed it: a `kept` beside the metadata is the gateway's.
+  const kept = keptFrom(meta.kept);
+  if (kept.length > 0) read.kept = kept;
+  else delete read.kept;
   return read;
 }
 
