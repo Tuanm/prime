@@ -52,6 +52,8 @@ export interface FleetCallersFile {
   writtenAt: number;
   /** The roster's head the list comes from. */
   head?: { n: number; hash: string };
+  /** The member's certificate for this space's reply key (see fleet-reply-cert.ts); the space adds it to the signature of the replies it gives a fleet. */
+  replyCert?: { key: string; until: number; cert: string };
   callers: CallerEntry[];
 }
 
@@ -107,6 +109,11 @@ export function readFleetCallers(path: string): { file?: FleetCallersFile; error
     if (!raw) return { error: `${path} has a caller with no valid key` };
     callers.push({ keyId: keyIdOf(raw), pub: raw.toString("base64"), label: typeof v!.label === "string" ? v!.label : "", addedAt: typeof v!.addedAt === "string" ? v!.addedAt : "" });
   }
+  const rc = f.replyCert as Record<string, unknown> | undefined;
+  const replyCert =
+    rc && typeof rc.key === "string" && typeof rc.until === "number" && Number.isFinite(rc.until) && typeof rc.cert === "string" && rc.cert.length < 400
+      ? { key: rc.key, until: rc.until, cert: rc.cert }
+      : undefined;
   const roster = f.roster === "signed" || f.roster === "open" || f.roster === "refused" ? f.roster : "refused";
   return {
     file: {
@@ -117,9 +124,18 @@ export function readFleetCallers(path: string): { file?: FleetCallersFile; error
       primary: f.primary,
       primarySince: f.primarySince,
       writtenAt: f.writtenAt,
+      ...(replyCert ? { replyCert } : {}),
       callers: roster === "signed" ? callers : [],
     },
   };
+}
+
+/**
+ * Where a space keeps the key it signs its replies with: `<secret dir>.state/caller-auth/device-ed25519.pem`, the `--caller-state` of its tool server
+ * (`spaceCallerStateDir` in spaces.ts, which a test holds this to: spaces.ts is not imported here, as it imports the agent).
+ */
+export function replyKeyFileOf(secretDir: string): string {
+  return join(secretDir.replace(/[\\/]+$/, "") + ".state", "caller-auth", "device-ed25519.pem");
 }
 
 /** Where a space's tool server looks for the file: beside its callers file. */

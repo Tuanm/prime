@@ -11,8 +11,9 @@
 //   enforce  such a call is refused with JSON-RPC error -32001
 
 import { createHash, sign as cryptoSign, verify as cryptoVerify } from "node:crypto";
-import { mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { dirname, join } from "node:path";
 import { FLEET_CALLERS_FRESH_MS, FLEET_CALL_SKEW_MS, FLEET_FUTURE_MS, type FleetCallersFile, fleetCallersPathFor, readFleetCallers } from "./fleet-callers.ts";
 import {
@@ -38,6 +39,11 @@ export const MAX_SKEW_MS = 5 * 60_000;
 const NONCE_LIMIT = 10_000;
 /** How many nonces of signed refusals are kept (see `retired`); when they are all in use, refusals go unsigned. */
 const RETIRED_LIMIT = 10_000;
+/** How many nonces of refusals for keys nobody allowed are kept (in memory only). */
+const RETIRED_UNKNOWN_LIMIT = 1_000;
+/** The file in the state directory that keeps them over a restart, and how long past the end of their calls' life they are kept. */
+const RETIRED_FILE = "retired-nonces.jsonl";
+const RETIRED_MARGIN_MS = 60_000;
 const LOG_LIMIT_BYTES = 1024 * 1024;
 
 export const REPLY_SIG_HEADER = "x-prime-reply-sig";
@@ -91,6 +97,8 @@ function parseBody(raw: unknown, parse: (text: string) => unknown): unknown {
 export interface ReplyBinding {
   nonce: string;
   raw: string;
+  /** The call named the member (`fleet:<id>@<member>`, or `@` for the question which): the reply carries the member's certificate for the key it is signed with. Not the replies to the form older builds sign, which they would take for a changed signature. */
+  fleet?: boolean;
 }
 
 export interface TunnelFrame {
@@ -184,6 +192,9 @@ export class CallerAuth {
   private flushing: Promise<void> | undefined;
   private logFailureSaid = false;
   private replyFailureSaid = false;
+  private retiredFailureSaid = false;
+  private readonly retiredUnknown = new Map<string, number>();
+  private retiredLines = 0;
   private cache: CallersCache | undefined;
   private fleetCache: FleetCache | undefined;
   private replyKey: CallerKey | undefined;
@@ -195,6 +206,7 @@ export class CallerAuth {
     this.mode = opts.mode;
     this.stateDir = opts.stateDir ?? join(dirname(opts.callersFile), "caller-auth");
     this.floorTs = (opts.now ?? Date.now)() - 1;
+    if (opts.mode !== "off") this.loadRetired();
   }
 
   private now(): number {
@@ -269,17 +281,22 @@ export class CallerAuth {
     }
 
     let failure: CallerFailure | undefined;
+    let fleetCall = false;
+    // The signature was checked against a key one of the callers files lists (what is true of a failure after that: not the primary, a tool not allowed...).
+    let signatureVerified = false;
     if (typeof frame.callerSig === "string") {
       const verdict = this.verify(frame);
       if (verdict.ok) {
         this.counts.signed++;
-        return { action: "run", request: verdict.request, keyId: verdict.keyId, reply: { nonce: verdict.nonce, raw: frame.raw as string } };
+        return { action: "run", request: verdict.request, keyId: verdict.keyId, reply: { nonce: verdict.nonce, raw: frame.raw as string, ...(verdict.fleet ? { fleet: true } : {}) } };
       }
       failure = verdict.failure;
+      fleetCall = verdict.fleet === true;
+      signatureVerified = verdict.verified === true;
     }
 
     if (request === undefined) return this.unreadable(frame);
-    const bound = binding && fromRaw !== undefined ? binding : undefined;
+    const bound = binding && fromRaw !== undefined ? (fleetCall ? { ...binding, fleet: true } : binding) : undefined;
     if (!requiresSignature(request)) return { action: "run", request, ...(bound ? { reply: bound } : {}) };
 
     failure ??= "unsigned";
@@ -296,7 +313,7 @@ export class CallerAuth {
       failure !== "stale" &&
       sig.ts > this.floorTs &&
       !this.ranNonces.has(sig.nonce) &&
-      this.retire(sig.nonce, sig.ts);
+      this.retire(sig.nonce, sig.ts, signatureVerified);
     return {
       action: "refuse",
       response: {
@@ -313,16 +330,101 @@ export class CallerAuth {
   }
 
   /** Keep a nonce from ever running, because a refusal for it is to be signed. False when no more can be kept: then the refusal is not signed. */
-  private retire(nonce: string, ts: number): boolean {
+  private retire(nonce: string, ts: number, known: boolean): boolean {
     const now = this.now();
+    if (!known) return this.retireStranger(nonce, ts, now);
     for (const [key, at] of this.retired) {
       if (at + MAX_SKEW_MS >= now) break;
       this.retired.delete(key);
     }
     if (this.retired.has(nonce)) return false;
     if (this.retired.size >= RETIRED_LIMIT) return false;
+    // Kept across a restart too: a call signed after the moment this process started is not refused as older than it, so without this a refusal that
+    // said "did not run" could be followed by the call running. If it cannot be kept, the refusal is not signed.
+    if (!this.persistRetired(nonce, ts)) return false;
     this.retired.set(nonce, ts);
     return true;
+  }
+
+  /**
+   * A frame whose signature did not verify against a listed key is a stranger's, whatever key id it carries (the id is in every call the gateway relays). Its refusal is signed too (a caller that is not allowed yet is told so by the device, not by
+   * a gateway that could have made it up), and its nonce is kept so that the call cannot run after a refusal that said it did not (a gateway that
+   * changed the key id of a genuine call gets the refusal for the changed one). But a stranger costs nothing to be, so its nonces have a set of their
+   * own, small, in memory only: frames from keys nobody allowed can neither fill the set that the refusals that matter use nor write to the disk.
+   * When it is full the refusal goes unsigned, and its caller is told the call may or may not have run.
+   */
+  private retireStranger(nonce: string, ts: number, now: number): boolean {
+    for (const [key, at] of this.retiredUnknown) {
+      if (at + MAX_SKEW_MS >= now) break;
+      this.retiredUnknown.delete(key);
+    }
+    if (this.retiredUnknown.has(nonce) || this.retiredUnknown.size >= RETIRED_UNKNOWN_LIMIT) return false;
+    this.retiredUnknown.set(nonce, ts);
+    return true;
+  }
+
+  private retiredFile(): string {
+    return join(this.stateDir, RETIRED_FILE);
+  }
+
+  /** The nonces that were retired before this process started and have not run out (a call stops verifying MAX_SKEW_MS after its time, and RETIRED_MARGIN_MS more is kept). */
+  private loadRetired(): void {
+    let text: string;
+    try {
+      text = readFileSync(this.retiredFile(), "utf8");
+    } catch {
+      return;
+    }
+    const now = this.now();
+    const live: Array<[string, number]> = [];
+    let lines = 0;
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      lines++;
+      try {
+        const v = JSON.parse(line) as { n?: unknown; t?: unknown };
+        if (typeof v.n === "string" && v.n.length > 0 && v.n.length <= 128 && typeof v.t === "number" && Number.isFinite(v.t) && v.t + MAX_SKEW_MS + RETIRED_MARGIN_MS >= now) live.push([v.n, v.t]);
+      } catch {
+        // a line that is not one is no nonce
+      }
+    }
+    live.sort((a, b) => a[1] - b[1]);
+    for (const [n, t] of live.slice(-RETIRED_LIMIT)) this.retired.set(n, t);
+    this.retiredLines = live.length;
+    if (lines > live.length) this.rewriteRetired();
+  }
+
+  private rewriteRetired(): boolean {
+    try {
+      mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      const body = [...this.retired].map(([n, t]) => JSON.stringify({ n, t })).join("\n");
+      writeFileAtomic(this.retiredFile(), body ? body + "\n" : "", 0o600);
+      this.retiredLines = this.retired.size;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private persistRetired(nonce: string, ts: number): boolean {
+    try {
+      // Entries that have run out are dropped when the file has grown to twice what can be held (and when it is read at the start).
+      if (this.retiredLines >= RETIRED_LIMIT * 2) {
+        const now = this.now();
+        for (const [key, at] of this.retired) if (at + MAX_SKEW_MS + RETIRED_MARGIN_MS < now) this.retired.delete(key);
+        if (!this.rewriteRetired()) return false;
+      }
+      mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      appendFileSync(this.retiredFile(), JSON.stringify({ n: nonce, t: ts }) + "\n", { mode: 0o600 });
+      this.retiredLines++;
+      return true;
+    } catch (err) {
+      if (!this.retiredFailureSaid) {
+        this.retiredFailureSaid = true;
+        this.opts.log?.(`caller-auth: refusals are not signed: cannot keep the nonces of the calls refused (${err instanceof Error ? err.message : String(err)})`);
+      }
+      return false;
+    }
   }
 
   /** Neither a request nor a body that can be read: there is nothing to run, whatever the mode. */
@@ -331,14 +433,14 @@ export class CallerAuth {
     return { action: "refuse", response: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the request could not be read", data: { reason: "invalid" } } } };
   }
 
-  private verify(frame: TunnelFrame): { ok: true; request: unknown; nonce: string; keyId: string } | { ok: false; failure: CallerFailure } {
+  private verify(frame: TunnelFrame): { ok: true; request: unknown; nonce: string; keyId: string; fleet?: boolean } | { ok: false; failure: CallerFailure; fleet?: boolean; verified?: boolean } {
     const parsed = parseCallSig(frame.callerSig as string);
     if (!parsed) return { ok: false, failure: "malformed" };
     if (typeof frame.raw !== "string") return { ok: false, failure: "no-raw" };
     const now = this.now();
     if (Math.abs(now - parsed.ts) > MAX_SKEW_MS) return { ok: false, failure: "stale" };
     // A refusal was signed for this nonce: the call must not run now (see `retired`).
-    if (this.retired.has(parsed.nonce)) return { ok: false, failure: "replay" };
+    if (this.retired.has(parsed.nonce) || this.retiredUnknown.has(parsed.nonce)) return { ok: false, failure: "replay" };
     const callers = this.callers();
     if (!callers.entries) return { ok: false, failure: "callers-unreadable" };
     const entry = callers.entries.find((e) => e.keyId === parsed.keyId);
@@ -360,37 +462,37 @@ export class CallerAuth {
         forFleet = true;
       } else if (verifyCallSignature(parsed, key, fleetMemberTarget(id, ""), frame.raw)) {
         // The question which member this is (nothing signed for it can run): answered, not run.
-        return { ok: false, failure: "fleet-member" };
+        return { ok: false, failure: "fleet-member", fleet: true, verified: true };
       } else if (verifyCallSignature(parsed, key, callTarget("fleet", id), frame.raw)) {
         // The form an older build makes: it names no member, so it could be run by every member that is sent it.
-        return { ok: false, failure: "fleet-unbound" };
+        return { ok: false, failure: "fleet-unbound", verified: true };
       }
     }
     if (!signer) return { ok: false, failure: "bad-signature" };
     if (forFleet) {
       const f = fleet.file!;
       // The agent's word that this space is the primary is good for a while after it was written, and no longer.
-      if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary" };
+      if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary", fleet: true, verified: true };
       // A call made for the fleet is not signed ahead of the clock, and one signed before this space became the primary - or within the
       // skew of the members' clocks of it - may have run on the member that was.
-      if (parsed.ts - now > FLEET_FUTURE_MS) return { ok: false, failure: "ahead" };
-      if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary" };
+      if (parsed.ts - now > FLEET_FUTURE_MS) return { ok: false, failure: "ahead", fleet: true, verified: true };
+      if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary", fleet: true, verified: true };
     }
     // Signed before this process started, or before a nonce that was forgotten: it may be a call that was run.
-    if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay" };
+    if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay", verified: true };
     let request: unknown;
     try {
       // The signature covers the bytes as they came, a leading byte-order mark included; JSON.parse does not take one.
       request = (this.opts.parse ?? JSON.parse)(frame.raw.charCodeAt(0) === 0xfeff ? frame.raw.slice(1) : frame.raw);
     } catch {
-      return { ok: false, failure: "bad-body" };
+      return { ok: false, failure: "bad-body", verified: true };
     }
     // A nonce is spent only by a call whose signature is good, so nobody else can fill the table.
     const nonceKey = `${parsed.keyId}.${parsed.nonce}`;
     this.forgetOldNonces(now);
-    if (this.seen.has(nonceKey)) return { ok: false, failure: "replay" };
+    if (this.seen.has(nonceKey)) return { ok: false, failure: "replay", verified: true };
     if (signer.tools && isToolCall(request) && !signer.tools.includes(toolName(request))) {
-      return { ok: false, failure: "tool-not-allowed" };
+      return { ok: false, failure: "tool-not-allowed", verified: true };
     }
     this.seen.set(nonceKey, { ts: parsed.ts });
     this.ranNonces.set(parsed.nonce, parsed.ts);
@@ -403,7 +505,7 @@ export class CallerAuth {
         this.floorTs = Math.max(this.floorTs, oldest[1].ts);
       }
     }
-    return { ok: true, request, nonce: parsed.nonce, keyId: parsed.keyId };
+    return { ok: true, request, nonce: parsed.nonce, keyId: parsed.keyId, ...(forFleet ? { fleet: true } : {}) };
   }
 
   private forgetOldNonces(now: number): void {
@@ -475,12 +577,20 @@ export class CallerAuth {
     while (this.flushing) await this.flushing;
   }
 
+  /** The member's certificate for this reply key, when the agent has written one that is for it and has not run out. */
+  private replyCert(replyKey: string): string | undefined {
+    const c = this.fleetCallers().file?.replyCert;
+    return c && c.key === replyKey && c.until > this.now() + 60_000 ? c.cert : undefined;
+  }
+
   /** Sign a reply so the caller knows this device (and not the gateway) answered. undefined if the key cannot be had. */
   replySig(call: ReplyBinding, responseText: string): string | undefined {
     try {
       this.replyKey ??= loadOrCreateCallerKey(join(this.stateDir, "device-ed25519.pem"));
       const sig = cryptoSign(null, replyMessage(call.nonce, call.raw, responseText), this.replyKey.privateKey).toString("base64url");
-      return `${REPLY_SIG_VERSION}.${this.replyKey.publicKey.toString("base64url")}.${sig}`;
+      const head = `${REPLY_SIG_VERSION}.${this.replyKey.publicKey.toString("base64url")}.${sig}`;
+      const cert = call.fleet ? this.replyCert(this.replyKey.publicKey.toString("base64url")) : undefined;
+      return cert ? `${head}.${cert}` : head;
     } catch (err) {
       if (!this.replyFailureSaid) {
         this.replyFailureSaid = true;

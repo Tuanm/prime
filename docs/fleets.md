@@ -648,9 +648,17 @@ checked by the space that runs it against what the signed roster says, not again
   with "update prime" (a device that predates this does not answer the question, and the call is signed as it was). A question that is not answered (the
   network, a 5xx, a 429, a reply that is not JSON) is asked once more and is not remembered as "this device is old". When the fleet's primary has moved
   since the member was asked, the member that is sent the call refuses it, and the client forgets the answer, so that the next call asks again; the refused call is not
-  sent again by the client. **The answers of a fleet are not authenticated**: whatever member answers, a reply's signature says only that someone who holds a key signed it
-  (a fleet's member keys are not bound to the roster yet), so a gateway can answer a call that ran with "did not run, send it again". Look at the work tree before you
-  send a refused call again, whatever the refusal says; a refusal that says a call "did not run" is the member's word if it is the member's, and the gateway can say it too.
+  sent again by the client unless the refusal is a member's (below).
+- **Whose reply it is.** A fleet's members have no key of the owner's that a space could sign with, and a gateway has keys of its own, so a reply's signature alone says only that
+  someone who holds a key signed it. The member's agent therefore signs a certificate ("in fleet F, the space of device D signs its replies with R, until T"; 24 hours, made again
+  when half gone or when the key changes) with the member's signing key, the `spub` the owner's roster names for it, and the space adds it to the signature of the replies it gives a fleet.
+  A machine that calls a fleet pins the owner's fingerprint (`prime fleets roster pin-caller <fleet> --owner <fingerprint>`, from `roster init` or the invite's `~fingerprint`), reads the
+  signed roster from the gateway (a buddy token may read that, and nothing else of the fleet), and takes a reply as a member's only when the certificate is signed by the key the roster
+  names for the member the call was made for. **Without the pin the replies of a fleet are not authenticated** and the client says so once: a gateway can answer a call that ran
+  with "did not run, send it again", so look at the work tree before you send a refused call again.
+  With the pin the client makes one more try, once: when the member the call was made for says it is not the primary (and proves it is that member), the call did not run
+  anywhere (it was made for that member alone), so the client asks which member answers now and signs the call again. A refusal that is signed by a key the roster does not name,
+  or by another member than the one the call was made for, is never acted on.
 - **Only the primary runs such a call.** A replica refuses it ("the call did not run"). A call signed before the space became the primary, or within 5
   seconds after it, is refused (it may have run on the member that was), and so is one signed more than a minute ahead of the device's clock (a caller's
   clock that is off by less is taken for a clock a little off; the message gives the figure). The agent renews the file every 20 seconds while it runs, and a space stops believing "primary" 2 minutes after it was
