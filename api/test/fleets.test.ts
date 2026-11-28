@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { deleteRows, listRows } from "./fake-list";
 import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes } from "node:crypto";
 import {
   cleanLabel,
@@ -47,8 +48,11 @@ function fakeState() {
         // round-trip through JSON, like a real SQLite-backed DO
         data.set(key, JSON.parse(JSON.stringify(value)));
       },
-      async delete(key: string): Promise<boolean> {
-        return data.delete(key);
+      async delete(key: string | string[]): Promise<boolean | number> {
+        return Array.isArray(key) ? deleteRows(data, key) : data.delete(key);
+      },
+      async list(o: { prefix?: string; start?: string; limit?: number; reverse?: boolean }): Promise<Map<string, unknown>> {
+        return listRows(data, o);
       },
     },
     async blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
@@ -1597,7 +1601,9 @@ describe("what a deleted fleet leaves in storage", () => {
     for (const key of ["fleets/acme-two/head", "fleets/acme-two/packs/" + "c".repeat(64), "fleets/other/head"]) await bucket.put(key, "x");
     const deleted = await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
     expect(deleted.status).toBe(200);
-    expect([...bucket.objects.keys()].sort()).toEqual(["fleets/acme-two/head", "fleets/acme-two/packs/" + "c".repeat(64), "fleets/other/head"]);
+    // The fleet's own objects go; what was done to it is kept, outside `fleets/<id>/`, so that it outlives it.
+    expect([...bucket.objects.keys()].filter((k) => !k.startsWith("audit/")).sort()).toEqual(["fleets/acme-two/head", "fleets/acme-two/packs/" + "c".repeat(64), "fleets/other/head"]);
+    expect([...bucket.objects.keys()].filter((k) => k.startsWith("audit/acme/"))).toHaveLength(1);
   });
 
   test("more than a page of it is all taken", async () => {
@@ -1605,7 +1611,7 @@ describe("what a deleted fleet leaves in storage", () => {
     await makeFleet(doInstance, "dev-owner");
     for (let i = 0; i < 2300; i++) await bucket.put("fleets/acme/packs/p" + i, "x");
     await call(doInstance, "/delete", { caller: "device", device: "dev-owner" });
-    expect(bucket.objects.size).toBe(0);
+    expect([...bucket.objects.keys()].filter((k) => !k.startsWith("audit/"))).toEqual([]);
   });
 });
 
@@ -1720,7 +1726,7 @@ describe("clearing away a fleet nobody can reach", () => {
     const res = await routeOf(doInstance, bucket, "reap", "anon-stranger", registryMapping(mapOf({ anonymous: ["anon-stranger"] })));
     expect(res.status).toBe(200);
     expect(state.data.get("members")).toBeUndefined();
-    expect(bucket.objects.size).toBe(0);
+    expect([...bucket.objects.keys()].filter((k) => !k.startsWith("audit/"))).toEqual([]);
   });
 
   test("a registry that fails keeps the fleet", async () => {

@@ -152,6 +152,8 @@ export interface Env {
   FLEET_OPERATOR_SSO_ONLY?: string; // "1"/"true": operator actions need an Access identity, not the shared token
   FLEET_OPERATOR_EMAILS?: string; // comma list of Access emails that may operate (empty = any Access admits)
   FLEET_LEASE_MS?: string; // a fleet's lease when its operator has not set one (default 45000; held to 30000-180000)
+  /** "0" stops a relayed call from being written to a fleet's audit log (one row each). */
+  FLEET_AUDIT_RELAY?: string;
   FLEET_LEASE_MIN_MS?: string; // lowers the 30000 floor (1000 at least): for a test that must see a lease run out in seconds
   FLEET_OPERATOR_TOKEN?: string; // who runs fleets as the operator, apart from GATEWAY_TOKEN (see GatewayConfig)
   // Keys the verifiers the gateway keeps instead of tokens (src/token-hash.ts).

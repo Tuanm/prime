@@ -370,7 +370,19 @@ describe("the fleets in the admin interface", () => {
     expect(root.children[0]!.className).toContain("cloud-ic");
     expect(root.children[0]!.className).toContain("on");
     expect(root.children[0]!.className).not.toContain("hollow");
-    expect(menuOf(root)).toEqual(["Save", "Deactivate", "Invite", "Delete"]);
+    expect(menuOf(root)).toEqual(["Save", "Deactivate", "Invite", "Audit", "Delete"]);
+  });
+
+  test("Audit asks the gateway for the last of the fleet's log and shows it in a dialog", async () => {
+    const page = loadPage([{ fleet: "acme", members: [], primary: null, pending: [] }]);
+    await page.settle();
+    const root = page.list()[0]!.children[0]!;
+    press(action(root, "Audit"));
+    await page.settle();
+    const asked = page.calls.filter((c) => c.path.includes("/audit"));
+    expect(asked.map((c) => [c.method, c.path])).toEqual([["GET", "/admin/api/fleets/acme/audit?tail=100"]]);
+    const body = page.body.children.filter((c) => c.className === "overlay").at(-1)!.querySelector(".dlg-body")!;
+    expect(body.children[0]!.textContent).toContain("Nothing has been done");
   });
 
   test("a paused fleet is drawn as switched off, and offers Activate", async () => {

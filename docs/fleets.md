@@ -513,6 +513,49 @@ the tooltip. The gateway keeps only that fingerprint, never the token.
 **Refresh token** makes a new one and shows it once, because there is no second
 chance.
 
+## What was done to a fleet
+
+Each fleet keeps a log of what was done to it, who did it and when, in an order nobody can change afterwards. It
+is written by the fleet's own object, so there is nothing to switch on.
+
+**What is written:** the fleet made, deleted (by the operator, by its last member leaving, or cleared away because
+every member was gone) and changed (its name, its pause, its lease); an invite made (its lifetime, never its code)
+and the invites revoked; a space's request to join, an admission, a removal or a decline; a member's request for
+another key, and a key replaced (by the operator's approval or by the proof of the old key, with the two
+fingerprints); the lease taken by a new holder (never a renewal), given up, or taken out of the running; every
+snapshot published (its number, its manifest's hash, the epoch and the key it was made with); the fleet's own
+token set or cleared (that it was, never the token); and every call relayed to the primary (the method, the tool's
+name and the size of the body - **never what the call asked**, and never what it carried).
+
+**Who:** `operator` (the operator token), `access` (a person who signed in through Access, by e-mail, or a service
+token by name), `owner` (the fleet's owner device acting as its operator), `device` (a member, by its id),
+`fleet-token` (a client that came with the fleet's own token) and `gateway` (the gateway on its own account, as
+when it takes a silent holder out of the running). A device is always itself: the header that names an operator is
+set by the gateway and dropped from every request it takes in. No address is kept.
+
+**The chain:** every entry carries the SHA-256 of the entry before it, so removing, changing or reordering one shows
+in the one after it. `head` (the number and hash of the last entry) is what to keep to check later reads against;
+`brokenAt(entries, prev)` in `api/src/fleet-audit.ts` is the check. The log is the gateway's own word: whoever holds
+the gateway's storage can rewrite all of it, and a head kept somewhere else is what tells that they did.
+
+**Reading it:** `GET /fleets/{fleet}/audit?after=N&limit=M` (the operator token, Access, or the fleet's owner),
+`GET /admin/api/fleets/{fleet}/audit?tail=100` (the admin page's **Audit** item on a fleet). It answers
+`{entries, head: {n, hash}, first}`; `first` is the oldest entry the fleet's object still holds.
+
+**How big it gets:** the object keeps the newest 10,000 entries. When it holds 11,000 the oldest 1,000 go to the
+bucket as one file, `audit/<fleet>/<time>-<first number>.jsonl`, and out of the object; the first entry that is left
+carries the hash of the last that went, so the chain runs across the two. A fleet that is deleted has everything it
+holds copied there too (outside `fleets/<fleet>/`, which is cleared with it), so what was done to a fleet outlives it,
+and a fleet made again under the name starts a log of its own. If the bucket cannot be written for so long that the
+object holds 30,000 entries, the oldest thousand are dropped without a copy and an `audit-dropped` entry says which;
+an entry that could not be stored at all is counted and the reader is told (`unrecorded`). Neither stops the work.
+
+**What it costs:** a row written for each entry, and one more when the entry is trimmed away: about two rows
+a publish or a relayed call. A fleet whose agents publish every few seconds and whose clients call a tool every
+few seconds makes about 150,000 entries a month, which is $0.15 to $0.30 a month in rows at list prices, and a few
+megabytes in the bucket. The log of a relayed call is written by the question that asks who the primary is, so it
+adds no request. A gateway whose relayed calls are many can leave them out: `FLEET_AUDIT_RELAY=0`.
+
 ## Three credentials, three jobs
 
 | Credential | Belongs to | Can do |

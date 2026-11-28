@@ -1,6 +1,7 @@
 // A fleet's lease is set by its operator within bounds, a holder cannot name its own, and each member says what
 // it can do, which is written once and read back as what every member can do.
 import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } from "bun:test";
+import { deleteRows, listRows } from "./fake-list";
 
 mock.module("cloudflare:workers", () => ({
   DurableObject: class {
@@ -37,9 +38,12 @@ function world(env: Record<string, unknown> = {}, socket = false) {
       writes.push("put:" + key);
       data.set(key, JSON.parse(JSON.stringify(value)));
     },
-    async delete(key: string) {
-      writes.push("delete:" + key);
-      return data.delete(key);
+    async delete(key: string | string[]) {
+      for (const k of Array.isArray(key) ? key : [key]) writes.push("delete:" + k);
+      return Array.isArray(key) ? deleteRows(data, key) : data.delete(key);
+    },
+    async list(o: { prefix?: string; start?: string; limit?: number; reverse?: boolean }) {
+      return listRows(data, o);
     },
   };
   if (socket) storage.setAlarm = async () => {};

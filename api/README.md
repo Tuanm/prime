@@ -94,6 +94,7 @@ Files authenticate with the buddy's own id and token, over HTTP Basic. There is 
 | `POST /fleets/{fleet}/join` | a buddy's token and the invite code | Ask to join. It waits until the operator admits it. |
 | `POST /fleets/{fleet}/bootstrap` | a member's token | Take the lease or become a replica, in one step. |
 | `POST /fleets/{fleet}/meta` | the fleet operator token, or the fleet's owner | Set the fleet's lease: `{"leaseMs": 90000}` (30 s to 3 min; `null` for the gateway's). Nothing else goes through here. |
+| `GET /fleets/{fleet}/audit?after=N&limit=M` | the fleet operator token, Access, or the fleet's owner | The fleet's audit log from the entry after `N`: `{entries, head:{n,hash}, first}`. See docs/fleets.md. |
 | `GET /fleets/{fleet}` | a member's token | The roster. Ids are cut short for everyone but the operator. |
 | `GET /fleets/{fleet}/head` | a member's token | Where the work has got to. |
 | `GET /fleets/{fleet}/events` | a member's token | A WebSocket the fleet speaks on: `hello`, `paused`, `resumed`, `head`, `lease-free`, `bye`. The member sends `ping`; the runtime answers `pong` for free. |
@@ -126,6 +127,7 @@ These need Cloudflare Access, unless the row says otherwise. The gateway verifie
 | `POST /admin/api/fleets/{fleet}/remove` | Access | Take a member out. |
 | `POST /admin/api/fleets/{fleet}/buddy` | Access | Set the fleet's own token. |
 | `POST /admin/api/fleets/{fleet}/meta` | Access | Rename a fleet, pause it, or set its lease (`leaseMs`, 30 s to 3 min, or `null`). |
+| `GET /admin/api/fleets/{fleet}/audit?tail=100` | Access | The newest entries of the fleet's audit log (or `after`/`limit`). |
 | `DELETE /admin/api/fleets/{fleet}` | Access | Delete a fleet. Its spaces are left alone. |
 | `GET /admin/api/usage` | Access | What the month has cost so far. |
 | `GET, POST, DELETE /admin/api/blocked` | Access | Block or unblock an address. |
@@ -273,6 +275,7 @@ npx wrangler deploy                        # publish the gateway
 | `R2_FREE_STORAGE_GB` | `10` | The free storage the budget assumes before it charges for any bytes. |
 | `FLEET_MONTHLY_BUDGET_USD` | `20` | The monthly ceiling on running fleets, counted as the whole bill (plan, requests, busy time, storage rows, R2 operations and stored bytes). Past it, fleet calls answer 402. |
 | `FLEET_LEASE_MS` | `45000` | The lease of a fleet whose operator has set none: how long a place in a fleet lasts without a renewal, held between 30 s and 3 min. A longer lease is cheaper and fails over more slowly (see docs/fleets.md). |
+| `FLEET_AUDIT_RELAY` | on | `0` leaves relayed calls out of a fleet's audit log (a row each); everything else is still written. |
 | `FLEET_LEASE_MIN_MS` | `30000` | Lowers the 30 s floor, to 1000 at the least, for a test that must see a lease run out in seconds. Leave it unset. |
 | `FLEET_INVITE_RATE_MAX`, `FLEET_UNKNOWN_RATE_MAX` | `30`, `60` | Code checks, and requests naming a device the gateway does not know, per client address per minute; beyond them, 429 with `Retry-After`. `0` turns one off. The `[[ratelimits]]` bindings in `wrangler.toml` keep the same two limits across a location. |
 | `FLEET_BODY_MAX_BYTES` | `65536` | The largest body a fleet route forwards (4 KB for a code check); beyond it, 413. |

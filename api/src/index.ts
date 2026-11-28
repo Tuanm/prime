@@ -27,6 +27,7 @@ import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, tokenVerifi
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 import { readBounded, readBoundedText } from "./body";
+import { describeCall } from "./fleet-audit";
 import { INVITE_CHECK_BODY_MAX, limitAsk } from "./fleet-limits";
 import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
@@ -307,11 +308,17 @@ async function relayToFleet(
   headers.set("x-prime-caller", "device");
   headers.set("x-prime-device", callerId);
   headers.set("x-prime-fleet", fleetId);
+  // The body is read before the fleet is asked, because the fleet's audit log is told what the call is - its method and
+  // the tool's name, and how large it is - in the very question that asks who the primary is: no request of its own.
+  const relayBody = await readBounded(request, cfg.maxBodyBytes);
+  if (relayBody instanceof Response) return relayBody;
   // A member asks as itself; a fleet's own token has already been proved by
   // the gateway, so the fleet answers the gateway itself.
-  const info = await stub.fetch("https://fleet/primary", {
+  const askHeaders = asBuddy ? adminHeaders(headers) : headers;
+  if (asBuddy) askHeaders.set("x-prime-actor", "fleet-token");
+  const info = await stub.fetch("https://fleet/primary?audit=" + encodeURIComponent(describeCall(relayBody)) + "&bytes=" + relayBody.byteLength, {
     method: "GET",
-    headers: asBuddy ? adminHeaders(headers) : headers,
+    headers: askHeaders,
   });
   if (!info.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
   const body = (await info.json()) as { member?: boolean; primary?: string | null; since?: number };
@@ -363,8 +370,6 @@ async function relayToFleet(
   if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) relayHeaders.set("mcp-session-id", sid);
   forwardCallerSig(request, relayHeaders);
   markAnonymous(relayHeaders, request, cfg, env);
-  const relayBody = await readBounded(request, cfg.maxBodyBytes);
-  if (relayBody instanceof Response) return relayBody;
   const relayed = await deviceStub.fetch(new Request(doUrl, { method: "POST", headers: relayHeaders, body: relayBody }));
   // A primary that cannot be reached is the fleet's problem, not the
   // caller's: say so, and say which member it was.
@@ -493,7 +498,7 @@ async function vacateSilentPrimary(env: Env, fleetId: string, holder: string | n
   if (!env.FLEET || !holder) return null;
   if (await deviceOnline(env, holder, since)) return null;
   const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
-  const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId });
+  const headers = new Headers({ "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId, "x-prime-actor": "gateway" });
   await stub
     .fetch("https://fleet/vacate", { method: "POST", headers, body: JSON.stringify({ deviceId: holder }) })
     .catch(() => null);
@@ -1338,6 +1343,17 @@ export default {
         if (request.method === "DELETE" && step === "") {
           return await adminFleetAction(env, fleetId, "delete", {}, adminActor);
         }
+        if (request.method === "GET" && step === "audit") {
+          // What was done to the fleet, from the entry after `after`.
+          if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+          const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
+          const asked = new URL("https://fleet/audit");
+          for (const name of ["after", "limit", "tail"]) {
+            const v = url.searchParams.get(name);
+            if (v !== null) asked.searchParams.set(name, v);
+          }
+          return await stub.fetch(asked.toString(), { method: "GET", headers: { "x-prime-caller": "admin", "x-prime-fleet": fleetId } });
+        }
         if (request.method === "POST" && step === "invite") {
           return await adminFleetAction(env, fleetId, "invite", {}, adminActor);
         }
@@ -1364,6 +1380,17 @@ export default {
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ token }),
           });
+          // The fleet's own record says it was done (that it was, never the token or anything made from it). Told after the
+          // registry took it, and only when it did; a fleet that does not exist, or a note that fails, changes nothing of the answer.
+          if (res.ok && env.FLEET) {
+            await env.FLEET.get(env.FLEET.idFromName(fleetId))
+              .fetch("https://fleet/note", {
+                method: "POST",
+                headers: { "content-type": "application/json", "x-prime-caller": "admin", "x-prime-fleet": fleetId, ...(adminActor ? { "x-prime-actor": adminActor } : {}) },
+                body: JSON.stringify({ action: token ? "fleet-token-set" : "fleet-token-cleared" }),
+              })
+              .catch(() => null);
+          }
           return new Response(res.body, { status: res.status, headers: res.headers });
         }
         if (request.method === "POST" && step === "meta") {
