@@ -27,6 +27,7 @@ import {
 import {
   fleetAgentDir,
   fleetAgentStatePath,
+  ensureFleetAgent,
   fleetAgentStatus,
   installFleetAgent,
   restartFleetAgentAfterUpdate,
@@ -939,4 +940,84 @@ describe("what an update hands the agent it starts", () => {
     expect(takeHandoverEnv(env, 5_000_000)).toEqual({ since: 5_000_000 - 100, replaces: 321, lockWaitMs: 900_000 });
     expect(env).toEqual({ PATH: "/bin" });
   });
+});
+
+withProcesses("setting the service up while the agent it starts waits for the lock", () => {
+  /** An agent that a hand started and still holds the lock, and the one the service has started, which waits behind it. */
+  async function serviceBehindOldAgent(): Promise<{ configPath: string; log: string; old: Spawned; service: Spawned }> {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const log = join(root, "log");
+    const old = await oldAgent(configPath, log, "300");
+    const service = startAgent(configPath, log, { PRIME_FLEET_LOCK_WAIT_MS: "20000" });
+    expect(await until(() => said(log, service.pid).includes("waiting"))).toBe(true);
+    // A request made in the first moments of an agent's life is for the agent before it (see SLACK_MS).
+    await Bun.sleep(200);
+    return { configPath, log, old, service };
+  }
+
+  test("`agent install` stops the agent in the way, and the service's agent that takes the lock after it runs", async () => {
+    const { configPath, log, old, service } = await serviceBehindOldAgent();
+    await installFleetAgent(configPath, { install: () => "unit", boundTo: () => undefined, servicePid: () => service.pid, stopWaitMs: 5000 });
+    expect(await until(() => said(log, service.pid).includes("took"))).toBe(true);
+    await Bun.sleep(1500);
+    expect(said(log, service.pid)).not.toContain("stopped");
+    expect(alive(service.pid)).toBe(true);
+    expect(alive(old.pid)).toBe(false);
+  }, 30_000);
+
+  test("a command that changes the agent's settings does the same", async () => {
+    const { configPath, log, service } = await serviceBehindOldAgent();
+    const state = await ensureFleetAgent(configPath, {}, { installed: () => true, pid: () => service.pid, restart: () => true, stopWaitMs: 5000 });
+    expect(state.pid).toBe(service.pid);
+    await Bun.sleep(1500);
+    expect(said(log, service.pid)).not.toContain("stopped");
+    expect(alive(service.pid)).toBe(true);
+  }, 30_000);
+
+  test("`agent stop` still stops every agent that was started before it, the service's included", async () => {
+    const { configPath, log, old, service } = await serviceBehindOldAgent();
+    stopFleetAgent(configPath);
+    expect(await until(() => !alive(old.pid))).toBe(true);
+    expect(await until(() => said(log, service.pid).includes("stopped"))).toBe(true);
+    expect(said(log, service.pid)).not.toContain("took");
+  }, 30_000);
+});
+
+describe("a request to stop that is for one agent", () => {
+  test("a successor that is stopped by name is the only one that the request is for", () => {
+    const dir = join(scratch(), "a", "fleet-agent");
+    registerSuccessor(dir, process.pid);
+    expect(stopWaitingSuccessor(dir, Date.now(), () => true, () => {})).toBe(true);
+    expect(stopRequestedSince(dir, Date.now() - 1000, process.pid)).toBe(true);
+    // An agent that the service started meanwhile is not the successor.
+    expect(stopRequestedSince(dir, Date.now() - 1000, process.pid + 1)).toBe(false);
+  });
+});
+
+describe("what the agent writes to its log", () => {
+  test("it says that it started, that it holds the lock, what asked it to stop, and that it left", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const dir = fleetAgentDir(configPath);
+    const script = `import { runFleetAgent } from ${JSON.stringify(join(import.meta.dir, "../src/fleet-daemon.ts"))}; await runFleetAgent(${JSON.stringify(configPath)}, { lockWaitMs: 0 });`;
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      env: { ...process.env, PRIME_FLEET_REPLACES: "", PRIME_FLEET_POLL_MS: "50" },
+      stdout: "ignore",
+      stderr: "pipe",
+      timeout: 40_000,
+      killSignal: "SIGKILL",
+    });
+    cleanups.push(() => child.kill("SIGKILL"));
+    expect(await until(() => existsSync(fleetAgentStatePath(configPath)), 20_000)).toBe(true);
+    await Bun.sleep(150);
+    requestStop(dir);
+    expect(await child.exited).toBe(0);
+    const log = await new Response(child.stderr).text();
+    const lines = log.trim().split("\n");
+    expect(lines[0]).toMatch(/^\d{4}-\d\d-\d\dT[\d:.]+Z fleet agent \(pid \d+\): starting/);
+    expect(log).toContain("holds the lock");
+    expect(log).toContain("asked to stop (a request to stop in the agent's directory)");
+    expect(lines.at(-1)).toContain("leaving: stopped");
+  }, 60_000);
 });

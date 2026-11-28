@@ -208,12 +208,14 @@ export function takeHandoverEnv(env: Record<string, string | undefined>, started
  * claim that has no process yet is stopped too: the request is what the successor, which is started after it, finds. An
  * entry that names nothing live is only removed, and asks nobody to stop. True when a live successor was signalled.
  */
-export function stopWaitingSuccessor(agentDir: string, now: number = Date.now()): boolean {
+export function stopWaitingSuccessor(agentDir: string, now: number = Date.now(), isAgent: (pid: number) => boolean = (pid) => isSuccessorProcess(agentDir, pid), kill?: (pid: number) => void): boolean {
   const there = readSuccessor(agentDir);
   if (!there) return false;
-  const live = there.pid > 0 ? isSuccessorProcess(agentDir, there.pid) : now - there.at < CLAIM_MS;
-  if (live) requestStop(agentDir, now);
-  return stopSuccessor(agentDir) !== undefined;
+  const live = there.pid > 0 ? isAgent(there.pid) : now - there.at < CLAIM_MS;
+  // For the successor, and not for every agent that was started before now: the agent that a service has started
+  // meanwhile is not the one that is being stopped. A claim has no process yet to name.
+  if (live) requestStop(agentDir, now, there.pid > 0 ? there.pid : undefined);
+  return stopSuccessor(agentDir, isAgent, kill) !== undefined;
 }
 
 /**

@@ -546,7 +546,11 @@ with the same.
   starts the agent: `agent start`, `spaces create` and a settings change ask it to start or
   restart it, and no agent is spawned beside it. An agent that was started by hand and is running
   when the service is installed (or is found beside it later) is stopped first, and `agent install`
-  does the same, except for the service's own agent, which the manager replaces. If the manager
+  does the same, except for the service's own agent, which the manager replaces. That stop is for the one agent that is
+in the way: the agent the service has started meanwhile, which waits for the lock behind it, is not asked to leave
+(only `agent stop` asks every agent). What the agent does is written to its log (standard error: the service's log file
+under `~/Library/Logs/prime` on macOS, the journal on Linux): when it starts, which agent it waits for, when it holds the
+lock, what asked it to stop, and that it left. If the manager
   cannot be reached (no login session on a headless machine, no user bus, a service file left by an
   install that failed) the service counts for nothing: the agent is handled directly, as if it
   were not installed - except that a settings change is refused while an agent is running (it may be

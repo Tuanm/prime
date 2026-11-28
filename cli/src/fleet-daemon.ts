@@ -608,7 +608,9 @@ function runningAgent(configPath: string): FleetAgentState | undefined {
 
 /** Ask the agent to stop and wait for it to be gone; never leave it to be started beside. */
 async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: number, platform: string = process.platform): Promise<void> {
-  await stopAgentProcess(configPath, state, waitMs, platform);
+  // The agent that is in the way, and no other: what asks for it here is a command that sets the service (or the
+  // settings) up, and the agent the service starts is the one that must run (see `stopFleetAgent`).
+  await stopAgentProcess(configPath, state, waitMs, platform, true);
   const gone = Date.now() + waitMs;
   while (pidAlive(state.pid) && Date.now() < gone) await Bun.sleep(50);
   if (pidAlive(state.pid)) {
@@ -625,16 +627,16 @@ async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: n
  * middle of its round: the agent is asked in a file that it looks at while it runs, given `waitMs` to finish and leave,
  * and ended only if it does not.
  */
-async function stopAgentProcess(configPath: string, state: FleetAgentState, waitMs: number, platform: string = process.platform): Promise<boolean> {
+async function stopAgentProcess(configPath: string, state: FleetAgentState, waitMs: number, platform: string = process.platform, only: boolean = false): Promise<boolean> {
   if (platform === "win32") {
     const was = isFleetAgentProcess(state.pid, fleetAgentDir(configPath));
-    requestStop(fleetAgentDir(configPath));
+    requestStop(fleetAgentDir(configPath), Date.now(), only ? state.pid : undefined);
     const gone = Date.now() + waitMs;
     while (pidAlive(state.pid) && Date.now() < gone) await Bun.sleep(50);
     // One that left in time is stopped; one that did not is ended now.
-    return stopFleetAgent(configPath) || was;
+    return stopFleetAgent(configPath, only) || was;
   }
-  return stopFleetAgent(configPath);
+  return stopFleetAgent(configPath, only);
 }
 
 /** The pid of the successor that waits for the lock, if one does. */
@@ -976,12 +978,21 @@ export async function stopFleetAgentManaged(
 /**
  * Stop the agent. Returns true when one was running (or was about to: a successor that waits for the lock).
  * The request to stop is written first, so that a successor that is taking the lock at this moment sees it.
+ *
+ * A request is for every agent that was started before it, which is what `agent stop` means. With `only` it is not: a
+ * command that is setting the service up, or changing the agent's settings, stops the agent that is in the way (that is
+ * a signal, which needs no request where it is one) and the successor of an update that waits, and no more. A request
+ * for all would be taken by the agent the service has started meanwhile, which is waiting for the very lock this
+ * agent holds, and it would leave the moment it had it.
  */
-export function stopFleetAgent(configPath: string): boolean {
+export function stopFleetAgent(configPath: string, only: boolean = false): boolean {
   const dir = fleetAgentDir(configPath);
   const state = readFleetAgentState(configPath);
-  if (!state && !readSuccessor(dir)) return false;
-  requestStop(dir);
+  const waiting = readSuccessor(dir);
+  if (!state && !waiting) return false;
+  if (!only) requestStop(dir);
+  else if (waiting && waiting.pid === 0) requestStop(dir);
+  else if (waiting && isSuccessorProcess(dir, waiting.pid)) requestStop(dir, Date.now(), waiting.pid);
   const successor = stopSuccessor(dir) !== undefined;
   if (!state) return successor;
   // A pid left in the state by an agent that is gone may belong to anything now.
@@ -1769,6 +1780,15 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
 const DEFAULT_LOCK_WAIT_MS = 10_000;
 
 /**
+ * A line in the agent's log (its standard error, which the service manager writes to the agent's log file): when it
+ * started, which lock it waited for, what asked it to stop and why it left. Without them, an agent that left, or was
+ * started again, left nothing to say why.
+ */
+function logAgent(text: string): void {
+  process.stderr.write(new Date().toISOString() + " fleet agent (pid " + process.pid + "): " + text + "\n");
+}
+
+/**
  * The agent's loop.
  *
  * Every space gets its own loop, so a space that is slow does not hold up the
@@ -1782,6 +1802,8 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   // (An agent that an update started was started on behalf of the update's claim, a moment earlier: see `claimSuccessor`.)
   const startedAtMs = Math.min(realStart, handover.since !== undefined ? handover.since - SINCE_MARGIN_MS : Infinity);
   const replaces = handover.replaces;
+  logAgent("starting" + (replaces !== undefined ? ", to replace the agent of pid " + replaces : "") + (handover.since !== undefined ? ", for an update's claim made " + (Math.round(realStart - handover.since)) + " ms before" : ""));
+  const waitingSince = Date.now();
   // Two agents for the same spaces would both act as the primary. A restart finds the old
   // one still finishing its round, so it is given a moment to let go (and one that was started to replace it
   // waits for as long as that agent is at it).
@@ -1789,13 +1811,13 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
     waitMs: options.lockWaitMs ?? handover.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
     startedAt: startedAtMs,
     ...(replaces !== undefined ? { replaces } : {}),
-    onWait: (holder) => process.stderr.write("the fleet agent (pid " + holder + ") is still finishing its round; this one keeps waiting for it\n"),
+    onWait: (holder) => logAgent("the fleet agent (pid " + holder + ") is still finishing its round; this one keeps waiting for it"),
     lock: {
       // Another agent has the lock: two took a dead one at the same moment. This one stops, and its
       // manager (or the next command) starts it again behind the lock. It finishes its current round
       // first, so the two overlap for up to one touch interval plus that round.
       onLost: () => {
-        process.stderr.write("the fleet agent's lock was taken by another agent; this one stops\n");
+        logAgent("the lock was taken by another agent; this one stops");
         process.exitCode = 1;
         process.kill(process.pid, "SIGTERM");
       },
@@ -1803,15 +1825,20 @@ export async function runFleetAgent(configPath: string, options: FleetAgentOptio
   });
   if (!lock.held) {
     if ("stopped" in lock) {
-      process.stderr.write("the fleet agent was asked to stop while this one was starting; it did not start\n");
+      logAgent("asked to stop while it was starting (a request to stop that is newer than this process); it did not start, and leaves");
       return;
     }
-    process.stderr.write("another fleet agent is already running" + (lock.holder > 0 ? " (pid " + lock.holder + ")" : "") + "; this one exits\n");
+    logAgent("another fleet agent is already running" + (lock.holder > 0 ? " (pid " + lock.holder + ")" : "") + "; this one exits after waiting " + (Date.now() - waitingSince) + " ms for the lock");
     process.exitCode = 1;
     return;
   }
+  logAgent("holds the lock" + (Date.now() - waitingSince > 100 ? " (after waiting " + (Date.now() - waitingSince) + " ms)" : ""));
   try {
     await runFleetAgentLocked(configPath, options, startedAtMs);
+    logAgent("leaving: stopped" + (process.exitCode ? " (exit code " + process.exitCode + ")" : ""));
+  } catch (err) {
+    logAgent("leaving: " + (err instanceof Error ? err.message : String(err)));
+    throw err;
   } finally {
     lock.release();
   }
@@ -1829,16 +1856,17 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   let stopping = false;
   const wakeups = new Map<string, () => void>();
-  const stop = (): void => {
+  const stop = (why: string): void => {
+    if (!stopping) logAgent("asked to stop (" + why + "); it finishes its round and leaves");
     stopping = true;
     // A loop may be asleep for minutes now; it has to see the signal at once.
     for (const w of wakeups.values()) w();
   };
-  process.on("SIGTERM", stop);
-  process.on("SIGINT", stop);
+  process.on("SIGTERM", () => stop("signal SIGTERM"));
+  process.on("SIGINT", () => stop("signal SIGINT"));
   // A stop that is asked for in a file (where a signal would end the agent in the middle of its round): the loops
   // finish what they are doing and the agent leaves, as it does for SIGTERM.
-  const endStopWatch = watchForStop(dir, startedAtMs, stop, STOP_WATCH_MS);
+  const endStopWatch = watchForStop(dir, startedAtMs, () => stop("a request to stop in the agent's directory"), STOP_WATCH_MS);
 
   // The runtime is found once: it is used to tell whether a space is
   // running, and looking it up on every round would be slow.
