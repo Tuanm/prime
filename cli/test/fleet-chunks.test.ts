@@ -91,11 +91,16 @@ describe("a snapshot bigger than one request", () => {
     expect(sameTree(fingerprint(w.work), fingerprint(w.replica.work))).toBe(true);
   });
 
-  test("pieces go up four at a time", async () => {
+  test("pieces go up two at a time, each saying its hash, so that a gateway can stream it", async () => {
     const w = await world();
     w.gateway.packDelayMs = 15;
     await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2);
-    expect(w.gateway.maxPackPostsInFlight).toBe(4);
+    expect(w.gateway.maxPackPostsInFlight).toBe(2);
+    expect(w.gateway.packHashHeaders.length).toBeGreaterThan(2);
+    for (const h of w.gateway.packHashHeaders) expect(h).toMatch(/^[0-9a-f]{64}$/);
+    // The hash it says is the hash of what it sent.
+    const stored = [...w.gateway.payloads.keys()].filter((k) => k.includes("/packs/")).map((k) => k.split("/").pop());
+    for (const h of w.gateway.packHashHeaders) expect(stored).toContain(h);
   });
 
   test("a change pack bigger than a request is in pieces too, and a replica that holds the base takes it", async () => {
