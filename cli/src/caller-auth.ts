@@ -91,7 +91,7 @@ function parseBody(raw: unknown, parse: (text: string) => unknown): unknown {
 export interface ReplyBinding {
   nonce: string;
   raw: string;
-  /** The call was made for a fleet (its key is one of the fleet's callers): the reply carries the member's certificate for the key it is signed with. */
+  /** The call named the member (`fleet:<id>@<member>`, or `@` for the question which): the reply carries the member's certificate for the key it is signed with. Not the replies to the form older builds sign, which they would take for a changed signature. */
   fleet?: boolean;
 }
 
@@ -299,6 +299,9 @@ export class CallerAuth {
       failure !== "replay" &&
       failure !== "stale" &&
       sig.ts > this.floorTs &&
+      // A call signed ahead of the clock is one a restart of this process could let run after all (its time is above what the restart left as the floor),
+      // so a refusal that says "did not run" is not signed for it, up to the skew of the members' clocks.
+      sig.ts <= this.now() + FLEET_CALL_SKEW_MS &&
       !this.ranNonces.has(sig.nonce) &&
       this.retire(sig.nonce, sig.ts);
     return {
@@ -351,8 +354,6 @@ export class CallerAuth {
     const fleet = this.fleetCallers();
     const fleetEntry = fleet.file?.callers.find((e) => e.keyId === parsed.keyId);
     if (!entry && !fleetEntry) return { ok: false, failure: "unknown-key" };
-    // A call whose key is a fleet's caller and not this device's own was made for the fleet: its reply carries the certificate.
-    const fleetCall = fleetEntry !== undefined && entry === undefined;
     let signer: CallerEntry | undefined;
     let forFleet = false;
     if (entry && verifyCallSignature(parsed, Buffer.from(entry.pub, "base64"), callTarget("device", this.opts.deviceId), frame.raw)) {
@@ -369,10 +370,10 @@ export class CallerAuth {
         return { ok: false, failure: "fleet-member", fleet: true };
       } else if (verifyCallSignature(parsed, key, callTarget("fleet", id), frame.raw)) {
         // The form an older build makes: it names no member, so it could be run by every member that is sent it.
-        return { ok: false, failure: "fleet-unbound", fleet: true };
+        return { ok: false, failure: "fleet-unbound" };
       }
     }
-    if (!signer) return { ok: false, failure: "bad-signature", ...(fleetCall ? { fleet: true } : {}) };
+    if (!signer) return { ok: false, failure: "bad-signature" };
     if (forFleet) {
       const f = fleet.file!;
       // The agent's word that this space is the primary is good for a while after it was written, and no longer.

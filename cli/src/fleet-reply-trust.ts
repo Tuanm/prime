@@ -134,15 +134,34 @@ export class FleetAuthority {
     }
   }
 
+  /**
+   * Should the client say, now, that the replies of this fleet are not authenticated? Once a day for a fleet, not once for each process: a one-shot
+   * `prime tools call --fleet` is a process of its own. What was said is kept beside the pins.
+   */
+  shouldSayUnpinned(): boolean {
+    const file = this.path() + ".said";
+    const name = pinName(this.opts.gateway, this.opts.fleet);
+    try {
+      const said = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, number>) : {};
+      const now = this.now();
+      if (typeof said[name] === "number" && now - said[name]! < 24 * 60 * 60_000) return false;
+      mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+      writeFileAtomic(file, JSON.stringify({ ...said, [name]: now }) + "\n", 0o600);
+    } catch {
+      // not being able to remember is no reason not to say it
+    }
+    return true;
+  }
+
   /** Why the roster could not be used the last time it was asked for. */
   lastFailure(): string | undefined {
     return this.failure;
   }
 
   /** The owner's roster as this machine can verify it, or undefined (not pinned, not signed, not reachable, or not the owner's). */
-  async roster(): Promise<VerifiedRoster | undefined> {
+  async roster(fresh = false): Promise<VerifiedRoster | undefined> {
     const ttl = this.opts.ttlMs ?? 60_000;
-    if (this.cached && this.now() - this.cached.at < ttl) return this.cached.roster;
+    if (!fresh && this.cached && this.now() - this.cached.at < ttl) return this.cached.roster;
     let pin: OwnerPin | undefined;
     try {
       pin = pinnedFleetOwner(this.opts.gateway, this.opts.fleet, this.path());
@@ -185,14 +204,15 @@ export class FleetAuthority {
    * Is this reply one that `member` gave? Its signature must be good (checked here), and its certificate must be one that a live member
    * of the owner's roster, the one named `member`, signed for the key of the reply.
    */
-  async certifiedBy(replySig: string, nonce: string, requestBody: string, responseText: string, member: string): Promise<boolean> {
+  async certifiedBy(replySig: string, nonce: string, requestBody: string, responseText: string, member: string, options: { fresh?: boolean } = {}): Promise<boolean> {
     const certText = replyCertOf(replySig);
     if (certText === undefined) return false;
     const cert = parseReplyCert(certText);
     const pub = verifyReplySig(replySig, nonce, requestBody, responseText);
     if (!cert || !pub) return false;
     if (!checkReplyCert(cert, { fleet: this.opts.fleet, device: member, replyKey: pub.toString("base64url") }, this.now())) return false;
-    const roster = await this.roster();
+    // A member that was removed must not vouch for a retry for as long as the roster that listed it is cached: `fresh` reads it again.
+    const roster = await this.roster(options.fresh === true);
     if (!roster) return false;
     return roster.tenures.some((t) => t.device === member && t.spub === cert.spub && t.until === null && t.role !== "viewer");
   }

@@ -588,6 +588,11 @@ const SPACE_AUTH_PROBE =
   `case "$help" in *'--activity-log <file>'*) set -- "$@" --activity-log ${SPACE_STATE_DIR}/activity.jsonl;; esac; `;
 
 /** The directory the host keeps for what a space's tool server writes: the journal of its calls, its reply key and log. */
+/** Where the space's tool server keeps its reply key and the log of calls it refused: `--caller-state` in the entrypoint, under the state directory. */
+export function spaceCallerStateDir(secretDir: string): string {
+  return join(spaceStateDir(secretDir), "caller-auth");
+}
+
 export function spaceStateDir(secretDir: string): string {
   return secretDir.replace(/[\\/]+$/, "") + ".state";
 }
