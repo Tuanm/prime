@@ -205,6 +205,44 @@ describe("the commands that sign a fleet's roster", () => {
     expect(said()).toContain("as member");
   });
 
+  test("approve --viewer signs an add whose role is viewer, and --role changes a member in the roster by an entry of its own", async () => {
+    const fresh = member("dev-40");
+    gw.pending = [fresh];
+    out.length = 0;
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-40", viewer: true, key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }));
+    let v = verifyChain(gw.entries, { fleet: "acme" });
+    expect(v.tenures.find((t) => t.device === "dev-40")?.role).toBe("viewer");
+    expect(said()).toContain("as viewer");
+    gw.pending = [];
+
+    // dev-40 is in the roster now: no request is waiting, and what is asked is its role, an entry of its own.
+    const before = gw.entries.length;
+    gw.head = 12;
+    out.length = 0;
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-40", role: "member" }));
+    expect(gw.entries.length).toBe(before + 1);
+    v = verifyChain(gw.entries, { fleet: "acme" });
+    let live = v.tenures.filter((t) => t.device === "dev-40" && t.until === null);
+    expect(live.length).toBe(1);
+    expect(live[0]!.role).toBe("member");
+    expect(live[0]!.from).toBe(12);
+    expect(said()).toContain("made a member dev-40");
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-40", viewer: true }));
+    v = verifyChain(gw.entries, { fleet: "acme" });
+    live = v.tenures.filter((t) => t.device === "dev-40" && t.until === null);
+    expect(live[0]!.role).toBe("viewer");
+    expect(said()).toContain("made a viewer dev-40");
+    // Asking again for what it is signs nothing.
+    const entries = gw.entries.length;
+    out.length = 0;
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-40", role: "viewer" }));
+    expect(gw.entries.length).toBe(entries);
+    expect(said()).toContain("already");
+    // A device that is not in the roster and has no request waiting is not made anything.
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-nobody", viewer: true }))).rejects.toThrow(/no request/);
+    gw.head = 7;
+  });
+
   test("approve for a new member is signed again at the head when the gateway says the head moved", async () => {
     const fresh = member("dev-34");
     gw.pending = [fresh];

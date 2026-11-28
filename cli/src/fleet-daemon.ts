@@ -1278,10 +1278,15 @@ export function loopSleepMs(loop: SpaceLoop, pollMs: number, now: number = Date.
   return sleepMs;
 }
 
+/** How this member's work tree follows the fleet: a viewer's is written as every snapshot arrives (it is there to be read). */
+export function modeOf(loop: Pick<SpaceLoop, "viewer">): ReplicaMode {
+  return loop.viewer === true ? "mirror" : replicaMode();
+}
+
 function baseSleepMs(loop: SpaceLoop, pollMs: number, now: number): number {
   const idle = loop.primary
     ? { pollMs, idleMs: undefined }
-    : replicaSleepMs({ mode: replicaMode(), connected: loop.events.connected, pollMs, ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}) });
+    : replicaSleepMs({ mode: modeOf(loop), connected: loop.events.connected, pollMs, ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}) });
   const sleepMs = roundSleepMs({
     paused: loop.paused || loop.upgrade !== undefined,
     connected: loop.events.connected && loop.upgrade === undefined,
@@ -1439,6 +1444,11 @@ export interface SpaceLoop {
   runtime?: RuntimeInfo;
   /** The operator paused the fleet: no place is taken and nothing is renewed. */
   paused: boolean;
+  /**
+   * The fleet admitted this member as a viewer (it said `viewer` when asked for the place): it reads the fleet and never
+   * writes it, so it takes no claim for the lease, does not answer a freed lease, and keeps its work tree as the fleet's.
+   */
+  viewer?: boolean;
   /** How long the gateway asked to wait before looking at a paused fleet again. */
   retryAfterMs?: number;
   /**
@@ -1753,7 +1763,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // A replica publishes nothing, so no publish is being left for the next round: whatever ended this member's turn as primary
   // (the lease freed or lost, a pause, a stop) ends the count with it.
   loop.postponed = undefined;
-  const mode = replicaMode();
+  const mode = modeOf(loop);
   const keep = (patch: Partial<FleetMemberState>, opts?: { rewind?: boolean }): void => {
     updateFleetState(loop.configPath, fleet, loop.name, patch, opts);
   };
@@ -1762,7 +1772,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // The fleet gives it to a member that has applied the head, so a replica that
   // has only fetched writes the work tree first - and one that loses the race
   // stays what it was, having done nothing the fleet has to know about.
-  if (loop.claim && Date.now() >= loop.claimAt) {
+  if (loop.claim && Date.now() >= loop.claimAt && loop.viewer !== true) {
     loop.claim = false;
     loop.promoting = true;
     const began = Date.now();
@@ -2114,6 +2124,11 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     }
     loop.refusedForMs = undefined;
     loop.paused = false;
+    // The fleet says a viewer is one: it is a replica that is never given the lease.
+    const viewer = placed.reason === "viewer" && !placed.primary;
+    if (viewer && loop.viewer !== true) logAgent("space " + loop.name + ": this member is a viewer of the fleet: it reads it and never writes, and takes no claim for the lease");
+    if (!viewer && loop.viewer === true) logAgent("space " + loop.name + ": this member is no longer a viewer of the fleet");
+    loop.viewer = viewer;
     // The index of the snapshots is not what it was when the member was last primary: a replica writes the work tree.
     if (placed.primary !== loop.primary) loop.indexTrusted = false;
     loop.primary = placed.primary;
@@ -2145,8 +2160,8 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     // the promotion's own business.
     // A member that has the place has nothing to claim, and a claim left set would
     // keep its round at the pace of a replica that is waiting for its turn.
-    if (placed.primary) loop.claim = false;
-    if (!placed.primary && !loop.promoting) {
+    if (placed.primary || viewer) loop.claim = false;
+    if (!placed.primary && !viewer && !loop.promoting) {
       if (answer.reason === "not-caught-up") {
         // The lease is free and this member could have it once it has applied the head.
         loop.claim = true;
@@ -2456,6 +2471,8 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   // What the fleet told a space. The socket only says that something happened;
   // the loop does the work, so each case just changes what the next round does.
   const claimNow = (loop: SpaceLoop): void => {
+    // A viewer never writes: a freed lease is not for it, whatever it has applied.
+    if (loop.viewer === true) return;
     const here = positions(readFleetState(loop.configPath, loop.fleet, loop.name)).fetched.seq;
     loop.claim = true;
     loop.claimAt = Date.now() + promotionDelayMs(loop.creds.deviceId, here < (loop.knownHeadSeq ?? 0));

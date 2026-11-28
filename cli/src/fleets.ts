@@ -123,7 +123,7 @@ export function resolveFleetTarget(
 
 export interface FleetMember {
   deviceId: string;
-  role: "owner" | "member";
+  role: "owner" | "member" | "viewer";
   addedAt: number;
   addedBy?: string;
   /** The key snapshots are sealed for, as the member offered it. */
@@ -494,16 +494,29 @@ function headMoved(json: Record<string, unknown> | undefined): boolean {
   return /head is at|was snapshot \d+/i.test(String(json?.error ?? ""));
 }
 
+/**
+ * The role the operator asks for: `--viewer` (reads the fleet and never writes it) or `--role member|viewer`. Nothing asked is
+ * left to the fleet: a request is admitted as what it asked to be, and a member keeps the role it has.
+ */
+export function askedRole(parsed: Ctx["parsed"]): "member" | "viewer" | undefined {
+  const role = str(parsed, "role");
+  const viewer = bool(parsed, "viewer");
+  if (role !== undefined && role !== "member" && role !== "viewer") throw new UsageError("--role is member or viewer, not \"" + role + "\"", "The owner is not changed here: remove it and the fleet is handed on.");
+  if (viewer && role === "member") throw new UsageError("--viewer and --role member ask for different things");
+  return viewer ? "viewer" : (role as "member" | "viewer" | undefined);
+}
+
 export async function fleetsApprove(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
   const deviceId = str(ctx.parsed, "member");
   if (!deviceId) throw new UsageError("missing --member", "The device id of the request to approve, as shown by 'prime fleets pending <fleet>'.");
+  const asked = askedRole(ctx.parsed);
   const t = target(ctx, spaceArg(ctx));
   // A member that asks to replace its key is approved for the key that was read in the list: `--key` names it
   // (the KEY column of `prime fleets pending`, to compare with what the member's own machine prints), so that
   // a request that was replaced since is not approved by mistake.
   const key = str(ctx.parsed, "key");
-  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/approve", { deviceId, ...(key ? { key } : {}) });
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/approve", { deviceId, ...(key ? { key } : {}), ...(asked ? { role: asked } : {}) });
   // A fleet whose roster is signed takes an approval only as an entry the owner key signed.
   if (res.status === 409 && res.json?.rosterSigned === true) return approveSigned(ctx, t, fleetId, deviceId, key);
   failOn(res.status, res.json, "could not approve the request");
@@ -511,7 +524,13 @@ export async function fleetsApprove(ctx: Ctx): Promise<void> {
     printJson({ fleet: fleetId, member: res.json.member, ...(res.json.keyChanged ? { keyChanged: true } : {}) });
     return;
   }
-  ctx.out(green(res.json.keyChanged ? "replaced the key of" : "approved") + " " + deviceId);
+  const became = res.json.member?.role;
+  ctx.out(
+    green(res.json.keyChanged ? "replaced the key of" : res.json.unchanged ? "already" : "approved") +
+      " " +
+      deviceId +
+      (became === "viewer" ? dim(" as a viewer: it reads the fleet and never writes it") : res.json.unchanged ? dim(" a " + became) : ""),
+  );
 }
 
 /**
@@ -546,7 +565,7 @@ export async function fleetsPending(ctx: Ctx): Promise<void> {
   const t = target(ctx, spaceArg(ctx));
   const res = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/pending");
   failOn(res.status, res.json, "could not list the requests");
-  const pending = (res.json.pending ?? []) as Array<{ deviceId: string; label?: string; requestedAt: number; pubkey?: string; keyChange?: boolean }>;
+  const pending = (res.json.pending ?? []) as Array<{ deviceId: string; label?: string; requestedAt: number; pubkey?: string; keyChange?: boolean; role?: string }>;
   if (ctx.json) {
     printJson({ fleet: fleetId, pending });
     return;
@@ -558,7 +577,7 @@ export async function fleetsPending(ctx: Ctx): Promise<void> {
   // The KEY of a request is the fingerprint of the key it offers: for a member that asks to replace its key it is
   // what `prime fleets approve --key` takes, and the one to compare with the member's own machine.
   ctx.out(table(["DEVICE", "LABEL", "REQUESTED", "REQUEST", "KEY"], [
-    ...pending.map((p) => [p.deviceId, p.label ?? "-", new Date(p.requestedAt).toISOString(), p.keyChange ? "new key" : "join", p.pubkey ? keyFingerprintOf(p.pubkey) : "-"]),
+    ...pending.map((p) => [p.deviceId, p.label ?? "-", new Date(p.requestedAt).toISOString(), p.keyChange ? "new key" : p.role === "viewer" ? "join as viewer" : "join", p.pubkey ? keyFingerprintOf(p.pubkey) : "-"]),
   ]));
 }
 
@@ -1365,6 +1384,12 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
   const pendingRes = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/pending");
   failOn(pendingRes.status, pendingRes.json, "could not list the requests");
   const request = ((pendingRes.json.pending ?? []) as Array<{ deviceId: string; pubkey?: string; spub?: string; role?: string; keyChange?: boolean }>).find((p) => p.deviceId === deviceId);
+  const asked = askedRole(ctx.parsed);
+  // A member that is in the roster and has no request waiting: what is asked is its role, which is an entry of its own.
+  if (!request && asked !== undefined) {
+    const there = liveMembers(v).find((m) => m.device === deviceId);
+    if (there) return changeRoleSigned(ctx, t, fleetId, owner, v, there, asked);
+  }
   if (!request) throw new CliError("no request from " + deviceId + " is waiting", "'prime fleets pending " + fleetId + "' lists them.");
   if (!request.pubkey) throw new CliError("the request of " + deviceId + " offers no key to seal snapshots for");
   if (!request.spub) {
@@ -1376,7 +1401,8 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
   const fp = keyFingerprintOf(request.pubkey);
   const spubFp = ownerFingerprint(request.spub);
   const live = liveMembers(v).find((m) => m.device === deviceId);
-  const role = request.role === "viewer" ? "viewer" : "member";
+  // What the operator asked for decides; a request that says nothing is admitted as what it asked to be.
+  const role = asked ?? (request.role === "viewer" ? "viewer" : "member");
   const offered = deviceId + " offers the key " + fp + " and the signing key " + spubFp + ", as " + role;
   // The roster is signed with the owner key, so what goes into it is what the operator compared, not what the gateway lists.
   // Both keys go into the signed roster, so both are what the operator compared: a signing key the gateway chose would be the member's
@@ -1422,6 +1448,37 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
     return;
   }
   ctx.out(green(live ? "replaced the key of" : "admitted") + " " + deviceId + dim(" as " + role + "; entry " + done.n + " of the roster, effective from snapshot " + seqAt + ", signed with the owner key " + shortKey(owner.publicKey) + "; its key " + fp + ", signing key " + spubFp));
+}
+
+/**
+ * Change the role of a member of a signed roster (a member to a viewer, or back): an entry of its own, effective from the head.
+ * The gateway lets go of the lease a member that is made a viewer holds, and what it publishes after the head is not a member's.
+ */
+async function changeRoleSigned(ctx: Ctx, t: FleetTarget, fleetId: string, owner: OwnerKey, v: VerifiedRoster, there: { device: string; role: string }, role: "member" | "viewer"): Promise<void> {
+  const deviceId = there.device;
+  if (there.role === "owner") throw new CliError(deviceId + " owns the fleet, and its role is not changed here", "Remove it, and the fleet is handed to the longest-standing member that is not a viewer.");
+  if (there.role === role) {
+    if (ctx.json) printJson({ fleet: fleetId, member: deviceId, role, unchanged: true });
+    else ctx.out(green("already") + " " + deviceId + dim(" a " + role));
+    return;
+  }
+  let seqAt = 0;
+  let done: { n: number; hash: string; signed: SignedEntry } | undefined;
+  let head = v.head;
+  for (let attempt = 0; done === undefined; attempt++) {
+    const before = await headSeqOf(t, fleetId);
+    seqAt = await headSeqOf(t, fleetId);
+    if (seqAt < before) throw new CliError("the gateway's head went back from " + before + " to " + seqAt + " while this was being signed");
+    const sent = await postEntry(t, fleetId, owner, head, v.incarnation, { op: "role", device: deviceId, role, seqAt });
+    if (sent.res.status === 409 && headMoved(sent.res.json) && attempt < 3) continue;
+    failOn(sent.res.status, sent.res.json, "the gateway did not take the roster entry " + sent.entry[3] + " (" + sent.entry[6] + ")");
+    done = { n: sent.entry[3], hash: entryHash(sent.signed), signed: sent.signed };
+  }
+  if (ctx.json) {
+    printJson({ fleet: fleetId, member: deviceId, role, entry: done.n, seqAt });
+    return;
+  }
+  ctx.out(green(role === "viewer" ? "made a viewer" : "made a member") + " " + deviceId + dim("  entry " + done.n + " of the roster, effective from snapshot " + seqAt + ", signed with the owner key " + shortKey(owner.publicKey)));
 }
 
 /** How far the sequence the gateway names for a fence may be above the head read after it: a publish that was in flight. */

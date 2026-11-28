@@ -833,6 +833,19 @@ must do for the role to hold without the gateway: treat a `role: "viewer"` key a
 caller of tools, in the trust check of a snapshot, in the signed roster, which must carry the role so that the
 gateway cannot relabel it, and in the callers a device accepts for signed tool calls.
 
+**What the agent does.** An agent that is told `viewer` (this build and later) takes no claim for the lease and does not
+answer a freed lease (`lease-free`, or the fleet saying the lease is nobody's): it never asks to take over, whatever it has
+applied. Its work tree is **written as every snapshot arrives**, as for a member that mirrors (`PRIME_FLEET_REPLICA=mirror`),
+since a viewer is there to be read; what a viewer edits itself is moved aside when the next snapshot is written, as for any
+replica. The agent's log says once that it is a viewer, and once that it no longer is. `prime spaces enter` refuses a
+viewer, like a replica, and says what it is.
+
+**From the command line.** `prime fleets approve <fleet> --member <device> --viewer` admits a waiting request as a viewer,
+or makes a member one; `--role member|viewer` says either. `prime fleets pending` shows a request that asked to be one
+(`join as viewer`). With a signed roster, the same command signs an `add` entry with that role, or a `role` entry (effective
+from the head) for a device that is in the roster and has no request waiting. A snapshot a member publishes after that
+entry's sequence is a viewer's, and is not taken in.
+
 **A space of an earlier build** (26.11.50) does not know the role: it believes it is a replica waiting for its turn and
 asks for its place as often as any replica. **Edits made in a viewer's own space are never published, and nothing tells
 the person there why**, and they can be overwritten when a snapshot is applied. Say to the person who is admitted as a

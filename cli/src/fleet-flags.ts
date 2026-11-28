@@ -51,6 +51,8 @@ const FLEET_APPROVE_FLAGS: FlagSpec[] = [
   flag("rotate", "boolean", "In a signed fleet: approve a member's new key (a plain approve never changes a key)"),
   OWNER_KEY_FLAG,
   flag("member", "string", "The member to approve", { placeholder: "<id>" }),
+  flag("viewer", "boolean", "Admit it as a viewer: it reads the fleet and never writes it (a member that is one already is made one)"),
+  flag("role", "string", "Admit it as, or change a member to: member or viewer (the owner is not changed)", { placeholder: "<member|viewer>" }),
   flag("signing-key", "string", "In a fleet whose roster is signed: the fingerprint of the signing key the member prints on its own machine, in full (approve takes it with --key)", { placeholder: "<fingerprint>" }),
   flag("key", "string", "For a member's request for a new key: the fingerprint of the key approved (the KEY of `prime fleets pending`)", { placeholder: "<fingerprint>" }),
 ];

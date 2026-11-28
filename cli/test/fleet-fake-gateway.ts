@@ -74,6 +74,8 @@ export class FakeGateway {
   bootstraps = 0;
   /** An ask for a place is never answered (a gateway that hangs): only the caller's own time limit ends it. */
   hangBootstraps = false;
+  /** Members the fleet admitted as viewers: they are never given the lease or a claim, and are told so. */
+  viewers = new Set<string>();
   /** What each ask for a place said. */
   bootstrapBodies: Array<Record<string, unknown>> = [];
   /** The key the gateway's object makes key-change proofs with (what /role says); undefined for a gateway that predates it. */
@@ -168,6 +170,10 @@ export class FakeGateway {
           { status: 409, headers: { "retry-after": "60" } },
         );
       }
+      // A viewer reads the fleet and is never given the lease, a claim or a wait for one.
+      if (this.viewers.has(creds.deviceId)) {
+        return Response.json({ ok: true, role: "replica", reason: "viewer", head: this.head ?? { seq: 0 }, retryAfterMs: 30_000 });
+      }
       // Whoever holds the lease keeps it; the others are told so.
       if (this.primary && this.primary !== creds.deviceId) {
         return Response.json({ ok: true, role: "replica", reason: "lease-held", holder: this.primary, head: this.head ?? { seq: 0 } });
@@ -216,7 +222,7 @@ export class FakeGateway {
     }
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);
-      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(this.fleetCaps !== undefined ? { fleetCaps: this.fleetCaps } : {}), ...(this.chunkLimit !== undefined ? { chunkLimit: this.chunkLimit } : {}), ...(this.chunkedLimit !== undefined ? { chunkedLimit: this.chunkedLimit } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) }, this.serverDate ? { headers: { date: this.serverDate } } : undefined);
+      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.viewers.has(creds.deviceId) ? { role: "viewer" } : {}), ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(this.fleetCaps !== undefined ? { fleetCaps: this.fleetCaps } : {}), ...(this.chunkLimit !== undefined ? { chunkLimit: this.chunkLimit } : {}), ...(this.chunkedLimit !== undefined ? { chunkedLimit: this.chunkedLimit } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) }, this.serverDate ? { headers: { date: this.serverDate } } : undefined);
     }
     if (kind === "roster" && method === "GET") {
       if (!this.roster) return Response.json({ error: "no such fleet action" }, { status: 404 });
