@@ -37,6 +37,19 @@ export const RELEASE_KEYS: readonly string[] = [
  */
 export const SIGNED_SINCE = "26.11.51";
 
+/**
+ * The releases that were published before signing: 26.11.7 to 26.11.50, one each (the list of the releases of the
+ * repository when signing was added). Only these can be installed without a signature, and only as a rollback: a
+ * version below SIGNED_SINCE that was never published (26.11.50+1, 26.11.9-rc.1, 26.10.1) is not one, and
+ * whoever can write to the release page could otherwise make one up.
+ */
+export const FIRST_UNSIGNED = 7;
+export const LAST_UNSIGNED = 50;
+export function isPreSigningRelease(version: string): boolean {
+  const m = /^26\.11\.(0|[1-9]\d*)$/.exec(version);
+  return m !== null && Number(m[1]) >= FIRST_UNSIGNED && Number(m[1]) <= LAST_UNSIGNED;
+}
+
 /** Extra trusted keys for a test build: MCP_CLI_RELEASE_KEY, comma separated base64. Honoured in development builds only. */
 export const EXTRA_KEY_ENV = "MCP_CLI_RELEASE_KEY";
 
