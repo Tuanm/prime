@@ -9,13 +9,15 @@
 // takes the lease. A primary that starts behind the head would fork the
 // fleet.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write";
+import { withDirLockSync } from "./dir-lock";
+import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
 import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
-import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair } from "./fleet-crypto";
-import { FleetTrust, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
+import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
+import { FleetTrust, RosterRefusedError, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
   PayloadGoneError,
   type IndexEntry,
@@ -66,13 +68,22 @@ export interface MemberPaths {
  *
  */
 export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
-  if (existsSync(keyFile)) {
-    const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
-    if (raw && typeof raw.publicKey === "string" && typeof raw.privateKey === "string") return raw;
-  }
+  return readKeyPair(keyFile) ?? withKeyFileLock(keyFile, () => loadOrCreateKeyPairLocked(keyFile));
+}
+
+function readKeyPair(keyFile: string): MemberKeyPair | undefined {
+  if (!existsSync(keyFile)) return undefined;
+  const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
+  return raw && typeof raw.publicKey === "string" && typeof raw.privateKey === "string" ? raw : undefined;
+}
+
+/** For a caller that holds the key file's lock: the key pair, made if it is not there (checked again, since another process may have made it while this one waited). */
+function loadOrCreateKeyPairLocked(keyFile: string): MemberKeyPair {
+  const found = readKeyPair(keyFile);
+  if (found) return found;
   const pair = generateMemberKeyPair();
   mkdirSync(join(keyFile, ".."), { recursive: true });
-  writeFileSync(keyFile, JSON.stringify(pair, null, 2), { mode: 0o600 });
+  writeFileAtomic(keyFile, JSON.stringify(pair, null, 2), 0o600);
   return pair;
 }
 
@@ -83,12 +94,49 @@ export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
  * fleet still holds that one.
  */
 export function rotateKeyPair(keyFile: string): MemberKeyPair {
-  const current = loadOrCreateKeyPair(keyFile);
-  const previous = current.previous ?? { publicKey: current.publicKey, privateKey: current.privateKey };
-  const pair = generateMemberKeyPair();
-  const next: MemberKeyPair = { ...pair, previous };
-  writeFileAtomic(keyFile, JSON.stringify(next, null, 2), 0o600);
-  return pair;
+  return withKeyFileLock(keyFile, () => {
+    const current = loadOrCreateKeyPairLocked(keyFile);
+    const previous = current.previous ?? { publicKey: current.publicKey, privateKey: current.privateKey };
+    const pair = generateMemberKeyPair();
+    // The signing key is the member's own, not the pair's: the roster names it, and a rotation of the pair does not change it.
+    const next: MemberKeyPair = { ...pair, previous, ...(current.sign ? { sign: current.sign } : {}) };
+    writeFileAtomic(keyFile, JSON.stringify(next, null, 2), 0o600);
+    return pair;
+  });
+}
+
+function withKeyFileLock<T>(keyFile: string, fn: () => T): T {
+  mkdirSync(join(keyFile, ".."), { recursive: true });
+  return withDirLockSync(keyFile + ".lock", fn, { waitMs: 5000, staleMs: 10_000 });
+}
+
+/**
+ * The member's signing key, made the first time it is asked for and kept in the key file beside the key pair.
+ * Its public half (`spub`) is what the member tells the fleet when it joins and asks for its place, and what the
+ * operator signs into the roster; the private half never leaves this machine.
+ */
+export function loadOrCreateSignKey(keyFile: string): MemberSignKey {
+  const have = (): MemberSignKey | undefined => {
+    if (!existsSync(keyFile)) return undefined;
+    try {
+      const sign = (JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair).sign;
+      return sign && typeof sign.publicKey === "string" && typeof sign.privateKey === "string" ? sign : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const found = have();
+  if (found) return found;
+  return withKeyFileLock(keyFile, () => {
+    // Another process may have made it while this one waited for the lock.
+    const again = have();
+    if (again) return again;
+    const pair = loadOrCreateKeyPairLocked(keyFile);
+    const { publicKey, privateKeyPem } = generateOwnerKey();
+    const sign: MemberSignKey = { publicKey, privateKey: privateKeyPem };
+    writeFileAtomic(keyFile, JSON.stringify({ ...pair, sign }, null, 2), 0o600);
+    return sign;
+  });
 }
 
 /** The key pair this member held before it rotated, when the fleet may still hold it. */
@@ -108,11 +156,15 @@ export function previousKeyPair(keyFile: string): MemberKeyPair | undefined {
  * a later rotation put there is not dropped by an answer to the one before.
  */
 export function dropPreviousKey(keyFile: string, only?: string): void {
-  const previous = previousKeyPair(keyFile);
-  if (!previous || (only !== undefined && previous.publicKey !== only)) return;
-  const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
-  const { previous: _gone, ...kept } = raw;
-  writeFileAtomic(keyFile, JSON.stringify(kept, null, 2), 0o600);
+  if (!previousKeyPair(keyFile)) return;
+  withKeyFileLock(keyFile, () => {
+    // Read again under the lock: what is dropped is what is there now.
+    const previous = previousKeyPair(keyFile);
+    if (!previous || (only !== undefined && previous.publicKey !== only)) return;
+    const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
+    const { previous: _gone, ...kept } = raw;
+    writeFileAtomic(keyFile, JSON.stringify(kept, null, 2), 0o600);
+  });
 }
 
 /** Whether a manifest shows the gateway nothing of the snapshot (see `FleetManifest.meta`). */
@@ -169,6 +221,49 @@ export interface PublishOptions {
   sinceWhole?: SinceWhole;
 }
 
+const warnedUnrostered = new Set<string>();
+
+function noteUnrostered(fleet: string, devices: string[]): void {
+  const said = fleet + " " + devices.join(",");
+  if (warnedUnrostered.has(said)) return;
+  warnedUnrostered.add(said);
+  process.stderr.write("prime: fleet " + fleet + ": the gateway lists a key the signed roster does not (" + devices.join(", ") + "): not sealed for it\n");
+}
+
+/**
+ * Who a snapshot is sealed for. With a roster the gateway keeps, everyone it lists (as it always was). With a signed
+ * roster, the listed members the roster names with the same key and a place that is open now; the rest are skipped and
+ * named. A publisher the roster does not let publish at `seq` is refused: its snapshot would be refused by every member.
+ */
+export async function rosterMembers<M extends { deviceId: string; pubkey?: string }>(
+  creds: FleetCredentials,
+  fleet: string,
+  keyFile: string,
+  ownKey: string,
+  seq: number,
+  listed: M[],
+): Promise<{ sealFor: M[]; skipped: string[] }> {
+  let v;
+  try {
+    v = await FleetTrust.beside(keyFile).verifiedRoster(creds, fleet);
+  } catch (err) {
+    if (err instanceof RosterRefusedError) throw new Error(err.message);
+    throw err;
+  }
+  if (v === null) return { sealFor: listed, skipped: [] };
+  if (!mayPublishAt(v, ownKey, seq)) {
+    throw new Error("the fleet's signed roster does not let this member publish snapshot " + seq + " (its key is not a member's at that sequence, or this member is a viewer)");
+  }
+  const live = new Map(liveMembers(v).map((t) => [t.device, t.xpub]));
+  const sealFor: M[] = [];
+  const skipped: string[] = [];
+  for (const m of listed) {
+    if (m.pubkey !== undefined && live.get(m.deviceId) === m.pubkey) sealFor.push(m);
+    else skipped.push(m.deviceId);
+  }
+  return { sealFor, skipped };
+}
+
 export interface PublishResult {
   seq: number;
   commit: string;
@@ -176,6 +271,8 @@ export interface PublishResult {
   /** The change-only pack that travelled beside a whole tree, when there was one. */
   deltaBytes?: number;
   members: number;
+  /** The gateway listed these devices (a key the signed roster does not name for them), and the snapshot was not sealed for them. */
+  unrostered?: string[];
   /** The members this snapshot was sealed for (see `rosterOf`). */
   roster: string;
   /** Where the manifest of this snapshot is stored. */
@@ -329,7 +426,7 @@ export async function publish(
   const known = options.known;
   const treeUnchanged: Promise<boolean> = known && known.base === base ? known.unchanged().catch(() => false) : Promise.resolve(false);
   let caughtUp = false;
-  const [members, head, role] = await Promise.all([
+  const [listed, head, role] = await Promise.all([
     fetchMemberKeys(creds, fleet),
     fetchHead(creds, fleet).catch(() => null),
     // Which fleet of this name it is, for the seal; a gateway that does not say, or does not answer, leaves it out.
@@ -355,6 +452,11 @@ export async function publish(
   }
 
   const seq = (head?.seq ?? 0) + 1;
+
+  // A fleet whose roster is signed is sealed for the members the roster names, with the keys it names, and for no
+  // key the gateway adds to its list: a snapshot sealed for a key that is not a member's is the gateway reading it.
+  const { sealFor: members, skipped } = await rosterMembers(creds, fleet, paths.keyFile, keys.publicKey, seq, listed);
+  if (skipped.length > 0) noteUnrostered(fleet, skipped);
 
   // A delta is only useful to a member that already holds the snapshot it is
   // built against. A member that joined since then, or that came back with a
@@ -582,6 +684,7 @@ export async function publish(
     bytes: main.length,
     ...(delta ? { deltaBytes: delta.bytes } : {}),
     members: sealed.wrapped.length,
+    ...(skipped.length > 0 ? { unrostered: skipped } : {}),
     roster,
     manifestKey: moved.manifestKey ?? "",
     full: wantFull,

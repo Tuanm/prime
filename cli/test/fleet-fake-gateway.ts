@@ -73,6 +73,8 @@ export class FakeGateway {
   serverDate: string | undefined = undefined;
   /** A key other than the one on the roster waits for the operator: the ask is refused, as the real object does without a proof. */
   keyChangePending = false;
+  /** The signed roster the gateway serves (GET /roster); undefined: a gateway that has none (404). */
+  roster: { mode: "open" | "signed"; entries: unknown[] } | undefined = undefined;
   /** Requests of each kind, by route. */
   requests = new Map<string, number>();
   /** Pack downloads, by the pack's key. */
@@ -170,6 +172,10 @@ export class FakeGateway {
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);
       return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(this.fleetCaps !== undefined ? { fleetCaps: this.fleetCaps } : {}), ...(this.chunkLimit !== undefined ? { chunkLimit: this.chunkLimit } : {}), ...(this.chunkedLimit !== undefined ? { chunkedLimit: this.chunkedLimit } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) }, this.serverDate ? { headers: { date: this.serverDate } } : undefined);
+    }
+    if (kind === "roster" && method === "GET") {
+      if (!this.roster) return Response.json({ error: "no such fleet action" }, { status: 404 });
+      return Response.json(this.roster);
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });

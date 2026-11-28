@@ -523,14 +523,22 @@ snapshot sealed for it. A fleet can take that from the gateway: its roster becom
 ```bash
 prime fleets roster init acme                 # shows the members, their keys in full, and a digest; signs nothing
 prime fleets roster init acme --yes --expect <digest>   # makes the owner key, signs the genesis and an add for each member shown
-prime fleets invite acme                      # prints the code, and the code with the owner key's fingerprint after "~"
+prime fleets invite acme                      # prints the code; once the roster is signed, also the code with the owner key's fingerprint after "~"
 prime fleets join acme --code p1_...~ABCDE-...   # the member pins that fingerprint; the gateway is sent the code alone
 prime fleets approve acme --member <id> --key <fp> --signing-key <fp>   # in a signed fleet: an `add` entry for the two keys you compared (--rotate: a member's new key)
 prime fleets remove acme --member <id> [--witness <url>]   # fences the member, checks the sequence it names, signs a `remove`, tells the witness
 prime fleets roster witness acme --witness <url>   # tell the witness of every removal in the chain (again, if it was down)
 prime fleets roster show acme --space work    # checks the chain; says whether the owner key is the one this member pinned
-prime fleets trust pin acme --space work --owner <fingerprint>   # pin (or replace the pin) by hand
+prime fleets trust pin acme --space work --owner <fingerprint>   # pin (or replace the pin) by hand, once the roster is signed
+prime fleets trust pin acme --space work --clear                # take a pin back (one made before the roster was signed)
 ```
+
+**The order.** A member that pinned an owner key refuses a roster that is not signed (it would be the way back to a roster the gateway writes). So:
+upgrade every member and the gateway; then `roster init`; then `invite` (only now does the code carry the owner key) or `trust pin` on each machine.
+After `roster init`, give the members five minutes, or restart their agents: a member that was told the roster is open keeps that answer for five minutes. `invite` leaves the key off the code, and `trust pin` refuses, while the gateway says the roster is not signed. A pin made too early (the code was handed out before `init`,
+or by an older build) makes the member refuse every pull and publish, and says so, with the way out: `trust pin ... --clear`, then pin again after `init`.
+A member that pinned nothing takes the first signed chain it sees on trust (the one printed on its stderr): a gateway that shows a chain of its own before `init`
+would be believed, which is why every machine should be pinned by hand, with the fingerprint the operator prints, as the last step.
 
 What is signed is what the operator compared, not what the gateway says at the moment of signing: the gateway is the thing the signature is
 there to defeat.
@@ -555,8 +563,33 @@ file, nobody can add or remove a member of a signed fleet.
 An entry is a thirteen-place array (`prime-roster-v1`, fleet, incarnation, n, prevHash, at, op, device, xpub, spub, role,
 seqAt, extra) signed as its JSON text; `prevHash` is the hash of the entry before it together with its signature. The
 fingerprint is 26 letters and digits of the owner key's hash. A member pins it at join (from the invite) and never
-accepts a chain whose genesis names another key. The member's own check of the chain and the witness follow in the
-member-side packages; this one covers what the operator does.
+accepts a chain whose genesis names another key.
+
+#### What a member does with it
+
+- **Its signing key.** The key file of a member gains an Ed25519 `sign` key, made when first needed (under a lock, and
+  kept when the key pair is rotated). Its public half, `spub`, goes to the gateway with the member's key when it joins and
+  every time it asks for its place; the operator signs it into the roster.
+- **Every pull and every publish reads the chain** (`GET /fleets/<id>/roster`, a signed answer kept for 5 seconds, and an answer that there is none for 5 minutes) and checks it from the
+  genesis: the owner key named is the one this member pinned, every signature and `prevHash` holds, and it contains the
+  newest entry this member has seen (`rosterHead` in the trust file). A member that has pinned nothing pins the owner key of the
+  first signed chain it sees and prints its fingerprint; compare it with `prime fleets roster show` where the key is.
+- **A snapshot is taken in only if the chain says its key was a member's (not a viewer's) at that sequence**: from the
+  `add` to the `remove`, with the `seqAt` the owner signed. What the gateway lists no longer decides.
+- **A viewer never writes.** With a signed roster the chain's role decides; with the gateway's own roster, a key of a member whose role is
+  `viewer` is not a key a snapshot may come from. A viewer is still sealed for, and reads.
+- **A publisher seals only for the members the chain names, with the keys it names.** A key the gateway adds to its list, or
+  puts in place of a member's, is skipped and named ("the gateway lists a key the signed roster does not"); the
+  publisher itself must be a member in the chain.
+- **The fleet is the one the chain names**: its incarnation is the genesis's, so a snapshot of an earlier fleet of the same
+  name is refused without having to have been learnt first.
+- **No way back.** A member that pinned an owner key or saw a signed chain refuses a gateway that says the roster is not
+  signed, a chain that does not contain the newest entry it saw, and a chain of another owner.
+
+`prime fleets members --space <name>` and `status` print this machine's own key and signing key fingerprints from its key file, which an
+operator compares with what the gateway lists before signing them into the roster.
+
+The witness (a second place a member's newest snapshot is recorded) follows in its own package.
 
 ## Use cases
 

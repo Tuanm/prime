@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fleetKeyFile, fleetsApprove, fleetsInvite, fleetsJoin, fleetsRemove, fleetsRoster, fleetsTrust } from "../src/fleets";
 import { keyFingerprintOf } from "../src/fleet-crypto";
 import { fleetKeyOf, generateOwnerKey, ownerFingerprint, parseInviteCode, readOwnerKey, verifyChain, type SignedEntry } from "../src/fleet-roster";
+import { loadOrCreateSignKey } from "../src/fleet-agent";
 import { FleetTrust } from "../src/fleet-trust";
 import { applyTestTimeout } from "./setup";
 
@@ -26,7 +27,7 @@ interface Fake {
   headAfterFence: number | undefined;
   witness: Array<{ path: string; body: any }>;
   /** What POST /roster answers instead of taking the entry, once each (a gateway that wants another seqAt, or no device's genesis). */
-  refuse: Array<{ status: number; error: string }>;
+  refuse: Array<{ status: number; error: string; code?: string }>;
   members: Array<Record<string, unknown>>;
   pending: Array<Record<string, unknown>>;
   stop(): void;
@@ -49,7 +50,7 @@ function fakeGateway(): Fake {
       if (p === "/fleets/acme/roster" && req.method === "GET") return Response.json({ mode: state.signed ? "signed" : "open", incarnation: "inc-1", entries: state.entries });
       if (p === "/fleets/acme/roster" && req.method === "POST") {
         const refused = state.refuse.shift();
-        if (refused) return Response.json({ error: refused.error }, { status: refused.status });
+        if (refused) return Response.json({ error: refused.error, ...(refused.code ? { code: refused.code } : {}) }, { status: refused.status });
         try {
           const chain = [...state.entries, body as SignedEntry];
           verifyChain(chain, { fleet: "acme", incarnation: "inc-1" });
@@ -214,6 +215,28 @@ describe("the commands that sign a fleet's roster", () => {
     expect(gw.entries.length).toBe(before + 1);
     expect(gw.refuse.length).toBe(0);
     gw.head = 7;
+  });
+
+  test("approve for a new member is signed again when the gateway says it was asked to join at a later snapshot", async () => {
+    const fresh = member("dev-35");
+    gw.pending = [fresh];
+    gw.head = 40;
+    gw.refuse = [{ status: 409, error: "the add's seqAt 40 is before the head (41) the device asked to join at", code: "head-moved" }];
+    const before = gw.entries.length;
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-35", key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }));
+    expect(gw.entries.length).toBe(before + 1);
+    expect(gw.refuse.length).toBe(0);
+    gw.head = 7;
+  });
+
+  test("a 409 with another code is not read as the head having moved, whatever its words say", async () => {
+    const fresh = member("dev-36");
+    gw.pending = [fresh];
+    gw.refuse = [{ status: 409, error: "head is at 41: sign it again", code: "ahead-of-head" }];
+    const before = gw.entries.length;
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-36", key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }))).rejects.toThrow();
+    expect(gw.entries.length).toBe(before);
+    gw.pending = [];
   });
 
   test("the genesis from a device is refused by the gateway, and the operator is told what to do", async () => {
@@ -388,6 +411,54 @@ describe("the commands that sign a fleet's roster", () => {
     gw.entries[1] = saved;
   });
 
+  describe("while the roster is not signed yet", () => {
+    const withSpace = (flags: Record<string, string | boolean>) => {
+      const c = ctx("trust", ["pin", "acme"], { space: "w", ...flags }) as unknown as { config: { spaces: Record<string, unknown> }; configPath: string };
+      c.config.spaces = { w: { fleet: "acme", gateway: gw.url, gateway_device: "dev-1", remote_token: "t" } };
+      return c as never;
+    };
+    const unsigned = async (run: () => Promise<void>) => {
+      const was = gw.signed;
+      gw.signed = false;
+      try {
+        await run();
+      } finally {
+        gw.signed = was;
+      }
+    };
+
+    test("an invite carries the code alone and says why, and carries the owner key once the roster is signed", async () => {
+      await unsigned(async () => {
+        out.length = 0;
+        await fleetsInvite(ctx("invite", ["acme"]));
+        expect(said()).toContain("CODE-123");
+        expect(said()).not.toContain("~");
+        expect(said()).toContain("not signed yet");
+      });
+      out.length = 0;
+      await fleetsInvite(ctx("invite", ["acme"]));
+      expect(said()).toContain("CODE-123~");
+    });
+
+    test("trust pin refuses a roster that is not signed, and pins once it is; --clear takes a pin back", async () => {
+      const fp = ownerFingerprint(readOwnerKey(keyFile).publicKey);
+      const keyPath = fleetKeyFile(join(dir, "config.yaml"), "acme", "w");
+      await unsigned(async () => {
+        await expect(fleetsTrust(withSpace({ owner: fp }))).rejects.toThrow(/not signed yet/);
+      });
+      expect(FleetTrust.ownerPinned(keyPath)).toBeUndefined();
+      await fleetsTrust(withSpace({ owner: fp }));
+      expect(FleetTrust.ownerPinned(keyPath)).toBe(fp.replace(/-/g, ""));
+      out.length = 0;
+      await fleetsTrust(withSpace({ clear: true }));
+      expect(FleetTrust.ownerPinned(keyPath)).toBeUndefined();
+      expect(said()).toContain("no longer pins");
+      await fleetsTrust(withSpace({ clear: true }));
+      expect(said()).toContain("pinned no owner key");
+      await expect(fleetsTrust(withSpace({ clear: true, owner: fp }))).rejects.toThrow(/do not go together/);
+    });
+  });
+
   test("trust pin needs a fleet space and a well-formed fingerprint", async () => {
     await expect(fleetsTrust(ctx("trust", ["pin", "acme"], { space: "none", owner: "x" }))).rejects.toThrow(/owner/);
   });
@@ -416,6 +487,8 @@ describe("the commands that sign a fleet's roster", () => {
       (globalThis as { fetch: unknown }).fetch = real;
     }
     expect(sent[0]!.code).toBe("c0de");
+    // ... and tells the fleet the key it signs with, so the operator can put it in the roster
+    expect(sent[0]!.spub).toBe(loadOrCreateSignKey(fleetKeyFile(cfg, "acme", "dev-9")).publicKey);
     expect(JSON.stringify(sent)).not.toContain(fp);
     expect(FleetTrust.ownerPinned(fleetKeyFile(cfg, "acme", "dev-9"))).toBe(fp.replace(/-/g, ""));
   });
@@ -532,3 +605,32 @@ function dir0(): string {
   dirForUnreadable ??= mkdtempSync(join(tmpdir(), "roster-bad-"));
   return dirForUnreadable;
 }
+
+describe("what a member says of its own keys", () => {
+  test("`fleets members --space` prints this machine's key and signing key from its own key file, for the operator to compare", async () => {
+    const { fleetsMembers } = await import("../src/fleets");
+    const { loadOrCreateKeyPair } = await import("../src/fleet-agent");
+    const root = mkdtempSync(join(tmpdir(), "roster-own-"));
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json({ ok: true, members: [] });
+    try {
+      const configPath = join(root, "config.yaml");
+      const keyFile = fleetKeyFile(configPath, "acme", "work");
+      const pair = loadOrCreateKeyPair(keyFile);
+      const sign = loadOrCreateSignKey(keyFile);
+      const out: string[] = [];
+      await fleetsMembers({
+        config: { defaults: { gateway: "https://g.example", fleet_operator_token: "op" }, devices: {}, spaces: { work: { fleet: "acme" } }, codeMcp: {} },
+        configPath,
+        json: false,
+        out: (l: string) => out.push(l),
+        parsed: { positionals: ["fleets", "members", "acme"], flags: new Map([["space", "work"]]), help: false },
+      } as never);
+      expect(out.join("\n")).toContain(keyFingerprintOf(pair.publicKey));
+      expect(out.join("\n")).toContain(ownerFingerprint(sign.publicKey));
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
