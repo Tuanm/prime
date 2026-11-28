@@ -106,6 +106,11 @@ interface Caller {
 }
 
 type Members = Record<string, Member>;
+/** A member as the roster views show it: its epoch key is for the primary, which reads it in `/keys`, and nobody else needs it. */
+const withoutEpoch = (m: Member): Member => {
+  const { epochKey: _epochKey, ...rest } = m;
+  return rest;
+};
 /** A fence for a removal: the sequence it was fenced at (null while it is being waited for), when, and whether the member left by itself. */
 type Fence = { seqAt: number | null; at: number; left?: true };
 
@@ -734,6 +739,7 @@ export class FleetDO implements DurableObject {
     }
     const applied = (await this.storage.get<Record<string, number>>("applied")) ?? {};
     const fetched = (await this.storage.get<Record<string, number>>("fetched")) ?? {};
+    const fenced = await this.fences();
     return Response.json({
       members: Object.values(members).map((m) => ({
         deviceId: m.deviceId,
@@ -744,7 +750,8 @@ export class FleetDO implements DurableObject {
         ...(m.role === "viewer" ? { role: "viewer" } : {}),
         // The signing key the fleet holds for it, and the epoch key it signed with that key, while the epoch key is valid.
         ...(m.spub ? { spub: m.spub } : {}),
-        ...(m.epochKey && m.epochKey.notAfter > Date.now() && m.spub
+        // Not for a member that is being removed or has left: its device is where the epoch private is sure to be.
+        ...(m.epochKey && m.epochKey.notAfter > Date.now() && m.spub && !fenced[m.deviceId]
           ? { epochKey: { n: m.epochKey.n, pub: m.epochKey.pub, notAfter: m.epochKey.notAfter, sig: m.epochKey.sig } }
           : {}),
         // How far this member has got. The admin page shows it; the publisher
@@ -1099,10 +1106,8 @@ export class FleetDO implements DurableObject {
     if (path === "/audit" && request.method === "GET") return this.readAudit(caller, url);
     if (path === "/note" && request.method === "POST") return this.note(caller, body);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
-    if (path === "/epoch-key" && request.method === "POST") {
-      await this.touch();
-      return this.epochKey(caller, body, request);
-    }
+    // Not `touch()`: a key posted in the background is no sign that anyone works in the fleet (bootstrap and `applied` are).
+    if (path === "/epoch-key" && request.method === "POST") return this.epochKey(caller, body, request);
     if (path === "/roster" && request.method === "GET") return this.rosterGet(caller, url);
     if (path === "/roster" && request.method === "POST") return this.rosterPost(caller, body, request);
     if (path === "/remove-fence" && request.method === "POST") return this.removeFence(caller, body, request);
@@ -1629,7 +1634,7 @@ export class FleetDO implements DurableObject {
       // The operator also sees how far each member says it has got (informational: only `applied` gates the lease).
       const applied = (await this.storage.get<Record<string, number>>("applied")) ?? {};
       const fetched = (await this.storage.get<Record<string, number>>("fetched")) ?? {};
-      const shown = Object.values(members).map((m) => ({
+      const shown = Object.values(members).map(withoutEpoch).map((m) => ({
         ...m,
         applied: applied[m.deviceId] ?? 0,
         ...(fetched[m.deviceId] !== undefined ? { fetched: fetched[m.deviceId] } : {}),
@@ -1642,8 +1647,8 @@ export class FleetDO implements DurableObject {
     // primary gets the keys it needs from the dedicated route instead.
     if (caller.kind === "device" && members[caller.deviceId]) {
       const self = members[caller.deviceId]!;
-      if (self.role === "owner") return Response.json({ ok: true, members: Object.values(members), left: await this.leftKeys(), fences: await this.fencesShown(), pendingRemoves: await this.pendingRemoves() });
-      const redacted = Object.values(members).map((m) =>
+      if (self.role === "owner") return Response.json({ ok: true, members: Object.values(members).map(withoutEpoch), left: await this.leftKeys(), fences: await this.fencesShown(), pendingRemoves: await this.pendingRemoves() });
+      const redacted = Object.values(members).map(withoutEpoch).map((m) =>
         m.deviceId === self.deviceId ? m : { ...m, deviceId: m.deviceId.slice(0, 8) + "…" },
       );
       return Response.json({ ok: true, members: redacted, left: await this.leftKeys() });
@@ -2854,10 +2859,11 @@ export class FleetDO implements DurableObject {
     const was = member.pubkey;
     if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId, opts.until);
     member.pubkey = pubkey;
-    if (opts.spub) {
-      if (opts.spub !== member.spub) delete member.epochKey;
-      member.spub = opts.spub;
-    }
+    // An epoch key goes with the key file it was made in, next to the sealing key and the signing key: whichever of the two is
+    // replaced, its private half is lost or is the one that was compromised, whether or not the signing key (which would still verify
+    // it) changed.
+    if (pubkey !== was || (opts.spub && opts.spub !== member.spub)) delete member.epochKey;
+    if (opts.spub) member.spub = opts.spub;
     await this.storage.put("members", members);
     await this.audit(caller, "key-replaced", deviceId, { via, key: await keyFingerprintLong(pubkey), ...(was ? { was: await keyFingerprintLong(was) } : {}) });
   }
