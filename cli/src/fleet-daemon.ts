@@ -1750,6 +1750,9 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // who wants the mirror current asks (`prime fleets sync`), or sets
   // PRIME_FLEET_REPLICA=mirror to have every snapshot written as it arrives.
   loop.primary = false;
+  // A replica publishes nothing, so no publish is being left for the next round: whatever ended this member's turn as primary
+  // (the lease freed or lost, a pause, a stop) ends the count with it.
+  loop.postponed = undefined;
   const mode = replicaMode();
   const keep = (patch: Partial<FleetMemberState>, opts?: { rewind?: boolean }): void => {
     updateFleetState(loop.configPath, fleet, loop.name, patch, opts);
@@ -2081,6 +2084,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     if (placed.paused) {
       loop.paused = true;
       loop.primary = false;
+      loop.postponed = undefined;
       loop.retryAfterMs = placed.retryAfterMs;
       loop.refusedForMs = undefined;
       return { primary: false, paused: true };
@@ -2094,6 +2098,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
       if (loop.primary) await releaseLease(creds, loop.fleet).catch(() => false);
       loop.upgrade = { need: placed.need ?? "", hint: placed.hint ?? "this build cannot read the fleet's newest snapshot: update prime" };
       loop.primary = false;
+      loop.postponed = undefined;
       loop.claim = false;
       loop.refusedForMs = undefined;
       loop.paused = false;
