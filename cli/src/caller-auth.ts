@@ -65,6 +65,19 @@ export type CallerFailure =
   | "tool-not-allowed";
 
 /** The frame the gateway tunnels in. `raw` and `callerSig` are absent on an unsigned call and from an older gateway. */
+/** What a device says in its register frame when it takes a signed call as `raw` alone, and answers with `responseText` alone. */
+export const CALL_RAW_ONLY = "call-raw-only";
+
+/** The request in a body, or undefined when it is not one that can be read. */
+function parseLoosely(raw: unknown): unknown {
+  if (typeof raw !== "string") return undefined;
+  try {
+    return JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface TunnelFrame {
   request?: unknown;
   raw?: unknown;
@@ -186,7 +199,13 @@ export class CallerAuth {
       failure = verdict.failure;
     }
 
-    const request = frame.request;
+    // A frame of a device that asked for them (CALL_RAW_ONLY) has `raw` and no `request`: what it says is read from `raw`.
+    const request = Object.hasOwn(frame, "request") ? frame.request : parseLoosely(frame.raw);
+    if (request === undefined) {
+      // Neither a request nor a body that can be read: there is nothing to run, whatever the mode.
+      this.record("bad-body", undefined, "refused", frame);
+      return { action: "refuse", response: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the request could not be read", data: { reason: "invalid" } } } };
+    }
     if (!requiresSignature(request)) return { action: "run", request };
 
     failure ??= "unsigned";
@@ -223,7 +242,8 @@ export class CallerAuth {
     if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay" };
     let request: unknown;
     try {
-      request = (this.opts.parse ?? JSON.parse)(frame.raw);
+      // The signature covers the bytes as they came, a leading byte-order mark included; JSON.parse does not take one.
+      request = (this.opts.parse ?? JSON.parse)(frame.raw.charCodeAt(0) === 0xfeff ? frame.raw.slice(1) : frame.raw);
     } catch {
       return { ok: false, failure: "bad-body" };
     }

@@ -18,7 +18,7 @@
 //   --mcp <path>       aggregate tools from external MCP servers defined in the given JSON config (Claude Desktop format).
 
 import { loadRunVault, runCodeInChild } from "./run-tool.ts";
-import { CallerAuth, parseCallerAuthMode } from "./caller-auth.ts";
+import { CALL_RAW_ONLY, CallerAuth, parseCallerAuthMode } from "./caller-auth.ts";
 import { callersPath } from "./caller-key.ts";
 import { spawn, spawnSync, file, write } from "bun";
 import { chmodSync, mkdtempSync, readdirSync, statSync, mkdirSync, rmdirSync, rmSync, realpathSync, lstatSync, constants as fsConstants } from "node:fs";
@@ -6257,7 +6257,8 @@ if (gatewayDomain) {
       console.error(`[${deviceId}] Connected to gateway`);
       everOpened = true;
       retries = 0;
-      ws.send(JSON.stringify({ type: "register", deviceId }));
+      // `capabilities`: a gateway that knows one may use it, one that does not ignores the field.
+      ws.send(JSON.stringify({ type: "register", deviceId, capabilities: [CALL_RAW_ONLY] }));
       armWatchdog();
       keepaliveTimer = setInterval(() => {
         try { ws.send(JSON.stringify({ type: "keepalive" })); }
@@ -6274,12 +6275,20 @@ if (gatewayDomain) {
         // One additional container belongs to the gateway envelope.
         const msg = parseMcpJson(e.data as string, 257) as { id?: string; request?: Json; raw?: string; callerSig?: string; token?: string; type?: string };
         if (msg.type === "keepalive-ack") return;
-        if (msg.id == null || !Object.hasOwn(msg, "request")) return;
+        // A frame has `request`, or (of a gateway that was told this device takes them) `raw` alone, and then the
+        // reply is `responseText` alone as well: the one text the reply signature covers, not written twice.
+        const rawOnly = !Object.hasOwn(msg, "request");
+        if (msg.id == null || (rawOnly && typeof msg.raw !== "string")) return;
+        const reply = (response: unknown, signature?: string): void => {
+          const text = JSON.stringify(response);
+          ws.send(JSON.stringify({ id: msg.id, ...(rawOnly ? {} : { response }), responseText: text, ...(signature ? { replySig: signature } : {}) }));
+        };
         // A call runs only if a key this device trusts signed it (a signed call runs from the body
         // that was signed, not from `request`), unless the mode lets it through.
         const admission = callerAuth.admit(msg);
         if (admission.action === "refuse") {
-          ws.send(JSON.stringify({ id: msg.id, response: admission.response }));
+          if (rawOnly) reply(admission.response);
+          else ws.send(JSON.stringify({ id: msg.id, response: admission.response }));
           return;
         }
         // In-process dispatch: handle() mirrors the /mcp HTTP handler exactly
@@ -6296,9 +6305,9 @@ if (gatewayDomain) {
         // The reply to a signed call is signed too, so its sender can tell this device answered.
         // `responseText` is the exact text that was signed: the gateway sends it as the body as it is, so what the
         // caller receives is what the signature covers, however the gateway would have written `response`.
-        const responseText = JSON.stringify(resp);
-        const replySig = admission.nonce !== undefined ? callerAuth.replySig(admission.nonce, responseText) : undefined;
-        ws.send(JSON.stringify({ id: msg.id, response: resp, ...(replySig ? { replySig, responseText } : {}) }));
+        const replySig = admission.nonce !== undefined ? callerAuth.replySig(admission.nonce, JSON.stringify(resp)) : undefined;
+        if (rawOnly || replySig) reply(resp, replySig);
+        else ws.send(JSON.stringify({ id: msg.id, response: resp }));
       } catch (err) {
         console.error(`[${deviceId}] handle error:`, err);
         // A frame rejected before parsing has no trustworthy correlation ID.
