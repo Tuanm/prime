@@ -454,7 +454,7 @@ export async function devicesCallers(ctx: Ctx): Promise<void> {
 
 export async function devicesRevokeCaller(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2);
-  if (positionals.length === 0) throw new UsageError("missing <key-id>", "Usage: prime devices revoke-caller <key-id>   (see 'prime devices callers')");
+  if (positionals.length === 0) throw new UsageError("missing <key-id>", "Usage: prime devices revoke-caller <key-id | public-key>   (see 'prime devices callers')");
   const given = positionals[0]!;
   // A public key is accepted for its id, so what was passed to allow-caller can be passed back.
   const raw = parsePublicKey(given);

@@ -90,7 +90,7 @@ USAGE
   prime devices rotate-code <device-id> [--operator [--revoke-previous]] [--json]
   prime devices allow-caller <public-key> | --self [--label <text>] [--tools a,b | --all-tools] [--callers <path>]
   prime devices callers [--json] [--callers <path>]
-  prime devices revoke-caller <key-id> [--callers <path>]
+  prime devices revoke-caller <key-id | public-key> [--callers <path>]
 
 ${bold("rotate-code")}
   A device made when codes were six characters keeps a code that can be guessed
@@ -152,7 +152,7 @@ ${bold("allow-caller, callers, revoke-caller")}
                                 limits it to those tools and is kept when the key is
                                 allowed again; --all-tools lifts the limit.
     callers                     List the allowed keys.
-    revoke-caller <key-id>      Stop trusting a key.
+    revoke-caller <key-id>      Stop trusting a key (its id, or its public key).
   The file is {"version": 1, "callers": [...]}. A file that is empty or damaged is an
   error, never "no callers".
   A fleet reached with its fleet token is addressed by 'prime devices connect <id>
