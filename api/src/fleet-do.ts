@@ -2589,7 +2589,7 @@ export class FleetDO implements DurableObject {
       try {
         result = await this.rosterApply(caller, signed, fleetId);
       } catch (error) {
-        if (error instanceof RosterRefusal) result = { out: Response.json({ error: error.message }, { status: error.status }) };
+        if (error instanceof RosterRefusal) result = { out: Response.json({ error: error.message, ...(error.extra ?? {}) }, { status: error.status }) };
         else throw error;
       }
     });
@@ -2636,7 +2636,9 @@ export class FleetDO implements DurableObject {
       const head = await this.readHeadOrNull(fleetId);
       if (head === null) throw new RosterRefusal("the fleet's head could not be read", 503);
       headSeq = head.seq;
-      if ((e[11] as number) > head.seq) throw new RosterRefusal("the entry takes effect from snapshot " + String(e[11]) + ", and the head is at " + head.seq, 409);
+      if ((e[11] as number) > head.seq) {
+        throw new RosterRefusal("the entry takes effect from snapshot " + String(e[11]) + ", and the head is at " + head.seq, 409, { code: "ahead-of-head", head: head.seq });
+      }
     }
     switch (op) {
       case "add":
@@ -2691,7 +2693,11 @@ export class FleetDO implements DurableObject {
     // every few seconds the owner could never sign in time. A low one is for a member that was in the fleet before the roster, above.)
     const floor = Math.min(request.headSeq ?? headSeq, headSeq);
     if ((signed.entry[11] as number) < floor) {
-      throw new RosterRefusal("an add for a new member takes effect from where the head was when it asked, or later: that was snapshot " + floor + ", and the entry says " + String(signed.entry[11]), 409);
+      throw new RosterRefusal(
+        "an add for a new member takes effect from where the head was when it asked, or later: that was snapshot " + floor + ", and the entry says " + String(signed.entry[11]),
+        409,
+        { code: "head-moved", head: headSeq, floor },
+      );
     }
     if (request.pubkey !== xpub || request.spub !== spub) throw new RosterRefusal("the entry is for another key than the request of " + device + " offers (it was replaced since)", 409);
     if (Object.keys(members).length >= MAX_MEMBERS) throw new RosterRefusal("fleet is full", 409);
