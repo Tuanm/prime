@@ -1,12 +1,13 @@
 // The agent's side of fleet-callers.ts: what it writes for a space's tool server, from the roster it verified and the
 // lease it holds.
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { CallerEntry } from "./caller-key.ts";
 import { loadOrCreateSignKey } from "./fleet-agent.ts";
+import { readControlledFile } from "./safe-file.ts";
 import { REPLY_CERT_RENEW_MS, REPLY_CERT_TTL_MS, publicKeyOfPem, signReplyCert } from "./fleet-reply-cert.ts";
 import { type FleetCallersFile, FLEET_CALLERS_FILE, FLEET_CALLERS_RENEW_MS, FLEET_ROSTER_KEEP_MS, FLEET_ROSTER_REFRESH_MS, FLEET_CALLERS_VERSION, callersOfRoster, replyKeyFileOf } from "./fleet-callers.ts";
 import type { FleetCredentials } from "./fleet-transport.ts";
@@ -149,6 +150,8 @@ export async function refreshFleetCallers(loop: CallersLoop, log: (text: string)
   writer.update(loop.primary);
 }
 
+let replyKeyFileSaid = false;
+
 /**
  * Certify the key this space signs its replies with, with the member's signing key (which stays here, on the host). The space makes
  * its reply key when it first signs a reply, so until then there is nothing to certify. A new certificate is made when the key changed
@@ -157,10 +160,15 @@ export async function refreshFleetCallers(loop: CallersLoop, log: (text: string)
 export function issueReplyCert(loop: CallersLoop & { creds: { deviceId: string } }, writer: FleetCallersWriter, secretDir: string, log: (text: string) => void, now: number = Date.now()): void {
   let replyKey: string | undefined;
   try {
-    const file = replyKeyFileOf(secretDir);
-    replyKey = existsSync(file) ? publicKeyOfPem(readFileSync(file, "utf8")) : undefined;
-  } catch {
+    // The space writes this file, so it is read as one that something else controls: no link, no named pipe, no more than a key is long.
+    const read = readControlledFile(replyKeyFileOf(secretDir), 16 * 1024);
+    replyKey = read ? publicKeyOfPem(read.text) : undefined;
+  } catch (err) {
     replyKey = undefined;
+    if (!replyKeyFileSaid) {
+      replyKeyFileSaid = true;
+      log(`the reply key of this space is not read: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   if (replyKey === undefined) {
     writer.setReplyCert(undefined);

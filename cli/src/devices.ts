@@ -21,7 +21,7 @@ import { RotateRefusedError, formatDuration, newDeviceCode, rotateAnonymousCode,
 import { DEFAULT_GATEWAY, ENV, assertDeviceId, entryFromOverrides, normalizeGateway } from "./target.ts";
 import { forgetDeviceKey, PinsFileError, pinnedDeviceKey } from "./device-pins.ts";
 import { dirname, join } from "node:path";
-import { requireSpace, spaceCallersFile, spaceStateDir } from "./spaces.ts";
+import { requireSpace, spaceCallerStateDir, spaceCallersFile } from "./spaces.ts";
 
 /** Is this error the device answering (as opposed to a transport failure)? */
 function isDeviceAnswer(err: unknown): boolean {
@@ -382,7 +382,7 @@ function callersFile(ctx: Ctx): string {
 /** Where the device that reads this callers file keeps its reply key: beside the file, or in the state directory of a space. */
 function deviceStateDir(ctx: Ctx, callers: string): string {
   const space = spaceOf(ctx);
-  return space ? join(spaceStateDir(space.secretDir), "caller-auth") : join(dirname(callers), "caller-auth");
+  return space ? spaceCallerStateDir(space.secretDir) : join(dirname(callers), "caller-auth");
 }
 
 /** The file's callers, or a usage error that names the file when it cannot be read. */

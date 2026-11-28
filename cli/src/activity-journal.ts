@@ -17,7 +17,8 @@
 // lose no line and take no number twice. A process that is killed loses the calls still in the queue (a few
 // milliseconds of them); `flushSync` writes them at a clean exit.
 
-import { appendFileSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { readControlledFile } from "./safe-file.ts";
+import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -300,35 +301,18 @@ export const READ_LIMIT_BYTES = 2 * 1024 * 1024;
  * it): a link is not followed, only a regular file is read, and no more than READ_LIMIT_BYTES of it (its end: the newest calls).
  */
 function readJournalText(path: string): string | undefined {
-  let fd: number;
+  let read;
   try {
-    // O_NOFOLLOW is not there on Windows; the check of the file's kind below is. O_NONBLOCK: opening a named pipe that nobody
-    // writes to would wait for a writer, and the space may put one there; it is opened at once and then refused as not a file.
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    read = readControlledFile(path, READ_LIMIT_BYTES, { tail: true });
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return undefined;
-    if (code === "ELOOP") throw new Error(`the activity journal ${path} is a link, and is not read`);
-    throw err;
+    // The messages name the activity journal (and a link is still a link).
+    throw new Error(String((err as Error).message).replace(path, `the activity journal ${path}`));
   }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error(`the activity journal ${path} is not a regular file, and is not read`);
-    const length = Math.min(st.size, READ_LIMIT_BYTES);
-    const buffer = Buffer.alloc(length);
-    let got = 0;
-    while (got < length) {
-      const n = readSync(fd, buffer, got, length - got, st.size - length + got);
-      if (n === 0) break;
-      got += n;
-    }
-    let text = buffer.subarray(0, got).toString("utf8");
-    // A read that began in the middle of a line drops that line.
-    if (st.size > length) text = text.slice(text.indexOf("\n") + 1);
-    return text;
-  } finally {
-    closeSync(fd);
-  }
+  if (read === undefined) return undefined;
+  let text = read.text;
+  // A read that began in the middle of a line drops that line.
+  if (read.truncated) text = text.slice(text.indexOf("\n") + 1);
+  return text;
 }
 
 /** The calls in a journal after `after` (none: all of them). Lines that are not entries are skipped. */

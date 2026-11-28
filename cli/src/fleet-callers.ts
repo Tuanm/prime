@@ -130,9 +130,12 @@ export function readFleetCallers(path: string): { file?: FleetCallersFile; error
   };
 }
 
-/** Where a space keeps the key it signs its replies with: in its state directory (see `spaceStateDir` in spaces.ts: the secret dir and ".state"). */
+/**
+ * Where a space keeps the key it signs its replies with: `<secret dir>.state/caller-auth/device-ed25519.pem`, the `--caller-state` of its tool server
+ * (`spaceCallerStateDir` in spaces.ts, which a test holds this to: spaces.ts is not imported here, as it imports the agent).
+ */
 export function replyKeyFileOf(secretDir: string): string {
-  return join(secretDir + ".state", "device-ed25519.pem");
+  return join(secretDir.replace(/[\\/]+$/, "") + ".state", "caller-auth", "device-ed25519.pem");
 }
 
 /** Where a space's tool server looks for the file: beside its callers file. */

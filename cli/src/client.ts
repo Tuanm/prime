@@ -173,7 +173,7 @@ export class GatewayClient {
    */
   private async fleetMember(method: string, signal: AbortSignal): Promise<string | undefined> {
     if (!this.signer || !(this.target.fleet || this.target.fleetBuddy) || !methodNeedsSignature(method)) return undefined;
-    if (!this.authority().pinned()) {
+    if (!this.authority().pinned() && this.authority().shouldSayUnpinned()) {
       const fleet = this.target.fleet ?? this.target.deviceId;
       this.once(`the replies of the fleet ${fleet} are not authenticated: a gateway can answer for a member. Pin the fleet's owner on this machine: prime fleets roster pin-caller ${fleet} --owner <fingerprint>`);
     }
@@ -306,7 +306,7 @@ export class GatewayClient {
           const reason = (err.data as { reason?: unknown } | undefined)?.reason;
           const replySig = response.headers.get(REPLY_SIG_HEADER);
           const nonce = parseCallSig(headers[CALL_SIG_HEADER] ?? "")?.nonce;
-          if (!retried && member !== undefined && reason === "not-primary" && replySig !== null && nonce !== undefined && (await this.authority().certifiedBy(replySig, nonce, body, text, member))) {
+          if (!retried && member !== undefined && reason === "not-primary" && replySig !== null && nonce !== undefined && (await this.authority().certifiedBy(replySig, nonce, body, text, member, { fresh: true }))) {
             retried = true;
             member = await this.fleetMember(method, signal);
             if (member !== undefined) continue;

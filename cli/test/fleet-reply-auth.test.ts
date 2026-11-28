@@ -2,18 +2,19 @@
 // what the agent writes, what the space adds to its replies, and what a caller makes of them (and of a refusal, to try again).
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { CallerAuth, replyCertOf, verifyReplySig } from "../src/caller-auth.ts";
 import { GatewayClient } from "../src/client.ts";
-import { CallSigner, FLEET_PROBE_TOOL, loadOrCreateCallerKey, parseCallSig } from "../src/caller-key.ts";
+import { CallSigner, FLEET_PROBE_TOOL, fleetMemberTarget, loadOrCreateCallerKey, parseCallSig, signCall } from "../src/caller-key.ts";
 import { FleetCallersWriter, issueReplyCert } from "../src/fleet-callers-agent.ts";
 import { readFleetCallers, replyKeyFileOf } from "../src/fleet-callers.ts";
 import { REPLY_CERT_RENEW_MS, REPLY_CERT_TTL_MS, checkReplyCert, parseReplyCert, publicKeyOfPem, signReplyCert } from "../src/fleet-reply-cert.ts";
 import { FleetAuthority, pinFleetOwner, pinnedFleetOwner, unpinFleetOwner } from "../src/fleet-reply-trust.ts";
 import { type OwnerKey, type RosterEntry, type SignedEntry, entryHash, generateOwnerKey, makeEntry, ownerFingerprint, signEntry } from "../src/fleet-roster.ts";
+import { containerArgs, entrypointScript, spaceCallerStateDir, spaceStateDir } from "../src/spaces.ts";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -31,7 +32,7 @@ afterAll(() => {
 const unsignedBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: { command: "id" } } });
 
 /** An owner-signed chain naming these members (device, spub). */
-function chainOf(owner: OwnerKey, members: Array<{ device: string; spub: string; role?: string }>): SignedEntry[] {
+function chainOf(owner: OwnerKey, members: Array<{ device: string; spub: string; role?: string }>, removed: string[] = []): SignedEntry[] {
   const entries: SignedEntry[] = [];
   const add = (f: Omit<Parameters<typeof makeEntry>[0], "fleet" | "incarnation" | "n" | "prevHash" | "at">): void => {
     const prev = entries[entries.length - 1];
@@ -40,6 +41,7 @@ function chainOf(owner: OwnerKey, members: Array<{ device: string; spub: string;
   };
   add({ op: "genesis", seqAt: 0, extra: owner.publicKey });
   for (const m of members) add({ op: "add", device: m.device, xpub: Buffer.from(m.device).toString("base64"), spub: m.spub, role: m.role ?? "member", seqAt: 0 });
+  for (const device of removed) add({ op: "remove", device, seqAt: 1 });
   return entries;
 }
 
@@ -80,7 +82,8 @@ function memberSpace(id: string, caller: { publicKeyB64: string }, options: { pr
   const root = scratch();
   const secretDir = join(root, "secret");
   mkdirSync(secretDir, { recursive: true });
-  const stateDir = secretDir + ".state";
+  // where the entrypoint of a space puts the state of its tool server (--caller-state): not made up here
+  const stateDir = spaceCallerStateDir(secretDir);
   mkdirSync(stateDir, { recursive: true });
   const sign = options.sign ?? generateOwnerKey();
   const keyFile = join(root, "member-key.json");
@@ -99,18 +102,66 @@ function memberSpace(id: string, caller: { publicKeyB64: string }, options: { pr
   write();
   // the callers are listed by the roster; this file is made the way the agent makes it, with the caller added by hand since no roster is read here
   const file = join(secretDir, "fleet-callers.json");
-  const parsed = JSON.parse(require("node:fs").readFileSync(file, "utf8"));
+  const parsed = JSON.parse(readFileSync(file, "utf8"));
   writeFileSync(file, JSON.stringify({ ...parsed, roster: "signed", primarySince: Date.now() - 120_000, callers: [{ pub: caller.publicKeyB64, label: "x", addedAt: "" }] }));
   const auth = new CallerAuth({ mode: "enforce", deviceId: id, callersFile: join(secretDir, "callers.json"), stateDir });
   return { id, secretDir, stateDir, sign, auth, writer, keyFile, loop };
 }
+
+describe("where the reply key is", () => {
+  test("the agent looks where the space's tool server keeps it: the --caller-state of the entrypoint, under the state directory that is mounted", () => {
+    const secret = join(scratch(), "secret");
+    expect(replyKeyFileOf(secret)).toBe(join(spaceCallerStateDir(secret), "device-ed25519.pem"));
+    expect(replyKeyFileOf(secret + "/")).toBe(replyKeyFileOf(secret));
+    // the entrypoint passes that directory as --caller-state, and mounts the state directory where it says
+    const script = entrypointScript({ id: "s", runtime: "docker", image: "i", mode: "ephemeral", container: "c", token: "t" } as never);
+    expect(script).toContain("--caller-state /run/prime-state/caller-auth");
+    const args = containerArgs({ kind: "podman" } as never, { id: "s", runtime: "podman", image: "i", mode: "ephemeral", container: "c", token: "t", port: 7777 } as never, "img", secret);
+    expect(args).toContain(spaceStateDir(secret) + ":/run/prime-state");
+    // and a space's tool server run as the entrypoint says makes its key there
+    const state = spaceCallerStateDir(secret);
+    mkdirSync(state, { recursive: true });
+    const auth = new CallerAuth({ mode: "enforce", deviceId: "space-1", callersFile: join(secret, "callers.json"), stateDir: state });
+    auth.replySig({ nonce: "n", raw: "{}" }, "{}");
+    expect(existsSync(replyKeyFileOf(secret))).toBe(true);
+  });
+
+  test("a reply key that is a link, a named pipe or is not a key is not read, says so once, and certifies nothing", () => {
+    const caller = loadOrCreateCallerKey(join(scratch(), "c.pem"));
+    const m = memberSpace("space-1", caller, { primary: true });
+    const said: string[] = [];
+    const key = replyKeyFileOf(m.secretDir);
+    const other = join(scratch(), "host.pem");
+    writeFileSync(other, readFileSync(key, "utf8"));
+    rmSync(key);
+    if (process.platform !== "win32") {
+      symlinkSync(other, key);
+      m.writer.setReplyCert(undefined);
+      issueReplyCert(m.loop, m.writer, m.secretDir, (t) => said.push(t));
+      expect(m.writer.currentReplyCert()).toBeUndefined();
+      expect(said.join("\n")).toContain("is a link");
+      rmSync(key);
+      // a named pipe that nobody writes to: refused at once, in a child so that a wait is a failure and not a hang
+      expect(Bun.spawnSync(["mkfifo", key], { timeout: 10_000 }).exitCode).toBe(0);
+      const script = `import { readControlledFile } from ${JSON.stringify(join(import.meta.dir, "..", "src", "safe-file.ts"))};
+        try { readControlledFile(${JSON.stringify(key)}, 16384); console.log("read"); } catch (e) { console.log(String(e)); }`;
+      const r = Bun.spawnSync(["bun", "-e", script], { timeout: 8_000, stdout: "pipe", stderr: "pipe" });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.toString()).toContain("not a regular file");
+      rmSync(key);
+    }
+    writeFileSync(key, "x".repeat(100_000));
+    issueReplyCert(m.loop, m.writer, m.secretDir, () => undefined);
+    expect(m.writer.currentReplyCert()).toBeUndefined();
+  });
+});
 
 describe("what the agent writes and the space adds", () => {
   test("the agent certifies the key the space replies with, and makes a new certificate when the key changes or the old one is half gone", () => {
     const caller = loadOrCreateCallerKey(join(scratch(), "c.pem"));
     const m = memberSpace("space-1", caller, { primary: true });
     const first = readFleetCallers(join(m.secretDir, "fleet-callers.json")).file!.replyCert!;
-    const replyPub = publicKeyOfPem(require("node:fs").readFileSync(replyKeyFileOf(m.secretDir), "utf8"));
+    const replyPub = publicKeyOfPem(readFileSync(replyKeyFileOf(m.secretDir), "utf8"));
     expect(first.key).toBe(replyPub);
     expect(checkReplyCert(parseReplyCert(first.cert)!, { fleet: "acme", device: "space-1", replyKey: replyPub }, Date.now())).toBe(true);
     // nothing to do while it has plenty left
@@ -134,6 +185,43 @@ describe("what the agent writes and the space adds", () => {
     expect(m.writer.currentReplyCert()).toBeUndefined();
   });
 
+  test("the certificate goes with the replies to a call that names the member, and the question which member it is; not with the others (an older client does not read it)", () => {
+    const caller = new CallSigner({ path: join(scratch(), "c.pem") });
+    const m = memberSpace("space-1", { publicKeyB64: caller.callerKey()!.publicKeyB64 }, { primary: true });
+    const sigOf = (member: string | undefined) => {
+      const header = caller.header("tools/call", { deviceId: "acme", fleetBuddy: true, ...(member !== undefined ? { member } : {}) }, unsignedBody)!;
+      const adm = m.auth.admit({ raw: unsignedBody, callerSig: header });
+      return { adm, sig: adm.reply ? m.auth.replySig(adm.reply, "{}") : undefined };
+    };
+    expect(replyCertOf(sigOf("space-1").sig!)).toBeDefined(); // the call
+    expect(replyCertOf(sigOf("").sig!)).toBeDefined(); // the question
+    const legacy = sigOf(undefined); // the form an older prime signs
+    expect(legacy.adm.action).toBe("refuse");
+    expect(legacy.sig).toBeDefined();
+    expect(replyCertOf(legacy.sig!)).toBeUndefined();
+    const other = sigOf("space-2"); // made for another member
+    expect(other.adm.action).toBe("refuse");
+    expect(replyCertOf(other.sig!)).toBeUndefined();
+  });
+
+  test("a member that is not the primary signs its refusal only for a call that is not signed ahead of the clock (a restart could let that one run)", () => {
+    const caller = new CallSigner({ path: join(scratch(), "c.pem") });
+    const key = caller.callerKey()!;
+    const m = memberSpace("space-1", { publicKeyB64: key.publicKeyB64 }, { primary: false });
+    const at = (ahead: number, n: number) => {
+      const raw = unsignedBody.replace('"id":1', `"id":${n}`);
+      return m.auth.admit({ raw, callerSig: signCall(key, fleetMemberTarget("acme", "space-1"), raw, { now: Date.now() + ahead }) });
+    };
+    const now = at(0, 2);
+    expect(now.action).toBe("refuse");
+    expect(now.reply).toBeDefined(); // signed: it did not run, and cannot afterwards
+    const soon = at(3_000, 3);
+    expect(soon.reply).toBeDefined();
+    const ahead = at(30_000, 4);
+    expect(ahead.action).toBe("refuse");
+    expect(ahead.reply).toBeUndefined(); // unsigned: the caller is told it may or may not have run
+  });
+
   test("a reply to a call made for the fleet carries the certificate, one to a call for the device does not", () => {
     const caller = new CallSigner({ path: join(scratch(), "c.pem") });
     const key = caller.callerKey()!;
@@ -155,7 +243,7 @@ describe("what the agent writes and the space adds", () => {
     const key = caller.callerKey()!;
     const m = memberSpace("space-1", { publicKeyB64: key.publicKeyB64 }, { primary: true });
     const file = join(m.secretDir, "fleet-callers.json");
-    const parsed = JSON.parse(require("node:fs").readFileSync(file, "utf8"));
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
     writeFileSync(file, JSON.stringify({ ...parsed, replyCert: { ...parsed.replyCert, key: "B".repeat(43) } }));
     const header = caller.header("tools/call", { deviceId: "acme", fleetBuddy: true, member: "space-1" }, unsignedBody)!;
     const adm = m.auth.admit({ raw: unsignedBody, callerSig: header });
@@ -198,6 +286,31 @@ describe("what a caller makes of a reply", () => {
     // the roster does not name that key for that device, or names it as a viewer
     expect(await authority([{ device: "space-1", spub: generateOwnerKey().publicKey }]).authority.certifiedBy(r.sig, r.nonce, unsignedBody, r.text, "space-1")).toBe(false);
     expect(await authority([{ device: "space-1", spub: m.sign.publicKey, role: "viewer" }]).authority.certifiedBy(r.sig, r.nonce, unsignedBody, r.text, "space-1")).toBe(false);
+  });
+
+  test("a member that was removed does not vouch for a retry, though the roster that listed it is cached (the retry reads it again)", async () => {
+    const caller = new CallSigner({ path: join(scratch(), "c.pem") });
+    const m = memberSpace("space-1", { publicKeyB64: caller.callerKey()!.publicKeyB64 }, { primary: true });
+    const r = replyOf(m, caller);
+    const pins = join(scratch(), "owners.json");
+    pinFleetOwner("http://gw.test", "acme", fp, pins);
+    let removed = false;
+    const fetchFn = (async () => Response.json({ mode: "signed", entries: chainOf(owner, [{ device: "space-1", spub: m.sign.publicKey }], removed ? ["space-1"] : []) })) as unknown as typeof fetch;
+    const a = new FleetAuthority({ gateway: "http://gw.test", fleet: "acme", headers: () => ({}), fetchFn, pinsPath: pins });
+    expect(await a.certifiedBy(r.sig, r.nonce, unsignedBody, r.text, "space-1")).toBe(true);
+    removed = true;
+    expect(await a.certifiedBy(r.sig, r.nonce, unsignedBody, r.text, "space-1")).toBe(true); // the cache, for a minute
+    expect(await a.certifiedBy(r.sig, r.nonce, unsignedBody, r.text, "space-1", { fresh: true })).toBe(false);
+  });
+
+  test("it is said once a day for a fleet that its replies are not authenticated, not once for each process", () => {
+    const pins = join(scratch(), "owners.json");
+    let now = 1_800_000_000_000;
+    const a = () => new FleetAuthority({ gateway: "http://gw.test", fleet: "acme", headers: () => ({}), pinsPath: pins, now: () => now });
+    expect(a().shouldSayUnpinned()).toBe(true);
+    expect(a().shouldSayUnpinned()).toBe(false); // another process
+    now += 25 * 60 * 60_000;
+    expect(a().shouldSayUnpinned()).toBe(true);
   });
 
   test("a roster that is another owner's, or no owner pinned, vouches for nothing", async () => {
