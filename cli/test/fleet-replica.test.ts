@@ -2868,9 +2868,15 @@ describe("a tree that is written to without a pause", () => {
       };
       await publishOnce("1");
       expect(s.loop.holdUntil ?? 0).toBe(0);
+      // The second follows the first "within moments", however slow this machine is to make a publish: it is what a round
+      // that takes a second or more (git on Windows) would otherwise make a lone change of.
+      s.loop.lastPublish = Date.now() + 60_000;
+      const began = Date.now();
       await publishOnce("2");
       expect(s.loop.holdMs).toBe(1000);
-      expect(s.loop.holdUntil).toBeGreaterThan(Date.now() - 50);
+      // The hold was set by this publish (a round that takes more than the hold itself, as on a slow runner, has it over
+      // by the time it is looked at, so it is not compared with now).
+      expect(s.loop.holdUntil).toBeGreaterThanOrEqual(began);
     } finally {
       finish(w);
     }
