@@ -230,6 +230,10 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
   if (positionals.length > 1) throw new UsageError(`unexpected argument "${positionals[1]}"`);
   const deviceId = assertDeviceId(positionals[0]!);
   const operator = bool(ctx.parsed, "operator");
+  const revokePrevious = bool(ctx.parsed, "revoke-previous");
+  if (revokePrevious && !operator) {
+    throw new UsageError("--revoke-previous is for --operator", "A device cannot cut off its own earlier code; the operator can: --operator --revoke-previous.");
+  }
   const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
 
   let operatorToken: string | undefined;
@@ -276,7 +280,7 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
       token: first.current,
       proposed: first.proposed,
       gatewayToken: target.gatewayToken,
-      ...(operatorToken !== undefined ? { operatorToken } : {}),
+      ...(operatorToken !== undefined ? { operatorToken, revokePrevious } : {}),
     });
   } catch (err) {
     // A repeat of a call that did succeed, made after the old code's day was over (or from a config that was
@@ -309,6 +313,7 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
     });
   }
 
+  const revoked = operator && revokePrevious;
   const grace = made.previousValidMs !== undefined && made.previousValidMs > 0 ? formatDuration(made.previousValidMs) : "a day";
   if (ctx.json) {
     printJson({
@@ -317,7 +322,7 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
       repeated: made.repeated,
       saved: first.keep,
       ...(first.keep ? {} : { token: made.token }),
-      previous_valid_ms: made.previousValidMs ?? null,
+      previous_valid_ms: revoked ? 0 : (made.previousValidMs ?? null),
       spaces,
       config_path: ctx.configPath,
     });
@@ -327,6 +332,12 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
   else {
     ctx.out(`${green("✓")} ${bold(deviceId)} has a new 25-character code: ${bold(made.token)}`);
     ctx.out(yellow("  this machine does not hold the device, so the code is not saved: this is the only time it is shown"));
+  }
+  if (revoked) {
+    ctx.out(yellow("  the old code stops working now: whatever holds it is refused until it is given the new one"));
+    if (spaces.length > 0) ctx.out(`  spaces exposed as it: ${spaces.join(", ")} - stop and start each, so that it holds the new code`);
+    ctx.out("  anything else that holds the old code (a running buddy, 'prime fleets' agent) - give it the new code and restart it");
+    return;
   }
   ctx.out(dim(`  the old code keeps working for ${grace}`));
   if (spaces.length > 0) ctx.out(`  spaces exposed as it: ${spaces.join(", ")} - stop and start each within ${grace}, so that it holds the new code`);

@@ -310,7 +310,7 @@ const fake = {
   /** The next rotation is applied but its answer is lost. */
   loseAnswer: false,
   operatorToken: "operator-secret",
-  rotateCalls: [] as Array<{ id: string; proposed: string; presented: string; operator: boolean }>,
+  rotateCalls: [] as Array<{ id: string; proposed: string; presented: string; operator: boolean; revoke?: boolean }>,
   calls: [] as string[],
 };
 
@@ -352,8 +352,10 @@ function startFakeGateway() {
         const operator = opRotate !== null;
         const id = operator ? decodeURIComponent(opRotate![1]!) : (request.headers.get("x-prime-device") ?? "");
         const device = fake.devices.get(id);
-        const proposed = ((await request.json().catch(() => ({}))) as { proposed?: string }).proposed ?? "";
-        fake.rotateCalls.push({ id, proposed, presented: request.headers.get("x-device-token") ?? "", operator });
+        const asked = (await request.json().catch(() => ({}))) as { proposed?: string; revoke_previous?: boolean };
+        const proposed = asked.proposed ?? "";
+        const revoke = operator && asked.revoke_previous === true;
+        fake.rotateCalls.push({ id, proposed, presented: request.headers.get("x-device-token") ?? "", operator, ...(revoke ? { revoke: true } : {}) });
         if (fake.rotateStatus) return Response.json({ error: "no" }, { status: fake.rotateStatus, headers: { "retry-after": "90" } });
         if (operator && request.headers.get("authorization") !== "Bearer " + fake.operatorToken) return Response.json({ error: "no" }, { status: 403 });
         if (!device) return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -366,7 +368,7 @@ function startFakeGateway() {
         if (proposed === device.token && (operator || isCurrent || isBefore)) return answer(true);
         if (!operator && !isCurrent) return isBefore ? Response.json({ error: "replaced" }, { status: 409 }) : Response.json({ error: "unauthorized" }, { status: 401 });
         fake.rotated++;
-        device.previous = device.token;
+        device.previous = revoke ? undefined : device.token;
         device.token = proposed;
         if (fake.loseAnswer) {
           fake.loseAnswer = false;
@@ -805,6 +807,39 @@ describe("prime devices rotate-code (fake gateway)", () => {
     expect(after.devices[device]!.token).toBe(fake.devices.get(device)!.token);
     expect(after.devices[device]!.token).not.toBe(token);
     expect(after.defaults.gateway).toBe(GATEWAY);
+  });
+
+  test("--revoke-previous cuts the old code off at once, and says so; without --operator it is a usage error", async () => {
+    const { config, device, token } = await made();
+    const doc = loadConfig(config);
+    doc.defaults.fleet_operator_token = "operator-secret";
+    doc.defaults.gateway = GATEWAY;
+    saveConfig(config, doc);
+    const bad = await cli(["devices", "rotate-code", device, "--revoke-previous"], config);
+    expect(bad.code).toBe(2);
+    expect(bad.err).toContain("--revoke-previous is for --operator");
+    expect(fake.rotateCalls).toEqual([]);
+    const run = await cli(["devices", "rotate-code", device, "--operator", "--revoke-previous"], config);
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("the old code stops working now");
+    expect(fake.rotateCalls).toEqual([expect.objectContaining({ id: device, operator: true, revoke: true })]);
+    expect(fake.devices.get(device)!.previous).toBeUndefined();
+    expect(fake.devices.get(device)!.token).toBe(loadConfig(config).devices[device]!.token!);
+    expect(fake.devices.get(device)!.token).not.toBe(token);
+    const json = await cli(["devices", "rotate-code", device, "--operator", "--revoke-previous", "--json"], config);
+    expect(JSON.parse(json.out)).toMatchObject({ rotated: true, previous_valid_ms: 0 });
+  });
+
+  test("a gateway that could not store the code says nothing was changed, and a rerun sends the same code", async () => {
+    const { config, device } = await made();
+    fake.rotateStatus = 503;
+    const down = await rotate(config, device);
+    expect(down.code).not.toBe(0);
+    expect(down.err).toContain("could not store");
+    const pending = loadConfig(config).devices[device]!.pending_token!;
+    fake.rotateStatus = 0;
+    expect((await rotate(config, device)).code).toBe(0);
+    expect(fake.rotateCalls.map((c) => c.proposed)).toEqual([pending, pending]);
   });
 
   test("the operator who does not hold the device is shown the code once, and nothing is saved", async () => {

@@ -86,7 +86,7 @@ USAGE
   prime devices disconnect <device-id>
   prime devices status <device-id> [--json]
   prime devices list [--no-probe] [--json]
-  prime devices rotate-code <device-id> [--operator] [--json]
+  prime devices rotate-code <device-id> [--operator [--revoke-previous]] [--json]
 
 ${bold("rotate-code")}
   A device made when codes were six characters keeps a code that can be guessed
@@ -101,6 +101,9 @@ ${bold("rotate-code")}
   --operator asks as the gateway's operator (--operator-token, or
   PRIME_FLEET_OPERATOR_TOKEN): no code of the device is needed and a lock on the
   device does not stop it - for a device whose code is lost or replaced.
+  --revoke-previous (with --operator) makes the old code stop working at once, not
+  after a day: for a code that has leaked or been taken. What holds it legitimately is
+  refused until it is given the new one.
   Update the gateway first - an older one has no such route.
 
 ${bold("connect")}

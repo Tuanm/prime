@@ -68,6 +68,7 @@ const ROTATE_FLAGS: FlagSpec[] = [
   ...GATEWAY_FLAGS,
   flag("operator", "boolean", "Ask as the gateway's operator: no code of the device is needed, and a lock on it does not stop this"),
   flag("operator-token", "string", "The gateway's fleet operator credential (FLEET_OPERATOR_TOKEN), for --operator", { placeholder: "<token>" }),
+  flag("revoke-previous", "boolean", "With --operator: the device's old code stops working now, not after a day (for a code that has leaked)"),
 ];
 
 const CONNECT_FLAGS: FlagSpec[] = [

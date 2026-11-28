@@ -230,6 +230,8 @@ export interface RotateRequest {
   gatewayToken?: string;
   /** The gateway's FLEET_OPERATOR_TOKEN: asks as the operator, which needs no code of the device. */
   operatorToken?: string;
+  /** With `operatorToken`: the code the device had stops working now, not after the day it is otherwise kept. */
+  revokePrevious?: boolean;
 }
 
 /**
@@ -252,7 +254,7 @@ export async function rotateAnonymousCode(gateway: string, deviceId: string, req
     response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify({ proposed: request.proposed }),
+      body: JSON.stringify({ proposed: request.proposed, ...(operator && request.revokePrevious ? { revoke_previous: true } : {}) }),
       signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
     });
   } catch (err) {
@@ -281,6 +283,9 @@ export async function rotateAnonymousCode(gateway: string, deviceId: string, req
     if (response.status === 429) {
       const wait = retryAfterMs(response.headers);
       throw new CliError("the gateway asks to wait (429)" + (wait !== undefined ? ": try again in " + formatDuration(wait) : ""));
+    }
+    if (response.status === 503) {
+      throw new CliError("the gateway could not store the new code (503): nothing was changed", "Run the command again: it sends the same code.");
     }
     if (response.status === 404 || response.status === 405) {
       throw new CliError(`${gateway} cannot make a code again (HTTP ${response.status})`, "The gateway is older than this command: it needs to be updated first.");
