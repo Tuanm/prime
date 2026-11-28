@@ -629,8 +629,11 @@ export class RegistryDO extends DurableObject<Env> {
       const id = url.searchParams.get("id") || "";
       if (!this.anon.has(id) || !this.tokens.has(id)) return Response.json({ error: "not an anonymous device" }, { status: 404 });
       if (pepperFrom(this.env) === null) return pepperMissingResponse();
-      const body = (await request.json().catch(() => ({}))) as { proposed?: unknown; presented?: unknown; operator?: unknown };
+      const body = (await request.json().catch(() => ({}))) as { proposed?: unknown; presented?: unknown; operator?: unknown; revoke_previous?: unknown };
       const operator = body.operator === true;
+      // For the operator only: the code the device had stops working now, not in a day. For a device whose code
+      // has leaked or been taken, a day of grace is a day for whoever holds it. (A migration keeps the day.)
+      const revoke = operator && body.revoke_previous === true;
       let proposed = typeof body.proposed === "string" ? body.proposed : undefined;
       if (proposed === undefined) {
         // Only the operator may leave the code to the gateway: a device's call must be repeatable.
@@ -649,7 +652,18 @@ export class RegistryDO extends DurableObject<Env> {
       const isCurrent = presentedV !== "" && timingSafeEq(presentedV, current);
       const isBefore = presentedV !== "" && before !== undefined && before.until > now && timingSafeEq(presentedV, before.verifier);
       if (timingSafeEq(proposedV, current) && (operator || isCurrent || isBefore)) {
-        // Done already: the same proposal, repeated. Nothing changes.
+        // Done already: the same proposal, repeated. Nothing changes, but for the operator asking for the old
+        // code to stop now: that it does (this is also how a revocation whose answer was lost is finished).
+        if (revoke && before) {
+          this.prevTokens.delete(id);
+          try {
+            await this.persistPrevTokens(true);
+          } catch {
+            this.prevTokens.set(id, before);
+            return Response.json({ error: "could not store the change; nothing was changed" }, { status: 503 });
+          }
+          return Response.json({ deviceId: id, token: proposed, previousValidMs: 0, repeated: true });
+        }
         return Response.json({ deviceId: id, token: proposed, previousValidMs: before && before.until > now ? before.until - now : 0, repeated: true });
       }
       if (!operator && !isCurrent) {
@@ -658,13 +672,25 @@ export class RegistryDO extends DurableObject<Env> {
           { status: isBefore ? 409 : 401 },
         );
       }
-      this.prevTokens.set(id, { verifier: current, until: now + ROTATE_GRACE_MS });
+      if (revoke) this.prevTokens.delete(id);
+      else this.prevTokens.set(id, { verifier: current, until: now + ROTATE_GRACE_MS });
       this.tokens.set(id, proposedV);
+      try {
+        // Previous first: a code that was replaced and not kept would be a device nobody can use.
+        await this.persistPrevTokens(true);
+        await this.persistTokens(true);
+      } catch {
+        // Nothing is said to be done that is not stored: after an eviction the object would hold the old code
+        // alone, and the caller would hold a new one. What was changed in memory is put back, and so is
+        // what may have been stored of it.
+        this.tokens.set(id, current);
+        if (before) this.prevTokens.set(id, before);
+        else this.prevTokens.delete(id);
+        await this.persistPrevTokens();
+        return Response.json({ error: "could not store the new code; nothing was changed. Try again." }, { status: 503, headers: { "retry-after": "5" } });
+      }
       if (operator) this.forgetLocks(id);
-      // Previous first: a code that was replaced and not kept would be a device nobody can use.
-      await this.persistPrevTokens();
-      await this.persistTokens();
-      return Response.json({ deviceId: id, token: proposed, previousValidMs: ROTATE_GRACE_MS });
+      return Response.json({ deviceId: id, token: proposed, previousValidMs: revoke ? 0 : ROTATE_GRACE_MS });
     }
 
     // Addresses refused at the edge of the Worker (both devices and MCP clients).
@@ -1218,16 +1244,21 @@ export class RegistryDO extends DurableObject<Env> {
     return out;
   }
 
-  private async persistPrevTokens(): Promise<void> {
+  /** `strict`: a failure to store is thrown, for the caller that must not say it is done when it is not. */
+  private async persistPrevTokens(strict = false): Promise<void> {
     try {
       await this.storage.put("device_tokens_prev", Object.fromEntries(this.prevTokens));
-    } catch {}
+    } catch (err) {
+      if (strict) throw err;
+    }
   }
 
-  private async persistTokens(): Promise<void> {
+  private async persistTokens(strict = false): Promise<void> {
     try {
       await this.storage.put("device_tokens", Object.fromEntries(this.tokens));
-    } catch {}
+    } catch (err) {
+      if (strict) throw err;
+    }
   }
 
   private async persistDisabled(): Promise<void> {

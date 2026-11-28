@@ -191,6 +191,74 @@ describe("the registry makes a device's code again", () => {
     expect((await call(...rotate(ID, { proposed: chosen.json.token, operator: true }))).json.repeated).toBe(true);
   });
 
+  test("the operator can have the old code stop at once: a stolen code does not keep the device for a day", async () => {
+    const { call, env } = await legacyRegistry();
+    // The owner migrated; then the old code is found to have leaked.
+    await call(...rotate(ID, { proposed: P1, presented: "OLD123" }));
+    const made = await call(...rotate(ID, { proposed: P2, operator: true, revoke_previous: true }));
+    expect(made.status).toBe(200);
+    expect(made.json.previousValidMs).toBe(0);
+    const map = (await call("GET", "/map")).json;
+    expect(await tokenVerifies(env as never, "device", P2, map.map[ID])).toBe(true);
+    expect(map.previous).toEqual({});
+    // Neither earlier code is kept, and neither can ask.
+    expect((await call(...rotate(ID, { proposed: P3, presented: "OLD123" }))).status).toBe(401);
+    expect((await call(...rotate(ID, { proposed: P3, presented: P1 }))).status).toBe(401);
+  });
+
+  test("without the option the operator's rotate keeps the old code for the day, as a migration does", async () => {
+    const { call, env } = await legacyRegistry();
+    await call(...rotate(ID, { proposed: P1, operator: true }));
+    const map = (await call("GET", "/map")).json;
+    expect(await tokenVerifies(env as never, "device", "OLD123", map.previous[ID])).toBe(true);
+  });
+
+  test("a device cannot ask for the revocation: only the operator's option is taken", async () => {
+    const { call, env } = await legacyRegistry();
+    await call(...rotate(ID, { proposed: P1, presented: "OLD123", revoke_previous: true }));
+    const map = (await call("GET", "/map")).json;
+    expect(await tokenVerifies(env as never, "device", "OLD123", map.previous[ID])).toBe(true);
+  });
+
+  test("a revocation whose answer was lost is finished by the same call again: the proposal is current, the old code goes", async () => {
+    const { call } = await legacyRegistry();
+    await call(...rotate(ID, { proposed: P1, operator: true }));
+    const again = await call(...rotate(ID, { proposed: P1, operator: true, revoke_previous: true }));
+    expect(again.status).toBe(200);
+    expect(again.json.repeated).toBe(true);
+    expect((await call("GET", "/map")).json.previous).toEqual({});
+  });
+
+  test("when the code cannot be stored nothing is said to be done: 503, memory put back, and a try again works", async () => {
+    const { call, store, env } = await legacyRegistry();
+    const real = store.put.bind(store);
+    let failing = true;
+    store.put = async (key: string, value: unknown) => {
+      if (failing && (key === "device_tokens" || key === "device_tokens_prev")) throw new Error("storage is busy");
+      return real(key, value);
+    };
+    const refused = await call(...rotate(ID, { proposed: P1, presented: "OLD123" }));
+    expect(refused.status).toBe(503);
+    // The device still has the code it had, and no previous.
+    let map = (await call("GET", "/map")).json;
+    expect(await tokenVerifies(env as never, "device", "OLD123", map.map[ID])).toBe(true);
+    expect(map.previous).toEqual({});
+    expect((store.data.get("device_tokens") as Record<string, string>)[ID]).toBe(map.map[ID]);
+    // A failure of the second write leaves the first put back too.
+    failing = false;
+    const realTokens = store.put;
+    store.put = async (key: string, value: unknown) => {
+      if (key === "device_tokens") throw new Error("storage is busy");
+      return realTokens(key, value);
+    };
+    expect((await call(...rotate(ID, { proposed: P1, presented: "OLD123" }))).status).toBe(503);
+    expect(((store.data.get("device_tokens_prev") as Record<string, unknown>) ?? {})[ID]).toBeUndefined();
+    store.put = real;
+    expect((await call(...rotate(ID, { proposed: P1, presented: "OLD123" }))).status).toBe(200);
+    map = (await call("GET", "/map")).json;
+    expect(await tokenVerifies(env as never, "device", P1, map.map[ID])).toBe(true);
+  });
+
   test("when the day is over the old code is gone, and the device is counted as having a long one", async () => {
     const t0 = Date.parse("2026-12-05T00:00:00Z");
     setSystemTime(t0);
@@ -353,7 +421,35 @@ describe("the gateway", () => {
       const res = await worker.fetch(post(route, { authorization: "Bearer " + OP, "cf-connecting-ip": "198.51.100.94" }, { proposed: P2 }), env as never);
       expect(res.status).toBe(200);
       expect(((await res.json()) as { token: string }).token).toBe(P2);
-      expect(rotated().at(-1)!.body).toEqual({ proposed: P2, operator: true });
+      expect(rotated().at(-1)!.body).toEqual({ proposed: P2, operator: true, revoke_previous: false });
+    });
+
+    test("the option to stop the old code at once is passed on from the operator's route and the admin page's, and from nowhere else", async () => {
+      const { env, rotated } = await gateway({ FLEET_OPERATOR_TOKEN: OP, ADMIN_ACCESS: "off" });
+      await worker.fetch(post(route, { authorization: "Bearer " + OP, "cf-connecting-ip": "198.51.100.99" }, { proposed: P1, revoke_previous: true }), env as never);
+      expect(rotated().at(-1)!.body).toEqual({ proposed: P1, operator: true, revoke_previous: true });
+      await worker.fetch(post(route, { authorization: "Bearer " + OP, "cf-connecting-ip": "198.51.100.99" }, { proposed: P2, revoke_previous: "yes" }), env as never);
+      expect(rotated().at(-1)!.body.revoke_previous).toBe(false);
+      await worker.fetch(post("/admin/api/anonymous/" + "a".repeat(24) + "/rotate", { "cf-connecting-ip": "198.51.100.99" }, { revoke_previous: true }), env as never);
+      expect(rotated().at(-1)!.body).toEqual({ operator: true, revoke_previous: true });
+      // A device's own call has no such thing.
+      await worker.fetch(post(ROTATE, asDevice(ID, "N".repeat(25), "198.51.100.99"), { proposed: P3, revoke_previous: true }), env as never);
+      expect(rotated().at(-1)!.body).toEqual({ proposed: P3, presented: "N".repeat(25) });
+    });
+
+    test("when the registry cannot store the code the answer is the 503, not a code", async () => {
+      const { env } = await gateway({ FLEET_OPERATOR_TOKEN: OP });
+      const inner = (env.REGISTRY as { get: () => { fetch: (i: string | Request) => Promise<Response> } }).get().fetch;
+      (env.REGISTRY as { get: () => unknown }).get = () => ({
+        fetch: async (i: string | Request) => {
+          const u = typeof i === "string" ? i : i.url;
+          if (new URL(u).pathname === "/anon/rotate") return Response.json({ error: "could not store the new code; nothing was changed. Try again." }, { status: 503 });
+          return inner(i);
+        },
+      });
+      const res = await worker.fetch(post(route, { authorization: "Bearer " + OP, "cf-connecting-ip": "198.51.100.100" }, { proposed: P1 }), env as never);
+      expect(res.status).toBe(503);
+      expect(JSON.stringify(await res.json())).not.toContain(P1);
     });
 
     test("without the operator token, or with the gateway's or a device's, it is refused, and nothing is made", async () => {
@@ -371,7 +467,7 @@ describe("the gateway", () => {
       const { env, rotated } = await gateway({ ADMIN_ACCESS: "off" });
       const res = await worker.fetch(post("/admin/api/anonymous/" + "a".repeat(24) + "/rotate", { "cf-connecting-ip": "198.51.100.97" }), env as never);
       expect(res.status).toBe(200);
-      expect(rotated().at(-1)!.body).toEqual({ operator: true });
+      expect(rotated().at(-1)!.body).toEqual({ operator: true, revoke_previous: false });
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.token).toHaveLength(25);
       expect(body.previous_valid_ms).toBe(ROTATE_GRACE_MS);
@@ -385,10 +481,14 @@ describe("the gateway", () => {
       expect(ADMIN_HTML).toContain("Make code again");
       expect(ADMIN_HTML).toContain('"/admin/api/anonymous/" + dev.ref + "/rotate"');
       expect(ADMIN_HTML).toContain("shown once");
+      // ...with the choice to stop the old code now, sent as the option the gateway knows.
+      expect(ADMIN_HTML).toContain('id="revokeNow"');
+      expect(ADMIN_HTML).toContain("revoke_previous: revoke");
       // A question first, as for a delete: the click alone does not rotate.
       // The page's script still parses (a stray quote in a template string would break the whole page).
       for (const m of ADMIN_HTML.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) expect(() => new Function(m[1]!)).not.toThrow();
-      expect(ADMIN_HTML).toMatch(/confirmDialog\(\s*"Make the code again"/);
+      expect(ADMIN_HTML).toContain('openDialog("Make the code again"');
+      expect(ADMIN_HTML).toContain('id="rotateYes"');
     });
 
     test("Access still guards the admin route: without it nothing is made", async () => {

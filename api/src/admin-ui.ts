@@ -1310,6 +1310,1002 @@ ${UI_CSS}    </style>
         // The code a device was just given, shown once: the gateway keeps only its verifier.
         function showNewCode(label, j) {
           var d = openDialog("New device code", esc(label));
+          var hours = j.previous_valid_ms > 0 ? Math.max(1, Math.round(j.previous_valid_ms / 3600000)) : 0;
+          d.bodyEl.innerHTML =
+            '<div class="dlg-msg">This is the code of the device from now on. It is shown once and is not kept anywhere the gateway can show it again. ' +
+            (hours > 0
+              ? "The code it had before works for " + hours + " more hours: give the new one to whatever holds it, then restart that."
+              : "The code it had before no longer works: give the new one to whatever holds it, then restart that.") +
+            "</div>" +
+            '<div class="dlg-code">' +
+            esc(j.token || "") +
+            "</div>" +
+            '<div class="dlg-msg"><button type="button" class="btn" id="copyNewCode">Copy</button></div>';
+          var copy = d.bodyEl.querySelector("#copyNewCode");
+          if (copy) {
+            copy.addEventListener("click", function () {
+              var done = function () {
+                copy.textContent = "Copied";
+                setTimeout(function () { copy.textContent = "Copy"; }, 1500);
+              };
+              if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(j.token || "").then(done, done);
+              else done();
+            });
+          }
+        }
+
+        function fleetInvite(fleet) {
+          api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/invite", { method: "POST", body: "{}" })
+            .then(function (j) {
+              var d = openDialog("Invite code", fleet);
+              var expires = j.expiresAt ? Math.max(0, Math.round((j.expiresAt - Date.now()) / 1000)) : 0;
+              d.bodyEl.innerHTML =
+                '<div class="dlg-msg">This code admits one space to the fleet. It expires in ' +
+                expires +
+                ' seconds.</div>' +
+                '<div class="dlg-code">' +
+                esc(j.code || "") +
+                "</div>" +
+                '<div class="dlg-msg"><button type="button" class="btn" id="copyInvite">Copy</button></div>';
+              var copy = d.bodyEl.querySelector("#copyInvite");
+              if (copy) {
+                copy.addEventListener("click", function () {
+                  var code = j.code || "";
+                  var done = function () {
+                    copy.textContent = "Copied";
+                    setTimeout(function () {
+                      copy.textContent = "Copy";
+                    }, 1500);
+                  };
+                  if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(code).then(done, done);
+                  } else {
+                    done();
+                  }
+                });
+              }
+            })
+            .catch(function (e) { setStatus("could not mint an invite: " + e.message, true); });
+        }
+
+        function fleetDelete(fleet) {
+          confirmDialog(
+            "Delete fleet",
+            "Delete the fleet " + fleet + "? The spaces in it are not touched.",
+            "Delete",
+            function () { fleetDeleteNow(fleet); },
+            true,
+          );
+        }
+
+        function fleetDeleteNow(fleet) {
+          api("/admin/api/fleets/" + encodeURIComponent(fleet), { method: "DELETE" })
+            .then(function () {
+              setStatus("deleted fleet " + fleet);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not delete the fleet: " + e.message, true); });
+        }
+
+        function fleetAction(fleet, step, body, what, danger) {
+          api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/" + step, {
+            method: "POST",
+            body: JSON.stringify(body),
+          })
+            .then(function () {
+              setStatus(what);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not " + step + ": " + e.message, true); });
+        }
+
+        function loadFleets() {
+          return api("/admin/api/fleets")
+            .then(function (j) {
+              fleets = (j && j.fleets) || [];
+              fleetRender();
+              // The fleets are rows of the list above as well.
+              render();
+            })
+            .catch(function (e) { setStatus("could not load the fleets: " + e.message, true); });
+        }
+
+        // ---- anonymous devices ----
+        // Same row and menu as a registered device, but read-only: the id and
+        // the code are never sent to this page. Rows are addressed by an opaque
+        // ref the gateway resolves server-side.
+        var anonDevices = [];
+        var anonSignature = "";
+
+        // A short UUID-style handle (no spaces). It comes from the opaque ref,
+        // not the device id, which this page never receives.
+        function anonLabel(d) {
+          return d.ref.slice(0, 8);
+        }
+
+        function renderAnon() {
+          anonListEl.innerHTML = "";
+          if (!anonDevices.length) {
+            var empty = document.createElement("li");
+            empty.className = "empty";
+            empty.textContent = "No anonymous devices.";
+            anonListEl.appendChild(empty);
+            return;
+          }
+          anonDevices.forEach(renderAnonRow);
+        }
+
+        function renderAnonRow(dev) {
+          var li = document.createElement("li");
+          li.className = "row" + (dev.disabled ? " disabled" : "");
+          li.dataset.ref = dev.ref;
+          var dot = document.createElement("span");
+          dot.className = "dot " + (dev.online ? "on" : "off");
+          var box = document.createElement("div");
+          box.className = "box";
+          var label = anonLabel(dev);
+
+          var idInput = document.createElement("input");
+          idInput.className = "id-input";
+          idInput.readOnly = true;
+          idInput.value = label;
+          idInput.title =
+            "created " + ago(dev.createdAt) +
+            (dev.lastSeenAt ? " \u00b7 last seen " + ago(dev.lastSeenAt) : " \u00b7 never connected") +
+            (dev.locked ? " \u00b7 locked after failed attempts" : "");
+          var tokInput = document.createElement("input");
+          tokInput.className = "tok-input";
+          tokInput.readOnly = true;
+          tokInput.value = "\u2022\u2022\u2022\u2022\u2022\u2022";
+          tokInput.title = "the device code is not shown";
+
+          var menuWrap = document.createElement("span");
+          menuWrap.className = "menu-wrap";
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "menu-btn";
+          btn.textContent = "\u22ee";
+          var menu = document.createElement("span");
+          menu.className = "menu";
+          function item(text, danger) {
+            var b = document.createElement("button");
+            b.type = "button";
+            b.textContent = text;
+            if (danger) b.className = "danger";
+            menu.appendChild(b);
+            return b;
+          }
+          var viewItem = item("View");
+          var toolsItem = item("Tools");
+          var clientsItem = item("Clients");
+          var stateItem = item(dev.disabled ? "Activate" : "Deactivate", !dev.disabled);
+          var rotateItem = item("Make code again");
+          var delItem = item("Delete", true);
+          menuWrap.appendChild(btn);
+          menuWrap.appendChild(menu);
+          box.appendChild(idInput);
+          box.appendChild(tokInput);
+          box.appendChild(menuWrap);
+          li.appendChild(dot);
+          li.appendChild(box);
+          anonListEl.appendChild(li);
+
+          function closeMenus() {
+            var open = document.querySelectorAll(".menu.open");
+            for (var i = 0; i < open.length; i++) open[i].classList.remove("open");
+          }
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var wasOpen = menu.classList.contains("open");
+            closeMenus();
+            toolsItem.disabled = !dev.online || dev.disabled;
+            clientsItem.disabled = !dev.online;
+            if (!wasOpen) menu.classList.add("open");
+          });
+          viewItem.addEventListener("click", function () {
+            closeMenus();
+            showViewDialog(label, "/admin/api/anonymous/" + dev.ref + "/origin");
+          });
+          toolsItem.addEventListener("click", function () {
+            closeMenus();
+            showAnonToolsDialog(dev.ref, label);
+          });
+          clientsItem.addEventListener("click", function () {
+            closeMenus();
+            showClients(label, "/admin/api/anonymous/" + dev.ref + "/clients");
+          });
+          stateItem.addEventListener("click", function () {
+            closeMenus();
+            var turningOff = !dev.disabled;
+            setStatus((turningOff ? "deactivating " : "activating ") + label + " ...");
+            api("/admin/api/anonymous/" + dev.ref + "/state", { method: "POST", body: JSON.stringify({ disabled: turningOff }) })
+              .then(function () {
+                setStatus((turningOff ? "deactivated " : "activated ") + label);
+                loadAnon(true);
+              })
+              .catch(function (e) { setStatus("state change failed: " + e.message, true); });
+          });
+          rotateItem.addEventListener("click", function () {
+            closeMenus();
+            var d = openDialog("Make the code again", esc(label));
+            d.bodyEl.innerHTML =
+              '<div class="dlg-msg">Give this device a new 25-character code? The code it has keeps working for 24 hours, so what holds it can be given the new one; after that it stops. A lock on the device is cleared. The new code is shown once, here.</div>' +
+              '<div class="dlg-msg"><label><input type="checkbox" id="revokeNow"> The code it has stops now (for a code that has leaked or been taken: whoever holds it is shut out at once, and what holds it legitimately stops until it is given the new one)</label></div>' +
+              '<div class="dlg-actions">' +
+              '<button type="button" class="btn secondary" id="rotateNo">Cancel</button>' +
+              '<button type="button" class="btn" id="rotateYes">Make code</button>' +
+              "</div>";
+            var yes = d.bodyEl.querySelector("#rotateYes");
+            var no = d.bodyEl.querySelector("#rotateNo");
+            var revokeBox = d.bodyEl.querySelector("#revokeNow");
+            if (no) no.addEventListener("click", d.close);
+            if (yes) {
+              yes.addEventListener("click", function () {
+                var revoke = !!(revokeBox && revokeBox.checked);
+                d.close();
+                setStatus("making a new code for " + label + " ...");
+                api("/admin/api/anonymous/" + dev.ref + "/rotate", { method: "POST", body: JSON.stringify({ revoke_previous: revoke }) })
+                  .then(function (j) {
+                    setStatus("made a new code for " + label);
+                    showNewCode(label, j);
+                    loadAnon(true);
+                  })
+                  .catch(function (e) { setStatus("could not make a new code: " + e.message, true); });
+              });
+              yes.focus();
+            }
+          });
+          delItem.addEventListener("click", function () {
+            closeMenus();
+            var id = (idInput.value || "").trim() || (dev.deviceId || "");
+            if (!id) return setStatus("no device to delete", true);
+            if (pendingObj) {
+              // Unsaved row: just discard it locally.
+              dropPending();
+              render();
+              setStatus("");
+              return;
+            }
+            confirmDialog(
+              "Delete device",
+              "Delete the device " + id + "? Its tunnel is dropped, and a client that still has its id and token stops working.",
+              "Delete",
+              function () {
+                setStatus("deleting " + id + " ...");
+                api("/admin/api/devices/" + encodeURIComponent(id), { method: "DELETE" })
+                  .then(function () {
+                    setStatus("deleted " + id);
+                    load();
+                  })
+                  .catch(function (e) { setStatus("delete failed: " + e.message, true); });
+              },
+              true,
+            );
+          });
+
+          if (stateItem) {
+            stateItem.addEventListener("click", function () {
+              closeMenus();
+              var id = (idInput.value || "").trim() || (dev.deviceId || "");
+              if (!id) return setStatus("no device to toggle", true);
+              var turningOff = !dev.disabled; // current state decides the action
+              setStatus((turningOff ? "deactivating " : "activating ") + id + " ...");
+              api("/admin/api/devices/" + encodeURIComponent(id) + "/state", {
+                method: "POST",
+                body: JSON.stringify({ disabled: turningOff }),
+              })
+                .then(function () {
+                  setStatus((turningOff ? "deactivated " : "activated ") + id);
+                  load();
+                })
+                .catch(function (e) { setStatus("state change failed: " + e.message, true); });
+            });
+          }
+
+          document.addEventListener("click", function handler(ev) {
+            if (!menuWrap.contains(ev.target)) closeMenus();
+            document.removeEventListener("click", handler);
+          });
+        }
+
+        // Shared dialog scaffolding (black/white, JetBrains Mono vibe).
+        /**
+         * Ask a question in the page's own dialog.
+         *
+         * The browser's confirm() blocks the page, cannot be styled, and reads
+         * as a warning from the browser rather than a decision by the page. This
+         * is the same dialog the page shows everywhere else.
+         */
+        function confirmDialog(title, message, confirmLabel, onConfirm, danger) {
+          var d = openDialog(title, "");
+          // One main answer and one way out. The main one is filled in - black for
+          // what it does, red for a decision that loses something.
+          d.bodyEl.innerHTML =
+            '<div class="dlg-msg">' +
+            esc(message) +
+            "</div>" +
+            '<div class="dlg-actions">' +
+            '<button type="button" class="btn secondary" id="confirmNo">Cancel</button>' +
+            '<button type="button" class="btn' +
+            (danger ? " danger" : "") +
+            '" id="confirmYes">' +
+            esc(confirmLabel) +
+            "</button>" +
+            "</div>";
+          var yes = d.bodyEl.querySelector("#confirmYes");
+          var no = d.bodyEl.querySelector("#confirmNo");
+          if (yes) {
+            yes.addEventListener("click", function () {
+              d.close();
+              onConfirm();
+            });
+          }
+          if (no) no.addEventListener("click", d.close);
+          if (yes) yes.focus();
+          return d;
+        }
+
+        function openDialog(title, deviceId) {
+          var overlay = document.createElement("div");
+          overlay.className = "overlay";
+          overlay.innerHTML =
+            '<div class="dlg">' +
+            '<div class="dlg-head"><span>' + title + '</span><span class="dlg-id">' + deviceId + '</span>' +
+            '<button type="button" class="dlg-close" title="Close">&times;</button></div>' +
+            '<div class="dlg-body"><div class="dlg-msg">Loading&hellip;</div></div>' +
+            "</div>";
+          document.body.appendChild(overlay);
+          var bodyEl = overlay.querySelector(".dlg-body");
+          var closeBtn = overlay.querySelector(".dlg-close");
+          function onKey(e) {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              close();
+            }
+          }
+          function close() {
+            document.removeEventListener("keydown", onKey, true);
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+          }
+          closeBtn.addEventListener("click", close);
+          // Escape closes it; clicking the backdrop does not, so a mis-click on
+          // the way to a button never throws away what is in the dialog.
+          document.addEventListener("keydown", onKey, true);
+          return { overlay: overlay, bodyEl: bodyEl, close: close };
+        }
+
+        // Escape untrusted text before it can reach innerHTML: device-supplied
+        // error messages could otherwise inject markup into the admin page.
+        function esc(s) {
+          return String(s == null ? "" : s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        function ago(ts) {
+          var sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+          if (sec < 5) return "just now";
+          if (sec < 60) return sec + "s ago";
+          var min = Math.floor(sec / 60);
+          if (min < 60) return min + "m ago";
+          return Math.floor(min / 60) + "h ago";
+        }
+
+        // Where a device connects from: address, location, network, user agent -
+        // and one button to block that address (or lift the block).
+        function showViewDialog(label, originPath) {
+          var d = openDialog("View", esc(label));
+          function row(name, value) {
+            var el = document.createElement("div");
+            el.className = "dlg-tool";
+            var n = document.createElement("div");
+            n.className = "t-name";
+            n.textContent = name;
+            var v = document.createElement("div");
+            v.className = "t-desc";
+            v.textContent = value;
+            el.appendChild(n);
+            el.appendChild(v);
+            return el;
+          }
+          function paint(info) {
+            d.bodyEl.innerHTML = "";
+            var o = info.origin;
+            if (!o) {
+              d.bodyEl.appendChild(row("Status", info.online ? "connected (no origin recorded)" : "not connected"));
+              d.bodyEl.appendChild(row("Note", "The address is known only while the device is connected - open View again while it is online."));
+            } else {
+              d.bodyEl.appendChild(row("Status", info.online ? "connected" : "not connected"));
+              d.bodyEl.appendChild(row("IP address", String(o.ip || "unknown")));
+              var where = [o.city, o.region, o.country].filter(Boolean).join(", ");
+              if (where) d.bodyEl.appendChild(row("Location", where + (o.colo ? " - " + String(o.colo) + " edge" : "")));
+              if (o.as) d.bodyEl.appendChild(row("Network", String(o.as) + (o.asn ? " (AS" + String(o.asn) + ")" : "")));
+              if (o.ua) d.bodyEl.appendChild(row("User agent", String(o.ua)));
+              if (o.at) d.bodyEl.appendChild(row("Connected at", new Date(String(o.at)).toLocaleString()));
+              if (info.block_key) d.bodyEl.appendChild(row("Block key", String(info.block_key) + (info.blocked ? "  (blocked)" : "")));
+            }
+            var bar = document.createElement("div");
+            bar.className = "dlg-bar";
+            if (o && info.block_key) {
+              var btn = document.createElement("button");
+              btn.type = "button";
+              btn.className = "btn" + (info.blocked ? "" : " danger");
+              btn.textContent = info.blocked ? "Unblock" : "Block";
+              btn.title = info.blocked
+                ? "Let this address connect again"
+                : "Refuse every request from this address (device or MCP client); the admin page stays reachable";
+              btn.addEventListener("click", function () {
+                btn.disabled = true;
+                api("/admin/api/blocked", { method: "POST", body: JSON.stringify({ ip: String(o.ip), blocked: !info.blocked }) })
+                  .then(function () { setStatus((info.blocked ? "unblocked " : "blocked ") + String(o.ip)); loadView(); load(); })
+                  .catch(function (e) { btn.disabled = false; setStatus("block failed: " + e.message, true); });
+              });
+              bar.appendChild(btn);
+            }
+            d.bodyEl.appendChild(bar);
+          }
+          function loadView() {
+            fetch(originPath)
+              .then(function (r) { return r.json().catch(function () { return {}; }); })
+              .then(paint)
+              .catch(function (e) { d.bodyEl.innerHTML = '<div class="dlg-msg err">' + esc((e && e.message) || "failed to load") + "</div>"; });
+          }
+          loadView();
+        }
+
+        // List the device's tools: the gateway relays the call itself, so no
+        // token is needed here (the page never has one).
+        function showToolsDialog(deviceId) {
+          showTools(deviceId, fetch("/admin/api/devices/" + encodeURIComponent(deviceId) + "/tools", {
+            method: "POST",
+            signal: AbortSignal.timeout(20000),
+          }));
+        }
+
+        // Anonymous devices: the gateway relays tools/list itself, so the
+        // device code never reaches this page.
+        function showAnonToolsDialog(ref, label) {
+          showTools(label, fetch("/admin/api/anonymous/" + ref + "/tools", { method: "POST", signal: AbortSignal.timeout(20000) }));
+        }
+
+        function showTools(title, request) {
+          var d = openDialog("Tools", esc(title));
+          request
+            .then(function (r) { return r.json().catch(function () { return {}; }); })
+            .then(function (j) {
+              var tools = j && j.result && j.result.tools;
+              if (!tools) throw new Error((j && j.error && j.error.message) || "device did not respond");
+              d.bodyEl.innerHTML = "";
+              if (!tools.length) {
+                d.bodyEl.innerHTML = '<div class="dlg-msg">No tools reported.</div>';
+                return;
+              }
+              tools.forEach(function (t) {
+                var el = document.createElement("div");
+                el.className = "dlg-tool";
+                var name = document.createElement("div");
+                name.className = "t-name";
+                name.textContent = t.name || "?";
+                var desc = document.createElement("div");
+                desc.className = "t-desc";
+                desc.textContent = t.description || "";
+                el.appendChild(name);
+                el.appendChild(desc);
+                d.bodyEl.appendChild(el);
+              });
+            })
+            .catch(function (e) {
+              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + esc((e && e.message) || "failed to load tools") + "</div>";
+            });
+        }
+
+        // List the MCP clients currently relaying through this device.
+        function showClientsDialog(deviceId) {
+          showClients(deviceId, "/admin/api/devices/" + encodeURIComponent(deviceId) + "/clients");
+        }
+
+        function showClients(title, path) {
+          var d = openDialog("Clients", esc(title));
+          fetch(path)
+            .then(function (r) { return r.json().catch(function () { return {}; }); })
+            .then(function (j) {
+              var clients = j && j.clients;
+              if (!clients) throw new Error((j && j.error) || "failed to load clients");
+              d.bodyEl.innerHTML = "";
+              if (!clients.length) {
+                d.bodyEl.innerHTML = '<div class="dlg-msg">No clients connected.</div>';
+                return;
+              }
+              clients.forEach(function (c) {
+                var el = document.createElement("div");
+                el.className = "dlg-tool";
+                var name = document.createElement("div");
+                name.className = "t-name";
+                name.textContent = c.name || c.ip;
+                var meta = document.createElement("div");
+                meta.className = "t-desc";
+                meta.textContent =
+                  (c.name ? c.ip + " · " : "") +
+                  c.count + " request" + (c.count === 1 ? "" : "s") +
+                  " · " + ago(c.lastSeen);
+                el.appendChild(name);
+                el.appendChild(meta);
+                d.bodyEl.appendChild(el);
+              });
+            })
+            .catch(function (e) {
+              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + esc((e && e.message) || "failed to load clients") + "</div>";
+            });
+        }
+
+        function showCount(j) {
+          if (j && typeof j.count === "number" && typeof j.max_devices === "number") {
+            countEl.textContent = " \u00b7 " + j.count + " / " + j.max_devices + " devices";
+          }
+        }
+
+        function load() {
+          loadAnon();
+          loadFleets();
+          return api("/admin/api/devices")
+            .then(function (j) {
+              devices = (j && j.devices) || [];
+              showCount(j);
+              render();
+            })
+            .catch(function (e) { setStatus("load failed: " + e.message, true); });
+        }
+
+        // ---- fleets ----
+        // A fleet is a group of spaces that keep each other in step. The
+        // operator sets them up here: the fleet is created, the spaces ask to
+        // join with an invite code, and the operator admits them. The member
+        // that holds the lease is the primary: it is the one that writes.
+        var fleetListEl = document.getElementById("fleetList");
+        // The three lists are tabs of one section: the page is about devices, and
+        // which kind you are looking at is a view of the same question. The
+        // order is the one that matters most first: a buddy, then the fleets of
+        // them, then the ones nobody has claimed.
+        var tabButtons = document.querySelectorAll("#deviceTabs .utab");
+        var tabPanels = document.querySelectorAll(".utab-panel");
+        var activeTab = "buddies";
+        function showTab(name) {
+          activeTab = name;
+          for (var i = 0; i < tabButtons.length; i++) {
+            tabButtons[i].className = "utab" + (tabButtons[i].getAttribute("data-tab") === name ? " on" : "");
+          }
+          for (var j = 0; j < tabPanels.length; j++) {
+            if (tabPanels[j].getAttribute("data-tab") === name) tabPanels[j].removeAttribute("hidden");
+            else tabPanels[j].setAttribute("hidden", "");
+          }
+          // The + button makes whatever the tab you are looking at holds.
+          addBtn.title = name === "fleets" ? "New fleet" : "Add a buddy";
+          addBtn.style.display = name === "anonymous" ? "none" : "";
+        }
+        var fleets = [];
+        // The fleets being set up, kept across re-renders so that typing is
+        // never lost.
+        var pendingFleets = [];
+
+        // An action button: the thing it does is on it, and its weight says how
+        // much it matters - "primary" for the main one, "danger" for one that
+        // loses something, nothing for the way out.
+        function fleetBtn(text, onClick, variant) {
+          var b = document.createElement("button");
+          b.type = "button";
+          b.className = "fleet-btn" + (variant ? " " + variant : "");
+          b.textContent = text;
+          b.addEventListener("click", onClick);
+          return b;
+        }
+
+        // The menu of a row, the way the device rows do it: a button that
+        // opens a list of actions.
+        function fleetMenu(items) {
+          var wrap = document.createElement("span");
+          wrap.className = "menu-wrap";
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "menu-btn";
+          btn.textContent = "\u22ee";
+          var menu = document.createElement("span");
+          menu.className = "menu";
+          items.forEach(function (spec) {
+            // The row keeps the button so it can switch it off while the
+            // action would do nothing (Save with nothing changed).
+            var b = document.createElement("button");
+            b.type = "button";
+            b.textContent = spec.text;
+            if (spec.danger) b.className = "danger";
+            if (spec.disabled) b.disabled = true;
+            spec.el = b;
+            b.addEventListener("click", function (e) {
+              e.stopPropagation();
+              closeFleetMenus();
+              spec.onClick();
+            });
+            menu.appendChild(b);
+          });
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var wasOpen = menu.classList.contains("open");
+            closeFleetMenus();
+            if (!wasOpen) menu.classList.add("open");
+          });
+          wrap.appendChild(btn);
+          wrap.appendChild(menu);
+          document.addEventListener("click", function handler(ev) {
+            if (!wrap.contains(ev.target)) closeFleetMenus();
+            document.removeEventListener("click", handler);
+          });
+          return wrap;
+        }
+
+        function closeFleetMenus() {
+          var open = document.querySelectorAll(".menu.open");
+          for (var i = 0; i < open.length; i++) open[i].classList.remove("open");
+        }
+
+
+        // The mark of a fleet: the cloud, the same one a cloud device has.
+        var FLEET_CLOUD =
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg>';
+
+        function fleetName(m) {
+          return m.label || m.deviceId || "?";
+        }
+
+        function fleetRender() {
+          fleetListEl.innerHTML = "";
+          if (!fleets.length && !pendingFleets.length) {
+            var empty = document.createElement("li");
+            empty.className = "empty";
+            empty.textContent = "No fleets yet. Click + to create one.";
+            fleetListEl.appendChild(empty);
+            return;
+          }
+          fleets.forEach(fleetCard);
+          // The cards that are being filled in are appended here: forEach
+          // throws away what the function returns.
+          pendingFleets.forEach(function (pending) {
+            fleetListEl.appendChild(fleetNewCard(pending));
+          });
+        }
+
+        // The card that is filled in to make a new fleet: the same row the
+        // device list opens, with the name to type into.
+        function fleetNewCard(pending) {
+          // There is nothing to create until a name is typed.
+          var createSpec = {
+            text: "Create",
+            disabled: !(pending.name || "").trim(),
+            onClick: function () {
+              fleetCreate(pending);
+            },
+          };
+          var row = fleetRootRow(
+            { name: pending.name || "" },
+            [
+              createSpec,
+              {
+                text: "Cancel",
+                onClick: function () {
+                  fleetDrop(pending);
+                },
+              },
+            ],
+            true
+          );
+          row.input.addEventListener("input", function () {
+            pending.name = row.input.value;
+            createSpec.el.disabled = !row.input.value.trim();
+          });
+          row.input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") fleetCreate(pending);
+          });
+          var branch = document.createElement("li");
+          branch.className = "fleet-tree fleet-branch";
+          branch.appendChild(row.li);
+          return branch;
+        }
+
+        function fleetDrop(pending) {
+          var i = pendingFleets.indexOf(pending);
+          if (i >= 0) pendingFleets.splice(i, 1);
+          fleetRender();
+        }
+
+        function fleetCard(f) {
+          var members = f.members || [];
+          var pending = f.pending || [];
+
+          // The fleet is the root of the tree: a row of the device list, with
+          // the spaces in it as the leaves below.
+          // Save does nothing until the name is changed, so it stays off.
+          var saveSpec = {
+            text: "Save",
+            disabled: true,
+            onClick: function () {
+              fleetSaveMeta(f, row.input.value);
+            },
+          };
+          var row;
+          row = fleetRootRow(
+            f,
+            [
+              saveSpec,
+              {
+                text: f.disabled ? "Activate" : "Deactivate",
+                danger: !f.disabled,
+                onClick: function () {
+                  fleetSaveMeta(f, null, !f.disabled);
+                },
+              },
+              {
+                text: "Invite",
+                onClick: function () {
+                  fleetInvite(f.fleet);
+                },
+              },
+              {
+                text: "Delete",
+                danger: true,
+                onClick: function () {
+                  fleetDelete(f.fleet);
+                },
+              },
+            ],
+            false
+          );
+          var li = row.li;
+          // Save is offered only when the name has been changed.
+          row.input.addEventListener("input", function () {
+            saveSpec.el.disabled = row.input.value.trim() === (f.label || f.fleet);
+          });
+
+          // The spaces hang from the fleet as the leaves of a tree: the
+          // primary first, then the mirrors in the order they came.
+          var ordered = members.slice().sort(function (a, b) {
+            var ap = a.deviceId === f.primary ? 0 : 1;
+            var bp = b.deviceId === f.primary ? 0 : 1;
+            if (ap !== bp) return ap - bp;
+            return (a.addedAt || 0) - (b.addedAt || 0);
+          });
+          var leaves = document.createElement("ul");
+          leaves.className = "fleet-tree";
+          ordered.forEach(function (m) {
+            var leaf = document.createElement("li");
+            leaf.appendChild(fleetNode(f.fleet, m, m.deviceId === f.primary));
+            leaves.appendChild(leaf);
+          });
+          pending.forEach(function (p) {
+            var leaf = document.createElement("li");
+            leaf.appendChild(fleetPendingNode(f.fleet, p));
+            leaves.appendChild(leaf);
+          });
+
+          // The fleet card is the root; the leaves are below it, outside it.
+          // The branch is a tree, so the lines are drawn between the root
+          // and the leaves.
+          var branch = document.createElement("li");
+          branch.className = "fleet-tree fleet-branch";
+          branch.appendChild(li);
+          branch.appendChild(leaves);
+          fleetListEl.appendChild(branch);
+        }
+
+        // A root row: the fleet, or the card that is filled in to make one.
+        // It is a row of the device list, the same as the spaces below it,
+        // with a cloud instead of the status dot: a fleet is a group.
+        function fleetRootRow(fleet, items, isNew) {
+          var li = document.createElement("li");
+          li.className = "row fleet-row" + (isNew ? " new" : "") + (fleet.disabled ? " disabled" : "");
+          var cloud = document.createElement("span");
+          cloud.className = isNew ? "cloud-ic off hollow" : fleetCloudClass(fleet);
+          cloud.title = isNew ? "a new fleet" : "a fleet of spaces";
+          cloud.innerHTML = FLEET_CLOUD;
+          var box = document.createElement("div");
+          box.className = "box";
+
+          var nameInput = document.createElement("input");
+          nameInput.className = "id-input";
+          nameInput.placeholder = isNew ? "fleet name" : "a name for the fleet";
+          nameInput.value = isNew ? fleet.name || "" : fleet.label || fleet.fleet || "";
+          nameInput.title = isNew ? "" : "the fleet " + fleet.fleet;
+
+          box.appendChild(nameInput);
+          box.appendChild(fleetMenu(items));
+          li.appendChild(cloud);
+          li.appendChild(box);
+          return { li: li, input: nameInput };
+        }
+
+        // A space in the fleet, drawn as a row of the device list: the status
+        // outside, the box with the name and the device id, and the actions in
+        // the menu.
+        function fleetNode(fleet, m, isPrimary) {
+          var li = document.createElement("li");
+          li.className = "row fleet-row" + (isPrimary ? " primary" : "") + (m.disabled ? " disabled" : "");
+          var dot = document.createElement("span");
+          dot.className = "dot " + (m.online ? "on" : "off");
+          var box = document.createElement("div");
+          box.className = "box";
+
+          var nameInput = document.createElement("input");
+          nameInput.className = "id-input";
+          nameInput.readOnly = true;
+          nameInput.value = fleetName(m);
+          nameInput.title = isPrimary
+            ? "the primary: it holds the lease, so it is the one that writes"
+            : m.role === "owner"
+              ? "the owner of the fleet"
+              : "a member of the fleet";
+          // The key snapshots are sealed for, as a fingerprint (the KEY of 'prime fleets members' on that
+          // machine says the same), and how far the member says it has got.
+          var facts = [];
+          if (m.key) facts.push("key " + m.key);
+          if (typeof m.applied === "number") {
+            facts.push("applied " + m.applied + (typeof m.fetched === "number" ? ", fetched " + m.fetched : ""));
+          }
+          if (facts.length) nameInput.title += " (" + facts.join("; ") + ")";
+
+          // The space is a device, so it has the actions a device has.
+          var menu = fleetMenu([
+            {
+              text: "View",
+              onClick: function () {
+                showViewDialog(fleetName(m), "/admin/api/devices/" + encodeURIComponent(m.deviceId) + "/origin");
+              },
+            },
+            {
+              text: "Tools",
+              disabled: !m.online || m.disabled,
+              onClick: function () {
+                showTools(fleetName(m), fetch("/admin/api/devices/" + encodeURIComponent(m.deviceId) + "/tools", { method: "POST" }));
+              },
+            },
+            {
+              text: "Clients",
+              disabled: !m.online || m.disabled,
+              onClick: function () {
+                showClientsDialog(m.deviceId);
+              },
+            },
+            {
+              text: m.disabled ? "Activate" : "Deactivate",
+              danger: !m.disabled,
+              onClick: function () {
+                fleetDeviceState(m);
+              },
+            },
+            {
+              text: "Remove",
+              danger: true,
+              onClick: function () {
+                fleetAction(fleet, "remove", { deviceId: m.deviceId }, "removed " + fleetName(m));
+              },
+            },
+          ]);
+
+          box.appendChild(nameInput);
+          box.appendChild(menu);
+          li.appendChild(dot);
+          li.appendChild(box);
+          return li;
+        }
+
+        // A space that asked to join: the same row, with the two answers in
+        // the menu.
+        function fleetPendingNode(fleet, p) {
+          var li = document.createElement("li");
+          li.className = "row fleet-row waiting";
+          var dot = document.createElement("span");
+          dot.className = "dot " + (p.online ? "on" : "off");
+          var box = document.createElement("div");
+          box.className = "box";
+
+          var nameInput = document.createElement("input");
+          nameInput.className = "id-input";
+          nameInput.readOnly = true;
+          nameInput.value = p.keyChange ? (p.label || "a member") + " (new key)" : p.label || "a device";
+          nameInput.title = p.keyChange
+            ? "asks to replace its key with " + (p.key || "another one") + ": compare it with what the member's own machine prints before admitting"
+            : "waiting to be admitted";
+
+          // The answers the operator has to give are shown, not tucked away.
+          var answers = document.createElement("span");
+          answers.className = "fleet-actions";
+          // The key a member asks to have is written out where it is read, not tucked in a tooltip: it is what
+          // the operator compares with what the member's own machine prints before saying yes.
+          if (p.keyChange) {
+            var offered = document.createElement("span");
+            offered.className = "fleet-key";
+            offered.textContent = "new key " + (p.key || "(unreadable)");
+            answers.appendChild(offered);
+          }
+          var admit = fleetBtn("Admit", function () {
+            fleetAction(fleet, "approve", p.keyChange ? { deviceId: p.deviceId, key: p.key } : { deviceId: p.deviceId }, (p.keyChange ? "replaced the key of " : "admitted ") + (p.label || p.deviceId));
+          }, "primary");
+          // A key that cannot be named cannot be approved: the gateway would refuse it.
+          if (p.keyChange && !p.key) admit.disabled = true;
+          answers.appendChild(admit);
+          answers.appendChild(fleetBtn("Decline", function () {
+            fleetAction(fleet, "remove", p.keyChange ? { deviceId: p.deviceId, keyChange: true } : { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
+          }, "danger"));
+
+          box.appendChild(nameInput);
+          box.appendChild(answers);
+          li.appendChild(dot);
+          li.appendChild(box);
+          return li;
+        }
+
+        // A space is a device: the operator can switch it off and on.
+        function fleetDeviceState(m) {
+          var disabled = !m.disabled;
+          setStatus((disabled ? "deactivating " : "activating ") + fleetName(m) + " ...");
+          api("/admin/api/devices/" + encodeURIComponent(m.deviceId) + "/state", {
+            method: "POST",
+            body: JSON.stringify({ disabled: disabled }),
+          })
+            .then(function () {
+              setStatus((disabled ? "deactivated " : "activated ") + fleetName(m));
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not change the state: " + e.message, true); });
+        }
+
+        function fleetCreate(pending) {
+          var name = (pending.name || "").trim();
+          if (!name) {
+            setStatus("enter a name for the fleet", true);
+            return;
+          }
+          if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) {
+            setStatus("that is not a fleet name: a-z, 0-9 and dashes, up to 32 characters", true);
+            return;
+          }
+          api("/admin/api/fleets/" + encodeURIComponent(name), { method: "POST", body: "{}" })
+            .then(function () {
+              setStatus("created fleet " + name);
+              fleetDrop(pending);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not create the fleet: " + e.message, true); });
+        }
+
+        // The + button opens the card that is filled in to make a fleet.
+        function fleetAddCard() {
+          var pending = { name: "" };
+          pendingFleets.push(pending);
+          fleetRender();
+          var inputs = fleetListEl.querySelectorAll(".fleet-row .id-input");
+          var last = inputs[inputs.length - 1];
+          if (last) last.focus();
+        }
+
+        // What the operator decided about the fleet itself: its name, or
+        // whether it takes part in anything.
+        function fleetSaveMeta(f, label, disabled) {
+          var patch = {};
+          if (label !== null && label !== undefined) patch.label = String(label).trim();
+          if (disabled !== undefined) patch.disabled = disabled;
+          api("/admin/api/fleets/" + encodeURIComponent(f.fleet) + "/meta", {
+            method: "POST",
+            body: JSON.stringify(patch),
+          })
+            .then(function () {
+              setStatus(disabled !== undefined ? (disabled ? "paused " : "resumed ") + f.fleet : "saved " + f.fleet);
+              loadFleets();
+            })
+            .catch(function (e) { setStatus("could not change the fleet: " + e.message, true); });
+        }
+
+        // The code a device was just given, shown once: the gateway keeps only its verifier.
+        function showNewCode(label, j) {
+          var d = openDialog("New device code", esc(label));
           var hours = j.previous_valid_ms ? Math.round(j.previous_valid_ms / 3600000) : 24;
           d.bodyEl.innerHTML =
             '<div class="dlg-msg">This is the code of the device from now on. It is shown once and is not kept anywhere the gateway can show it again. The code it had before works for ' +

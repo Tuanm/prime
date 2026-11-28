@@ -819,7 +819,7 @@ async function rotateAnonymous(
   env: Env,
   url: URL,
   deviceId: string,
-  ask: { proposed?: unknown; presented?: string; operator?: boolean },
+  ask: { proposed?: unknown; presented?: string; operator?: boolean; revoke_previous?: boolean },
 ): Promise<Response> {
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
   const made = await reg.fetch(
@@ -993,13 +993,13 @@ export default {
       if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
       const bodyText = await readBoundedText(request, 4096);
       if (bodyText instanceof Response) return bodyText;
-      let proposed: unknown;
+      let parsed: { proposed?: unknown; revoke_previous?: unknown };
       try {
-        proposed = (JSON.parse(bodyText || "{}") as { proposed?: unknown }).proposed;
+        parsed = JSON.parse(bodyText || "{}") as { proposed?: unknown; revoke_previous?: unknown };
       } catch {
         return Response.json({ error: "invalid json" }, { status: 400 });
       }
-      return rotateAnonymous(env, url, deviceId, { proposed, operator: true });
+      return rotateAnonymous(env, url, deviceId, { proposed: parsed.proposed, operator: true, revoke_previous: parsed.revoke_previous === true });
     }
 
     // ---- Anonymous device registration ----
@@ -1250,7 +1250,9 @@ export default {
         if (request.method === "POST" && action === "rotate") {
           // The operator, proved by Access: a new code for the device, answered to the operator once.
           // The page never holds a device's id: it is given the code and when the old one ends, and no URL.
-          const made = await rotateAnonymous(env, url, deviceId, { operator: true });
+          // `revoke_previous`: the code it had stops now (the page's checkbox).
+          const asked = (await request.json().catch(() => ({}))) as { revoke_previous?: unknown };
+          const made = await rotateAnonymous(env, url, deviceId, { operator: true, revoke_previous: asked?.revoke_previous === true });
           if (!made.ok) return made;
           const j = (await made.json()) as { token: string; previous_valid_ms: number };
           return Response.json({ ok: true, token: j.token, previous_valid_ms: j.previous_valid_ms }, { headers: { "cache-control": "no-store" } });
