@@ -203,3 +203,25 @@ describe("when every member can read it", () => {
     expect(wrapIdOf(undefined, "device")).toBe(wrapIdOf("", "device"));
   });
 });
+
+describe("the size of the sealed metadata", () => {
+  test("what a reader would refuse for its size is left out of it, optional parts first, and the snapshot is still readable", async () => {
+    const { generateMemberKeyPair, openPayload, sealManyForMembers } = await import("../src/fleet-crypto");
+    const sender = generateMemberKeyPair();
+    const me = generateMemberKeyPair();
+    const sealed = sealManyForMembers([Buffer.from("tree")], [{ memberId: "me", publicKey: me.publicKey }], sender.privateKey, sender.publicKey);
+    const binding = { fleet: "x", seq: 1, parentSeq: null, parentManifest: null, full: true, packHash: "p", deltaHash: null, senderPublicKey: sender.publicKey, incarnation: null };
+    const big = { tipCommit: "c".repeat(40), tree: "t".repeat(40), roster: "r", actor: { key: "k", agent: "a", tools: [{ tool: "x".repeat(100), caller: "c", n: 1 }] }, kept: Array.from({ length: 400 }, (_, i) => "d" + i + "/" + "p".repeat(200)) };
+    const blob = sealed.sealMeta(binding, big);
+    const opened = openPayload(sealed.ciphertexts[0]!, sealed.wrapped, sender.publicKey, "me", me.privateKey)!;
+    const meta = opened.openMeta(binding, blob)!;
+    expect(meta.tipCommit).toBe(big.tipCommit);
+    expect(meta.roster).toBe("r");
+    // the actor fits and stays; the long list of paths is what goes
+    expect(meta.actor).toEqual(big.actor);
+    expect(meta.kept).toBeUndefined();
+    // a metadata that cannot be made to fit is an error at the publisher, not a snapshot nobody reads
+    expect(() => sealed.sealMeta(binding, { ...big, roster: "r".repeat(70_000) })).toThrow(/sealed metadata/);
+  });
+});
+
