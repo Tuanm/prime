@@ -1011,7 +1011,7 @@ describe("what the agent writes to its log", () => {
     cleanups.push(() => child.kill("SIGKILL"));
     // Read as it is written, so that an agent that did not start says why.
     let log = "";
-    void (async () => {
+    const reading = (async () => {
       for await (const chunk of child.stderr as unknown as AsyncIterable<Uint8Array>) log += new TextDecoder().decode(chunk);
     })();
     const started = await until(() => existsSync(fleetAgentStatePath(configPath)), 45_000);
@@ -1019,7 +1019,8 @@ describe("what the agent writes to its log", () => {
     await Bun.sleep(150);
     requestStop(dir);
     expect(await child.exited).toBe(0);
-    await Bun.sleep(50);
+    // Everything the agent wrote, and not what had arrived by now.
+    await reading;
     const lines = log.trim().split("\n");
     expect(lines[0]).toMatch(/^\d{4}-\d\d-\d\dT[\d:.]+Z fleet agent \(pid \d+\): starting/);
     expect(log).toContain("holds the lock");
