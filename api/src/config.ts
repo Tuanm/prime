@@ -191,6 +191,15 @@ export interface Env {
   ANON_IDLE_TTL_MS?: string; // delete an anonymous device offline this long (default 7 days)
   ANON_AUTH_MAX_FAILURES?: string; // wrong-token attempts per anonymous device before it is locked (default 20)
   ANON_AUTH_LOCK_MS?: string; // failure window and lock duration (default 10 minutes)
+  // Limits on what a caller with no standing can ask of the fleet routes (see src/fleet-limits.ts).
+  // Each is a count per client IP per minute; 0 turns that limit off.
+  FLEET_INVITE_RATE_MAX?: string; // invite checks (default 30)
+  FLEET_UNKNOWN_RATE_MAX?: string; // requests naming a device the gateway does not know (default 60)
+  FLEET_BODY_MAX_BYTES?: string; // largest body a fleet route forwards to its object (default 65536)
+  // Cloudflare rate-limit bindings: the same two limits kept across the whole location, not one isolate.
+  // Optional; set the limit and period in wrangler.toml ([[ratelimits]]).
+  FLEET_RL_INVITE?: RateLimit;
+  FLEET_RL_UNKNOWN?: RateLimit;
   // The coding sandbox container (CodingSandbox DO) - shell/fs/jobs tools.
   CODING_SANDBOX: DurableObjectNamespace;
   DEVICES: DurableObjectNamespace;
@@ -207,7 +216,7 @@ export interface Env {
   ADMIN_ACCESS?: string;
 }
 
-function num(env: Env, key: string, def: number): number {
+export function num(env: Env, key: string, def: number): number {
   const raw = (env as unknown as Record<string, string | undefined>)[key];
   if (raw == null || raw === "") return def;
   const n = parseInt(raw, 10);

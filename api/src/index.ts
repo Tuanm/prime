@@ -26,6 +26,8 @@ import { anonConfig, anonLockKey, loadConfig, timingSafeEq, extractToken, extrac
 import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, tokenVerifies } from "./token-hash";
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
+import { readBounded, readBoundedText } from "./body";
+import { INVITE_CHECK_BODY_MAX, limitAsk } from "./fleet-limits";
 import { ADMIN_HTML } from "./admin-ui";
 import { LANDING_HTML } from "./landing-page";
 import { HOME_HTML } from "./home-page";
@@ -49,49 +51,6 @@ export { FilesDO } from "./files-do";
 export { FleetDO } from "./fleet-do";
 
 const unauthorized = () => Response.json({ error: "unauthorized" }, { status: 401 });
-
-/**
- * Read a relayed body in full, bounded by the body cap.
- *
- * The device DO buffers the whole body anyway (it calls request.text()), so
- * forwarding a live stream buys nothing and costs something: when the DO refuses
- * before reading it - device offline, device busy, over the cap - the stream is
- * left dangling, and workerd then reads it after the response has been sent. That
- * logs an uncaught "Can't read from request stream after response has been sent"
- * for every refused request and, occasionally, drops the connection as a 500
- * where the caller was owed a 503.
- *
- * Reading it here settles the stream. It never buffers more than the cap plus one
- * chunk, so a lying Content-Length or a chunked body cannot force a large
- * allocation.
- */
-async function readBounded(request: Request, max: number): Promise<ArrayBuffer | Response> {
-  if (!request.body) return new ArrayBuffer(0);
-  const tooLarge = () => Response.json({ error: "payload too large" }, { status: 413 });
-  if (Number(request.headers.get("content-length") || 0) > max) return tooLarge();
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => {});
-      return tooLarge();
-    }
-    chunks.push(value);
-  }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return body.buffer;
-}
 
 // Per-isolate rate limiter. Configured once on first fetch (module scope is
 // shared across requests within an isolate; a fresh isolate re-creates it).
@@ -774,7 +733,22 @@ async function authorizeDevice(
   // Without the pepper no token can be checked, so none is accepted - and the
   // refusal says why, instead of passing for an open gateway or a wrong token.
   if (pepperFrom(env) === null) return { denied: pepperMissingResponse(), anonymous: false };
-  const snap = await resolveSnapshot(env, deviceId);
+  let snap = await effectiveSnapshot(env);
+  if (!snap.map.has(deviceId)) {
+    // An id the cache does not know is read again from the registry, in case it was made a moment ago
+    // elsewhere (see resolveSnapshot). A caller that is making ids up would cost a registry read for
+    // each, so each address is held to a few of them a minute. Only where an unknown id is always refused
+    // (the registry has devices): a gateway with none is open, and every id is unknown there. A caller
+    // that presents the one shared device token is exempt too: none of the devices of a gateway that
+    // uses it is in the registry.
+    const given = extractDeviceToken(request, url);
+    const shared = !!cfg.deviceToken && !!given && timingSafeEq(given, cfg.deviceToken);
+    if (!shared && hasNonVirtualDevice(snap, env)) {
+      const limited = await limitAsk(env, "unknown-device", request);
+      if (limited) return { denied: limited, anonymous: false };
+    }
+    snap = await resolveSnapshot(env, deviceId);
+  }
   const anonymous = snap.anon.has(deviceId);
   if (hasNonVirtualDevice(snap, env) && !snap.map.has(deviceId)) return { denied: unauthorized(), anonymous };
   // Locked after too many wrong codes: that address is refused, the right code included, or the lock
@@ -928,11 +902,24 @@ export default {
       // address may make does not apply to it. The invite code is the proof:
       // it is single-use, it expires, and the fleet has its own limits.
       let exempt = false;
+      // The body is a fleet and a code at most: more than that is not read.
+      const asked = await readBoundedText(request, INVITE_CHECK_BODY_MAX);
+      if (asked instanceof Response) return asked;
       try {
-        const wanted = (await request.clone().json().catch(() => ({}))) as { fleet?: unknown; code?: unknown };
+        const wanted = (() => {
+          try {
+            return JSON.parse(asked) as { fleet?: unknown; code?: unknown };
+          } catch {
+            return {} as { fleet?: unknown; code?: unknown };
+          }
+        })();
         const fleet = typeof wanted.fleet === "string" ? wanted.fleet : "";
         const code = typeof wanted.code === "string" ? wanted.code : "";
         if (fleet && code && env.FLEET && /^[a-z0-9][a-z0-9-]{0,31}$/.test(fleet)) {
+          // This asks a fleet whether a code is good, which is what invite-check does, so it is held to the
+          // same few a minute for an address.
+          const probeLimited = await limitAsk(env, "invite-check", request);
+          if (probeLimited) return probeLimited;
           const stub = env.FLEET.get(env.FLEET.idFromName(fleet));
           const headers = new Headers({ "content-type": "application/json" });
           headers.set("x-prime-caller", "admin");

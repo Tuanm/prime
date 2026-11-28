@@ -15,6 +15,8 @@
 import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
 import { MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
 import { countFleetR2 } from "./usage";
+import { readBounded, readBoundedText } from "./body";
+import { fleetBodyMax, INVITE_CHECK_BODY_MAX, limitAsk } from "./fleet-limits";
 import type { Env } from "./config";
 
 // Captured as a general action segment and then checked against an allowlist,
@@ -137,8 +139,10 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   // Said before the body is read, when the sender says how long it is.
   const declared = Number(deps.request.headers.get("content-length") ?? 0);
   if (declared > MAX_SNAPSHOT_BYTES) return tooBig(declared);
-  const body = Buffer.from(await deps.request.arrayBuffer());
-  if (body.length > MAX_SNAPSHOT_BYTES) return tooBig(body.length);
+  // Read up to the limit and no further: a body with no length said (chunked) is stopped at it too.
+  const read = await readBounded(deps.request, MAX_SNAPSHOT_BYTES);
+  if (read instanceof Response) return tooBig(MAX_SNAPSHOT_BYTES + 1);
+  const body = Buffer.from(read);
   if (body.length < 4) return Response.json({ error: "malformed snapshot" }, { status: 400 });
   const manifestLength = body.readUInt32BE(0);
   if (manifestLength === 0 || manifestLength + 4 > body.length) {
@@ -302,8 +306,8 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     // Said before the body is read, when the sender says how long it is, and again after.
     const declared = Number(deps.request.headers.get("content-length") ?? 0);
     if (declared > MAX_SNAPSHOT_BYTES) return uploadTooBig(declared, "change pack");
-    const body = await deps.request.arrayBuffer();
-    if (body.byteLength > MAX_SNAPSHOT_BYTES) return uploadTooBig(body.byteLength, "change pack");
+    const body = await readBounded(deps.request, MAX_SNAPSHOT_BYTES);
+    if (body instanceof Response) return uploadTooBig(MAX_SNAPSHOT_BYTES + 1, "change pack");
     if (body.byteLength === 0) return Response.json({ error: "empty payload" }, { status: 400 });
     const digest = await sha256Hex(body);
     const key = prefix + digest;
@@ -607,10 +611,15 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   if (action === "invite-check" && request.method === "POST") {
     const namespace = deps.env.FLEET;
     if (!namespace) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+    // Held to a few a minute for any one address, and to a body the size of a code, before the object is
+    // woken: this is the route a caller with nothing to show can make cost something.
+    const limited = await limitAsk(env, "invite-check", request);
+    if (limited) return limited;
+    const body = await readBoundedText(request, INVITE_CHECK_BODY_MAX);
+    if (body instanceof Response) return body;
     const stub = namespace.get(namespace.idFromName(fleetId));
     const headers = new Headers({ "content-type": "application/json" });
     headers.set("x-prime-caller", "admin");
-    const body = await request.clone().text();
     return await stub.fetch("https://fleet/invite-check", { method: "POST", headers, body });
   }
 
@@ -643,7 +652,13 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     target.pathname = "/members";
   }
   const method = action !== undefined && READ_ACTIONS.has(action) ? "GET" : "POST";
-  const body = method === "POST" ? await request.text() : undefined;
+  // Every route takes a small JSON document; what is bigger is refused here, not handed to the object.
+  let body: string | undefined;
+  if (method === "POST") {
+    const read = await readBoundedText(request, fleetBodyMax(env));
+    if (read instanceof Response) return read;
+    body = read;
+  }
 
   let response = await stub.fetch(target.toString(), { method, headers, body });
 

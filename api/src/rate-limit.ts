@@ -31,6 +31,16 @@ export class RateLimiter {
     return true;
   }
 
+  /**
+   * Like `allow`, and says how long until the key may ask again when it may not (0 when it may).
+   * Counts the ask only when it is allowed, as `allow` does.
+   */
+  check(key: string): { ok: boolean; retryAfterMs: number } {
+    if (this.allow(key)) return { ok: true, retryAfterMs: 0 };
+    const entry = this.buckets.get(key);
+    return { ok: false, retryAfterMs: Math.max(1000, entry ? entry.resetAt - Date.now() : this.windowMs) };
+  }
+
   size(): number {
     return this.buckets.size;
   }

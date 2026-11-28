@@ -37,6 +37,21 @@ new_sqlite_classes = ["FilesDO"]
 tag = "v4"
 new_sqlite_classes = ["FleetDO"]
 
+# Per-address limits on what a caller with no standing may ask of the fleet routes (src/fleet-limits.ts).
+# Counted across the isolates of a location, with no Durable Object or storage behind them, so they add
+# nothing to the budget the fleet guard counts. The isolate keeps its own count as well, and
+# FLEET_INVITE_RATE_MAX / FLEET_UNKNOWN_RATE_MAX set that one (and are where to tune these two).
+# namespace_id only has to be unique among this account's rate limiters.
+[[ratelimits]]
+name = "FLEET_RL_INVITE"
+namespace_id = "7101"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "FLEET_RL_UNKNOWN"
+namespace_id = "7102"
+simple = { limit = 60, period = 60 }
+
 [[kv_namespaces]]
 binding = "KV"
 id = "d36acd23e12945058bf9910182deeec7"
