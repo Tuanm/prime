@@ -1072,8 +1072,11 @@ checks it against the signing key of the roster, not against the gateway's word)
 - At most one in five minutes from a member (`429`, with `retry-after`), since each is a row written.
 - `GET /fleets/{fleet}/keys` (the primary) gives each member's `spub` and, while it is valid, `epochKey: {n, pub, notAfter, sig}`.
   A member with no valid epoch key has none there, and a publisher wraps to its long-term key as before.
-- A change of the member's signing key (a `rotate-self`, a `rotate`, or the key of the open roster) drops its epoch key: it was signed
-  by the key that was.
+- **An epoch key goes with the key file**: any change of the member's sealing key or of its signing key (an approved key change, a
+  key change the old key proves, a `rotate` or `rotate-self`, the key of the open roster) drops it, whether or not the signing key that
+  would still verify it changed. A member that is fenced for removal, or has left and is still in the chain, has none in `/keys`.
+  No view of the roster (`GET /members`) carries epoch keys.
+- Posting one is not activity of the fleet (the 7-day reaper's clock is not moved by it).
 - It is not written to the audit log (one a day per member would be most of it); the member's own record is what it keeps.
 
 A member of an earlier build does not send one and is wrapped for as before. Forward secrecy holds only once every publisher

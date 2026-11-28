@@ -1,6 +1,6 @@
 // A member's epoch key: signed by its signing key, kept as the newest one, served to the primary, and dropped with the signing key.
 import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } from "bun:test";
-import { createHash, generateKeyPairSync, sign as cryptoSign } from "node:crypto";
+import { createHash, createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, sign as cryptoSign } from "node:crypto";
 import { deleteRows, listRows } from "./fake-list";
 
 mock.module("cloudflare:workers", () => ({
@@ -16,6 +16,7 @@ mock.module("cloudflare:workers", () => ({
 mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 
 const { FleetDO } = await import("../src/fleet-do");
+const { KEY_PROOF_INFO, keyChangeMessage } = await import("../src/fleets");
 const { handleFleetRoutes } = await import("../src/fleets-routes");
 
 beforeEach(() => setSystemTime(new Date("2026-12-01T10:00:00Z")));
@@ -336,6 +337,113 @@ describe("a member's epoch key", () => {
     expect((await keysOf(w, "owner")).find((m) => m.deviceId === "eye")).toMatchObject({ role: "viewer", epochKey: { n: 1 } });
     await call(w, "/remove", "operator", "admin", { deviceId: "eye" });
     expect((await keysOf(w, "owner")).some((m) => m.deviceId === "eye")).toBe(false);
+  });
+});
+
+describe("an epoch key goes with the key file: any change of the sealing key or the signing key drops it", () => {
+  const newXKey = createHash("sha256").update("new-x").digest().toString("base64");
+  const newX = () => newXKey;
+
+  async function rekeyedByOperator(spubMode: "same" | "none" | "other") {
+    const { w, inc } = await fleetWithPrimary();
+    expect((await put(w, "dev-a", epochBody(w, "dev-a", 1, {}, inc))).status).toBe(200);
+    const invite = await call(w, "/invite", "operator", "admin");
+    const spub = spubMode === "same" ? sKey("dev-a").pub : spubMode === "other" ? sKey("dev-a-other").pub : undefined;
+    const joined = await call(w, "/join", "dev-a", "device", { code: invite.json.code, pubkey: newX(), ...(spub ? { spub } : {}), label: "dev-a" });
+    expect(joined.status).toBeLessThan(500);
+    const { keyFingerprintLong } = await import("../src/fleets");
+    expect((await call(w, "/approve", "operator", "admin", { deviceId: "dev-a", key: await keyFingerprintLong(newX()) })).status).toBe(200);
+    return { w, inc };
+  }
+
+  for (const mode of ["same", "none", "other"] as const) {
+    test("the operator approves a new sealing key (signing key " + mode + "): the epoch key is not served any more", async () => {
+      const { w } = await rekeyedByOperator(mode);
+      const after = (await keysOf(w, "owner")).find((m) => m.deviceId === "dev-a")!;
+      expect(after.pubkey).toBe(newX());
+      expect(after.epochKey).toBeUndefined();
+    });
+  }
+
+  test("a new epoch key can be published after that, signed by the signing key the fleet holds", async () => {
+    const { w, inc } = await rekeyedByOperator("same");
+    expect((await put(w, "dev-a", epochBody(w, "dev-a", 1, {}, inc))).status).toBe(200);
+    expect((await keysOf(w, "owner")).find((m) => m.deviceId === "dev-a")!.epochKey.n).toBe(1);
+  });
+
+  test("an owner-signed rotate that changes only the sealing key drops it", async () => {
+    const { w, chain } = await signedFleet(["owner", "dev-a"]);
+    expect((await call(w, "/bootstrap", "owner", "device", { seals: true })).json.role).toBe("primary");
+    const inc = await incarnationOf(w);
+    expect((await put(w, "dev-a", epochBody(w, "dev-a", 1, {}, inc))).status).toBe(200);
+    // The member asks for another sealing key and keeps its signing key; the owner's rotate replaces it.
+    const asked = await call(w, "/bootstrap", "dev-a", "device", { seals: true, pubkey: newX(), spub: sKey("dev-a").pub });
+    expect(asked.json.keyChange).toBe("pending");
+    const rotate = chain.make("rotate", { device: "dev-a", xpub: newX(), spub: sKey("dev-a").pub, seqAt: 0 });
+    expect((await post(w, rotate)).status).toBe(200);
+    const after = (await keysOf(w, "owner")).find((m) => m.deviceId === "dev-a")!;
+    expect(after.pubkey).toBe(newX());
+    expect(after.epochKey).toBeUndefined();
+  });
+
+  test("a key change the old key proves drops it, whether the signing key is sent again or not", async () => {
+    for (const sendSpub of [true, false]) {
+      const w = await openFleet(["owner"]);
+      const inc = await incarnationOf(w);
+      // A member whose sealing key is a real X25519 key, so that it can prove it holds it.
+      const pair = generateKeyPairSync("x25519");
+      const der = pair.publicKey.export({ type: "spki", format: "der" }) as Buffer;
+      const oldPub = der.subarray(der.length - 32).toString("base64");
+      const invite = await call(w, "/invite", "operator", "admin");
+      await call(w, "/join", "prover", "device", { code: invite.json.code, pubkey: oldPub, spub: sKey("prover").pub, label: "prover" });
+      await call(w, "/approve", "operator", "admin", { deviceId: "prover" });
+      await call(w, "/bootstrap", "owner", "device", { seals: true });
+      expect((await put(w, "prover", epochBody(w, "prover", 1, {}, inc))).status).toBe(200);
+      expect((await keysOf(w, "owner")).find((m) => m.deviceId === "prover")!.epochKey.n).toBe(1);
+      const objectKey = (await call(w, "/role", "prover", "device", {}, "GET")).json.keyProofKey as string;
+      const spki = Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from(objectKey, "base64")]);
+      const shared = diffieHellman({ privateKey: pair.privateKey, publicKey: createPublicKey({ key: spki, format: "der", type: "spki" }) });
+      const macKey = Buffer.from(hkdfSync("sha256", shared, Buffer.alloc(32), Buffer.from(KEY_PROOF_INFO), 32));
+      const ts = Date.now();
+      const nonce = randomBytes(16).toString("base64");
+      const mac = createHmac("sha256", macKey).update(keyChangeMessage(newX(), "acme", "prover", ts, nonce)).digest("base64");
+      const res = await call(w, "/bootstrap", "prover", "device", { seals: true, pubkey: newX(), ...(sendSpub ? { spub: sKey("prover").pub } : {}), keyProof: { ts, nonce, mac } });
+      expect(res.status, JSON.stringify(res.json)).toBe(200);
+      const after = (await keysOf(w, "owner")).find((m) => m.deviceId === "prover")!;
+      expect(after.pubkey).toBe(newX());
+      expect(after.epochKey).toBeUndefined();
+    }
+  });
+});
+
+describe("what is served of epoch keys", () => {
+  test("a member that is fenced or has left has none in /keys, and the member views carry none", async () => {
+    const { w, chain } = await signedFleet(["owner", "dev-a", "dev-b"]);
+    expect((await call(w, "/bootstrap", "owner", "device", { seals: true })).json.role).toBe("primary");
+    const inc = await incarnationOf(w);
+    for (const d of ["dev-a", "dev-b"]) expect((await put(w, d, epochBody(w, d, 1, {}, inc))).status).toBe(200);
+    expect((await keysOf(w, "owner")).filter((m) => m.epochKey).map((m) => m.deviceId).sort()).toEqual(["dev-a", "dev-b"]);
+    // No view of the roster carries them: the operator's, the owner's, another member's.
+    for (const [who, kind] of [["", "admin"], ["owner", "device"], ["dev-a", "device"], ["dev-b", "device"]] as const) {
+      const view = (await call(w, "/members", who, kind, {}, "GET")).json.members as Array<Record<string, unknown>>;
+      expect(view.some((m) => "epochKey" in m)).toBe(false);
+    }
+    // Fenced for removal: not offered to the publisher.
+    expect((await call(w, "/remove-fence", "operator", "admin", { deviceId: "dev-b" })).status).toBe(200);
+    expect((await keysOf(w, "owner")).find((m) => m.deviceId === "dev-b")!.epochKey).toBeUndefined();
+    expect((await keysOf(w, "owner")).find((m) => m.deviceId === "dev-a")!.epochKey.n).toBe(1);
+    // Left by itself, still in the chain: its fence holds it back too.
+    expect((await call(w, "/remove", "dev-a", "device", { deviceId: "dev-a" })).json.removed).toBe("member");
+    expect((await keysOf(w, "owner")).some((m) => m.deviceId === "dev-a")).toBe(false);
+    void chain;
+  });
+
+  test("posting a key is no activity of the fleet (the reaper's clock is not moved)", async () => {
+    const { w, inc } = await fleetWithPrimary();
+    const before = w.data.get("lastActivity");
+    setSystemTime(new Date(Date.now() + 3_600_000));
+    expect((await put(w, "dev-a", epochBody(w, "dev-a", 1, { notAfter: NOW() + 2 * DAY }, inc))).status).toBe(200);
+    expect(w.data.get("lastActivity")).toBe(before);
   });
 });
 
