@@ -188,7 +188,7 @@ export class GatewayClient {
     const header = this.signer?.header("tools/call", { ...this.target, member: "" }, body);
     if (!header) return "failed";
     try {
-      const response = await fetch(this.endpoint(), { method: "POST", headers: { ...this.headers("initialize", body), [CALL_SIG_HEADER]: header }, body, signal });
+      const response = await fetch(this.endpoint(), { method: "POST", headers: { ...this.baseHeaders(), [CALL_SIG_HEADER]: header }, body, signal });
       if (!response.ok) return "failed";
       const parsed = JSON.parse(await response.text()) as { jsonrpc?: unknown; error?: { code?: unknown; data?: { reason?: unknown; member?: unknown } } } | null;
       if (!parsed || typeof parsed !== "object" || parsed.jsonrpc !== "2.0") return "failed";
@@ -208,7 +208,7 @@ export class GatewayClient {
     this.member = undefined;
   }
 
-  private headers(method: string, body: string, member?: string): Record<string, string> {
+  private baseHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
@@ -218,6 +218,11 @@ export class GatewayClient {
     // entry checks the first, the DeviceDO forwards the second to the device.
     if (this.target.gatewayToken) headers.authorization = `Bearer ${this.target.gatewayToken}`;
     if (this.target.deviceToken) headers["x-device-token"] = this.target.deviceToken;
+    return headers;
+  }
+
+  private headers(method: string, body: string, member?: string): Record<string, string> {
+    const headers = this.baseHeaders();
     // Signed over the exact string that is sent, and again on every attempt: a retry is a new call.
     const signature = this.signer?.header(method, member !== undefined ? { ...this.target, member } : this.target, body);
     if (signature) headers[CALL_SIG_HEADER] = signature;
@@ -243,8 +248,7 @@ export class GatewayClient {
     this.lastAttempts = 0;
 
     const started = performance.now();
-    let member = await this.fleetMember(method, signal);
-    let asked = false;
+    const member = await this.fleetMember(method, signal);
     for (let attempt = 1; ; attempt++) {
       this.lastAttempts = attempt;
       let response: Response;
@@ -270,21 +274,15 @@ export class GatewayClient {
         await sleep(backoffMs);
         continue;
       }
-      const verified = this.checkReply(headers[CALL_SIG_HEADER], body, response.headers.get(REPLY_SIG_HEADER), text);
+      this.checkReply(headers[CALL_SIG_HEADER], body, response.headers.get(REPLY_SIG_HEADER), text);
       try {
         return this.parseBody(response.status, text);
       } catch (err) {
         if (err instanceof McpError && err.code === CALLER_REFUSED_CODE) {
           // Refused: the member that was named may not be the one the fleet sends calls to any more, so the next call asks again.
           this.forgetMember();
-          // A refusal that the device signed, because the call was not made for it (the fleet's primary changed): nothing ran, so
-          // the question is asked again and the call signed again, once. An unsigned refusal may be the gateway's, and is not acted on.
-          const reason = (err.data as { reason?: unknown } | undefined)?.reason;
-          if (verified && !asked && member !== undefined && (reason === "invalid" || reason === "not-primary")) {
-            asked = true;
-            member = await this.fleetMember(method, signal);
-            if (member !== undefined) continue;
-          }
+          // Not sent again here, whoever signed the refusal: a fleet's answers are not authenticated (any key can sign a reply), so a
+          // gateway could turn a call that ran into "did not run" and have it run again. The user's next call asks again.
         }
         throw err;
       }
@@ -298,10 +296,10 @@ export class GatewayClient {
    * may be an older build. A fleet is answered by whichever member holds the lease, so its replies are checked
    * for a good signature only; their keys come from the fleet's roster, not from a first use.
    */
-  private checkReply(callSig: string | undefined, requestBody: string, replySig: string | null, text: string): boolean {
-    if (!callSig) return false;
+  private checkReply(callSig: string | undefined, requestBody: string, replySig: string | null, text: string): void {
+    if (!callSig) return;
     const nonce = parseCallSig(callSig)?.nonce;
-    if (!nonce) return false;
+    if (!nonce) return;
     const { gateway, deviceId: device } = this.target;
     const pooled = Boolean(this.target.fleet || this.target.fleetBuddy);
     let pinned: string | undefined;
@@ -322,22 +320,21 @@ export class GatewayClient {
     };
     if (replySig === null) {
       if (pinned) refuse("answered a signed call without signing its reply, as it has before");
-      return false;
+      return;
     }
     const pub = verifyReplySig(replySig, nonce, requestBody, text);
     if (!pub) {
       if (pinned) refuse("answered with a signature that does not match the reply");
       this.once(`the reply from ${device} carries a signature that does not match it; the gateway may have changed the answer`);
-      return false;
+      return;
     }
-    if (pooled || pinsBroken) return true;
+    if (pooled || pinsBroken) return;
     try {
       if (checkDeviceKey(gateway, device, pub) === "changed") refuse(`answered with a different key (${deviceKeyLabel(pub)}) from the one it first used`);
     } catch (err) {
       if (err instanceof CliError) throw err;
       this.once(`cannot pin the key of ${device}: ${err instanceof Error ? err.message : String(err)}`);
     }
-    return true;
   }
 
   private once(text: string): void {

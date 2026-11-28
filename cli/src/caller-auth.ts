@@ -554,9 +554,9 @@ export function refusalMessage(failure: CallerFailure, member?: string): string 
     case "fleet-unbound":
       return "a call for a fleet names the member that is to run it, and this one did not: either this prime is older than the fleet's (update prime on this machine), or the question which member answers did not get through (send the call again); it did not run";
     case "not-primary":
-      return "this space is not the fleet's primary now (or its agent has not said so lately), so it runs no call made for the fleet: the call did not run; the fleet's primary takes it, send it again";
+      return "this space is not the fleet's primary now (or its agent has not said so lately), so it runs no call made for the fleet: the call did not run here (the answers of a fleet are not authenticated, so look at the work tree before you send it again)";
     case "before-primary":
-      return "this space became the fleet's primary after this call was signed, and the call may have run on the member that was: it did not run here; look at the work tree before you send it again";
+      return "this space became the fleet's primary after this call was signed, and the call may have run on the member that was: it did not run here (the answers of a fleet are not authenticated); look at the work tree before you send it again";
     case "tool-not-allowed":
       return "the key that signed this call is not allowed to run this tool on this device";
     case "callers-unreadable":

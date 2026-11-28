@@ -612,8 +612,10 @@ checked by the space that runs it against what the signed roster says, not again
   for that member. A member that is sent a call for another one does not run it, and a call that names no member (the form older builds sign) is refused
   with "update prime" (a device that predates this does not answer the question, and the call is signed as it was). A question that is not answered (the
   network, a 5xx, a 429, a reply that is not JSON) is asked once more and is not remembered as "this device is old". When the fleet's primary has moved
-  since the member was asked, the member that is sent the call refuses it and signs the refusal ("it did not run"); the client then asks again and signs again,
-  once. A refusal that is not signed is not acted on, since the gateway may have made it.
+  since the member was asked, the member that is sent the call refuses it, and the client forgets the answer, so that the next call asks again; the refused call is not
+  sent again by the client. **The answers of a fleet are not authenticated**: whatever member answers, a reply's signature says only that someone who holds a key signed it
+  (a fleet's member keys are not bound to the roster yet), so a gateway can answer a call that ran with "did not run, send it again". Look at the work tree before you
+  send a refused call again, whatever the refusal says; a refusal that says a call "did not run" is the member's word if it is the member's, and the gateway can say it too.
 - **Only the primary runs such a call.** A replica refuses it ("the call did not run"). A call signed before the space became the primary, or within 5
   seconds after it, is refused (it may have run on the member that was), and so is one signed more than a minute ahead of the device's clock (a caller's
   clock that is off by less is taken for a clock a little off; the message gives the figure). The agent renews the file every 20 seconds while it runs, and a space stops believing "primary" 2 minutes after it was
