@@ -390,6 +390,32 @@ describe("the fleets in the admin interface", () => {
     expect(openButtons.map((b) => b.textContent)).toContain("Admit");
   });
 
+  test("a signed fleet shows the removals that wait for the owner key: a member fenced, and one that left", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        rosterSigned: true,
+        members: [{ deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true }, { deviceId: "d2", role: "member", label: "beta", addedAt: 2, online: true }],
+        primary: "d1",
+        pending: [],
+        fences: [{ deviceId: "d2", seqAt: 4, at: 1, lapsesAt: Date.UTC(2026, 11, 8, 10, 30) }],
+        pendingRemoves: [{ deviceId: "gone-device-1234", seqAt: 3, left: true }],
+      },
+    ]);
+    await page.settle();
+    const titles: string[] = [];
+    const texts: string[] = [];
+    const walk = (el: El): void => {
+      if (el.textContent) texts.push(el.textContent);
+      if (el.title) titles.push(el.title);
+      el.children.forEach(walk);
+    };
+    page.list().forEach(walk);
+    expect(texts.filter((t) => t.endsWith("awaiting roster signature (remove)"))).toEqual(["d2 - awaiting roster signature (remove)", "gone-device- - awaiting roster signature (remove)"]);
+    expect(titles.some((t) => t.startsWith("fenced for removal at snapshot 4: the fence lapses 2026-12-08 10:30 UTC"))).toBe(true);
+    expect(titles.some((t) => t.startsWith("left the fleet, and waits for the owner key to remove it from the roster (at snapshot 3)"))).toBe(true);
+  });
+
   test("a fleet is a cloud, and it offers Save and Deactivate", async () => {
     const page = loadPage([
       {

@@ -331,12 +331,17 @@ try {
     // A new member: asks, and the owner key's add is the approval.
     const inv = await admin("/admin/api/fleets/e2e/invite");
     await member("/fleets/e2e/join", "dev-c", "token-c-1234", { code: inv.json.code, label: "dev-c", pubkey: sealingKeyOf("dev-c"), spub: signingKeyOf("dev-c").pub });
-    const admitted = await send("add", { device: "dev-c", xpub: sealingKeyOf("dev-c"), spub: signingKeyOf("dev-c").pub, role: "member", seqAt: 0 });
+    // A new member takes effect from the head on (a lower sequence is for the members the roster was put over).
+    const headNow = await fetch(BASE + "/fleets/e2e/head", { headers: asDevice("dev-a", "token-a-1234") }).then((r) => r.json() as Promise<any>);
+    const headSeq = typeof headNow.head?.seq === "number" ? headNow.head.seq : 0;
+    const tooEarly = headSeq > 0 ? await send("add", { device: "dev-c", xpub: sealingKeyOf("dev-c"), spub: signingKeyOf("dev-c").pub, role: "member", seqAt: headSeq - 1 }) : { status: 409 };
+    check("a new member's add as of before the head is refused", tooEarly.status === 409, JSON.stringify(tooEarly));
+    const admitted = await send("add", { device: "dev-c", xpub: sealingKeyOf("dev-c"), spub: signingKeyOf("dev-c").pub, role: "member", seqAt: headSeq });
     check("a request is made a member by the owner's entry", admitted.status === 200, JSON.stringify(admitted.json));
     const me = await fetch(BASE + "/fleets/e2e/me", { headers: asDevice("dev-c", "token-c-1234") }).then((r) => r.json() as Promise<any>);
     check("and the member is in", me.status === "member", JSON.stringify(me));
     // A removal: fenced first, and signed with the sequence the fence says.
-    const noFence = await send("remove", { device: "dev-c", seqAt: 0 });
+    const noFence = await send("remove", { device: "dev-c", seqAt: headSeq });
     check("a removal without a fence is refused", noFence.status === 409, JSON.stringify(noFence.json));
     const fence = await operator("/fleets/e2e/remove-fence", { deviceId: "dev-c" });
     check("the fence answers a sequence", fence.status === 200 && typeof fence.json.seqAt === "number", JSON.stringify(fence.json));

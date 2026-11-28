@@ -33,6 +33,7 @@ import {
   cleanCaps,
   commonCaps,
   effectiveLeaseMs,
+  FENCE_TTL_MS,
   hashCode,
   LEASE_DEFAULT_MS,
   LEASE_MIN_MS,
@@ -98,6 +99,8 @@ interface Caller {
 }
 
 type Members = Record<string, Member>;
+/** A fence for a removal: the sequence it was fenced at (null while it is being waited for), when, and whether the member left by itself. */
+type Fence = { seqAt: number | null; at: number; left?: true };
 
 interface Head {
   seq: number;
@@ -568,7 +571,7 @@ export class FleetDO implements DurableObject {
     const lastActivity = (await this.storage.get<number>("lastActivity")) ?? 0;
     const created = (await this.storage.get<number>("created")) ?? 0;
     const meta = await this.meta();
-    return Response.json({ members: Object.keys(members), lastActivity, created, meta, rosterSigned: await this.rosterSigned() });
+    return Response.json({ members: Object.keys(members), lastActivity, created, meta, rosterSigned: await this.rosterSigned(), fences: await this.fencesShown(), pendingRemoves: await this.pendingRemoves() });
   }
 
   //
@@ -1395,6 +1398,7 @@ export class FleetDO implements DurableObject {
     }
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
+    let leftSigned = false;
     let wasMember = false;
     let freedLease = false;
     await this.state.blockConcurrencyWhile(async () => {
@@ -1437,13 +1441,36 @@ export class FleetDO implements DurableObject {
       out = dropped.out;
       wasMember = dropped.wasMember;
       freedLease = dropped.freedLease;
+      // In a signed fleet the chain still lists the member that left: the mark is made here, so that nothing it publishes from now on
+      // is taken, and its removal's sequence is read below, once what it had in flight has landed.
+      if (leaving && wasMember && (await this.rosterSigned()) && (await this.exists())) {
+        const fences = await this.fences();
+        fences[deviceId] = { seqAt: null, at: Date.now(), left: true };
+        await this.putFences(fences);
+        leftSigned = true;
+      }
     });
     // Told after the decision is made and stored, outside the block that made it:
     // a socket closed while the object is held shut is not let go of cleanly.
     if (freedLease) this.broadcast({ type: "lease-free" }, deviceId);
     // It is not a member any more, so it has nothing to listen for.
     if (wasMember) this.hangUp("removed", deviceId);
+    if (leftSigned) await this.settleLeaverFence(deviceId, request.headers.get("x-prime-fleet") ?? "");
     return out;
+  }
+
+  /** The sequence the removal of a member that left by itself is signed with: the head once what it had in flight has landed. */
+  private async settleLeaverFence(deviceId: string, fleetId: string): Promise<void> {
+    await Promise.all([...(this.advancing.get(deviceId) ?? [])]);
+    const head = await this.readHeadOrNull(fleetId);
+    // Not read: it stays null, and `POST /remove-fence` (which reads it again) gives the sequence when the owner signs.
+    if (head === null) return;
+    const fences = await this.fences();
+    const fence = fences[deviceId];
+    if (!fence || fence.seqAt !== null) return;
+    fences[deviceId] = { ...fence, seqAt: head.seq };
+    await this.putFences(fences);
+    await this.audit({ kind: "device", deviceId }, "member-left-fenced", deviceId, { seqAt: head.seq });
   }
 
   /**
@@ -1524,7 +1551,7 @@ export class FleetDO implements DurableObject {
         applied: applied[m.deviceId] ?? 0,
         ...(fetched[m.deviceId] !== undefined ? { fetched: fetched[m.deviceId] } : {}),
       }));
-      return Response.json({ ok: true, members: shown, left: await this.leftKeys() });
+      return Response.json({ ok: true, members: shown, left: await this.leftKeys(), fences: await this.fencesShown(), pendingRemoves: await this.pendingRemoves() });
     }
     // The owner runs the fleet: it admits and removes members, so it needs
     // their ids in full. Any other member sees the other ids cut short:
@@ -1532,7 +1559,7 @@ export class FleetDO implements DurableObject {
     // primary gets the keys it needs from the dedicated route instead.
     if (caller.kind === "device" && members[caller.deviceId]) {
       const self = members[caller.deviceId]!;
-      if (self.role === "owner") return Response.json({ ok: true, members: Object.values(members), left: await this.leftKeys() });
+      if (self.role === "owner") return Response.json({ ok: true, members: Object.values(members), left: await this.leftKeys(), fences: await this.fencesShown(), pendingRemoves: await this.pendingRemoves() });
       const redacted = Object.values(members).map((m) =>
         m.deviceId === self.deviceId ? m : { ...m, deviceId: m.deviceId.slice(0, 8) + "…" },
       );
@@ -2241,7 +2268,7 @@ export class FleetDO implements DurableObject {
   // each entry to the member list the older members read.
 
   private signedMemo?: boolean;
-  private fenceMemo?: Record<string, { seqAt: number | null; at: number }>;
+  private fenceMemo?: Record<string, Fence>;
   /** Publishes that are running, by the device that makes them: a fence waits for them to land. */
   private readonly advancing = new Map<string, Set<Promise<void>>>();
 
@@ -2264,13 +2291,56 @@ export class FleetDO implements DurableObject {
     );
   }
 
-  /** What the object keeps of the fleets it fenced: a member fenced for removal publishes nothing more. */
-  private async fences(): Promise<Record<string, { seqAt: number | null; at: number }>> {
-    if (this.fenceMemo === undefined) this.fenceMemo = (await this.storage.get<Record<string, { seqAt: number | null; at: number }>>("fence")) ?? {};
+  /**
+   * What the object keeps of the fleets it fenced: a member fenced for removal publishes nothing more. A fence lapses
+   * `FENCE_TTL_MS` after it was made if no removal was signed under it, and the lapse is written to the audit log. (A member
+   * that left of its own accord is fenced too, for its removal's sequence; it is no longer a member, so there is nothing for its
+   * fence to hold and it does not lapse: the chain says it is waiting for the owner's `remove`.)
+   */
+  private async fences(): Promise<Record<string, Fence>> {
+    if (this.fenceMemo === undefined) this.fenceMemo = (await this.storage.get<Record<string, Fence>>("fence")) ?? {};
+    const lapsed = Object.entries(this.fenceMemo).filter(([, f]) => f.left !== true && Date.now() - f.at >= FENCE_TTL_MS);
+    if (lapsed.length > 0) {
+      const kept = { ...this.fenceMemo };
+      for (const [device, fence] of lapsed) {
+        delete kept[device];
+        try {
+          await this.auditLog().append({ actor: { kind: "gateway" }, action: "remove-fence-lapsed", target: device, detail: { seqAt: fence.seqAt ?? -1, hours: Math.round((Date.now() - fence.at) / 3_600_000) } });
+        } catch (e) {
+          this.auditFailures++;
+          console.error("audit: could not record remove-fence-lapsed: " + String(e));
+        }
+      }
+      await this.putFences(kept);
+    }
     return this.fenceMemo;
   }
 
-  private async putFences(fences: Record<string, { seqAt: number | null; at: number }>): Promise<void> {
+  /** The fences a member of the fleet is held by (not the ones of members that left), as the operator and the owner see them. */
+  private async fencesShown(): Promise<Array<{ deviceId: string; seqAt: number | null; at: number; lapsesAt: number }>> {
+    return Object.entries(await this.fences())
+      .filter(([, f]) => f.left !== true)
+      .map(([deviceId, f]) => ({ deviceId, seqAt: f.seqAt, at: f.at, lapsesAt: f.at + FENCE_TTL_MS }));
+  }
+
+  /**
+   * The members the chain lists and the fleet no longer has (they left, or the gateway dropped them): their removal waits for the
+   * owner's signature, and `seqAt` is the sequence to sign it with (null while the head could not be read at the time).
+   */
+  private async pendingRemoves(): Promise<Array<{ deviceId: string; seqAt: number | null; left: true; at?: number }>> {
+    if (!(await this.rosterSigned())) return [];
+    const entries = (await this.storage.get<SignedEntry[]>("roster")) ?? [];
+    // The genesis names the fleet it was made for (it was checked against this one when it was stored).
+    const state = entries.length === 0 ? null : await foldTrusted(entries, String(entries[0]!.entry[1]), await this.incarnation()).catch(() => null);
+    if (!state) return [];
+    const members = await this.members();
+    const fences = await this.fences();
+    return [...state.live.keys()]
+      .filter((d) => !members[d])
+      .map((deviceId) => ({ deviceId, seqAt: fences[deviceId]?.seqAt ?? null, left: true as const, ...(fences[deviceId] ? { at: fences[deviceId]!.at } : {}) }));
+  }
+
+  private async putFences(fences: Record<string, Fence>): Promise<void> {
     this.fenceMemo = fences;
     if (Object.keys(fences).length === 0) await this.storage.delete("fence");
     else await this.storage.put("fence", fences);
@@ -2295,6 +2365,8 @@ export class FleetDO implements DurableObject {
     return Response.json({
       ok: true,
       mode: "signed",
+      // The members the chain lists that the fleet no longer has: their removal waits for the owner's signature, at that `seqAt`.
+      pendingRemoves: await this.pendingRemoves(),
       incarnation,
       fleetKey: await fleetKeyOf(entries[0]!.entry),
       head: { n: entries.length - 1, hash: await entryHash(entries[entries.length - 1]!) },
@@ -2340,6 +2412,11 @@ export class FleetDO implements DurableObject {
     const op = e[6] as string;
 
     if (entries.length === 0) {
+      // The genesis roots the chain in a key: it is the operator's to put, not that of a member that happens to be the owner, which a
+      // compromised one could use to make itself the root of trust for good. (Every entry after it is the owner key's.)
+      if (caller.kind !== "admin") {
+        return { out: Response.json({ error: "the first entry of the roster is the operator's to post (prime fleets roster init, with the operator's credential), not a device's" }, { status: 403 }) };
+      }
       if (!(await this.exists())) return { out: Response.json({ error: "no such fleet" }, { status: 404 }) };
       const state = await begin(signed, fleetId, incarnation);
       await this.storage.put("roster", [signed]);
@@ -2359,15 +2436,17 @@ export class FleetDO implements DurableObject {
     const next = await extend(state, signed);
 
     let effect: { freed?: string; left?: string } = {};
+    let headSeq = 0;
     const needsHead = op === "add" || op === "rotate" || op === "rotate-self" || op === "role";
     if (needsHead) {
       const head = await this.readHeadOrNull(fleetId);
       if (head === null) throw new RosterRefusal("the fleet's head could not be read", 503);
+      headSeq = head.seq;
       if ((e[11] as number) > head.seq) throw new RosterRefusal("the entry takes effect from snapshot " + String(e[11]) + ", and the head is at " + head.seq, 409);
     }
     switch (op) {
       case "add":
-        await this.rosterAdd(caller, signed);
+        await this.rosterAdd(caller, signed, headSeq);
         break;
       case "rotate":
         await this.rosterRotate(caller, signed, fleetId);
@@ -2394,7 +2473,7 @@ export class FleetDO implements DurableObject {
     return { out: Response.json({ ok: true, n: e[3], hash: next.head.hash }), ...effect };
   }
 
-  private async rosterAdd(caller: Caller, signed: SignedEntry): Promise<void> {
+  private async rosterAdd(caller: Caller, signed: SignedEntry, headSeq: number): Promise<void> {
     const e = signed.entry;
     const device = e[7] as string;
     const xpub = e[8] as string;
@@ -2413,6 +2492,9 @@ export class FleetDO implements DurableObject {
     const pending = await this.joinRequests();
     const request = pending[device];
     if (!request || request.keyChange) throw new RosterRefusal("no request from " + device + " is waiting", 409);
+    // A member that is new takes effect from the head on: an earlier sequence would make its key a valid sender for snapshots
+    // that were made before it was admitted. (A low one is for a member that was in the fleet before the roster, above.)
+    if ((signed.entry[11] as number) < headSeq) throw new RosterRefusal("an add for a new member takes effect from the head or later: the head is at " + headSeq + ", and the entry says " + String(signed.entry[11]) + " (sign it again at the head)", 409);
     if (request.pubkey !== xpub || request.spub !== spub) throw new RosterRefusal("the entry is for another key than the request of " + device + " offers (it was replaced since)", 409);
     if (Object.keys(members).length >= MAX_MEMBERS) throw new RosterRefusal("fleet is full", 409);
     const owned = Object.values(members).some((m) => m.role === "owner");
@@ -2532,7 +2614,7 @@ export class FleetDO implements DurableObject {
       return Response.json({ ok: true, lifted: true });
     }
     // First the mark, so that a publish that starts from here on is refused, and what runs now is waited for.
-    fences[deviceId] = { seqAt: fences[deviceId]?.seqAt ?? null, at: Date.now() };
+    fences[deviceId] = { seqAt: fences[deviceId]?.seqAt ?? null, at: Date.now(), ...(fences[deviceId]?.left ? { left: true as const } : {}) };
     await this.putFences(fences);
     let freed = false;
     const held = await this.lease();
@@ -2546,7 +2628,7 @@ export class FleetDO implements DurableObject {
     await Promise.all([...(this.advancing.get(deviceId) ?? [])]);
     const head = await this.readHeadOrNull(fleetId);
     if (head === null) return Response.json({ error: "the fleet's head could not be read", fenced: true }, { status: 503 });
-    fences[deviceId] = { seqAt: head.seq, at: Date.now() };
+    fences[deviceId] = { seqAt: head.seq, at: Date.now(), ...(fences[deviceId]?.left ? { left: true as const } : {}) };
     await this.putFences(fences);
     await this.audit(caller, "member-fenced", deviceId, { seqAt: head.seq, freedLease: freed });
     return Response.json({ ok: true, fenced: deviceId, seqAt: head.seq });
@@ -2732,6 +2814,7 @@ export class FleetDO implements DurableObject {
     const member = members[caller.deviceId];
     if (!member) return Response.json({ member: false, primary: false, epoch: 0 });
     const held = await this.lease();
+    const fence = (await this.fences())[caller.deviceId];
     return Response.json({
       member: true,
       primary: held !== null && held.holder === caller.deviceId,
@@ -2745,6 +2828,8 @@ export class FleetDO implements DurableObject {
       leaseMs: effectiveLeaseMs((await this.meta()).leaseMs, this.env),
       // This object does not move the head from a sealed snapshot to one that is not (see `advance`).
       sealGate: true,
+      // The member is fenced for removal (it publishes nothing and takes no lease), until the fence lapses if no removal comes.
+      ...(fence ? { fenced: true, fenceLapsesAt: fence.at + FENCE_TTL_MS } : {}),
       // The most one upload may be: a member says so before it sends what the gateway would refuse.
       snapshotLimit: MAX_SNAPSHOT_BYTES,
       // The key a member proves that it holds its old key with, when it changes its own (see `changeKey`).

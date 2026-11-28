@@ -127,6 +127,13 @@ export const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 export const MAX_FLEETS_PER_DEVICE = 5;
 
 /**
+ * How long a fence for a removal lasts if no removal is signed under it: a member fenced and never removed (the operator's
+ * machine died between the two) publishes again after this. Seven days is long enough for an owner key kept somewhere
+ * hard to reach, and short enough that a forgotten fence is not a permanent exile.
+ */
+export const FENCE_TTL_MS = 7 * 24 * 3_600_000;
+
+/**
  * How many fleets each device has created recently.
  *
  * The count is kept in one place that every device shares, because a count

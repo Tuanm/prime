@@ -660,7 +660,7 @@ async function adminFleets(env: Env): Promise<Response> {
     headers.set("x-prime-fleet", id);
     const info = await stub.fetch("https://fleet/reap", { method: "POST", headers }).catch(() => null);
     if (!info || !info.ok) continue;
-    const body = (await info.json()) as { members?: string[]; lastActivity?: number; rosterSigned?: boolean; meta?: { label?: string; disabled?: boolean } };
+    const body = (await info.json()) as { members?: string[]; lastActivity?: number; rosterSigned?: boolean; fences?: unknown[]; pendingRemoves?: unknown[]; meta?: { label?: string; disabled?: boolean } };
     // The registry's copy of "paused" is only a copy: put it right if it fell behind.
     if ((body.meta?.disabled === true) !== snapshot.paused.has(id)) void setFleetPaused(env, id, body.meta?.disabled === true);
     const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
@@ -704,6 +704,9 @@ async function adminFleets(env: Env): Promise<Response> {
       disabled: body.meta?.disabled === true,
       // The members are what an owner-signed chain says: they are admitted and removed with the owner key, not here.
       rosterSigned: body.rosterSigned === true,
+      // Removals that wait for the owner key: members fenced (until the fence lapses), and members that left and are still in the chain.
+      fences: Array.isArray(body.fences) ? body.fences : [],
+      pendingRemoves: Array.isArray(body.pendingRemoves) ? body.pendingRemoves : [],
       // Which token this fleet answers to as a device, if the operator set
       // one: a fingerprint, never the token.
       buddy: await buddyFingerprint(snapshot.buddies.get(id)),

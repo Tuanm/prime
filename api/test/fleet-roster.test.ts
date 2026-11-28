@@ -18,6 +18,7 @@ mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 const { FleetDO } = await import("../src/fleet-do");
 const { handleFleetRoutes } = await import("../src/fleets-routes");
 const { fleetKeyOf, ROSTER_MAX_ENTRIES } = await import("../src/fleet-roster");
+const { FENCE_TTL_MS } = await import("../src/fleets");
 const witness = await import("../witness/src/lib");
 
 beforeEach(() => setSystemTime(new Date("2026-12-01T10:00:00Z")));
@@ -291,12 +292,18 @@ describe("putting a fleet under the owner key", () => {
     expect((await post(empty, new Chain("acme", "x").genesis())).status).toBe(404);
   });
 
-  test("only the operator or the owner device posts it, and a member does not", async () => {
+  test("only the operator posts it: neither a member nor the owner device roots the chain", async () => {
     const w = await openFleet();
     const chain = new Chain("acme", await incarnationOf(w));
     const g = chain.genesis();
     expect((await post(w, g, "dev-a", "device")).status).toBe(403);
-    expect((await post(w, g, "owner", "device")).status).toBe(200);
+    const byOwner = await post(w, g, "owner", "device");
+    expect(byOwner.status).toBe(403);
+    expect(byOwner.json.error).toMatch(/operator/);
+    // Nothing was stored: the fleet is still open, and the operator's genesis is taken.
+    expect((await call(w, "/roster", "dev-a", "device", {}, "GET")).json.mode).toBe("open");
+    expect((await call(w, "/approve", "operator", "admin", { deviceId: "nobody" })).status).not.toBe(409);
+    expect((await post(w, g)).status).toBe(200);
   });
 
   test("an add for a member that is in the fleet must say what the fleet holds: its key, signing key and role", async () => {
@@ -415,6 +422,23 @@ describe("admitting a member with a signed add", () => {
     expect((await post(w, ahead)).json.error).toMatch(/head is at 0/);
   });
 
+  test("a new member's add names the head or a later snapshot, never an earlier one (a low one is for the members the roster is put over)", async () => {
+    const { w, chain } = await signedFleet();
+    await lead(w, "dev-a");
+    expect((await publish(w, "dev-a", 1)).status).toBe(200);
+    expect((await publish(w, "dev-a", 2, "b")).status).toBe(200);
+    await knock(w, "dev-b");
+    const body = { device: "dev-b", xpub: xpubOf("dev-b"), spub: sKey("dev-b").pub, role: "member" };
+    for (const seqAt of [0, 1]) {
+      const early = await post(w, chain.make("add", { ...body, seqAt }));
+      expect(early.status).toBe(409);
+      expect(early.json.error).toMatch(/head is at 2/);
+    }
+    const add = chain.make("add", { ...body, seqAt: 2 });
+    expect((await post(w, add)).status).toBe(200);
+    chain.accept(add);
+  });
+
   test("is the owner device's to post, as well as the operator's, and a plain member's is refused", async () => {
     const { w, chain } = await signedFleet();
     await knock(w, "dev-b");
@@ -524,6 +548,92 @@ describe("removing a member with a fence and a signed remove", () => {
     expect(again.mode).toBe("open");
     expect(again.incarnation).not.toBe(was);
     expect((await post(w, chain.entries[0]!)).status).toBe(400);
+  });
+});
+
+describe("a member that leaves of its own accord in a signed fleet", () => {
+  test("is fenced at once, and its removal is waiting for the owner's signature, in /roster, /members and the admin's list", async () => {
+    const { w, chain } = await signedFleet(["owner", "dev-a", "dev-b"]);
+    await lead(w, "dev-a");
+    expect((await publish(w, "dev-a", 1)).status).toBe(200);
+    expect((await call(w, "/remove", "dev-b", "device", { deviceId: "dev-b" })).json.removed).toBe("member");
+    // The chain still lists it: the gateway says so, with the sequence the removal is to be signed with.
+    const read = (await call(w, "/roster", "dev-a", "device", {}, "GET")).json;
+    expect(read.pendingRemoves).toEqual([{ deviceId: "dev-b", seqAt: 1, left: true, at: Date.now() }]);
+    const view = (await call(w, "/members", "", "admin", {}, "GET")).json;
+    expect(view.pendingRemoves).toEqual(read.pendingRemoves);
+    // The signed remove goes through with that sequence, with no fence call of the operator's, and clears it.
+    const remove = chain.make("remove", { device: "dev-b", seqAt: 1 });
+    expect((await post(w, remove)).status).toBe(200);
+    chain.accept(remove);
+    expect((await call(w, "/roster", "dev-a", "device", {}, "GET")).json.pendingRemoves).toEqual([]);
+  });
+
+  test("what it had in flight lands first, and the sequence includes it", async () => {
+    const { w } = await signedFleet(["owner", "dev-a", "dev-b"]);
+    await lead(w, "dev-a");
+    let release!: () => void;
+    w.bucket.gate = new Promise<void>((r) => (release = r));
+    const reached = new Promise<void>((r) => (w.bucket.reached = r));
+    const running = publish(w, "dev-a", 1);
+    await reached;
+    const left = call(w, "/remove", "dev-a", "device", { deviceId: "dev-a" });
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    expect((await running).status).toBe(200);
+    expect((await left).json.removed).toBe("member");
+    const read = (await call(w, "/roster", "owner", "device", {}, "GET")).json;
+    expect(read.pendingRemoves.map((p: any) => [p.deviceId, p.seqAt])).toEqual([["dev-a", 1]]);
+  });
+
+  test("an open fleet has nothing waiting", async () => {
+    const w = await openFleet(["owner", "dev-a"]);
+    await call(w, "/remove", "dev-a", "device", { deviceId: "dev-a" });
+    expect((await call(w, "/members", "", "admin", {}, "GET")).json.pendingRemoves).toEqual([]);
+  });
+});
+
+describe("a fence is seen, and lapses", () => {
+  test("is shown to the operator and the owner (and to the member fenced), with when it lapses", async () => {
+    const { w } = await signedFleet(["owner", "dev-a", "dev-b"]);
+    expect((await call(w, "/remove-fence", "operator", "admin", { deviceId: "dev-b" })).status).toBe(200);
+    const admin = (await call(w, "/members", "", "admin", {}, "GET")).json;
+    expect(admin.fences).toEqual([{ deviceId: "dev-b", seqAt: 0, at: Date.now(), lapsesAt: Date.now() + FENCE_TTL_MS }]);
+    const owner = (await call(w, "/members", "owner", "device", {}, "GET")).json;
+    expect(owner.fences.map((f: any) => f.deviceId)).toEqual(["dev-b"]);
+    // A plain member does not see who is being removed; the member fenced is told of its own.
+    expect((await call(w, "/members", "dev-a", "device", {}, "GET")).json.fences).toBeUndefined();
+    expect((await call(w, "/role", "dev-b", "device", {}, "GET")).json).toMatchObject({ fenced: true, fenceLapsesAt: Date.now() + FENCE_TTL_MS });
+    expect((await call(w, "/role", "dev-a", "device", {}, "GET")).json.fenced).toBeUndefined();
+    const info = (await call(w, "/reap", "", "admin")).json;
+    expect(info.fences.map((f: any) => f.deviceId)).toEqual(["dev-b"]);
+  });
+
+  test("lapses after seven days, which is audited, and the member publishes again", async () => {
+    const { w } = await signedFleet(["owner", "dev-a", "dev-b"]);
+    await lead(w, "dev-b");
+    expect((await call(w, "/remove-fence", "operator", "admin", { deviceId: "dev-b" })).status).toBe(200);
+    expect((await publish(w, "dev-b", 1)).status).toBe(409);
+    setSystemTime(new Date(Date.now() + FENCE_TTL_MS - 1000));
+    expect((await publish(w, "dev-b", 1)).status).toBe(409);
+    setSystemTime(new Date(Date.now() + 2000));
+    expect((await call(w, "/members", "", "admin", {}, "GET")).json.fences).toEqual([]);
+    expect((await call(w, "/bootstrap", "dev-b", "device", { seals: true })).json.role).toBe("primary");
+    expect((await publish(w, "dev-b", 1)).status).toBe(200);
+    const log = (await call(w, "/audit", "operator", "admin", {}, "GET")).json.entries as Array<{ action: string; target?: string; actor: { kind: string } }>;
+    const lapsed = log.filter((e) => e.action === "remove-fence-lapsed");
+    expect(lapsed).toHaveLength(1);
+    expect(lapsed[0]).toMatchObject({ target: "dev-b", actor: { kind: "gateway" } });
+  });
+
+  test("a fence that is signed away is not a lapse", async () => {
+    const { w, chain } = await signedFleet(["owner", "dev-a", "dev-b"]);
+    await call(w, "/remove-fence", "operator", "admin", { deviceId: "dev-b" });
+    const remove = chain.make("remove", { device: "dev-b", seqAt: 0 });
+    expect((await post(w, remove)).status).toBe(200);
+    setSystemTime(new Date(Date.now() + FENCE_TTL_MS + 1000));
+    const log = (await call(w, "/audit", "operator", "admin", {}, "GET")).json.entries as Array<{ action: string }>;
+    expect(log.some((e) => e.action === "remove-fence-lapsed")).toBe(false);
   });
 });
 

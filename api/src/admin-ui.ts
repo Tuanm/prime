@@ -1095,6 +1095,14 @@ ${UI_CSS}    </style>
             leaf.appendChild(fleetPendingNode(f.fleet, p, f.rosterSigned === true));
             leaves.appendChild(leaf);
           });
+          // What waits for the owner key to remove: a member fenced (it publishes nothing until the fence lapses), and one that left and is
+          // still in the chain.
+          (f.fences || []).forEach(function (x) {
+            leaves.appendChild(fleetWaitingRemoveNode(f.fleet, x.deviceId, "fenced for removal at snapshot " + (x.seqAt === null ? "?" : x.seqAt) + ": the fence lapses " + new Date(x.lapsesAt).toISOString().slice(0, 16).replace("T", " ") + " UTC unless the owner key signs the removal"));
+          });
+          (f.pendingRemoves || []).forEach(function (x) {
+            leaves.appendChild(fleetWaitingRemoveNode(f.fleet, x.deviceId, "left the fleet, and waits for the owner key to remove it from the roster" + (x.seqAt === null ? "" : " (at snapshot " + x.seqAt + ")")));
+          });
 
           // The fleet card is the root; the leaves are below it, outside it.
           // The branch is a tree, so the lines are drawn between the root
@@ -1135,6 +1143,20 @@ ${UI_CSS}    </style>
         // A space in the fleet, drawn as a row of the device list: the status
         // outside, the box with the name and the device id, and the actions in
         // the menu.
+        // A row for a member the roster still lists and the owner key has to remove.
+        function fleetWaitingRemoveNode(fleet, deviceId, what) {
+          var leaf = document.createElement("li");
+          var row = document.createElement("li");
+          row.className = "row fleet-row disabled";
+          var name = document.createElement("span");
+          name.className = "fleet-key";
+          name.textContent = deviceId.slice(0, 12) + " - awaiting roster signature (remove)";
+          name.title = what + ". prime fleets remove " + fleet + " --member " + deviceId + ", on the machine that holds the owner key.";
+          row.appendChild(name);
+          leaf.appendChild(row);
+          return leaf;
+        }
+
         function fleetNode(fleet, m, isPrimary, signed) {
           var li = document.createElement("li");
           li.className = "row fleet-row" + (isPrimary ? " primary" : "") + (m.disabled ? " disabled" : "");
