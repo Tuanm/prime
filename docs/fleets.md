@@ -1023,7 +1023,11 @@ seqAt, extra]`, signed with Ed25519 over `JSON.stringify` of the array; `prevHas
 and its signature.
 
 **Reading it.** `GET /fleets/{fleet}/roster?after=N` answers `{mode, incarnation, entries, head, fleetKey}` to any
-member and to the operator. `mode` is `open` until the genesis is stored, and `signed` from then on (with `entries`
+member and to the operator, and to the fleet itself: a client that reaches the fleet under its own name, with the fleet's own
+token (`x-prime-device: <fleet>`, `x-device-token: <the fleet's token>`), may read this route of that fleet and nothing else
+of it (the chain is public: entries, keys and fingerprints), so that it can check what the fleet says against it. The token of one
+fleet is nothing at another, a token that was changed or removed is refused, and a wrong one counts against the address like a
+wrong device id. `mode` is `open` until the genesis is stored, and `signed` from then on (with `entries`
 not empty); `incarnation` is the one `GET /role` says, and the genesis is **bound to it**: a chain made for an earlier
 fleet of the same name is refused, and a fleet made again of a name starts open with a new incarnation. `GET /role` also
 says `rosterSigned`. A signed answer also has `pendingRemoves`: the members the chain lists and the fleet no longer has (they

@@ -1156,6 +1156,15 @@ export default {
           const auth = await authorizeDevice(deviceId, request, url, cfg, env);
           return auth.denied ? { ok: false as const, response: auth.denied } : { ok: true as const };
         },
+        authorizeFleetToken: async (fleetId) => {
+          // The token the fleet answers to under its own name, checked as the entry route checks it. A wrong one is held to the few
+          // guesses an address gets at an unknown device a minute, and a fleet with no token (or none that exists) is answered the
+          // same way, so that the limit does not say which fleets have one.
+          if (pepperFrom(env) === null) return { ok: false as const, response: pepperMissingResponse() };
+          const buddy = await fleetBuddyToken(env, fleetId);
+          if (buddy && (await tokenMatches(env, request, url, buddy))) return { ok: true as const };
+          return { ok: false as const, response: (await limitAsk(env, "unknown-device", request)) ?? unauthorized() };
+        },
         deviceOnline: (deviceId: string, since?: number) => deviceOnline(env, deviceId, since),
         fleetPaused: async (fleetId: string) => (await effectiveSnapshot(env)).paused.has(fleetId),
       });
