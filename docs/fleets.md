@@ -302,7 +302,7 @@ helps can still read what it was sent before it was removed, as it always could.
 What a credential on its own can no longer do, and what the gateway still can.
 
 - **A member's device token cannot replace the key of that member.** The token of a space is a short code (an
-  anonymous device's is 25 characters, 129 bits; one made before that is six, and is still accepted), which the space also keeps in its environment. The fleet takes a
+  anonymous device's is 25 characters, 129 bits; one made before that is six: see "Codes made before" below), which the space also keeps in its environment. The fleet takes a
   member's new key only on a proof made with the member's old private key (checked by the fleet object, which
   has an X25519 key pair of its own), or when the operator or the owner approves it. A request for a new key
   shows its fingerprint (`prime fleets pending`, the admin page), to compare with what the member's own machine
@@ -652,10 +652,19 @@ it lapses; it was five before the activity stamp, the epoch and a claim that was
 stopped being written again), and a row written is a millionth of a dollar beyond the first
 fifty million a month.
 
+Every object that keeps state counts its rows: the fleets, the devices, the registry and the temporary
+files.
+
 The ceiling is `FLEET_MONTHLY_BUDGET_USD`, twenty dollars by default. At the
 ceiling the fleet routes answer **402** and say so. The admin page keeps working,
 because the operator has to be able to see the number that stopped it and raise
 it, and so does everything that is not a fleet.
+
+Before the ceiling is reached the gateway says where the month is going. Once two days of the month
+have gone, `/usage` (and the admin page) price the month at the pace so far, with the free allowances
+applied once to the month's total, and give `projectedUsd`; when that passes the budget and the month so far
+has not, `projectionWarning` is true and `warning` says so, so the operator can raise the figure or
+find the load while the fleets still run. The size of the bucket is held, not scaled.
 
 Why twenty: the figure is the whole bill, so it includes the five dollars of the Workers Paid
 plan, and leaves fifteen for what the fleets cost. By the cost model (an estimate, to be checked
@@ -681,9 +690,25 @@ says; it now means twenty dollars.
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
 | `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (15000 ms; the fleet's own lease can lower it); saved like the others |
-| asks from one address, without a device the gateway knows | 30 code checks and 60 requests naming an unknown device a minute for each address (`FLEET_INVITE_RATE_MAX`, `FLEET_UNKNOWN_RATE_MAX`; 0 turns one off); beyond that the gateway answers 429 with `Retry-After`, before any fleet object is woken. Kept in the isolate and, with the `[[ratelimits]]` bindings, across the location. A gateway with no registered device is open and every id is unknown there, so the unknown-device count does not apply to it. |
-| a request body on a fleet route | 64 KB (`FLEET_BODY_MAX_BYTES`), 4 KB for a code check; the snapshot and change-pack uploads have their own limit above. The gateway answers 413 |
+| asks from one address, without a device the gateway knows | 30 invite-code checks (made when a device is asked for with a fleet and a code) and 60 requests naming an unknown device a minute for each address (`FLEET_INVITE_RATE_MAX`, `FLEET_UNKNOWN_RATE_MAX`; 0 turns one off); beyond that the gateway answers 429 with `Retry-After`, before any fleet object is woken. Kept in the isolate and, with the `[[ratelimits]]` bindings, across the location. A gateway with no registered device is open and every id is unknown there, so the unknown-device count does not apply to it. |
+| a request body on a fleet route | 64 KB (`FLEET_BODY_MAX_BYTES`), 4 KB for the body that asks for a device with a code; the snapshot and change-pack uploads have their own limit above. The gateway answers 413 |
 | a fleet nobody touches | kept: only the operator or the owner deletes it (`reap` also takes one whose members the gateway has all forgotten, after a week) |
+
+## Codes made before the longer ones
+
+An anonymous device's code was six characters until the gateway began issuing 25. Nothing issues a short one
+now. What is left of the old ones:
+
+- **One that is still waiting for its first connection is refused after an hour** (the device is collected, as
+  an unused one always was), whatever `ANON_UNUSED_TTL_MS` is set to. An hour is what an invite lives at most
+  and the default for an unused device, so a gateway on the defaults sees no change; it only keeps a raised
+  setting from leaving a short code waiting for days. The bound counts from when the device was made, so
+  those already waiting at the deploy are refused within the hour.
+- **One that has connected is unaffected**: a member of a fleet, or a machine in use, keeps its code until it is
+  made again (re-joining, or `prime connect` after the device is removed), and an offline device is collected
+  after seven days as before. Refusing those would take every joined member's credential away at once.
+- A wrong code from an address locks that address out of the device, not the device (see above), which is what
+  keeps guessing a short code from one address in check without letting a stranger shut a member out.
 
 ## Known limitations
 
