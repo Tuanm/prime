@@ -37,6 +37,8 @@ export interface Target {
   gateway: string;
   /** A local MCP server (a space): dial it directly instead of the gateway relay. */
   localUrl?: string;
+  /** The id is a fleet, reached with its own token: calls to it are signed for the fleet. */
+  fleetBuddy?: boolean;
   gatewayToken?: string;
   deviceToken?: string;
   timeoutMs: number;
@@ -47,6 +49,7 @@ export interface TargetOverrides {
   gatewayToken?: string;
   deviceToken?: string;
   timeoutMs?: number;
+  fleetBuddy?: boolean;
 }
 
 export const DEFAULT_TIMEOUT_MS = 300_000; // matches the gateway's TIMEOUT_MS default
@@ -165,6 +168,7 @@ export function resolveTarget(config: Config, deviceId: string, overrides: Targe
     deviceId,
     gateway,
     ...(localUrl ? { localUrl } : {}),
+    ...(overrides.fleetBuddy || entry.fleet_token ? { fleetBuddy: true } : {}),
     gatewayToken: pick(overrides.gatewayToken, process.env[ENV.gatewayToken], entry.gateway_token, config.defaults.gateway_token),
     deviceToken: pick(overrides.deviceToken, process.env[ENV.deviceToken], entry.token, config.defaults.token),
     timeoutMs,
@@ -237,6 +241,7 @@ export function entryFromOverrides(overrides: TargetOverrides, now: string): { e
   if (overrides.gateway !== undefined) entry.gateway = normalizeGateway(overrides.gateway);
   if (overrides.gatewayToken !== undefined) entry.gateway_token = overrides.gatewayToken;
   if (overrides.deviceToken !== undefined) entry.token = overrides.deviceToken;
+  if (overrides.fleetBuddy) entry.fleet_token = true;
   entry.connected_at = now;
 
   const defaults: Partial<Config["defaults"]> = {};

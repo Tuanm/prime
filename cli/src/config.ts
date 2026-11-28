@@ -54,6 +54,8 @@ export interface DeviceEntry {
    * when the gateway confirms.
    */
   pending_token?: string;
+  /** The id is a fleet, reached with the fleet's own token (the call is signed for the fleet, not for a device). */
+  fleet_token?: boolean;
 }
 
 export interface Defaults {
@@ -188,6 +190,7 @@ export function parseConfig(text: string, source: string): Config {
       ...(asString(entry.space) ? { space: asString(entry.space) } : {}),
       ...(asString(entry.fleet) ? { fleet: asString(entry.fleet) } : {}),
       ...(asString(entry.pending_token) ? { pending_token: asString(entry.pending_token) } : {}),
+      ...(entry.fleet_token === true ? { fleet_token: true } : {}),
     };
   }
 
@@ -311,6 +314,7 @@ export function serializeConfig(config: Config): string {
         ["space", entry.space],
         ["fleet", entry.fleet],
         ["pending_token", entry.pending_token],
+        ["fleet_token", entry.fleet_token === true ? true : undefined],
       ] as const) {
         if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
       }

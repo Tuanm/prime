@@ -448,10 +448,10 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
 
   // A device that only runs signed calls says so once per call; the way to let this machine in is shown once.
   let refusedHinted = false;
-  const hintRefused = (err: unknown): void => {
+  const hintRefused = (err: unknown, target: Target): void => {
     if (refusedHinted || !(err instanceof McpError) || err.code !== CALLER_REFUSED_CODE) return;
     refusedHinted = true;
-    ctx.note(dim(callerRefusedHint(signer)));
+    ctx.note(dim(callerRefusedHint(signer, { fleet: Boolean(target.fleet || target.fleetBuddy) })));
   };
 
   const run = async (item: PlanItem): Promise<CallOutcome> => {
@@ -465,7 +465,7 @@ export async function toolsCall(ctx: Ctx): Promise<void> {
         result,
       };
     } catch (err) {
-      hintRefused(err);
+      hintRefused(err, item.client.target);
       if (single) throw err;
       return toFailure(item, err);
     }

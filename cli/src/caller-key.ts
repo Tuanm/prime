@@ -25,11 +25,12 @@ import {
   verify as cryptoVerify,
   type KeyObject,
 } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { defaultConfigPath } from "./config.ts";
+import { withDirLockSync } from "./dir-lock.ts";
 
 export const CALL_SIG_HEADER = "x-prime-call-sig";
 export const CALL_SIG_VERSION = "v1";
@@ -84,11 +85,14 @@ export function callerKeyPath(): string {
   return join(homedir(), ".prime", "caller-ed25519.pem");
 }
 
-/** The default callers file of the device on this machine, beside its config. */
-export function callersPath(): string {
+/**
+ * The callers file of the device that runs with this config: callers.json beside the config file (PRIME_CALLERS
+ * overrides it). The device reads the same name, so the file a command writes is the file the device reads.
+ */
+export function callersPath(configPath: string = defaultConfigPath()): string {
   const override = process.env.PRIME_CALLERS;
   if (override && override.trim().length > 0) return override.trim();
-  return join(dirname(defaultConfigPath()), "callers.json");
+  return join(dirname(configPath), "callers.json");
 }
 
 export interface CallerKey {
@@ -105,18 +109,51 @@ function fromPrivate(privateKey: KeyObject): CallerKey {
   return { privateKey, publicKey, keyId: keyIdOf(publicKey), publicKeyB64: publicKey.toString("base64") };
 }
 
+/** Group or other may read this file: a private key like that is not used (the rule ssh has). POSIX only. */
+function tooOpen(path: string): string | undefined {
+  if (process.platform === "win32") return undefined;
+  const mode = statSync(path).mode & 0o777;
+  return (mode & 0o077) !== 0 ? mode.toString(8).padStart(3, "0") : undefined;
+}
+
 function readKey(path: string): CallerKey {
-  const key = createPrivateKey(readFileSync(path, "utf8"));
-  if (key.asymmetricKeyType !== "ed25519") throw new Error(`${path} is not an Ed25519 key`);
+  const open = tooOpen(path);
+  if (open) throw new Error(`${path}: the key file is readable by others (mode ${open}); run: chmod 600 ${path}`);
+  let key: KeyObject;
+  try {
+    key = createPrivateKey(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(`${path}: not a readable Ed25519 PEM key`);
+  }
+  if (key.asymmetricKeyType !== "ed25519") throw new Error(`${path}: not an Ed25519 key`);
   return fromPrivate(key);
+}
+
+/** Read a key file that another process may still be writing: a short wait for it to be whole. */
+function readKeyWhenWhole(path: string): CallerKey {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return readKey(path);
+    } catch (err) {
+      if (attempt >= 20 || !/not a readable Ed25519/.test((err as Error).message)) throw err;
+      Bun.sleepSync(25);
+    }
+  }
+}
+
+export interface KeyFileHooks {
+  /** Replaced in tests: a file system with no hard links. */
+  link?: (existing: string, created: string) => void;
 }
 
 /**
  * This machine's caller key, made on first use. The private half is written once, mode 0600, and is
- * never printed: two processes that start together end up with the same key.
+ * never printed: two processes that start together end up with the same key. A key file that others can read
+ * is refused, not used. (On Windows the mode means nothing: the file is protected by the access rules of the
+ * user's profile.)
  */
-export function loadOrCreateCallerKey(path: string = callerKeyPath()): CallerKey {
-  if (existsSync(path)) return readKey(path);
+export function loadOrCreateCallerKey(path: string = callerKeyPath(), hooks: KeyFileHooks = {}): CallerKey {
+  if (existsSync(path)) return readKeyWhenWhole(path);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const pem = generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }) as string;
   const scratch = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
@@ -124,12 +161,17 @@ export function loadOrCreateCallerKey(path: string = callerKeyPath()): CallerKey
     writeFileSync(scratch, pem, { mode: 0o600 });
     try {
       // A hard link fails when the name is taken, which is how a racing process loses: it reads the winner's key.
-      linkSync(scratch, path);
+      (hooks.link ?? linkSync)(scratch, path);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") return readKey(path);
-      // A file system with no hard links: move it into place if the name is still free.
-      if (existsSync(path)) return readKey(path);
-      renameSync(scratch, path);
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return readKeyWhenWhole(path);
+      // A file system with no hard links: create the name exclusively. Whoever gets it first keeps it; the
+      // other reads it, so no two processes ever hold different keys.
+      try {
+        writeFileSync(path, pem, { flag: "wx", mode: 0o600 });
+      } catch (second) {
+        if ((second as NodeJS.ErrnoException).code === "EEXIST") return readKeyWhenWhole(path);
+        throw second;
+      }
     }
   } finally {
     rmSync(scratch, { force: true });
@@ -178,6 +220,8 @@ export function parseCallSig(header: string | undefined | null): ParsedCallSig |
   const parts = header.trim().split(".");
   if (parts.length !== 5 || parts[0] !== CALL_SIG_VERSION) return undefined;
   const [, keyId, tsText, nonce, sig] = parts as [string, string, string, string, string];
+  // Exact lengths, so what a device remembers per call (the nonce) is of a known size.
+  if (keyId.length !== 22 || nonce.length !== 22 || sig.length !== 86) return undefined;
   if (!B64URL.test(keyId) || !B64URL.test(nonce) || !B64URL.test(sig) || !/^\d{1,16}$/.test(tsText)) return undefined;
   const sigBytes = Buffer.from(sig, "base64url");
   if (sigBytes.length !== 64) return undefined;
@@ -193,42 +237,75 @@ export function verifyCallSignature(parsed: ParsedCallSig, publicKey: Buffer, ta
   }
 }
 
-/** The signature target of a call: a fleet when the call addresses one, else the device. */
-export function signTarget(target: { deviceId: string; fleet?: string }): string {
-  return target.fleet ? `fleet:${target.fleet}` : `device:${target.deviceId}`;
+/**
+ * The name a signature is made for: "device:<id>" for a call to a device, "fleet:<id>" for a call to a fleet.
+ * The signer and the device that verifies derive it with this one function.
+ */
+export function callTarget(kind: "device" | "fleet", id: string): string {
+  return `${kind}:${id}`;
 }
 
 /**
+ * The signature target of a call. A call addresses a fleet when it goes through `?fleet=` (the member that is
+ * called is `deviceId`, the fleet is `fleet`), and also when the name in the path is a fleet reached with its own
+ * token (`fleetBuddy`): then the name is the fleet's.
+ */
+export function signTarget(target: { deviceId: string; fleet?: string; fleetBuddy?: boolean }): string {
+  if (target.fleet) return callTarget("fleet", target.fleet);
+  if (target.fleetBuddy) return callTarget("fleet", target.deviceId);
+  return callTarget("device", target.deviceId);
+}
+
+/** How long after a failure to make or read the key the signer tries again. */
+const KEY_RETRY_MS = 30_000;
+
+/**
  * Signs calls for a client. The key is made the first time a call needs it; if it cannot be made or read
- * (a read-only home), the call goes out unsigned and the reason is given once.
+ * (a read-only home, a key file others can read), the call goes out unsigned, the reason is given once, and the
+ * key is tried again after a while, so a repaired file is picked up without a restart.
  */
 export class CallSigner {
   private key: CallerKey | undefined;
-  private failed = false;
+  private failedAt: number | undefined;
+  private reason: string | undefined;
+  private warned: string | undefined;
   private readonly path: string | undefined;
   private readonly warn: (text: string) => void;
+  private readonly now: () => number;
 
-  constructor(options: { path?: string; warn?: (text: string) => void } = {}) {
+  constructor(options: { path?: string; warn?: (text: string) => void; now?: () => number } = {}) {
     this.path = options.path;
     this.warn = options.warn ?? ((text) => process.stderr.write(`${text}\n`));
+    this.now = options.now ?? Date.now;
   }
 
-  /** The key, or undefined if there is none to be had. */
+  /** The key, or undefined if there is none to be had (see `problem`). */
   callerKey(): CallerKey | undefined {
     if (this.key) return this.key;
-    if (this.failed) return undefined;
+    if (this.failedAt !== undefined && this.now() - this.failedAt < KEY_RETRY_MS) return undefined;
     try {
       this.key = loadOrCreateCallerKey(this.path);
+      this.failedAt = undefined;
+      this.reason = undefined;
       return this.key;
     } catch (err) {
-      this.failed = true;
-      this.warn(`prime: calls are not signed: the caller key cannot be used (${err instanceof Error ? err.message : String(err)})`);
+      this.failedAt = this.now();
+      this.reason = err instanceof Error ? err.message : String(err);
+      if (this.warned !== this.reason) {
+        this.warned = this.reason;
+        this.warn(`prime: calls are not signed: ${this.reason}`);
+      }
       return undefined;
     }
   }
 
+  /** Why there is no key, when there is none. */
+  problem(): string | undefined {
+    return this.key ? undefined : this.reason;
+  }
+
   /** The header for one call, or undefined when it should go unsigned. */
-  header(method: string, target: { deviceId: string; fleet?: string }, body: string): string | undefined {
+  header(method: string, target: { deviceId: string; fleet?: string; fleetBuddy?: boolean }, body: string): string | undefined {
     if (!methodNeedsSignature(method)) return undefined;
     const key = this.callerKey();
     return key ? signCall(key, signTarget(target), body) : undefined;
@@ -240,14 +317,32 @@ export function allowCallerCommand(key: CallerKey): string {
   return `prime devices allow-caller ${key.publicKeyB64}`;
 }
 
-/** What to tell someone whose call a device refused for want of a signature it trusts. */
-export function callerRefusedHint(signer: CallSigner | undefined): string {
-  const key = signer?.callerKey();
-  if (!key) return "This device only runs signed calls, and this machine has no caller key to sign with.";
+/**
+ * What to tell someone whose call a device refused for want of a signature it trusts. `signer` is undefined when
+ * the call was sent unsigned on purpose (--no-sign). A call to a fleet is let in by the fleet's owner, not by a
+ * device's callers file.
+ */
+export function callerRefusedHint(signer: CallSigner | undefined, options: { fleet?: boolean } = {}): string {
+  if (!signer) return "This call was sent unsigned because of --no-sign; a device that only runs signed calls refuses it. Run it again without --no-sign.";
+  const key = signer.callerKey();
+  if (!key) {
+    return `This device only runs signed calls, and this machine has no usable caller key to sign with${signer.problem() ? ` (${signer.problem()})` : ""}.`;
+  }
+  if (options.fleet) {
+    return `This fleet does not trust this machine's caller key (${key.keyId}). Ask the fleet's owner to allow this key: ${key.publicKeyB64}`;
+  }
   return `This device does not trust this machine's caller key (${key.keyId}). Run on the device's machine: ${allowCallerCommand(key)}`;
 }
 
 // ---- the callers file --------------------------------------------------------
+//
+//   { "version": 1, "callers": [ { "keyId", "pub", "label", "addedAt", "tools"? } ] }
+//
+// A file that is missing holds no callers. A file that is empty, cut short, of another version or otherwise not
+// this format is an error and never "no callers": a device that enforces signatures must not stop enforcing
+// because the file it keeps them in was truncated.
+
+export const CALLERS_FILE_VERSION = 1;
 
 export interface CallerEntry {
   keyId: string;
@@ -255,28 +350,38 @@ export interface CallerEntry {
   pub: string;
   label: string;
   addedAt: string;
-  /** Tools this key may call; every tool when absent. */
+  /** The only tools this key may call; every tool when absent. Never present and empty. */
   tools?: string[];
 }
 
-function asEntry(value: unknown): CallerEntry | undefined {
-  if (!value || typeof value !== "object") return undefined;
+function fail(path: string, why: string): never {
+  throw new Error(`${path}: ${why}`);
+}
+
+function asEntry(path: string, value: unknown): CallerEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail(path, "a caller entry is not an object");
   const v = value as Record<string, unknown>;
-  if (typeof v.pub !== "string") return undefined;
-  const raw = parsePublicKey(v.pub);
-  if (!raw) return undefined;
+  const raw = typeof v.pub === "string" ? parsePublicKey(v.pub) : undefined;
+  if (!raw) fail(path, "a caller entry has no valid public key");
+  // A restriction that cannot be read is an error, not "every tool".
+  let tools: string[] | undefined;
+  if (v.tools !== undefined) {
+    if (!Array.isArray(v.tools) || v.tools.length === 0 || !v.tools.every((t) => typeof t === "string" && t.length > 0)) {
+      fail(path, `the tools of caller ${keyIdOf(raw)} must be a non-empty list of tool names`);
+    }
+    tools = [...(v.tools as string[])];
+  }
   // The id is derived from the key, never taken on trust from the file.
-  const tools = Array.isArray(v.tools) ? v.tools.filter((t): t is string => typeof t === "string" && t.length > 0) : undefined;
   return {
     keyId: keyIdOf(raw),
     pub: raw.toString("base64"),
     label: typeof v.label === "string" ? v.label : "",
     addedAt: typeof v.addedAt === "string" ? v.addedAt : "",
-    ...(tools && tools.length > 0 ? { tools } : {}),
+    ...(tools ? { tools } : {}),
   };
 }
 
-/** The callers in the file. A missing file is no callers; an unreadable or malformed one is an error, never "no callers". */
+/** The callers in the file. Missing is none; anything that is not a whole file of this format is an error. */
 export function readCallers(path: string = callersPath()): CallerEntry[] {
   let text: string;
   try {
@@ -285,54 +390,79 @@ export function readCallers(path: string = callersPath()): CallerEntry[] {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw err;
   }
-  if (text.trim().length === 0) return [];
+  if (text.trim().length === 0) fail(path, "the file is empty (it may have been cut short); delete it or run 'prime devices allow-caller' again");
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error(`${path} is not valid JSON`);
+    fail(path, "not valid JSON");
   }
-  if (!Array.isArray(parsed)) throw new Error(`${path} must hold a JSON array of callers`);
-  const entries: CallerEntry[] = [];
-  for (const item of parsed) {
-    const entry = asEntry(item);
-    if (!entry) throw new Error(`${path} has an entry with no valid public key`);
-    entries.push(entry);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) fail(path, `must hold {"version": ${CALLERS_FILE_VERSION}, "callers": [...]}`);
+  const file = parsed as Record<string, unknown>;
+  if (file.version !== CALLERS_FILE_VERSION) fail(path, `version ${String(file.version)} is not one this build reads (it reads ${CALLERS_FILE_VERSION})`);
+  if (!Array.isArray(file.callers)) fail(path, "has no callers list");
+  const entries = file.callers.map((item) => asEntry(path, item));
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (seen.has(entry.keyId)) fail(path, `caller ${entry.keyId} is listed twice`);
+    seen.add(entry.keyId);
   }
   return entries;
 }
 
 function writeCallers(path: string, entries: CallerEntry[]): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileAtomic(path, JSON.stringify(entries, null, 2) + "\n", 0o600);
+  const file = { version: CALLERS_FILE_VERSION, callers: entries };
+  // Durable: the file is rarely written, and one cut short by a crash would be an error for the device.
+  writeFileAtomic(path, JSON.stringify(file, null, 2) + "\n", 0o600, { durable: true });
 }
 
-/** Add a caller (or update its label and tools when it is already there). Returns the entry and whether it is new. */
+/** Read, change and write the file with nobody else changing it in between (two writers must not lose each other's change). */
+function updateCallers<T>(path: string, change: (entries: CallerEntry[]) => { entries?: CallerEntry[]; result: T }): T {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  return withDirLockSync(
+    `${path}.lock`,
+    () => {
+      const { entries, result } = change(readCallers(path));
+      if (entries) writeCallers(path, entries);
+      return result;
+    },
+    { waitMs: 10_000, staleMs: 60_000 },
+  );
+}
+
+/**
+ * Add a caller. An entry that is already there keeps its label, its date and its tool restriction unless the
+ * input says otherwise: `tools` sets the restriction, `allTools` lifts it.
+ */
 export function addCaller(
   path: string,
-  input: { pub: Buffer; label?: string; tools?: string[] },
+  input: { pub: Buffer; label?: string; tools?: string[]; allTools?: boolean },
   now: Date = new Date(),
 ): { entry: CallerEntry; added: boolean } {
-  const entries = readCallers(path);
+  if (input.tools !== undefined && (input.tools.length === 0 || input.tools.some((t) => t.length === 0))) {
+    throw new Error("the tools of a caller must be a non-empty list of tool names");
+  }
+  if (input.tools && input.allTools) throw new Error("a caller cannot be limited to some tools and allowed all of them");
   const keyId = keyIdOf(input.pub);
-  const existing = entries.find((e) => e.keyId === keyId);
-  const tools = input.tools && input.tools.length > 0 ? input.tools : undefined;
-  const entry: CallerEntry = {
-    keyId,
-    pub: input.pub.toString("base64"),
-    label: input.label ?? existing?.label ?? "",
-    addedAt: existing?.addedAt || now.toISOString(),
-    ...(tools ? { tools } : {}),
-  };
-  writeCallers(path, [...entries.filter((e) => e.keyId !== keyId), entry]);
-  return { entry, added: !existing };
+  return updateCallers(path, (entries) => {
+    const existing = entries.find((e) => e.keyId === keyId);
+    const tools = input.allTools ? undefined : (input.tools ?? existing?.tools);
+    const entry: CallerEntry = {
+      keyId,
+      pub: input.pub.toString("base64"),
+      label: input.label ?? existing?.label ?? "",
+      addedAt: existing?.addedAt || now.toISOString(),
+      ...(tools ? { tools } : {}),
+    };
+    return { entries: [...entries.filter((e) => e.keyId !== keyId), entry], result: { entry, added: !existing } };
+  });
 }
 
 /** Remove a caller by key id. Returns whether it was there. */
 export function removeCaller(path: string, keyId: string): boolean {
-  const entries = readCallers(path);
-  const kept = entries.filter((e) => e.keyId !== keyId);
-  if (kept.length === entries.length) return false;
-  writeCallers(path, kept);
-  return true;
+  return updateCallers(path, (entries) => {
+    const kept = entries.filter((e) => e.keyId !== keyId);
+    return kept.length === entries.length ? { result: false } : { entries: kept, result: true };
+  });
 }
