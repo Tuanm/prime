@@ -11,6 +11,7 @@ import { callTarget, loadOrCreateCallerKey, readCallers, removeCaller, signCall 
 import { CallerAuth } from "../src/caller-auth.ts";
 import type { Ctx } from "../src/context.ts";
 import type { SpaceEntry } from "../src/config.ts";
+import { devicesAllowCaller, devicesCallers, devicesRevokeCaller } from "../src/devices.ts";
 import { containerArgs, ensureSpaceAuth, entrypointScript, spaceActivityFile, spaceCallersFile, spaceStateDir } from "../src/spaces.ts";
 import { applyTestTimeout } from "./setup";
 
@@ -75,11 +76,12 @@ describe("the tool server of a space", () => {
     const script = entrypointScript(space());
     // before signed calls
     expect(started("--port <n>  port\n--token <s>  token", script)).not.toContain("--callers");
-    // with the callers file and the journal, before --caller-state
+    // an image that has the callers file and the journal and not --caller-state (26.11.51): the callers file would keep its reply key
+    // on a mount that cannot be written, so it is not given the callers file at all
     const mid = started("--callers <file>  keys\n--activity-log <file>  journal", script);
-    expect(mid).toContain("--callers");
-    expect(mid).toContain("--activity-log");
+    expect(mid).not.toContain("--callers");
     expect(mid).not.toContain("--caller-state");
+    expect(mid).toContain("--activity-log");
     // a prime that cannot print its help at all is started without them, not stopped
     expect(started("", script)).not.toContain("--callers");
   });
@@ -119,6 +121,16 @@ describe("a space's callers file", () => {
     expect(readCallers(file)).toEqual([]);
   });
 
+  test("a space in a fleet is not given this machine's key: the fleet's roster says who may call it", () => {
+    const secret = join(dir, "spaces", "f");
+    mkdirSync(secret, { recursive: true });
+    ensureSpaceAuth(ctx, secret, { enrol: false });
+    expect(existsSync(spaceCallersFile(secret))).toBe(false);
+    expect(existsSync(spaceStateDir(secret))).toBe(true);
+    // ... and a file that is not there means no callers, so the device warns until someone is allowed
+    expect(readCallers(spaceCallersFile(secret))).toEqual([]);
+  });
+
   test("a device that reads it takes the host's signature and nobody else's", () => {
     const secret = join(dir, "spaces", "c");
     mkdirSync(secret, { recursive: true });
@@ -146,5 +158,40 @@ describe("--caller-state", () => {
     const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "..", "src", "index.ts"), "code-mcp", "--caller-state", "/s/state", "--help"], { stdout: "pipe", stderr: "pipe", timeout: 30_000 });
     expect(r.exitCode).toBe(0);
     expect(r.stdout.toString()).toContain("--caller-state <dir>");
+  });
+});
+
+describe("prime devices allow-caller | callers | revoke-caller --space", () => {
+  const out: string[] = [];
+  const errs: string[] = [];
+  const cmd = (sub: string, flags: Record<string, string | boolean>, positionals: string[] = []) =>
+    ({
+      config: { defaults: {}, devices: {}, spaces: { work: { id: "s1", runtime: "docker", image: "i", mode: "ephemeral", container: "c", token: "t", secret_dir: join(dir, "spaces", "c") } }, codeMcp: {} },
+      configPath: join(dir, "config.yaml"),
+      json: false,
+      out: (l: string) => out.push(l),
+      note: (l: string) => errs.push(l),
+      parsed: { positionals: ["devices", sub, ...positionals], flags: new Map<string, string | boolean>(Object.entries(flags)), help: false },
+    }) as unknown as Ctx;
+
+  test("work on the file a space's device reads, and show the reply key it keeps in its state directory", async () => {
+    const secret = join(dir, "spaces", "c");
+    mkdirSync(secret, { recursive: true });
+    const other = loadOrCreateCallerKey(join(dir, "other.pem"));
+    out.length = 0;
+    await devicesAllowCaller(cmd("allow-caller", { space: "work", label: "second" }, [other.publicKeyB64]));
+    expect(readCallers(spaceCallersFile(secret)).map((c) => c.keyId)).toEqual([other.keyId]);
+    // the device keeps its reply key in the state directory, not beside the callers file
+    const reply = loadOrCreateCallerKey(join(spaceStateDir(secret), "caller-auth", "device-ed25519.pem"));
+    errs.length = 0;
+    await devicesCallers(cmd("callers", { space: "work" }));
+    expect(errs.join("\n")).toContain(reply.keyId);
+    await devicesRevokeCaller(cmd("revoke-caller", { space: "work" }, [other.keyId]));
+    expect(readCallers(spaceCallersFile(secret))).toEqual([]);
+  });
+
+  test("a space that is not there, or has no callers file, or --space with --callers, is a usage error", async () => {
+    await expect(devicesCallers(cmd("callers", { space: "nope" }))).rejects.toThrow('no space named "nope"');
+    await expect(devicesCallers(cmd("callers", { space: "work", callers: "/x/callers.json" }))).rejects.toThrow("both name a callers file");
   });
 });

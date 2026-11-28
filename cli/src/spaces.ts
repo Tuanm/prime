@@ -575,8 +575,9 @@ const SPACE_STATE_DIR = "/run/prime-state";
  */
 const SPACE_AUTH_PROBE =
   'help=$(/usr/local/bin/prime code-mcp --help 2>&1) || true; set --; ' +
-  `case "$help" in *'--callers <file>'*) set -- "$@" --callers ${SPACE_CALLERS_FILE};; esac; ` +
-  `case "$help" in *'--caller-state <dir>'*) set -- "$@" --caller-state ${SPACE_STATE_DIR}/caller-auth;; esac; ` +
+  // The callers file is on a read-only mount, so it comes with a state directory of its own or not at all: an image that knows --callers
+  // and not --caller-state would keep its reply key beside the callers file, where it cannot write it.
+  `case "$help" in *'--caller-state <dir>'*) set -- "$@" --callers ${SPACE_CALLERS_FILE} --caller-state ${SPACE_STATE_DIR}/caller-auth;; esac; ` +
   `case "$help" in *'--activity-log <file>'*) set -- "$@" --activity-log ${SPACE_STATE_DIR}/activity.jsonl;; esac; `;
 
 /** The directory the host keeps for what a space's tool server writes: the journal of its calls, its reply key and log. */
@@ -599,12 +600,14 @@ export function spaceCallersFile(secretDir: string): string {
  * there yet gets this machine's caller key, so the CLI that created the space can call it once the device checks
  * signatures; a file that is there is left as it is (a key that was revoked stays revoked).
  */
-export function ensureSpaceAuth(ctx: Ctx, secretDir: string): void {
+export function ensureSpaceAuth(ctx: Ctx, secretDir: string, options: { enrol?: boolean } = {}): void {
   const state = spaceStateDir(secretDir);
   mkdirSync(state, { recursive: true, mode: 0o700 });
   chmodSync(state, 0o700);
   const file = spaceCallersFile(secretDir);
-  if (existsSync(file)) return;
+  // A space that is in a fleet is let in by the fleet's signed roster (fleet-callers.json), and it enforces once that lists
+  // someone: enrolling this machine's key here would make it refuse the fleet's other callers before the roster says who they are.
+  if (existsSync(file) || options.enrol === false) return;
   try {
     addCaller(file, { pub: loadOrCreateCallerKey().publicKey, label: "host" });
   } catch (err) {
@@ -1158,7 +1161,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   networkCreate(runtime, network, offline);
   const secretDir = secretDirFor(ctx, container);
   ensureSecret(secretDir, token);
-  ensureSpaceAuth(ctx, secretDir);
+  ensureSpaceAuth(ctx, secretDir, { enrol: !fleet });
   space.secret_dir = secretDir;
   let pendingBroker: PendingBroker | undefined;
   if (vaultCompanies.length > 0) {
@@ -1471,7 +1474,7 @@ async function startSpace(ctx: Ctx, name: string): Promise<void> {
     await refreshExposure(ctx, name, space, gatewayToken);
   }
   ensureSecret(space.secret_dir, space.token, expose || space.fleet ? space.remote_token : undefined);
-  ensureSpaceAuth(ctx, space.secret_dir);
+  ensureSpaceAuth(ctx, space.secret_dir, { enrol: !space.fleet });
   let pendingBroker: PendingBroker | undefined;
   try {
     pendingBroker = await prepareVault(ctx, space, runtime);

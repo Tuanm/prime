@@ -790,7 +790,7 @@ describe("code-mcp behind a gateway that sends frames", () => {
     stop(): void;
   }
 
-  async function run(mode: string, callers: string): Promise<Run> {
+  async function run(mode: string, callers: string, extra: string[] = []): Promise<Run> {
     let socket: { send(text: string): void } | undefined;
     const pending = new Map<string, (m: Record<string, any>) => void>();
     let ready!: () => void;
@@ -829,7 +829,7 @@ describe("code-mcp behind a gateway that sends frames", () => {
     const port = free.port;
     free.stop(true);
     const proc = Bun.spawn(
-      ["bun", join(ROOT, "src", "code-mcp.ts"), "--gateway", `ws://127.0.0.1:${gw.port}`, "--id", "laptop", "--port", String(port), "--bind", "127.0.0.1", "--caller-auth", mode, "--callers", callers, "--token", "t"],
+      ["bun", join(ROOT, "src", "code-mcp.ts"), "--gateway", `ws://127.0.0.1:${gw.port}`, "--id", "laptop", "--port", String(port), "--bind", "127.0.0.1", "--caller-auth", mode, "--callers", callers, "--token", "t", ...extra],
       { cwd: scratch(), env: { ...process.env, HOME: scratch() }, stdout: "ignore", stderr: "pipe" },
     );
     procs.push(proc);
@@ -1051,6 +1051,26 @@ describe("code-mcp behind a gateway that sends frames", () => {
       const log = readFileSync(join(dir, "caller-auth", "caller-auth.log"), "utf8");
       expect(log).toContain('"reason":"unsigned"');
       expect(log).toContain('"tool":"write"');
+    } finally {
+      r.stop();
+    }
+  });
+  test("--caller-state is where the device keeps its reply key and its log, and not beside the callers file", async () => {
+    const dir = scratch();
+    const state = join(dir, "state-dir");
+    const key = loadOrCreateCallerKey(join(dir, "me.pem"));
+    addCaller(join(dir, "callers.json"), { pub: key.publicKey });
+    const r = await run("enforce", join(dir, "callers.json"), ["--caller-state", state]);
+    try {
+      const raw = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "write", arguments: { cwd: dir, path: join(dir, "x.txt"), content: "x" } } });
+      // refused unsigned (logged), and a signed call is answered with a signature of the key kept in the state directory
+      await r.send({ raw });
+      const sig = signCall(key, "device:laptop", raw.replace('"id":1', '"id":2'));
+      const out = await r.send({ raw: raw.replace('"id":1', '"id":2'), callerSig: sig });
+      expect(out.replySig).toBeDefined();
+      expect(existsSync(join(state, "device-ed25519.pem"))).toBe(true);
+      expect(existsSync(join(state, "caller-auth.log"))).toBe(true);
+      expect(existsSync(join(dir, "caller-auth"))).toBe(false);
     } finally {
       r.stop();
     }

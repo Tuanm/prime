@@ -21,6 +21,7 @@ import { RotateRefusedError, formatDuration, newDeviceCode, rotateAnonymousCode,
 import { DEFAULT_GATEWAY, ENV, assertDeviceId, entryFromOverrides, normalizeGateway } from "./target.ts";
 import { forgetDeviceKey, PinsFileError, pinnedDeviceKey } from "./device-pins.ts";
 import { dirname, join } from "node:path";
+import { requireSpace, spaceCallersFile, spaceStateDir } from "./spaces.ts";
 
 /** Is this error the device answering (as opposed to a transport failure)? */
 function isDeviceAnswer(err: unknown): boolean {
@@ -359,9 +360,29 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
 
 // ---- who may call this device's tools -----------------------------------------
 
-/** The callers file this command works on: --callers, else the one the device on this machine reads. */
+/** The space --space names, with the directory its device keeps its callers file in. */
+function spaceOf(ctx: Ctx): { name: string; secretDir: string } | undefined {
+  const name = str(ctx.parsed, "space");
+  if (name === undefined) return undefined;
+  if (str(ctx.parsed, "callers") !== undefined) throw new UsageError("--space and --callers both name a callers file", "Use one of them.");
+  const space = requireSpace(ctx.config, name);
+  if (!space.secret_dir) {
+    throw new UsageError(`space "${name}" has no callers file (it was made before spaces had one)`, "Delete it and create it again to give it one.");
+  }
+  return { name, secretDir: space.secret_dir };
+}
+
+/** The callers file this command works on: that of --space, or --callers, else the one the device on this machine reads. */
 function callersFile(ctx: Ctx): string {
+  const space = spaceOf(ctx);
+  if (space) return spaceCallersFile(space.secretDir);
   return str(ctx.parsed, "callers") ?? callersPath(ctx.configPath);
+}
+
+/** Where the device that reads this callers file keeps its reply key: beside the file, or in the state directory of a space. */
+function deviceStateDir(ctx: Ctx, callers: string): string {
+  const space = spaceOf(ctx);
+  return space ? join(spaceStateDir(space.secretDir), "caller-auth") : join(dirname(callers), "caller-auth");
 }
 
 /** The file's callers, or a usage error that names the file when it cannot be read. */
@@ -459,7 +480,7 @@ export async function devicesCallers(ctx: Ctx): Promise<void> {
   // The key this device signs its replies with, if it has made one: it is shown so that it can be compared, out of band,
   // with the key another machine pinned for it.
   let replyKey: { keyId: string; publicKeyB64: string } | undefined;
-  const replyKeyFile = join(dirname(path), "caller-auth", "device-ed25519.pem");
+  const replyKeyFile = join(deviceStateDir(ctx, path), "device-ed25519.pem");
   if (existsSync(replyKeyFile)) {
     try {
       replyKey = loadOrCreateCallerKey(replyKeyFile);

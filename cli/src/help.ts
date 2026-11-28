@@ -88,9 +88,9 @@ USAGE
   prime devices status <device-id> [--json]
   prime devices list [--no-probe] [--json]
   prime devices rotate-code <device-id> [--operator [--revoke-previous]] [--json]
-  prime devices allow-caller <public-key> | --self [--label <text>] [--tools a,b | --all-tools] [--callers <path>]
-  prime devices callers [--json] [--callers <path>] [--device <id> [--forget]]
-  prime devices revoke-caller <key-id | public-key> [--callers <path>]
+  prime devices allow-caller <public-key> | --self [--label <text>] [--tools a,b | --all-tools] [--callers <path> | --space <name>]
+  prime devices callers [--json] [--callers <path> | --space <name>] [--device <id> [--forget]]
+  prime devices revoke-caller <key-id | public-key> [--callers <path> | --space <name>]
 
 ${bold("rotate-code")}
   A device made when codes were six characters keeps a code that can be guessed
@@ -145,7 +145,8 @@ ${bold("allow-caller, callers, revoke-caller")}
   protected by your profile's access rules, not by a mode.
   A device that checks signatures trusts the keys in its callers file: callers.json
   beside the config file (the --config of this command; PRIME_CALLERS or --callers
-  <path> for another). Run these on the machine the device runs on; nothing a
+  <path> for another; the callers file of a space made with 'prime spaces create' is
+  --space <name>). Run these on the machine the device runs on; nothing a
   gateway sends can edit the file:
     allow-caller <public-key>   Allow a key (a refused call prints it); --self allows
                                 this machine's own key. --label names it. --tools a,b

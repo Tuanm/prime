@@ -17,7 +17,7 @@
 // lose no line and take no number twice. A process that is killed loses the calls still in the queue (a few
 // milliseconds of them); `flushSync` writes them at a clean exit.
 
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -292,15 +292,48 @@ export interface ActivityRead {
   gap: boolean;
 }
 
-/** The calls in a journal after `after` (none: all of them). Lines that are not entries are skipped. */
-export function readActivity(path: string, after: ActivityPosition = { seq: 0 }): ActivityRead {
-  let text: string;
+/** The most of a journal a reader takes: the ring keeps 1 MiB, so a file bigger than this was not written by the journal. */
+export const READ_LIMIT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The text of a journal, or undefined when there is none. The file may be one that a space writes (the space can put anything in
+ * it): a link is not followed, only a regular file is read, and no more than READ_LIMIT_BYTES of it (its end: the newest calls).
+ */
+function readJournalText(path: string): string | undefined {
+  let fd: number;
   try {
-    text = readFileSync(path, "utf8");
+    // O_NOFOLLOW is not there on Windows; the check of the file's kind below is.
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: [], position: after, gap: false };
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    if (code === "ELOOP") throw new Error(`the activity journal ${path} is a link, and is not read`);
     throw err;
   }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`the activity journal ${path} is not a regular file, and is not read`);
+    const length = Math.min(st.size, READ_LIMIT_BYTES);
+    const buffer = Buffer.alloc(length);
+    let got = 0;
+    while (got < length) {
+      const n = readSync(fd, buffer, got, length - got, st.size - length + got);
+      if (n === 0) break;
+      got += n;
+    }
+    let text = buffer.subarray(0, got).toString("utf8");
+    // A read that began in the middle of a line drops that line.
+    if (st.size > length) text = text.slice(text.indexOf("\n") + 1);
+    return text;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The calls in a journal after `after` (none: all of them). Lines that are not entries are skipped. */
+export function readActivity(path: string, after: ActivityPosition = { seq: 0 }): ActivityRead {
+  const text = readJournalText(path);
+  if (text === undefined) return { entries: [], position: after, gap: false };
   const all: ActivityEntry[] = [];
   for (const line of text.split("\n")) {
     const entry = line ? entryOf(line) : undefined;
