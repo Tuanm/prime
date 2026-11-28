@@ -720,8 +720,8 @@ OPTIONS (create)
   --trusted           deprecated; the broker keeps secrets out of every space
   --gateway <url>     gateway for --expose
   --runtime <rt>      apple|podman|docker
-  --allow-rootful     permit rootful docker (not recommended)
-  --allow-no-limits   accept a space without enforced cpu/memory limits
+  --allow-rootful     permit rootful docker (not recommended); a later start without it takes it back
+  --allow-no-limits   accept a space without enforced cpu/memory limits; a later start without it takes it back
 
 EXAMPLES
   prime spaces create --name dev                    # ephemeral, 2 cpu, 4g

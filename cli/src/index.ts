@@ -593,6 +593,7 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "list") return SPACE_LIST_FLAGS;
     if (sub === "top") return SPACE_TOP_FLAGS;
     if (sub === "enter") return SPACE_ENTER_FLAGS;
+    if (sub === "show") return [];
     if (isSpaceCommand(sub) || sub === "refresh-fleet") return SPACE_LIFECYCLE_FLAGS;
     return [];
   }
