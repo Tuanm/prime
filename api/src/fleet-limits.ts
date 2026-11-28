@@ -26,7 +26,7 @@
 // request (and a wake) of its own - the cost being limited - and one that held its counts in memory would
 // lose them when it was evicted, which a paced caller could use to start its window again.
 
-import { num, type Env } from "./config";
+import { ipBlockKey, num, type Env } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
 
 export type LimitKind = "invite-check" | "unknown-device";
@@ -77,8 +77,10 @@ export function tooManyAsks(retryAfterMs: number): Response {
 export async function limitAsk(env: Env, kind: LimitKind, request: Request): Promise<Response | null> {
   const max = num(env, ENV_MAX[kind], DEFAULT_MAX[kind]);
   if (max === 0) return null;
+  // An IPv6 address is counted by its /64, as a block is: a single host can take any address of its /64 at
+  // will, and each would otherwise start a window of its own, in the isolate and in the binding alike.
   const ip = clientIp(request);
-  const key = kind + ":" + ip;
+  const key = kind + ":" + (ipBlockKey(ip) ?? ip);
   const local = limiterFor(kind, max).check(key);
   if (!local.ok) return tooManyAsks(local.retryAfterMs);
   const binding = kind === "invite-check" ? env.FLEET_RL_INVITE : env.FLEET_RL_UNKNOWN;

@@ -67,9 +67,9 @@ describe("the lock on an anonymous device", () => {
     expect((await fail(id, "198.51.100.7")).locked).toBe(false);
     expect((await fail(id, "198.51.100.7")).locked).toBe(true);
     const map = await call("GET", "/map");
-    expect(map.locked).toEqual([anonLockKey(id, "198.51.100.7")]);
+    expect(Object.keys(map.locked)).toEqual([anonLockKey(id, "198.51.100.7")]);
     // The member's own address is not in it.
-    expect(map.locked).not.toContain(anonLockKey(id, "203.0.113.5"));
+    expect(Object.keys(map.locked)).not.toContain(anonLockKey(id, "203.0.113.5"));
   });
 
   test("any number of addresses that each stay under the limit lock nothing", async () => {
@@ -78,7 +78,7 @@ describe("the lock on an anonymous device", () => {
     for (let n = 0; n < 40; n++) {
       for (let i = 0; i < 2; i++) expect((await fail(id, "198.51.100." + n)).locked).toBe(false);
     }
-    expect((await call("GET", "/map")).locked).toEqual([]);
+    expect((await call("GET", "/map")).locked).toEqual({});
   });
 
   test("a stranger's lock on one device is not a lock on another", async () => {
@@ -86,7 +86,7 @@ describe("the lock on an anonymous device", () => {
     const a = await device();
     const b = await device();
     for (let i = 0; i < 3; i++) await fail(a, "198.51.100.7");
-    expect((await call("GET", "/map")).locked).toEqual([anonLockKey(a, "198.51.100.7")]);
+    expect(Object.keys((await call("GET", "/map")).locked)).toEqual([anonLockKey(a, "198.51.100.7")]);
     expect((await fail(b, "198.51.100.7")).locked).toBe(false);
   });
 
@@ -96,7 +96,7 @@ describe("the lock on an anonymous device", () => {
     await fail(id, "2001:db8:1:2::1");
     await fail(id, "2001:db8:1:2:ffff::9");
     expect((await fail(id, "2001:db8:1:2:abcd::1")).locked).toBe(true);
-    expect((await call("GET", "/map")).locked).toEqual([anonLockKey(id, "2001:db8:1:2::5")]);
+    expect(Object.keys((await call("GET", "/map")).locked)).toEqual([anonLockKey(id, "2001:db8:1:2::5")]);
   });
 
   test("the admin list says a device is locked while any address is", async () => {

@@ -22,7 +22,7 @@
 // the admin UI can register devices at runtime without a redeploy. It keeps a
 // verifier per device (src/token-hash.ts), never the token.
 
-import { anonConfig, anonLockKey, loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
+import { anonConfig, anonDeviceLockKey, anonLockKey, loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
 import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, tokenVerifies } from "./token-hash";
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
@@ -64,7 +64,8 @@ let limiterMax = 0;
 interface RegistrySnapshot {
   map: Map<string, string>; // deviceId -> token (registered, anonymous and virtual)
   anon: Set<string>; // which of those are anonymous
-  locked: Set<string>; // (device, address) pairs locked after too many wrong codes: see anonLockKey
+  locked: Map<string, number>; // (device, address) pairs, and devices, locked after too many wrong codes, and when each lock ends: see anonLockKey
+  previous: Map<string, string>; // anonymous device -> the verifier of the code it had before it was made again, still good for a day
   buddies: Map<string, string>; // fleetId -> the token its clients present
   online: Set<string>; // which devices hold a tunnel right now
   paused: Set<string>; // the fleets the operator has paused
@@ -183,7 +184,8 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
   const snap: RegistrySnapshot = {
     map: new Map(),
     anon: new Set(),
-    locked: new Set(),
+    locked: new Map(),
+    previous: new Map(),
     buddies: new Map(),
     online: new Set(),
     paused: new Set(),
@@ -196,7 +198,8 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
       const j = (await r.json()) as {
         map?: Record<string, string>;
         anonymous?: string[];
-        locked?: string[];
+        locked?: string[] | Record<string, number>;
+        previous?: Record<string, string>;
         buddies?: Record<string, string>;
         online?: string[];
         paused?: string[];
@@ -207,7 +210,10 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
         if (typeof tok === "string" && tok.length > 0) snap.map.set(id, tok);
       }
       for (const id of j.anonymous || []) snap.anon.add(id);
-      for (const id of j.locked || []) snap.locked.add(id);
+      // A list of keys (an earlier registry) has no end to the lock: it is taken to last the whole window.
+      if (Array.isArray(j.locked)) for (const key of j.locked) snap.locked.set(key, Date.now() + 600_000);
+      else for (const [key, until] of Object.entries(j.locked || {})) if (typeof until === "number") snap.locked.set(key, until);
+      for (const [id, v] of Object.entries(j.previous || {})) if (typeof v === "string" && v.length > 0) snap.previous.set(id, v);
       for (const [id, tok] of Object.entries(j.buddies || {})) {
         if (typeof tok === "string" && tok.length > 0) snap.buddies.set(id, tok);
       }
@@ -753,12 +759,20 @@ async function authorizeDevice(
   if (hasNonVirtualDevice(snap, env) && !snap.map.has(deviceId)) return { denied: unauthorized(), anonymous };
   // Locked after too many wrong codes: that address is refused, the right code included, or the lock
   // would not stop it guessing. Only that address: another one, with the right code, is let in, so a
-  // stranger's wrong codes cannot shut the member out.
-  if (anonymous && snap.locked.has(anonLockKey(deviceId, clientIp(request)))) {
-    return {
-      denied: Response.json({ error: "too many failed attempts; try again later" }, { status: 429, headers: { "retry-after": "600" } }),
-      anonymous,
-    };
+  // stranger's wrong codes cannot shut the member out. (A device with a six-character code can also be
+  // locked against every address at once: see the registry.) The answer says how long is left.
+  if (anonymous) {
+    const until = Math.max(
+      snap.locked.get(anonLockKey(deviceId, clientIp(request))) ?? 0,
+      snap.locked.get(anonDeviceLockKey(deviceId)) ?? 0,
+    );
+    if (until > Date.now()) {
+      const seconds = Math.max(1, Math.ceil((until - Date.now()) / 1000));
+      return {
+        denied: Response.json({ error: "too many failed attempts; try again later" }, { status: 429, headers: { "retry-after": String(seconds) } }),
+        anonymous,
+      };
+    }
   }
   // The registry holds a verifier; the one shared DEVICE_TOKEN is an env secret
   // and compares as it is. `presented` is the caller's credential in the same
@@ -771,6 +785,10 @@ async function authorizeDevice(
     let match: boolean;
     if (stored !== undefined) {
       match = ticketVerified || (await tokenVerifies(env, "device", given, stored));
+      // A device that was made again keeps the code it had for a day, so that what holds it can be given
+      // the new one. It is the same device: the Durable Object is shown the current credential.
+      const before = anonymous ? snap.previous.get(deviceId) : undefined;
+      if (!match && before !== undefined) match = await tokenVerifies(env, "device", given, before);
       presented = match ? stored : undefined;
     } else {
       match = !!given && timingSafeEq(given, expected);
@@ -795,6 +813,16 @@ async function authorizeDevice(
 }
 
 
+
+/** The per-isolate limit on everything else: null when the request may go on, else the 429 that says when to come back. */
+function generalLimit(cfg: ReturnType<typeof loadConfig>, request: Request): Response | null {
+  const verdict = getLimiter(cfg).check(clientIp(request));
+  if (verdict.ok) return null;
+  return Response.json(
+    { error: "rate limited" },
+    { status: 429, headers: { "retry-after": String(Math.max(1, Math.ceil(verdict.retryAfterMs / 1000))) } },
+  );
+}
 
 function getLimiter(cfg: ReturnType<typeof loadConfig>): RateLimiter {
   if (!rateLimiter || limiterWindowMs !== cfg.rateWindowMs || limiterMax !== cfg.rateMax) {
@@ -822,9 +850,8 @@ async function authorizeRelay(
     const t = extractToken(request, url, "auth");
     if (!t || !timingSafeEq(t, cfg.gatewayToken)) return unauthorized();
   }
-  if (!getLimiter(cfg).allow(clientIp(request))) {
-    return Response.json({ error: "rate limited" }, { status: 429 });
-  }
+  const rateLimited = generalLimit(cfg, request);
+  if (rateLimited) return rateLimited;
   if (!validDeviceId(deviceId)) {
     return Response.json({ error: "invalid deviceId" }, { status: 400 });
   }
@@ -884,6 +911,43 @@ export default {
       });
     }
 
+    // ---- Anonymous device: make its code again ----
+    // A device made when codes were six characters holds a code that can be guessed online by enough
+    // addresses. It proves it holds that code, and is given a new 25-character one; the old one goes on
+    // working for a day (the registry), so that the space and the agent that hold it can be given the new
+    // one without a gap.
+    if (url.pathname === "/api/devices/anonymous/rotate") {
+      if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+      if (cfg.gatewayToken) {
+        const t = extractToken(request, url, "auth");
+        if (!t || !timingSafeEq(t, cfg.gatewayToken)) return unauthorized();
+      }
+      const rateLimited = generalLimit(cfg, request);
+      if (rateLimited) return rateLimited;
+      const deviceId = request.headers.get("x-prime-device") ?? "";
+      if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      const auth = await authorizeDevice(deviceId, request, url, cfg, env);
+      if (auth.denied) return auth.denied;
+      if (!auth.anonymous) return Response.json({ error: "only an anonymous device's code can be made again" }, { status: 400 });
+      const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+      const made = await reg.fetch("https://registry/anon/rotate?id=" + encodeURIComponent(deviceId), { method: "POST" });
+      if (!made.ok) return made;
+      const { token, previousValidMs } = (await made.json()) as { token: string; previousValidMs: number };
+      mapCache = null;
+      const wsScheme = url.protocol === "https:" ? "wss:" : "ws:";
+      return Response.json(
+        {
+          deviceId,
+          token,
+          connect_url: url.origin + "/device/" + encodeURIComponent(deviceId) + "?token=" + encodeURIComponent(token),
+          ws_url: wsScheme + "//" + url.host + "/device/ws/" + encodeURIComponent(deviceId),
+          anonymous: true,
+          previous_valid_ms: previousValidMs,
+        },
+        { headers: { "cache-control": "no-store" } },
+      );
+    }
+
     // ---- Anonymous device registration ----
     // A client that has no registered device asks for one here: the gateway
     // picks an unused id and a 25-character code. Limits (per-IP creations, the
@@ -894,9 +958,8 @@ export default {
         const t = extractToken(request, url, "auth");
         if (!t || !timingSafeEq(t, cfg.gatewayToken)) return unauthorized();
       }
-      if (!getLimiter(cfg).allow(clientIp(request))) {
-        return Response.json({ error: "rate limited" }, { status: 429 });
-      }
+      const rateLimited = generalLimit(cfg, request);
+      if (rateLimited) return rateLimited;
       // A space that is about to join a fleet is a first-class device, not a
       // throwaway one, so the limit on how many anonymous devices one
       // address may make does not apply to it. The invite code is the proof:
@@ -1437,9 +1500,8 @@ export default {
       }
 
       // Cheap per-isolate rate limit (global enforcement via CF edge rules).
-      if (!getLimiter(cfg).allow(clientIp(request))) {
-        return Response.json({ error: "rate limited" }, { status: 429 });
-      }
+      const rateLimited = generalLimit(cfg, request);
+      if (rateLimited) return rateLimited;
 
       const deviceId = url.pathname.startsWith("/device/") ? url.pathname.slice("/device/".length) : url.pathname.slice(5);
       if (!validDeviceId(deviceId)) {
@@ -1572,9 +1634,8 @@ export default {
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       // Probe gate: bound how many WS upgrades an IP can initiate, which also
       // caps the cost of the fresh-identity read for unknown ids below.
-      if (!getLimiter(cfg).allow(clientIp(request))) {
-        return Response.json({ error: "rate limited" }, { status: 429 });
-      }
+      const rateLimited = generalLimit(cfg, request);
+      if (rateLimited) return rateLimited;
       // Origin whitelist applies to browser-style WS clients.
       if (cfg.allowedOrigins && cfg.allowedOrigins.size > 0) {
         const origin = request.headers.get("origin");

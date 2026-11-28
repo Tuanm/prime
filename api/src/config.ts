@@ -190,6 +190,7 @@ export interface Env {
   ANON_UNUSED_TTL_MS?: string; // delete an anonymous device that never connected after this long (default 1 hour)
   ANON_IDLE_TTL_MS?: string; // delete an anonymous device offline this long (default 7 days)
   ANON_AUTH_MAX_FAILURES?: string; // wrong-token attempts per anonymous device before it is locked (default 20)
+  ANON_LEGACY_MAX_FAILURES?: string; // wrong codes from all addresses together before a six-character device is locked for everyone (default 200)
   ANON_AUTH_LOCK_MS?: string; // failure window and lock duration (default 10 minutes)
   // Limits on what a caller with no standing can ask of the fleet routes (see src/fleet-limits.ts).
   // Each is a count per client IP per minute; 0 turns that limit off.
@@ -291,6 +292,8 @@ export interface AnonConfig {
   unusedTtlMs: number;
   idleTtlMs: number;
   authMaxFailures: number;
+  /** Wrong codes, from every address together, before a device with a six-character code is locked for everyone. */
+  legacyMaxFailures: number;
   authLockMs: number;
 }
 
@@ -305,6 +308,7 @@ export function anonConfig(env: Env): AnonConfig {
     unusedTtlMs: num(env, "ANON_UNUSED_TTL_MS", 60 * 60_000),
     idleTtlMs: num(env, "ANON_IDLE_TTL_MS", 7 * 24 * 60 * 60_000),
     authMaxFailures: num(env, "ANON_AUTH_MAX_FAILURES", 20),
+  legacyMaxFailures: num(env, "ANON_LEGACY_MAX_FAILURES", 200),
     authLockMs: num(env, "ANON_AUTH_LOCK_MS", 10 * 60_000),
   };
 }
@@ -317,6 +321,11 @@ export function anonConfig(env: Env): AnonConfig {
  */
 export function anonLockKey(deviceId: string, ip: string): string {
   return deviceId + "|" + (ipBlockKey(ip) ?? "unknown");
+}
+
+/** The lock on a device against every address at once (see `anonLockKey` for one address). */
+export function anonDeviceLockKey(deviceId: string): string {
+  return deviceId + "|*";
 }
 
 /** Anonymous ids: "anon-" + 16 hex. Never produced by the admin UI's own ids. */

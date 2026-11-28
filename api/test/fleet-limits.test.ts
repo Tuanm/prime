@@ -16,13 +16,13 @@ mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 
 const { default: worker } = await import("../src/index");
 const { verifierFor } = await import("../src/token-hash");
-const { anonLockKey } = await import("../src/config");
+const { anonDeviceLockKey, anonLockKey } = await import("../src/config");
 
 const PEPPER = "test-pepper-0123456789abcdef0123456789";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** A gateway in registry mode: one registered device (limits-dev), one anonymous one (limits-anon), fleet "acme" paused. */
-async function gateway(extra: Record<string, unknown> = {}, locked: string[] = []) {
+async function gateway(extra: Record<string, unknown> = {}, locked: Record<string, number> = {}) {
   const asked: string[] = [];
   const fleetAsked: string[] = [];
   const env: Record<string, unknown> = { TOKEN_PEPPER: PEPPER, ...extra };
@@ -60,7 +60,7 @@ async function gateway(extra: Record<string, unknown> = {}, locked: string[] = [
   };
   // A snapshot another test left in the isolate's cache would answer for this registry: a lock is only seen
   // once it has aged out.
-  if (locked.length) await sleep(2_100);
+  if (Object.keys(locked).length) await sleep(2_100);
   return { env, asked, fleetAsked };
 }
 
@@ -111,6 +111,62 @@ describe("unknown devices", () => {
     for (let i = 0; i < 10; i++) {
       const res = await worker.fetch(post("/fleets/acme/bootstrap", { "x-prime-device": "ghost-" + i, "x-device-token": "x", "cf-connecting-ip": "198.51.100.14" }), env as never);
       expect(res.status).toBe(401);
+    }
+  });
+});
+
+describe("an address is counted as a block is", () => {
+  test("addresses in one IPv6 /64 share the unknown-device count, and another /64 has its own", async () => {
+    const { env, asked } = await gateway({ FLEET_UNKNOWN_RATE_MAX: "3" });
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      const res = await worker.fetch(post("/fleets/acme/bootstrap", { "x-prime-device": "ghost-" + i, "x-device-token": "x", "cf-connecting-ip": "2001:db8:aa:bb::" + (i + 1).toString(16) }), env as never);
+      statuses.push(res.status);
+    }
+    expect(statuses.filter((s) => s === 401)).toHaveLength(3);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(9);
+    expect(asked.filter((p) => p === "/map").length).toBeLessThanOrEqual(4);
+    const other = await worker.fetch(post("/fleets/acme/bootstrap", { "x-prime-device": "ghost-z", "x-device-token": "x", "cf-connecting-ip": "2001:db8:aa:cc::1" }), env as never);
+    expect(other.status).toBe(401);
+  });
+
+  test("addresses in one /64 share the invite count, and the binding is asked under the block's key", async () => {
+    const keys: string[] = [];
+    const { env, fleetAsked } = await gateway({ FLEET_INVITE_RATE_MAX: "3", FLEET_RL_INVITE: { limit: async (o: { key: string }) => { keys.push(o.key); return { success: true }; } } });
+    const statuses: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      const res = await worker.fetch(
+        post("/api/devices/anonymous", { "cf-connecting-ip": "2001:db8:dd:ee::" + (i + 1).toString(16) }, JSON.stringify({ fleet: "acme", code: "ABCD-EFGH" })),
+        env as never,
+      );
+      statuses.push(res.status);
+    }
+    expect(statuses.filter((s) => s === 429)).toHaveLength(7);
+    expect(fleetAsked.filter((p) => p === "/invite-check")).toHaveLength(3);
+    expect(new Set(keys)).toEqual(new Set(["invite-check:ipv6:2001:db8:dd:ee::/64"]));
+  });
+
+  test("an IPv4 address is its own count, as before", async () => {
+    const { env } = await gateway({ FLEET_UNKNOWN_RATE_MAX: "1" });
+    for (const ip of ["198.51.100.61", "198.51.100.62"]) {
+      const res = await worker.fetch(post("/fleets/acme/bootstrap", { "x-prime-device": "ghost-" + ip, "x-device-token": "x", "cf-connecting-ip": ip }), env as never);
+      expect(res.status).toBe(401);
+    }
+  });
+});
+
+describe("the answer to a caller that asks too much says when to come back", () => {
+  test("the per-isolate limit on creating an anonymous device carries Retry-After", async () => {
+    const { env } = await gateway({ RATE_LIMIT_MAX: "2", RATE_LIMIT_WINDOW_MS: "30000" });
+    const statuses: Response[] = [];
+    for (let i = 0; i < 4; i++) statuses.push(await worker.fetch(post("/api/devices/anonymous", { "cf-connecting-ip": "198.51.100.71" }, "{}"), env as never));
+    const limited = statuses.filter((r) => r.status === 429);
+    expect(limited.length).toBeGreaterThan(0);
+    for (const r of limited) {
+      const seconds = Number(r.headers.get("retry-after"));
+      expect(seconds).toBeGreaterThan(0);
+      expect(seconds).toBeLessThanOrEqual(30);
+      expect(((await r.clone().json()) as { error: string }).error).toBe("rate limited");
     }
   });
 });
@@ -238,15 +294,30 @@ describe("the size of what a fleet route forwards", () => {
 describe("a lock on an anonymous device", () => {
   const anon = (ip: string) => ({ "x-prime-device": "limits-anon", "x-device-token": "ANONCODE", "cf-connecting-ip": ip });
 
-  test("refuses the address it was made against, the right code included, and says when to come back", async () => {
-    const { env } = await gateway({}, [anonLockKey("limits-anon", "203.0.113.9")]);
+  test("refuses the address it was made against, the right code included, and says how long is left of the lock", async () => {
+    const { env } = await gateway({}, { [anonLockKey("limits-anon", "203.0.113.9")]: Date.now() + 90_000 });
     const res = await worker.fetch(post("/fleets/acme/bootstrap", anon("203.0.113.9")), env as never);
     expect(res.status).toBe(429);
-    expect(res.headers.get("retry-after")).toBe("600");
+    // Ninety seconds when it was made, a couple of them gone while the test waited: what is left, not a fixed ten minutes.
+    const seconds = Number(res.headers.get("retry-after"));
+    expect(seconds).toBeGreaterThan(80);
+    expect(seconds).toBeLessThanOrEqual(90);
+  });
+
+  test("a lock on the device against every address refuses all of them", async () => {
+    const { env } = await gateway({}, { [anonDeviceLockKey("limits-anon")]: Date.now() + 60_000 });
+    for (const ip of ["203.0.113.30", "198.51.100.77"]) {
+      expect((await worker.fetch(post("/fleets/acme/bootstrap", anon(ip)), env as never)).status).toBe(429);
+    }
+  });
+
+  test("a lock that has ended refuses nobody", async () => {
+    const { env } = await gateway({}, { [anonLockKey("limits-anon", "203.0.113.9")]: Date.now() - 1_000 });
+    expect((await worker.fetch(post("/fleets/acme/bootstrap", anon("203.0.113.9")), env as never)).status).toBe(409);
   });
 
   test("lets in the member from any other address", async () => {
-    const { env } = await gateway({}, [anonLockKey("limits-anon", "203.0.113.9")]);
+    const { env } = await gateway({}, { [anonLockKey("limits-anon", "203.0.113.9")]: Date.now() + 600_000 });
     // 409 is the paused fleet's answer to a member that is known: the lock did not stop it.
     expect((await worker.fetch(post("/fleets/acme/bootstrap", anon("203.0.113.10")), env as never)).status).toBe(409);
   });

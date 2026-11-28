@@ -18,6 +18,7 @@ import {
   ANON_TOKEN_LENGTH,
   FILE_ID_RE,
   anonConfig,
+  anonDeviceLockKey,
   anonLockKey,
   ipBlockKey,
   r2Budget,
@@ -68,6 +69,14 @@ interface AnonRec {
  * connected (a member of a fleet, or a machine in use) keeps its code until it is made again.
  */
 export const LEGACY_PENDING_TTL_MS = 60 * 60_000;
+
+/** The misses of single addresses that are kept: a miss with one in the window is never dropped to make room. */
+const MAX_MISS_KEYS = 10_000;
+/** Locks against single addresses kept for one device, and in all. */
+const MAX_LOCKED_ADDRESSES = 20;
+const MAX_LOCKS = 500;
+/** How long the code a device had stays good after it is made again. */
+export const ROTATE_GRACE_MS = 24 * 60 * 60_000;
 
 /** How often the bucket is listed to learn how much it holds. */
 const STORAGE_MEASURE_EVERY_MS = 6 * 60 * 60_000;
@@ -134,7 +143,9 @@ export class RegistryDO extends DurableObject<Env> {
   private anon = new Map<string, AnonRec>(); // deviceId -> record (persisted)
   private anonCreates = new Map<string, number[]>(); // client IP -> recent creation times (memory)
   private anonFailures = new Map<string, number[]>(); // anonLockKey(device, address) -> recent wrong-token times (memory)
-  private anonLockedUntil = new Map<string, number>(); // anonLockKey(device, address) -> lock expiry (memory)
+  private anonLockedUntil = new Map<string, number>(); // anonLockKey(device, address), or anonDeviceLockKey(device) -> lock expiry (memory)
+  private anonDeviceMisses = new Map<string, number[]>(); // deviceId -> recent wrong-token times from every address (memory; kept for six-character codes)
+  private prevTokens = new Map<string, { verifier: string; until: number }>(); // deviceId -> the code it had before it was made again, valid until then (persisted)
   private fleetCreates = new FleetCreationAllowance();
   private fleets = new Set<string>(); // the fleets that exist (persisted)
   private fleetBuddies = new Map<string, string>(); // fleetId -> verifier of its token (persisted)
@@ -231,6 +242,10 @@ export class RegistryDO extends DurableObject<Env> {
             classA: Math.max(0, Number(savedBudget.classA) || 0),
             classB: Math.max(0, Number(savedBudget.classB) || 0),
           };
+        }
+        const savedPrev = (await this.storage.get<Record<string, { verifier: string; until: number }>>("device_tokens_prev")) || {};
+        for (const [id, p] of Object.entries(savedPrev)) {
+          if (validDeviceId(id) && p && typeof p.verifier === "string" && typeof p.until === "number") this.prevTokens.set(id, p);
         }
         const savedAnon = (await this.storage.get<Record<string, AnonRec>>("anon_devices")) || {};
         for (const [id, rec] of Object.entries(savedAnon)) {
@@ -457,7 +472,10 @@ export class RegistryDO extends DurableObject<Env> {
         anonymous: [...this.anon.keys()],
         online: [...this.online.keys()],
         // Each is a device and the address that was locked out of it (see `anonLockKey`).
-        locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([key]) => key),
+        // key -> when the lock ends, so that the Worker can say when to come back.
+        locked: Object.fromEntries([...this.anonLockedUntil].filter(([, until]) => until > now)),
+        // The codes devices had before they were made again, still good for a while.
+        previous: Object.fromEntries([...this.prevTokens].filter(([, p]) => p.until > now).map(([id, p]) => [id, p.verifier])),
         buddies: RegistryDO.verifiersOnly(this.fleetBuddies),
         paused: [...this.pausedFleets],
         // Read on every request the Worker gates, so they come in the same
@@ -542,25 +560,68 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({ error: "not found" }, { status: 404 });
     }
 
-    // A wrong device code for an anonymous device. Too many misses lock the address they came from
-    // out of that device until the window passes - enforced here, globally, rather than per isolate.
-    // The lock is per (device, address): a stranger's wrong codes lock the stranger, never the member
-    // whose code is right (the code is long enough, since it is made, that guessing it is out of reach).
+    // A wrong device code for an anonymous device.
+    //
+    // Two locks, for two attackers. Too many misses from one address lock that address out of the device
+    // for the window: a stranger's wrong codes lock the stranger, never the member whose code is right.
+    // And a device whose code is still the old six characters (about 31 bits, so guessable online by
+    // enough addresses, each with a count of its own) is also locked for everyone when the misses from all
+    // addresses together pass a ceiling: addresses are cheap (a /48 is 65,536 of the blocks counted), the
+    // device's code is not. A 25-character code has no such ceiling: it cannot be guessed, and a lock for
+    // everyone would hand a stranger the lever back. Enforced here, globally, rather than per isolate.
     if (request.method === "POST" && path === "/anon/fail") {
       const id = url.searchParams.get("id") || "";
-      if (!this.anon.has(id)) return Response.json({ locked: false });
+      const rec = this.anon.get(id);
+      if (!rec) return Response.json({ locked: false });
       const policy = anonConfig(this.env);
       const now = Date.now();
       const key = anonLockKey(id, url.searchParams.get("ip") || "");
-      const misses = (this.anonFailures.get(key) || []).filter((t) => now - t < policy.authLockMs);
-      misses.push(now);
-      // Re-inserted, so the oldest in the map is the one that has been quiet longest.
-      this.anonFailures.delete(key);
-      this.anonFailures.set(key, misses);
-      this.pruneFailures(now, policy.authLockMs);
-      const locked = misses.length >= policy.authMaxFailures;
-      if (locked) this.anonLockedUntil.set(key, now + policy.authLockMs);
-      return Response.json({ locked });
+      let deviceLocked = false;
+      if (rec.long !== true) {
+        const all = (this.anonDeviceMisses.get(id) || []).filter((t) => now - t < policy.authLockMs);
+        all.push(now);
+        this.anonDeviceMisses.set(id, all);
+        if (all.length >= policy.legacyMaxFailures) {
+          this.anonLockedUntil.set(anonDeviceLockKey(id), now + policy.authLockMs);
+          // What the device-wide lock covers, the per-address ones need not say.
+          this.dropAddressLocks(id);
+          deviceLocked = true;
+        }
+      }
+      // The misses of one address. Nothing with a miss in the window is ever forgotten to make room: when
+      // the map is full of such entries a new address is not tracked on its own, and its misses count only
+      // in the device's total above (which is why that total is kept for the codes that can be guessed).
+      let addressLocked = false;
+      const known = this.anonFailures.get(key);
+      if (known !== undefined || this.anonFailures.size < MAX_MISS_KEYS || this.pruneFailures(now, policy.authLockMs) < MAX_MISS_KEYS) {
+        const misses = (known || []).filter((t) => now - t < policy.authLockMs);
+        misses.push(now);
+        // Re-inserted, so the oldest in the map is the one that has been quiet longest.
+        this.anonFailures.delete(key);
+        this.anonFailures.set(key, misses);
+        if (misses.length >= policy.authMaxFailures) {
+          this.anonLockedUntil.set(key, now + policy.authLockMs);
+          addressLocked = true;
+          this.capLocks(id, rec.long !== true, now, policy.authLockMs);
+        }
+      }
+      return Response.json({ locked: deviceLocked || addressLocked || (this.anonLockedUntil.get(anonDeviceLockKey(id)) || 0) > now });
+    }
+
+    // A device is made again: it is given a new 25-character code, and the code it had keeps working for a
+    // day, so that everything that holds it (a space, the agent) can be given the new one without a gap.
+    // The caller is a device that has proved it holds the code, which the Worker has checked.
+    if (request.method === "POST" && path === "/anon/rotate") {
+      const id = url.searchParams.get("id") || "";
+      if (!this.anon.has(id) || !this.tokens.has(id)) return Response.json({ error: "not an anonymous device" }, { status: 404 });
+      if (pepperFrom(this.env) === null) return pepperMissingResponse();
+      const token = randomDeviceCode();
+      this.prevTokens.set(id, { verifier: this.tokens.get(id)!, until: Date.now() + ROTATE_GRACE_MS });
+      this.tokens.set(id, await verifierFor(this.env, "device", token));
+      // Previous first: a code that was replaced and not kept would be a device nobody can use.
+      await this.persistPrevTokens();
+      await this.persistTokens();
+      return Response.json({ deviceId: id, token, previousValidMs: ROTATE_GRACE_MS });
     }
 
     // Addresses refused at the edge of the Worker (both devices and MCP clients).
@@ -805,10 +866,12 @@ export class RegistryDO extends DurableObject<Env> {
 
   private async removeDevice(id: string): Promise<void> {
     this.tokens.delete(id);
+    const hadPrev = this.prevTokens.delete(id);
     this.online.delete(id);
     this.disabled.delete(id);
     const wasAnon = this.anon.delete(id);
     this.forgetLocks(id);
+    if (hadPrev) await this.persistPrevTokens();
     await this.persistTokens();
     await this.persist();
     await this.persistDisabled();
@@ -833,13 +896,28 @@ export class RegistryDO extends DurableObject<Env> {
       if (age > ttl) doomed.push(id);
     }
     for (const id of doomed) {
+      this.prevTokens.delete(id);
       this.tokens.delete(id);
       this.online.delete(id);
       this.disabled.delete(id);
       this.anon.delete(id);
       this.forgetLocks(id);
     }
+    // A code that was replaced stops working when its day is over; the device then has only a long one.
+    let rotated = false;
+    for (const [id, p] of this.prevTokens) {
+      if (p.until > now) continue;
+      this.prevTokens.delete(id);
+      const rec = this.anon.get(id);
+      if (rec) rec.long = true;
+      rotated = true;
+    }
+    if (rotated) {
+      await this.persistPrevTokens();
+      await this.persistAnon();
+    }
     if (doomed.length) {
+      await this.persistPrevTokens();
       await this.persistTokens();
       await this.persist();
       await this.persistDisabled();
@@ -860,20 +938,54 @@ export class RegistryDO extends DurableObject<Env> {
     const prefix = id + "|";
     for (const key of [...this.anonFailures.keys()]) if (key.startsWith(prefix)) this.anonFailures.delete(key);
     for (const key of [...this.anonLockedUntil.keys()]) if (key.startsWith(prefix)) this.anonLockedUntil.delete(key);
+    this.anonDeviceMisses.delete(id);
   }
 
   /**
-   * Bound the misses kept: a stranger can make one entry for each address it has, so what has had no
-   * miss in the window is dropped, and past a hard cap the quietest go first.
+   * Drop the misses that have aged out of the window, and say how many are left. Only those: an entry
+   * with a miss inside the window is never dropped to make room (see `/anon/fail`). Looked at once a
+   * second at most, so a full map costs a scan a second and not one for each miss.
    */
-  private pruneFailures(now: number, windowMs: number): void {
-    if (this.anonFailures.size < 2000) return;
-    for (const [key, times] of this.anonFailures) {
-      if (!times.some((t) => now - t < windowMs)) this.anonFailures.delete(key);
+  private lastMissPrune = 0;
+  private pruneFailures(now: number, windowMs: number): number {
+    if (now - this.lastMissPrune >= 1000 || now < this.lastMissPrune) {
+      this.lastMissPrune = now;
+      for (const [key, times] of this.anonFailures) {
+        if (!times.some((t) => now - t < windowMs)) this.anonFailures.delete(key);
+      }
     }
-    for (const key of this.anonFailures.keys()) {
-      if (this.anonFailures.size <= 10_000) break;
-      this.anonFailures.delete(key);
+    return this.anonFailures.size;
+  }
+
+  /** Forget the locks held against single addresses of a device. */
+  private dropAddressLocks(id: string): void {
+    const prefix = id + "|";
+    const wide = anonDeviceLockKey(id);
+    for (const key of [...this.anonLockedUntil.keys()]) if (key.startsWith(prefix) && key !== wide) this.anonLockedUntil.delete(key);
+  }
+
+  /**
+   * Bound the locks held. They all ride in every answer of `/map`, and each costs an attacker only
+   * the misses that make it. Past a few locked addresses for one device, a device with a short code is
+   * locked for everyone (the address locks are then redundant and dropped); a long code's oldest locks are
+   * let go, which costs nothing, since it cannot be guessed. The whole is capped too.
+   */
+  private capLocks(id: string, legacy: boolean, now: number, lockMs: number): void {
+    const prefix = id + "|";
+    const wide = anonDeviceLockKey(id);
+    const mine = [...this.anonLockedUntil].filter(([key]) => key.startsWith(prefix) && key !== wide);
+    if (mine.length > MAX_LOCKED_ADDRESSES) {
+      if (legacy) {
+        this.anonLockedUntil.set(wide, now + lockMs);
+        this.dropAddressLocks(id);
+      } else {
+        mine.sort((a, b) => a[1] - b[1]);
+        for (const [key] of mine.slice(0, mine.length - MAX_LOCKED_ADDRESSES)) this.anonLockedUntil.delete(key);
+      }
+    }
+    if (this.anonLockedUntil.size > MAX_LOCKS) {
+      const soonest = [...this.anonLockedUntil].filter(([key]) => !key.endsWith("|*")).sort((a, b) => a[1] - b[1]);
+      for (const [key] of soonest.slice(0, this.anonLockedUntil.size - MAX_LOCKS)) this.anonLockedUntil.delete(key);
     }
   }
 
@@ -1034,6 +1146,12 @@ export class RegistryDO extends DurableObject<Env> {
       });
     }
     return out;
+  }
+
+  private async persistPrevTokens(): Promise<void> {
+    try {
+      await this.storage.put("device_tokens_prev", Object.fromEntries(this.prevTokens));
+    } catch {}
   }
 
   private async persistTokens(): Promise<void> {
