@@ -44,7 +44,7 @@ for (const file of readdirSync(dir).sort()) {
   if (!/\.ya?ml$/.test(file)) continue;
   const path = join(dir, file);
   const text = readFileSync(path, "utf8");
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/); // a Windows checkout has CRLF line ends
   files++;
 
   try {
