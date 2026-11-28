@@ -143,7 +143,8 @@ describe("the forms", () => {
 
   test("the witness accepts what is made here: the same fleetKey, and a proof it verifies", async () => {
     const witness = join(import.meta.dir, "..", "..", "api", "witness", "src", "lib.ts");
-    if (!existsSync(witness)) return;
+    // The witness is in this repository: a path that moved is a test that must say so, not one that passes without looking.
+    expect(existsSync(witness)).toBe(true);
     const lib = (await import(pathToFileURL(witness).href)) as {
       fleetKeyOf(g: unknown[]): Promise<string>;
       checkProof(c: unknown, key: string): Promise<{ ok: boolean; error?: string }>;

@@ -56,6 +56,8 @@ export interface FleetSpaceOptions {
   deviceToken: string;
   /** The invite code, when the space is joining an existing fleet. */
   code?: string;
+  /** The fingerprint of the fleet's owner key the invite named: pinned once the space has joined (see `FleetTrust.pinOwner`). */
+  ownerFp?: string;
   /** True when the space is the first member and creates the fleet. */
   create: boolean;
   /** How long to wait for the publisher to publish a snapshot for this member. */
@@ -120,6 +122,8 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     // A new membership starts knowing nothing of the fleet: what an earlier one under this name left
     // beside the key is not this fleet's. Only once it has been made: a join that failed changes nothing.
     FleetTrust.forget(paths.keyFile);
+    // ... and then the owner key the invite named is pinned: before the forget it would be forgotten with the rest.
+    if (opts.ownerFp !== undefined) FleetTrust.pinOwner(paths.keyFile, opts.ownerFp);
     // The same goes for where the member was in it: a position from the fleet that had this name before would be taken
     // for a place in this one (a head far ahead of the new fleet's, or a publish that was never written down).
     resetFleetState(ctx.configPath, opts.fleet, opts.spaceName);

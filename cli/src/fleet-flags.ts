@@ -20,6 +20,8 @@ const FLEET_ROSTER_FLAGS: FlagSpec[] = [
   OWNER_KEY_FLAG,
   flag("owner", "string", "The fingerprint of the owner key to pin", { placeholder: "<fingerprint>" }),
   flag("yes", "boolean", "Sign and send; without it `roster init` only shows what it would do"),
+  flag("expect", "string", "With --yes: the digest `roster init` printed for the rows you compared", { placeholder: "<digest>" }),
+  flag("witness", "string", "The witness's address, to tell it of a removal (or PRIME_FLEET_WITNESS)", { placeholder: "<url>" }),
 ];
 
 const FLEET_INVITE_FLAGS: FlagSpec[] = [
@@ -36,6 +38,7 @@ const FLEET_JOIN_FLAGS: FlagSpec[] = [
 
 const FLEET_APPROVE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
+  flag("rotate", "boolean", "In a signed fleet: approve a member's new key (a plain approve never changes a key)"),
   OWNER_KEY_FLAG,
   flag("member", "string", "The member to approve", { placeholder: "<id>" }),
   flag("key", "string", "For a member's request for a new key: the fingerprint of the key approved (the KEY of `prime fleets pending`)", { placeholder: "<fingerprint>" }),
@@ -43,6 +46,7 @@ const FLEET_APPROVE_FLAGS: FlagSpec[] = [
 
 const FLEET_REMOVE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
+  flag("witness", "string", "In a signed fleet: the witness's address, to tell it of the removal (or PRIME_FLEET_WITNESS)", { placeholder: "<url>" }),
   OWNER_KEY_FLAG,
   flag("member", "string", "The member to remove", { placeholder: "<id>" }),
   flag("key-change", "boolean", "Decline the member's request for a new key, and keep the member"),

@@ -17,8 +17,8 @@
 // (`spub`, the genesis `extra`) are base64url of the raw 32 bytes. An entry is always re-serialised from
 // the parsed array, never hashed or signed as stored text.
 
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign as cryptoSign, verify as cryptoVerify } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createHash, randomBytes, createPrivateKey, createPublicKey, generateKeyPairSync, sign as cryptoSign, verify as cryptoVerify } from "node:crypto";
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -211,7 +211,17 @@ export function createOwnerKeyFile(file: string): OwnerKey {
   if (existsSync(file)) throw new RosterError("there is already an owner key at " + file + ": it is not replaced (it is the fleet's authority)");
   const key = generateOwnerKey();
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  writeFileAtomic(file, key.privateKeyPem, 0o600);
+  // The file is made whole and put in place only if nothing is there: two runs at once do not replace each other's key.
+  const tmp = file + "." + process.pid + "." + randomBytes(4).toString("hex") + ".tmp";
+  writeFileSync(tmp, key.privateKeyPem, { mode: 0o600, flag: "wx" });
+  try {
+    linkSync(tmp, file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") throw new RosterError("there is already an owner key at " + file + ": it is not replaced (it is the fleet's authority)");
+    throw err;
+  } finally {
+    rmSync(tmp, { force: true });
+  }
   return key;
 }
 

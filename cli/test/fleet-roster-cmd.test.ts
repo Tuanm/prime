@@ -2,12 +2,13 @@
 // a gateway that keeps the chain the way the roster wire says (see docs/fleets.md, "The signed roster").
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { fleetKeyFile, fleetsApprove, fleetsInvite, fleetsJoin, fleetsRemove, fleetsRoster, fleetsTrust } from "../src/fleets";
-import { generateOwnerKey, ownerFingerprint, parseInviteCode, readOwnerKey, verifyChain, type SignedEntry } from "../src/fleet-roster";
+import { keyFingerprintOf } from "../src/fleet-crypto";
+import { fleetKeyOf, generateOwnerKey, ownerFingerprint, parseInviteCode, readOwnerKey, verifyChain, type SignedEntry } from "../src/fleet-roster";
 import { FleetTrust } from "../src/fleet-trust";
 import { applyTestTimeout } from "./setup";
 
@@ -19,6 +20,11 @@ interface Fake {
   signed: boolean;
   fenced: string[];
   head: number;
+  /** What /remove-fence answers as seqAt; undefined: the head. */
+  fenceAt: number | undefined;
+  /** What /head answers from the second read on (the head moves between the reads). */
+  headAfterFence: number | undefined;
+  witness: Array<{ path: string; body: any }>;
   members: Array<Record<string, unknown>>;
   pending: Array<Record<string, unknown>>;
   stop(): void;
@@ -31,7 +37,7 @@ const member = (id: string, role = "member") => {
 };
 
 function fakeGateway(): Fake {
-  const state: Fake = { url: "", entries: [], signed: false, fenced: [], head: 7, members: [], pending: [], stop: () => undefined };
+  const state: Fake = { url: "", entries: [], signed: false, fenced: [], head: 7, fenceAt: undefined, headAfterFence: undefined, witness: [], members: [], pending: [], stop: () => undefined };
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -52,10 +58,14 @@ function fakeGateway(): Fake {
       }
       if (p === "/fleets/acme/members") return Response.json({ ok: true, incarnation: "inc-1", members: state.members });
       if (p === "/fleets/acme/pending") return Response.json({ ok: true, pending: state.pending });
-      if (p === "/fleets/acme/head") return Response.json({ ok: true, head: { seq: state.head } });
+      if (p === "/fleets/acme/head") return Response.json({ ok: true, head: { seq: state.fenced.length > 0 && state.headAfterFence !== undefined ? state.headAfterFence : state.head } });
       if (p === "/fleets/acme/remove-fence") {
         state.fenced.push((body as { deviceId: string }).deviceId);
-        return Response.json({ ok: true, seqAt: state.head });
+        return Response.json({ ok: true, seqAt: state.fenceAt ?? state.head });
+      }
+      if (p.startsWith("/w/") && p.endsWith("/remove")) {
+        state.witness.push({ path: p, body });
+        return Response.json({ ok: true });
       }
       if (p === "/fleets/acme/approve" || p === "/fleets/acme/remove") {
         if (state.signed) return Response.json({ error: "the roster is signed", rosterSigned: true }, { status: 409 });
@@ -94,6 +104,16 @@ describe("the commands that sign a fleet's roster", () => {
       parsed: { positionals: ["fleets", sub, ...positionals], flags: new Map<string, string | boolean>(Object.entries({ "owner-key": keyFile, ...flags })), help: false },
     }) as never;
   const said = () => out.join("\n");
+  // eslint-disable-next-line no-control-regex
+  const digestShown = () => /--expect (\S+)/.exec(said().replace(/\u001b\[[0-9;]*m/g, ""))?.[1] ?? "";
+  /** The dry run, then the run that signs exactly what it showed. */
+  const initSigned = async (flags: Record<string, string | boolean> = {}) => {
+    out.length = 0;
+    await fleetsRoster(ctx("roster", ["init", "acme"], flags));
+    const digest = digestShown();
+    expect(digest).not.toBe("");
+    await fleetsRoster(ctx("roster", ["init", "acme"], { ...flags, yes: true, expect: digest }));
+  };
 
   test("init shows what it would sign and signs nothing without --yes", async () => {
     gw.members = [member("dev-1", "owner"), member("dev-2")];
@@ -107,7 +127,7 @@ describe("the commands that sign a fleet's roster", () => {
   test("init refuses a member that has not told the gateway its signing key", async () => {
     const bare = { ...member("dev-3"), spub: undefined };
     gw.members = [member("dev-1", "owner"), bare];
-    await expect(fleetsRoster(ctx("roster", ["init", "acme"], { yes: true }))).rejects.toThrow(/dev-3/);
+    await expect(fleetsRoster(ctx("roster", ["init", "acme"], { yes: true, expect: "x" }))).rejects.toThrow(/dev-3/);
     expect(gw.entries.length).toBe(0);
     expect(existsSync(keyFile)).toBe(false);
   });
@@ -115,9 +135,11 @@ describe("the commands that sign a fleet's roster", () => {
   test("init --yes makes the owner key, a genesis and an add for each member, and never prints the key", async () => {
     gw.members = [member("dev-1", "owner"), member("dev-2")];
     out.length = 0;
-    await fleetsRoster(ctx("roster", ["init", "acme"], { yes: true }));
+    await initSigned();
     expect(gw.entries.length).toBe(3);
     const v = verifyChain(gw.entries, { fleet: "acme" });
+    // the members were members before the chain: their place is from the start, so what they published before it is theirs
+    expect(v.tenures.every((t) => t.from === 0)).toBe(true);
     expect(v.tenures.map((t) => t.device)).toEqual(["dev-1", "dev-2"]);
     expect(v.tenures[0]!.role).toBe("owner");
     if (process.platform !== "win32") expect(statSync(keyFile).mode & 0o777).toBe(0o600);
@@ -130,35 +152,87 @@ describe("the commands that sign a fleet's roster", () => {
 
   test("a second init adds only the member that is not in the roster yet", async () => {
     gw.members = [...gw.members, member("dev-4")];
-    await fleetsRoster(ctx("roster", ["init", "acme"], { yes: true }));
+    await initSigned();
     expect(gw.entries.length).toBe(4);
     const again = gw.entries.length;
-    await fleetsRoster(ctx("roster", ["init", "acme"], { yes: true }));
+    out.length = 0;
+    await fleetsRoster(ctx("roster", ["init", "acme"]));
+    expect(said()).toContain("already");
     expect(gw.entries.length).toBe(again);
   });
 
-  test("approve, once the roster is signed, is an add entry signed with the owner key", async () => {
+  test("--yes signs what was compared, and not what the gateway lists by then: a swapped key is refused and nothing is signed", async () => {
+    const fresh = member("dev-9");
+    gw.members = [...gw.members, fresh];
+    out.length = 0;
+    await fleetsRoster(ctx("roster", ["init", "acme"]));
+    const digest = digestShown();
+    const before = gw.entries.length;
+    // between the two runs the gateway puts its own keys in place of dev-9's
+    const swapped = member("dev-9");
+    gw.members = gw.members.map((m) => (m.deviceId === "dev-9" ? swapped : m));
+    await expect(fleetsRoster(ctx("roster", ["init", "acme"], { yes: true, expect: digest }))).rejects.toThrow(/not the ones that were shown/);
+    expect(gw.entries.length).toBe(before);
+    // --yes without what was compared is no signing either
+    await expect(fleetsRoster(ctx("roster", ["init", "acme"], { yes: true }))).rejects.toThrow(/--expect/);
+    expect(gw.entries.length).toBe(before);
+    gw.members = gw.members.filter((m) => m.deviceId !== "dev-9");
+  });
+
+  test("the table shows both keys in full, so that they can be compared", async () => {
+    const extra = member("dev-10");
+    gw.members = [...gw.members, extra];
+    out.length = 0;
+    await fleetsRoster(ctx("roster", ["init", "acme"]));
+    expect(said()).toContain(ownerFingerprint(extra.spub));
+    expect(said()).toContain(keyFingerprintOf(extra.pubkey));
+    gw.members = gw.members.filter((m) => m.deviceId !== "dev-10");
+  });
+
+  test("approve, once the roster is signed, is an add entry signed with the owner key, for the key that was compared", async () => {
     const fresh = member("dev-5");
     gw.pending = [{ ...fresh }];
     out.length = 0;
-    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-5" }));
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(fresh.pubkey) }));
     const v = verifyChain(gw.entries, { fleet: "acme" });
     expect(v.tenures.find((t) => t.device === "dev-5")?.spub).toBe(fresh.spub);
     expect(said()).toContain("admitted dev-5");
+    expect(said()).toContain("as member");
   });
 
-  test("approve refuses a request that offers no signing key, and one whose key changed under the operator", async () => {
-    gw.pending = [{ deviceId: "dev-6", pubkey: xpubOf("x"), role: "member" }];
+  test("approve without --key signs nothing, and says which key the gateway offers", async () => {
+    const offered = member("dev-6");
+    gw.pending = [offered];
     const before = gw.entries.length;
-    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-6" }))).rejects.toThrow(/signing key/);
-    const other = member("dev-7");
-    gw.pending = [other];
-    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-7", key: "AAAAAAAAAAAA" }))).rejects.toThrow(/replaced since/);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-6" }))).rejects.toThrow(/the gateway is the one saying so/);
     expect(gw.entries.length).toBe(before);
   });
 
-  test("remove fences the member first and signs the sequence the gateway named", async () => {
+  test("approve for another key than the one compared is refused, and a plain approve never becomes a key change", async () => {
+    const live = member("dev-5"); // a member already, offered under a new key
+    gw.pending = [live];
+    const before = gw.entries.length;
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: "AAAAAAAAAAAA" }))).rejects.toThrow(/not the one you compared/);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(live.pubkey) }))).rejects.toThrow(/--rotate/);
+    expect(gw.entries.length).toBe(before);
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(live.pubkey), rotate: true }));
+    const v = verifyChain(gw.entries, { fleet: "acme" });
+    expect(v.tenures.find((t) => t.device === "dev-5" && t.until === null)?.xpub).toBe(live.pubkey);
+    const newcomer = member("dev-11");
+    gw.pending = [newcomer];
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-11", key: keyFingerprintOf(newcomer.pubkey), rotate: true }))).rejects.toThrow(/not a member/);
+  });
+
+  test("approve refuses a request that offers no signing key", async () => {
+    gw.pending = [{ deviceId: "dev-12", pubkey: xpubOf("x"), role: "member" }];
+    const before = gw.entries.length;
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-12", key: keyFingerprintOf(xpubOf("x")) }))).rejects.toThrow(/signing key/);
+    expect(gw.entries.length).toBe(before);
+  });
+
+  test("remove fences the member first and signs the sequence the gateway named, and prints it with the head", async () => {
     gw.head = 12;
+    out.length = 0;
     await fleetsRemove(ctx("remove", ["acme"], { member: "dev-2" }));
     expect(gw.fenced).toEqual(["dev-2"]);
     const v = verifyChain(gw.entries, { fleet: "acme" });
@@ -166,7 +240,57 @@ describe("the commands that sign a fleet's roster", () => {
     expect(last[6]).toBe("remove");
     expect(last[11]).toBe(12);
     expect(v.tenures.find((t) => t.device === "dev-2")?.until).toBe(12);
+    expect(said()).toContain("as of snapshot 12");
+    expect(said()).toContain("the head is 12");
+    expect(said()).toContain("the witness was not told");
     await expect(fleetsRemove(ctx("remove", ["acme"], { member: "dev-2" }))).rejects.toThrow(/not a member/);
+  });
+
+  test("a fence at a sequence the head never had is not signed: a removed key would stay a sender for ever", async () => {
+    gw.head = 20;
+    try {
+      gw.fenceAt = Number.MAX_SAFE_INTEGER;
+      const before = gw.entries.length;
+      await expect(fleetsRemove(ctx("remove", ["acme"], { member: "dev-4" }))).rejects.toThrow(/not a sequence it could have fenced at/);
+      expect(gw.entries.length).toBe(before);
+      // one in the past is no better
+      gw.fenceAt = 3;
+      await expect(fleetsRemove(ctx("remove", ["acme"], { member: "dev-4" }))).rejects.toThrow(/not a sequence it could have fenced at/);
+      expect(gw.entries.length).toBe(before);
+      // a publish that was in flight when the fence fell (the head is one past it afterwards) is let through
+      gw.fenceAt = 20;
+      gw.headAfterFence = 21;
+      gw.fenced = [];
+      await fleetsRemove(ctx("remove", ["acme"], { member: "dev-4" }));
+      expect(gw.entries[gw.entries.length - 1]!.entry[11]).toBe(20);
+    } finally {
+      gw.fenceAt = undefined;
+      gw.headAfterFence = undefined;
+      gw.fenced = [];
+    }
+  });
+
+  test("with a witness the removal is posted to it, as {genesis, entry, sig}, and a witness that refuses is said, not fatal", async () => {
+    gw.head = 30;
+    // (the real gateway no longer lists a member that was removed)
+    gw.members = [...gw.members.filter((m) => !["dev-2", "dev-4"].includes(String(m.deviceId))), member("dev-13")];
+    await initSigned();
+    gw.witness = [];
+    await fleetsRemove(ctx("remove", ["acme"], { member: "dev-13", witness: gw.url }));
+    expect(gw.witness.length).toBe(1);
+    const { path, body } = gw.witness[0]!;
+    const last = gw.entries[gw.entries.length - 1]!;
+    expect(path).toBe("/w/" + fleetKeyOf(gw.entries[0]!.entry) + "/remove");
+    expect(body.genesis).toEqual(gw.entries[0]!.entry);
+    expect(body.entry).toEqual(last.entry);
+    expect(body.sig).toBe(last.sig);
+    expect(said()).toContain("the witness was told");
+    // the same entries, told again, by the command made for it
+    gw.witness = [];
+    out.length = 0;
+    await fleetsRoster(ctx("roster", ["witness", "acme"], { witness: gw.url }));
+    expect(gw.witness.length).toBeGreaterThanOrEqual(2); // dev-2, dev-4 and dev-13 were removed
+    expect(said()).toContain("told the witness");
   });
 
   test("a machine without the owner key cannot change a signed roster", async () => {
@@ -251,3 +375,115 @@ describe("the commands that sign a fleet's roster", () => {
     expect(FleetTrust.ownerPinned(fleetKeyFile(cfg, "acme", "dev-9"))).toBe(fp.replace(/-/g, ""));
   });
 });
+
+describe("the owner key a member pins", () => {
+  test("a space that joins with the owner key in its invite pins it after the forget that a new membership makes", async () => {
+    const { setupFleetSpace } = await import("../src/fleet-space");
+    const root = mkdtempSync(join(tmpdir(), "roster-space-"));
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        calls.push({ path, body: req.method === "POST" ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {} });
+        if (req.method === "GET" && path.endsWith("/me")) return Response.json({ status: "none" }, { status: 404 });
+        if (req.method === "POST" && path.endsWith("/join")) return Response.json({ ok: true });
+        return Response.json({ member: false });
+      },
+    });
+    try {
+      const configPath = join(root, "config.yaml");
+      const keyFile = fleetKeyFile(configPath, "x", "r1");
+      const old = ownerFingerprint(generateOwnerKey().publicKey);
+      const fp = ownerFingerprint(generateOwnerKey().publicKey);
+      FleetTrust.pinOwner(keyFile, old); // what an earlier membership under this name left
+      await setupFleetSpace(
+        { configPath, config: {}, parsed: {}, json: false, quiet: true, verbose: false, color: false, out() {}, note() {} } as never,
+        { fleet: "x", spaceName: "r1", gateway: "http://127.0.0.1:" + server.port, deviceId: "dev", deviceToken: "tok", code: "invite", ownerFp: fp, create: false, approvalWaitMs: 0 },
+      );
+      expect(calls.find((c) => c.path.endsWith("/join"))!.body.code).toBe("invite");
+      expect(JSON.stringify(calls)).not.toContain(fp);
+      expect(FleetTrust.ownerPinned(keyFile)).toBe(fp.replace(/-/g, ""));
+    } finally {
+      server.stop(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a pin made by the operator is not written back by a trust that was loaded before it", () => {
+    const root = mkdtempSync(join(tmpdir(), "roster-pin-"));
+    try {
+      const keyFile = join(root, "m.key");
+      const a = ownerFingerprint(generateOwnerKey().publicKey);
+      const b = ownerFingerprint(generateOwnerKey().publicKey);
+      FleetTrust.pinOwner(keyFile, a);
+      // a round of the agent holds the trust it loaded, and saves it after a step
+      const inUse = FleetTrust.beside(keyFile);
+      inUse.noteMac(5);
+      FleetTrust.pinOwner(keyFile, b, true); // the operator replaces the pin meanwhile
+      inUse.save();
+      expect(FleetTrust.ownerPinned(keyFile)).toBe(b.replace(/-/g, ""));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the newest roster entry seen is kept only for the owner key it was seen under", () => {
+    const root = mkdtempSync(join(tmpdir(), "roster-head-"));
+    try {
+      const keyFile = join(root, "m.key");
+      const a = ownerFingerprint(generateOwnerKey().publicKey);
+      const b = ownerFingerprint(generateOwnerKey().publicKey);
+      const t = FleetTrust.beside(keyFile);
+      t.setOwner(a);
+      t.rosterHead = { n: 9, hash: "h" };
+      t.save();
+      expect(FleetTrust.beside(keyFile).rosterHead).toEqual({ n: 9, hash: "h" });
+      FleetTrust.pinOwner(keyFile, b, true);
+      expect(FleetTrust.beside(keyFile).rosterHead).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("two runs that make the owner key at once do not replace each other's", async () => {
+    const { createOwnerKeyFile } = await import("../src/fleet-roster");
+    const root = mkdtempSync(join(tmpdir(), "roster-key-"));
+    try {
+      const file = join(root, "k", "acme.pem");
+      const results = await Promise.allSettled([1, 2, 3, 4].map(async () => createOwnerKeyFile(file)));
+      expect(results.filter((r) => r.status === "fulfilled").length).toBe(1);
+      const winner = (results.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<{ publicKey: string }>).value;
+      expect(readOwnerKey(file).publicKey).toBe(winner.publicKey);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an owner key file that cannot be read does not stop an invite: the plain code is printed, and the reason", async () => {
+    const bad = join(dir0(), "bad.pem");
+    writeFileSync(bad, "not a key");
+    const out: string[] = [];
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json({ ok: true, code: "CODE-9", expiresAt: Date.now() + 60_000 });
+    try {
+      await fleetsInvite({
+        config: { defaults: { gateway: "https://g.example", fleet_operator_token: "op" }, devices: {}, spaces: {}, codeMcp: {} },
+        configPath: join(dir0(), "config.yaml"),
+        json: false,
+        out: (l: string) => out.push(l),
+        parsed: { positionals: ["fleets", "invite", "acme"], flags: new Map([["owner-key", bad]]), help: false },
+      } as never);
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+    expect(out.join("\n")).toContain("CODE-9");
+    expect(out.join("\n")).toContain("could not be read");
+  });
+});
+
+let dirForUnreadable: string | undefined;
+function dir0(): string {
+  dirForUnreadable ??= mkdtempSync(join(tmpdir(), "roster-bad-"));
+  return dirForUnreadable;
+}

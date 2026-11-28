@@ -509,18 +509,34 @@ snapshot sealed for it. A fleet can take that from the gateway: its roster becom
 **owner key** that only the operator's machine holds. The gateway stores and serves the chain; it cannot add to it.
 
 ```bash
-prime fleets roster init acme                 # shows what would be signed; nothing is sent
-prime fleets roster init acme --yes           # makes the owner key, signs the genesis and an add for each member
+prime fleets roster init acme                 # shows the members, their keys in full, and a digest; signs nothing
+prime fleets roster init acme --yes --expect <digest>   # makes the owner key, signs the genesis and an add for each member shown
 prime fleets invite acme                      # prints the code, and the code with the owner key's fingerprint after "~"
 prime fleets join acme --code p1_...~ABCDE-...   # the member pins that fingerprint; the gateway is sent the code alone
-prime fleets approve acme --member <id>       # in a signed fleet: an `add` entry signed with the owner key
-prime fleets remove acme --member <id>        # fences the member at the gateway, then signs a `remove` at the sequence it names
+prime fleets approve acme --member <id> --key <fp>   # in a signed fleet: an `add` entry for the key you compared (--rotate: a member's new key)
+prime fleets remove acme --member <id> [--witness <url>]   # fences the member, checks the sequence it names, signs a `remove`, tells the witness
+prime fleets roster witness acme --witness <url>   # tell the witness of every removal in the chain (again, if it was down)
 prime fleets roster show acme --space work    # checks the chain; says whether the owner key is the one this member pinned
 prime fleets trust pin acme --space work --owner <fingerprint>   # pin (or replace the pin) by hand
 ```
 
+What is signed is what the operator compared, not what the gateway says at the moment of signing: the gateway is the thing the signature is
+there to defeat.
+
+- `roster init` prints each member's key and signing key in full and a digest of those rows; `--yes` is accepted only with that digest
+  (`--expect`), and refuses if the gateway lists other keys by then. Compare each key with what that member's own machine prints
+  (`prime fleets members`), not through the gateway. The members are put in the roster from the start (snapshot 0): they were members before
+  the chain, and what they published then stays theirs.
+- `approve` in a signed fleet needs `--key <fingerprint>` of the key you compared; without it nothing is signed and the key the gateway offers is
+  shown. A device that is a member already and asks for another key is a key change: it needs `--rotate` as well, so a plain approve never becomes one.
+- `remove` asks the gateway to fence the member (it takes nothing more from it) and signs the sequence it answers. That sequence is the last the
+  removed key is a member for; it is checked against the head read before the fence and after it, and a sequence the head never had is refused
+  with nothing signed. The witness keeps a removed key's place until it is told: `--witness <url>` (or `PRIME_FLEET_WITNESS`) posts the removal
+  `{genesis, entry, sig}` to it, and `roster witness` posts every removal in the chain again.
+
 The owner key is written to `~/.prime/fleet-owner/<gateway host>/<fleet>.ed25519.pem` (mode 600), or where `--owner-key`
-or `PRIME_FLEET_OWNER_KEY` says. It is never printed. A copy kept elsewhere is the operator's decision: without the
+or `PRIME_FLEET_OWNER_KEY` says. It is never printed, and never replaced (two runs at once make one key). On Windows the mode is not enforced:
+the file has the permissions of the profile it is in. A copy kept elsewhere is the operator's decision: without the
 file, nobody can add or remove a member of a signed fleet.
 
 An entry is a thirteen-place array (`prime-roster-v1`, fleet, incarnation, n, prevHash, at, op, device, xpub, spub, role,

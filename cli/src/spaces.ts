@@ -12,6 +12,7 @@ import { bool, num, str, strList, type ParsedArgs } from "./args.ts";
 import { saveConfig, type Config, type SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
+import { parseInviteCode } from "./fleet-roster.ts";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1147,7 +1148,17 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
       }
       // A fleet space tells the gateway which fleet it is joining, so the
       // device is made without the limit that applies to throwaway ones.
-      const code = str(ctx.parsed, "code");
+      // The code may carry the fleet's owner key after a "~": only the code goes to the gateway, and the key is pinned (fleet-space.ts).
+      const invite = (() => {
+        const given = str(ctx.parsed, "code");
+        if (!given) return undefined;
+        try {
+          return parseInviteCode(given);
+        } catch (err) {
+          throw new UsageError(err instanceof Error ? err.message : String(err), "Pass the code as 'prime fleets invite' printed it.");
+        }
+      })();
+      const code = invite?.code;
       device =
         device ??
         (await registerAnonymous(gateway!, gatewayToken, code ? { id: fleet, code } : undefined));
@@ -1157,8 +1168,9 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
         gateway: gateway!,
         deviceId: device.deviceId,
         deviceToken: device.token,
-        ...(str(ctx.parsed, "code") ? { code: str(ctx.parsed, "code") } : {}),
-        create: !str(ctx.parsed, "code"),
+        ...(code ? { code } : {}),
+        ...(invite?.ownerFp ? { ownerFp: invite.ownerFp } : {}),
+        create: !code,
       });
       space.fleet_role = setup.role;
       if (setup.role === "pending") {
