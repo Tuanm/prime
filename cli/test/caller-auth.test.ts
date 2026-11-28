@@ -201,12 +201,25 @@ describe("CallerAuth: a signed call", () => {
     expect(t.auth.admit(t.frame(BASH, signCall(other, "device:laptop", BASH, { nonce }))).action).toBe("run");
   });
 
-  test("a forged signature does not use up a nonce", () => {
+  test("a forged signature does not make a call run, and a refusal that is not signed does not use up the nonce", () => {
     const t = setup("enforce");
     addCaller(t.callers, { pub: t.key.publicKey });
     const good = t.sign(BASH, "device:laptop", { nonce: NONCE });
     const forged = good.replace(/\.[^.]+$/, "." + "A".repeat(86));
     expect(refusedWith(t.auth.admit(t.frame(BASH, forged)))).toBe("invalid");
+    // a frame with no body to bind a reply to is refused unsigned: nothing was promised about the call
+    const noBody = t.auth.admit({ request: JSON.parse(BASH), callerSig: forged });
+    expect(noBody.action).toBe("refuse");
+    expect(noBody.reply).toBeUndefined();
+    // (the refusal of the first, with its body, was signed: that nonce is retired, see the tests below)
+  });
+
+  test("a forged signature without a body does not use up the nonce of the real call", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const good = t.sign(BASH, "device:laptop", { nonce: NONCE });
+    const forged = good.replace(/\.[^.]+$/, "." + "A".repeat(86));
+    expect(t.auth.admit({ request: JSON.parse(BASH), callerSig: forged }).action).toBe("refuse");
     expect(t.auth.admit(t.frame(BASH, good)).action).toBe("run");
   });
 
@@ -362,6 +375,95 @@ describe("CallerAuth: which replies are signed", () => {
       // a frame with `request` that is unsigned is not affected by the parser of `raw`
       expect(auth.admit({ request: JSON.parse(BASH), raw: '{"x":"DEEP"}' }).action).toBe(mode === "enforce" ? "refuse" : "run");
     }
+  });
+});
+
+describe("CallerAuth: a signed refusal is never followed by that call running", () => {
+  const mangle = (header: string, part: number, value: string) => header.split(".").map((x, i) => (i === part ? value : x)).join(".");
+  const flipped = (header: string) => {
+    const parts = header.split(".");
+    const sig = Buffer.from(parts[4]!, "base64url");
+    sig[0] = sig[0]! ^ 1;
+    parts[4] = sig.toString("base64url");
+    return parts.join(".");
+  };
+
+  for (const [what, damage] of [
+    ["a changed key id", (h: string) => mangle(h, 1, "A".repeat(22))],
+    ["a flipped byte of the signature", flipped],
+  ] as const) {
+    test(`${what}: the refusal is signed, and the real call with that nonce is then refused and does not run`, () => {
+      const t = setup("enforce");
+      addCaller(t.callers, { pub: t.key.publicKey });
+      const header = t.sign(BASH);
+      const refusal = t.auth.admit({ raw: BASH, callerSig: damage(header) });
+      expect(refusal.action).toBe("refuse");
+      expect(refusal.reply).toBeDefined(); // the caller is told what happened, and can rely on it
+      const real = t.auth.admit({ raw: BASH, callerSig: header });
+      expect(real.action).toBe("refuse"); // ...because the call never runs under that nonce
+      expect(refusedWith(real)).toBe("replay");
+      expect(real.reply).toBeUndefined(); // and this one is not signed, so it cannot be mistaken for the answer
+      expect(t.auth.counts.signed).toBe(0);
+    });
+  }
+
+  test("an unreadable callers file: the same", () => {
+    const t = setup("enforce");
+    writeFileSync(t.callers, "{ broken");
+    const header = t.sign(BASH);
+    expect(t.auth.admit({ raw: BASH, callerSig: header }).reply).toBeDefined();
+    addCaller(join(t.dir, "other.json"), { pub: t.key.publicKey });
+    writeFileSync(t.callers, readFileSync(join(t.dir, "other.json")));
+    expect(t.auth.admit({ raw: BASH, callerSig: header }).action).toBe("refuse");
+  });
+
+  test("the other way round: a call that ran is not given a signed refusal under a changed header", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const header = t.sign(BASH);
+    expect(t.auth.admit({ raw: BASH, callerSig: header }).action).toBe("run");
+    const refusal = t.auth.admit({ raw: BASH, callerSig: mangle(header, 1, "A".repeat(22)) });
+    expect(refusal.action).toBe("refuse");
+    expect(refusal.reply).toBeUndefined();
+  });
+
+  test("a refusal of one nonce does not stop another call, and each nonce is retired once", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const first = t.sign(BASH);
+    expect(t.auth.admit({ raw: BASH, callerSig: mangle(first, 1, "A".repeat(22)) }).reply).toBeDefined();
+    expect(t.auth.admit({ raw: BASH, callerSig: mangle(first, 1, "B".repeat(22)) }).reply).toBeUndefined(); // the same nonce again
+    expect(t.auth.admit(t.frame(BASH, t.sign(BASH))).action).toBe("run"); // a new nonce
+  });
+
+  test("when no more can be retired, refusals go out unsigned (and the caller is told the call may or may not have run)", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    let signed = 0;
+    for (let i = 0; i < 10_000; i++) {
+      const body = JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/call", params: { name: "bash", arguments: {} } });
+      if (t.auth.admit({ raw: body, callerSig: mangle(t.sign(body), 1, "A".repeat(22)) }).reply) signed++;
+    }
+    expect(signed).toBe(10_000);
+    const header = t.sign(BASH);
+    const over = t.auth.admit({ raw: BASH, callerSig: mangle(header, 1, "A".repeat(22)) });
+    expect(over.action).toBe("refuse");
+    expect(over.reply).toBeUndefined();
+    // a call that is not refused still runs
+    expect(t.auth.admit(t.frame(BASH, t.sign(BASH))).action).toBe("run");
+  });
+
+  test("retired nonces are forgotten when their signatures no longer verify", () => {
+    let now = Date.now();
+    const t = setup("enforce", { now: () => now });
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const header = t.sign(BASH, "device:laptop", { now });
+    expect(t.auth.admit({ raw: BASH, callerSig: mangle(header, 1, "A".repeat(22)) }).reply).toBeDefined();
+    now += 6 * 60_000;
+    // the old signature is stale now: refused as stale, whatever happens to the table
+    expect(refusedWith(t.auth.admit({ raw: BASH, callerSig: header }))).toBe("stale");
+    const fresh = t.sign(BASH, "device:laptop", { now });
+    expect(t.auth.admit({ raw: BASH, callerSig: mangle(fresh, 1, "A".repeat(22)) }).reply).toBeDefined();
   });
 });
 
