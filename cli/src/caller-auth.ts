@@ -282,6 +282,8 @@ export class CallerAuth {
 
     let failure: CallerFailure | undefined;
     let fleetCall = false;
+    // The signature was checked against a key one of the callers files lists (what is true of a failure after that: not the primary, a tool not allowed...).
+    let signatureVerified = false;
     if (typeof frame.callerSig === "string") {
       const verdict = this.verify(frame);
       if (verdict.ok) {
@@ -290,6 +292,7 @@ export class CallerAuth {
       }
       failure = verdict.failure;
       fleetCall = verdict.fleet === true;
+      signatureVerified = verdict.verified === true;
     }
 
     if (request === undefined) return this.unreadable(frame);
@@ -310,7 +313,7 @@ export class CallerAuth {
       failure !== "stale" &&
       sig.ts > this.floorTs &&
       !this.ranNonces.has(sig.nonce) &&
-      this.retire(sig.nonce, sig.ts, failure !== "unknown-key");
+      this.retire(sig.nonce, sig.ts, signatureVerified);
     return {
       action: "refuse",
       response: {
@@ -344,7 +347,7 @@ export class CallerAuth {
   }
 
   /**
-   * A key that neither callers file lists is a stranger's. Its refusal is signed too (a caller that is not allowed yet is told so by the device, not by
+   * A frame whose signature did not verify against a listed key is a stranger's, whatever key id it carries (the id is in every call the gateway relays). Its refusal is signed too (a caller that is not allowed yet is told so by the device, not by
    * a gateway that could have made it up), and its nonce is kept so that the call cannot run after a refusal that said it did not (a gateway that
    * changed the key id of a genuine call gets the refusal for the changed one). But a stranger costs nothing to be, so its nonces have a set of their
    * own, small, in memory only: frames from keys nobody allowed can neither fill the set that the refusals that matter use nor write to the disk.
@@ -430,7 +433,7 @@ export class CallerAuth {
     return { action: "refuse", response: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the request could not be read", data: { reason: "invalid" } } } };
   }
 
-  private verify(frame: TunnelFrame): { ok: true; request: unknown; nonce: string; keyId: string; fleet?: boolean } | { ok: false; failure: CallerFailure; fleet?: boolean } {
+  private verify(frame: TunnelFrame): { ok: true; request: unknown; nonce: string; keyId: string; fleet?: boolean } | { ok: false; failure: CallerFailure; fleet?: boolean; verified?: boolean } {
     const parsed = parseCallSig(frame.callerSig as string);
     if (!parsed) return { ok: false, failure: "malformed" };
     if (typeof frame.raw !== "string") return { ok: false, failure: "no-raw" };
@@ -459,37 +462,37 @@ export class CallerAuth {
         forFleet = true;
       } else if (verifyCallSignature(parsed, key, fleetMemberTarget(id, ""), frame.raw)) {
         // The question which member this is (nothing signed for it can run): answered, not run.
-        return { ok: false, failure: "fleet-member", fleet: true };
+        return { ok: false, failure: "fleet-member", fleet: true, verified: true };
       } else if (verifyCallSignature(parsed, key, callTarget("fleet", id), frame.raw)) {
         // The form an older build makes: it names no member, so it could be run by every member that is sent it.
-        return { ok: false, failure: "fleet-unbound" };
+        return { ok: false, failure: "fleet-unbound", verified: true };
       }
     }
     if (!signer) return { ok: false, failure: "bad-signature" };
     if (forFleet) {
       const f = fleet.file!;
       // The agent's word that this space is the primary is good for a while after it was written, and no longer.
-      if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary", fleet: true };
+      if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary", fleet: true, verified: true };
       // A call made for the fleet is not signed ahead of the clock, and one signed before this space became the primary - or within the
       // skew of the members' clocks of it - may have run on the member that was.
-      if (parsed.ts - now > FLEET_FUTURE_MS) return { ok: false, failure: "ahead", fleet: true };
-      if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary", fleet: true };
+      if (parsed.ts - now > FLEET_FUTURE_MS) return { ok: false, failure: "ahead", fleet: true, verified: true };
+      if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary", fleet: true, verified: true };
     }
     // Signed before this process started, or before a nonce that was forgotten: it may be a call that was run.
-    if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay" };
+    if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay", verified: true };
     let request: unknown;
     try {
       // The signature covers the bytes as they came, a leading byte-order mark included; JSON.parse does not take one.
       request = (this.opts.parse ?? JSON.parse)(frame.raw.charCodeAt(0) === 0xfeff ? frame.raw.slice(1) : frame.raw);
     } catch {
-      return { ok: false, failure: "bad-body" };
+      return { ok: false, failure: "bad-body", verified: true };
     }
     // A nonce is spent only by a call whose signature is good, so nobody else can fill the table.
     const nonceKey = `${parsed.keyId}.${parsed.nonce}`;
     this.forgetOldNonces(now);
-    if (this.seen.has(nonceKey)) return { ok: false, failure: "replay" };
+    if (this.seen.has(nonceKey)) return { ok: false, failure: "replay", verified: true };
     if (signer.tools && isToolCall(request) && !signer.tools.includes(toolName(request))) {
-      return { ok: false, failure: "tool-not-allowed" };
+      return { ok: false, failure: "tool-not-allowed", verified: true };
     }
     this.seen.set(nonceKey, { ts: parsed.ts });
     this.ranNonces.set(parsed.nonce, parsed.ts);

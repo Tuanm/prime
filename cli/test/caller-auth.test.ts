@@ -439,19 +439,20 @@ describe("CallerAuth: a signed refusal is never followed by that call running", 
 
   test("when no more can be retired, refusals go out unsigned (and the caller is told the call may or may not have run)", () => {
     const t = setup("enforce");
-    addCaller(t.callers, { pub: t.key.publicKey });
+    // a key that may run `read` only: a call for another tool is refused after its signature has verified, which is what is kept (and written)
+    addCaller(t.callers, { pub: t.key.publicKey, tools: ["read"] });
     let signed = 0;
     for (let i = 0; i < 10_000; i++) {
       const body = JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/call", params: { name: "bash", arguments: {} } });
-      if (t.auth.admit({ raw: body, callerSig: flipped(t.sign(body)) }).reply) signed++;
+      if (t.auth.admit({ raw: body, callerSig: t.sign(body) }).reply) signed++;
     }
     expect(signed).toBe(10_000);
-    const header = t.sign(BASH);
-    const over = t.auth.admit({ raw: BASH, callerSig: flipped(header) });
+    const over = t.auth.admit({ raw: BASH, callerSig: t.sign(BASH) });
     expect(over.action).toBe("refuse");
     expect(over.reply).toBeUndefined();
-    // a call that is not refused still runs
-    expect(t.auth.admit(t.frame(BASH, t.sign(BASH))).action).toBe("run");
+    // a call that is allowed still runs
+    const read = JSON.stringify({ jsonrpc: "2.0", id: 99999, method: "tools/call", params: { name: "read", arguments: {} } });
+    expect(t.auth.admit(t.frame(read, t.sign(read))).action).toBe("run");
   });
 
   test("frames from a key nobody allowed are refused signed, but cannot fill what the refusals that matter use, nor write to the disk", () => {
@@ -466,9 +467,22 @@ describe("CallerAuth: a signed refusal is never followed by that call running", 
     // a small set of their own: signed until it is full, and unsigned after
     expect(signed).toBe(1_000);
     expect(existsSync(join(t.dir, "caller-auth", "retired-nonces.jsonl"))).toBe(false);
-    // a call that was refused signed for a key that is allowed still is, and is kept
-    expect(t.auth.admit({ raw: BASH, callerSig: flipped(t.sign(BASH)) }).reply).toBeDefined();
-    expect(readFileSync(join(t.dir, "caller-auth", "retired-nonces.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("the key id of a caller that is allowed on a frame whose signature does not verify is a stranger's too: the id is in every call the gateway relays", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey, tools: ["read"] });
+    const file = join(t.dir, "caller-auth", "retired-nonces.jsonl");
+    let signed = 0;
+    for (let i = 0; i < 1_200; i++) {
+      const body = JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/call", params: { name: "bash", arguments: {} } });
+      if (t.auth.admit({ raw: body, callerSig: flipped(t.sign(body)) }).reply) signed++;
+    }
+    expect(signed).toBe(1_000); // the set of the frames that were not verified; the same 1 000
+    expect(existsSync(file)).toBe(false);
+    // a refusal after the signature has verified (a tool the key is not allowed) is signed, and is kept: the one line
+    expect(t.auth.admit({ raw: BASH, callerSig: t.sign(BASH) }).reply).toBeDefined();
+    expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
   });
 
   test("retired nonces are forgotten when their signatures no longer verify", () => {
