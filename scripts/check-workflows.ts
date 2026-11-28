@@ -3,12 +3,14 @@
 // parser catches - by which time the workflow has already been rejected with
 // the unhelpful "This run likely failed because of a workflow file issue."
 //
-// Two checks, both learned the hard way:
+// Three checks, the first two learned the hard way:
 //
 //  1. Every ${{ ... }} expression must close with }} on the same line. A
 //     malformed expression is still valid YAML, so a YAML parse says nothing.
 //  2. A heredoc inside a `run:` block must have its terminator at column 0 of
 //     the *dedented* script, otherwise the shell swallows the rest of the file.
+//  3. Every `uses:` of an action names a full commit SHA (`owner/repo@<40 hex> # v1.2.3`), not a tag
+//     or branch that its owner can move: a workflow that publishes releases runs what it pinned.
 //
 // Run: bun scripts/check-workflows.ts [dir]
 
@@ -55,11 +57,25 @@ for (const file of readdirSync(dir).sort()) {
 
   lines.forEach((line, index) => {
     const opens = (line.match(/\$\{\{/g) ?? []).length;
-    const closes = (line.match(/\}\}/g) ?? []).length;
+    // A `{{ ... }}` with no `$` before it is not an expression (a Go template for docker --format, say):
+    // its closing braces are not this line's to count.
+    const templates = (line.match(/\{\{/g) ?? []).length - opens;
+    const closes = (line.match(/\}\}/g) ?? []).length - templates;
     expressions += opens;
     if (opens !== closes) {
       problems++;
       console.log(`${path}:${index + 1}: unbalanced expression braces (opens=${opens} closes=${closes}): ${line.trim()}`);
+    }
+  });
+
+  lines.forEach((line, index) => {
+    const uses = /^\s*(?:-\s+)?uses:\s*(\S+)/.exec(line);
+    if (!uses) return;
+    const ref = uses[1]!;
+    if (ref.startsWith("./")) return; // an action in this repository
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\/-]+@[0-9a-f]{40}$/.test(ref)) {
+      problems++;
+      console.log(`${path}:${index + 1}: action is not pinned to a commit SHA: ${ref}`);
     }
   });
 

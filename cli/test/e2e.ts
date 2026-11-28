@@ -6,6 +6,7 @@
 // documented input form.
 
 import { spawn } from "node:child_process";
+import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -634,6 +635,23 @@ try {
   const fakeBundleBytes = new TextEncoder().encode(`console.log('fake ${FAKE_VERSION}');\n`);
   const digest = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
   let corruptChecksums = false;
+  // Releases are signed: the fake index signs with a key made for this run, which the binary is told to trust
+  // (MCP_CLI_RELEASE_KEY, on top of the keys built in). The signature is made here with node:crypto, not with
+  // the code under test.
+  const releaseKey = generateKeyPairSync("ed25519");
+  const releaseKeyB64 = Buffer.from(releaseKey.publicKey.export({ format: "der", type: "spki" }).subarray(-32)).toString("base64");
+  const currentAsset = `prime-${CURRENT_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`;
+  const sumsFor = (which: "new" | "old"): string => {
+    if (which === "old") return `${digest(fakeBinaryBytes)}  ${currentAsset}\n${digest(fakeBundleBytes)}  prime-${CURRENT_VERSION}.js\n`;
+    const binaryHash = corruptChecksums ? "0".repeat(64) : digest(fakeBinaryBytes);
+    return `${binaryHash}  ${fakeAsset}\n${digest(fakeBundleBytes)}  ${fakeBundle}\n`;
+  };
+  const releaseFor = (version: string, sums: string): string =>
+    `prime-release-v1\nversion ${version}\nsha256sums ${digest(new TextEncoder().encode(sums))}\n`;
+  const signedAssets = (base: string) => [
+    { name: "RELEASE", browser_download_url: `${UPDATE_BASE}/${base}-release`, size: 0 },
+    { name: "RELEASE.sig", browser_download_url: `${UPDATE_BASE}/${base}-sig`, size: 64 },
+  ];
 
   const updateServer = Bun.serve({
     port: UPDATE_PORT,
@@ -651,6 +669,7 @@ try {
               { name: fakeAsset, browser_download_url: `${UPDATE_BASE}/asset`, size: fakeBinaryBytes.length },
               { name: fakeBundle, browser_download_url: `${UPDATE_BASE}/bundle`, size: fakeBundleBytes.length },
               { name: "SHA256SUMS", browser_download_url: `${UPDATE_BASE}/sums`, size: 0 },
+              ...signedAssets("new"),
             ],
           },
           // An older release must be ignored in favour of the newest.
@@ -666,6 +685,7 @@ try {
               { name: `prime-${CURRENT_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}`, browser_download_url: `${UPDATE_BASE}/asset`, size: fakeBinaryBytes.length },
               { name: `prime-${CURRENT_VERSION}.js`, browser_download_url: `${UPDATE_BASE}/bundle`, size: fakeBundleBytes.length },
               { name: "SHA256SUMS", browser_download_url: `${UPDATE_BASE}/sums-old`, size: 0 },
+              ...signedAssets("old"),
             ],
           },
           // A draft and a non-CLI tag must both be ignored (the draft is the
@@ -676,18 +696,18 @@ try {
       }
       if (path === "/asset") return new Response(fakeBinaryBytes);
       if (path === "/bundle") return new Response(fakeBundleBytes);
-      if (path === "/sums-old") {
-        return new Response(`${digest(fakeBinaryBytes)}  prime-${CURRENT_VERSION}-${fakeOs}-${fakeArch}${fakeOs === "windows" ? ".exe" : ""}\n${digest(fakeBundleBytes)}  prime-${CURRENT_VERSION}.js\n`);
-      }
-      if (path === "/sums") {
-        const binaryHash = corruptChecksums ? "0".repeat(64) : digest(fakeBinaryBytes);
-        return new Response(`${binaryHash}  ${fakeAsset}\n${digest(fakeBundleBytes)}  ${fakeBundle}\n`);
+      if (path === "/sums-old") return new Response(sumsFor("old"));
+      if (path === "/sums") return new Response(sumsFor("new"));
+      for (const [base, version, which] of [["new", FAKE_VERSION, "new"], ["old", CURRENT_VERSION, "old"]] as const) {
+        const release = releaseFor(version, sumsFor(which));
+        if (path === `/${base}-release`) return new Response(release);
+        if (path === `/${base}-sig`) return new Response(cryptoSign(null, Buffer.from(release), releaseKey.privateKey));
       }
       return new Response("not found", { status: 404 });
     },
   });
 
-  const updateEnv = { MCP_CLI_API_BASE: UPDATE_BASE };
+  const updateEnv = { MCP_CLI_API_BASE: UPDATE_BASE, MCP_CLI_RELEASE_KEY: releaseKeyB64 };
   const installDir = mkdtempSync(join(tmpdir(), "prime-update-"));
 
   const checkRun = await cli(["update", "--check", "--json"], { env: updateEnv });
