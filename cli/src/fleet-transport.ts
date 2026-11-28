@@ -149,6 +149,8 @@ export interface FleetManifest {
    * fleet's own copy of the manifest does not carry it). A member that applies the snapshot does not delete them.
    */
   kept?: string[];
+  /** The list in `kept` is not every path that was left out (read from `meta`, like `kept`). */
+  keptCut?: true;
   /** Which epoch published this, for the fencing check. */
   epoch: number;
   createdAt: number;

@@ -651,7 +651,7 @@ export function metaBindingOf(m: FleetManifest, packHash: string, deltaHash: str
  * roster say something else. What the metadata says is what is believed; the seal then binds it.
  */
 export function withOpenedMeta(m: FleetManifest, packHash: string, deltaHash: string | null, opened: OpenedPayload): FleetManifest {
-  if (m.meta === undefined) return m.kept === undefined ? m : manifestCopy(m, { kept: undefined });
+  if (m.meta === undefined) return m.kept === undefined && m.keptCut === undefined ? m : manifestCopy(m, { kept: undefined, keptCut: undefined });
   const meta = typeof m.meta === "string" ? opened.openMeta(metaBindingOf(m, packHash, deltaHash), m.meta) : null;
   if (meta === null) {
     throw new TamperedSnapshotError(m.seq, "its sealed metadata does not open for this manifest (it was damaged, or taken from another snapshot's)");
@@ -668,6 +668,8 @@ export function withOpenedMeta(m: FleetManifest, packHash: string, deltaHash: st
   const kept = keptFrom(meta.kept);
   if (kept.length > 0) read.kept = kept;
   else delete read.kept;
+  if (meta.keptCut === true) read.keptCut = true;
+  else delete read.keptCut;
   return read;
 }
 

@@ -119,3 +119,47 @@ describe("a replica that already holds a file the gate now leaves out", () => {
     expect(readFileSync(join(replica.work, "fixture.ts"), "utf8")).toContain("// new");
   }, 60_000);
 });
+
+describe("more files left out than the metadata can list", () => {
+  const fixture = (i: number): string => "fixtures/case-" + String(i).padStart(3, "0") + ".txt";
+  const aws = (): string => "aws_key_id = AK" + "IA" + "ABCDEFGHIJKLMNOP\n";
+
+  test("a replica keeps every one of them, though the list in the snapshot is cut (the reviewer's 300 fixtures)", async () => {
+    const { primary, replica } = fleet();
+    mkdirSync(join(primary.work, "fixtures"), { recursive: true });
+    writeFileSync(join(primary.work, "ok.txt"), "one\n");
+    writeFileSync(join(primary.work, "plain.txt"), "plain\n");
+    const N = 300;
+    for (let i = 0; i < N; i++) writeFileSync(join(primary.work, fixture(i)), aws() + "// " + i + "\n");
+    process.env.PRIME_FLEET_SECRET_GATE = "off";
+    const one = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+    const got = await pull(credsFor("replica-device"), "x", replica, 0);
+    delete process.env.PRIME_FLEET_SECRET_GATE;
+    writeFileSync(join(primary.work, "ok.txt"), "two\n");
+    const two = await publish(credsFor("primary-device"), "x", primary, one.commit, one.seq, 2, one.roster);
+    expect(two.kept!.length).toBe(N);
+    await pull(credsFor("replica-device"), "x", replica, got.seq, got.commit);
+    let gone = 0;
+    for (let i = 0; i < N; i++) if (!existsSync(join(replica.work, fixture(i)))) gone++;
+    expect(gone).toBe(0);
+    expect(readFileSync(join(replica.work, "ok.txt"), "utf8")).toBe("two\n");
+  }, 120_000);
+
+  test("a file whose content matches goes untouched on a replica even when the snapshot lists nothing; a plain file the primary deleted is deleted", async () => {
+    const { primary, replica } = fleet();
+    writeFileSync(join(primary.work, "ok.txt"), "one\n");
+    writeFileSync(join(primary.work, "gone.txt"), "bye\n");
+    writeFileSync(join(primary.work, "fixture.ts"), aws());
+    process.env.PRIME_FLEET_SECRET_GATE = "off";
+    const one = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+    const got = await pull(credsFor("replica-device"), "x", replica, 0);
+    rmSync(join(primary.work, "fixture.ts"));
+    rmSync(join(primary.work, "gone.txt"));
+    const two = await publish(credsFor("primary-device"), "x", primary, one.commit, one.seq, 2, one.roster);
+    expect(two.kept).toBeUndefined();
+    await pull(credsFor("replica-device"), "x", replica, got.seq, got.commit);
+    expect(existsSync(join(replica.work, "gone.txt"))).toBe(false);
+    expect(existsSync(join(replica.work, "fixture.ts"))).toBe(true);
+  }, 60_000);
+});
+

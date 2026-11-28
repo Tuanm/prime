@@ -288,6 +288,8 @@ export interface SnapshotMeta {
   roster?: string;
   actor?: unknown;
   kept?: unknown;
+  /** True when `kept` is not every path that was left out (it was cut, or dropped for size): an apply keeps every removal it cannot account for. */
+  keptCut?: boolean;
 }
 
 /**
@@ -339,7 +341,7 @@ function fitMeta(meta: SnapshotMeta): Buffer {
   for (const drop of ["kept", "actor"] as const) {
     if (bytes.length <= META_MAX_BYTES) break;
     const { [drop]: _dropped, ...rest } = meta;
-    meta = rest as SnapshotMeta;
+    meta = (drop === "kept" ? { ...rest, keptCut: true } : rest) as SnapshotMeta;
     bytes = Buffer.from(JSON.stringify(meta), "utf8");
   }
   if (bytes.length > META_MAX_BYTES) throw new Error("the snapshot's sealed metadata is " + bytes.length + " bytes, and a member reads at most " + META_MAX_BYTES);

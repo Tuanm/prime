@@ -175,6 +175,63 @@ async function readBlobs(gitDir: string, ids: string[]): Promise<Map<string, str
   return out;
 }
 
+/** The sizes of objects, through one `git cat-file --batch-check` (a missing object has none). */
+async function sizesOf(gitDir: string, ids: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (ids.length === 0) return out;
+  const child = spawn("git", ["cat-file", "--batch-check"], { env: gitEnv(gitDir), stdio: ["pipe", "pipe", "ignore"] });
+  const chunks: Buffer[] = [];
+  child.stdout.on("data", (d: Buffer) => chunks.push(d));
+  const done = new Promise<void>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", () => resolve());
+  });
+  child.stdin.end(ids.join("\n") + "\n");
+  await done;
+  for (const line of Buffer.concat(chunks).toString("utf8").split("\n")) {
+    const [id, type, size] = line.split(" ");
+    if (id && type === "blob" && size !== undefined && Number.isSafeInteger(Number(size))) out.set(id, Number(size));
+  }
+  return out;
+}
+
+/**
+ * Of the files that go from one snapshot to the next (`previous` has them, `commit` does not), the ones that look like secrets, by
+ * name or by what a text file of at most `SCAN_MAX_BYTES` holds: what a replica leaves where it is, whatever the snapshot's own list
+ * of what was left out says (it can be cut, or missing). Read from the replica's own object store.
+ */
+export async function removedSecrets(gitDir: string, previous: string, commit: string): Promise<string[]> {
+  const raw = (await exec("git", ["diff-tree", "-r", "--no-renames", "--diff-filter=D", "-z", "--raw", previous, commit], { env: gitEnv(gitDir), maxBuffer: 256 * 1024 * 1024, encoding: "utf8" })).stdout;
+  const parts = raw.split("\u0000");
+  const gone: Array<{ id: string; path: string }> = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const meta = parts[i]!.split(" ");
+    const path = parts[i + 1]!;
+    if (meta.length < 5 || path === "") continue;
+    if (meta[1] === "120000" || meta[0] === ":120000") continue; // a symbolic link is a name, not a file's content
+    gone.push({ id: meta[2]!, path });
+  }
+  const hits: string[] = [];
+  const toRead: Array<{ id: string; path: string }> = [];
+  for (const g of gone) {
+    if (secretPathReason(g.path) !== null) hits.push(g.path);
+    else if (!contentCache.has(g.id) || contentCache.get(g.id) !== undefined) toRead.push(g);
+  }
+  const sizes = await sizesOf(gitDir, [...new Set(toRead.map((t) => t.id))]);
+  const unique = [...new Set(toRead.filter((t) => (sizes.get(t.id) ?? 0) > 0 && sizes.get(t.id)! <= SCAN_MAX_BYTES && !contentCache.has(t.id)).map((t) => t.id))];
+  for (let i = 0; i < unique.length; i += 500) {
+    const part = unique.slice(i, i + 500);
+    const texts = await readBlobs(gitDir, part);
+    for (const id of part) {
+      if (contentCache.size >= CACHE_MAX) contentCache.clear();
+      const text = texts.get(id);
+      contentCache.set(id, text === undefined ? null : secretContentReason(text));
+    }
+  }
+  for (const t of toRead) if (contentCache.get(t.id)) hits.push(t.path);
+  return hits;
+}
+
 /**
  * The files of a snapshot's tree that look like secrets, and are not allowed: by name, and by what a text file of at most
  * `SCAN_MAX_BYTES` holds. `tree` is read from the member's object store (`gitDir`), so nothing in the work tree is touched.
@@ -226,6 +283,7 @@ const KEPT_BYTES_MAX = 32 * 1024;
 
 /** The paths to put in a snapshot's metadata: as many as fit (`KEPT_MAX`, and `KEPT_BYTES_MAX` of text), in order. */
 export function keptForMeta(paths: string[]): string[] {
+  // (`keptWasCut` says whether this left some out.)
   const out: string[] = [];
   let bytes = 0;
   for (const p of paths) {
@@ -235,6 +293,11 @@ export function keptForMeta(paths: string[]): string[] {
     bytes += n;
   }
   return out;
+}
+
+/** Whether `keptForMeta` had to leave some of the paths out: a member that applies the snapshot then keeps what it cannot tell. */
+export function keptWasCut(paths: string[]): boolean {
+  return keptForMeta(paths).length < paths.length;
 }
 
 /** The paths a snapshot's metadata says were left out; what is not a plain list of paths is ignored. */

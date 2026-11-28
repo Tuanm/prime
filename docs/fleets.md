@@ -712,8 +712,8 @@ The allow list belongs to the member that publishes (it is kept beside its key).
 recognise goes through, and so does anything the operator allowed.
 
 **What a replica does.** A replica that holds a file the gate now leaves out (it received it from a primary that had no gate) keeps it: an apply
-never removes a path in the snapshot's sealed `kept` list, and never removes a file that the name rules above call a secret, whatever the snapshot
-says (a list that was cut, or a primary of an earlier build). The other side of that: a `.env` that the primary really deletes stays on the
+never removes a path in the snapshot's sealed `kept` list, and never removes a file that the name rules above call a secret or whose content they match (read from the replica's own store), whatever the snapshot
+says (a primary of an earlier build). When more files were left out than the sealed list can hold (256 paths, 32 KB), the snapshot says the list was cut, and the replica then keeps every file the apply would remove. The other side of that: a `.env` that the primary really deletes stays on the
 replicas until someone removes it there. A member of an earlier build (before this release) still deletes the file once, so upgrade the replicas
 before the primary.
 
