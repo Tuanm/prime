@@ -462,7 +462,7 @@ export async function putSnapshot(
   fleet: string,
   manifest: FleetManifest,
   pack: Buffer,
-): Promise<{ ok: boolean; seq?: number; manifestKey?: string; error?: string; status?: number }> {
+): Promise<{ ok: boolean; seq?: number; manifestKey?: string; error?: string; status?: number; missing?: string[]; chunks?: false }> {
   const manifestBytes = Buffer.from(JSON.stringify(manifest), "utf8");
   const header = Buffer.alloc(4);
   header.writeUInt32BE(manifestBytes.length, 0);
@@ -474,8 +474,12 @@ export async function putSnapshot(
     body,
     "application/octet-stream",
   );
-  const result = (await res.json().catch(() => ({}))) as { ok?: boolean; seq?: number; manifestKey?: string; error?: string };
-  if (!res.ok) return { ok: false, error: result.error ?? ("status " + res.status), status: res.status };
+  const result = (await res.json().catch(() => ({}))) as { ok?: boolean; seq?: number; manifestKey?: string; error?: string; missing?: unknown; chunks?: unknown };
+  if (!res.ok) {
+    // A gateway that takes pieces says which of them it does not have (a refused publish took them with it), and when a member cannot read them.
+    const missing = Array.isArray(result.missing) ? result.missing.filter((h): h is string => typeof h === "string" && /^[0-9a-f]{64}$/.test(h)) : [];
+    return { ok: false, error: result.error ?? ("status " + res.status), status: res.status, ...(missing.length > 0 ? { missing } : {}), ...(result.chunks === false ? { chunks: false as const } : {}) };
+  }
   return { ok: true, seq: result.seq, manifestKey: result.manifestKey };
 }
 

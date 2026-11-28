@@ -206,8 +206,8 @@ export class FakeGateway {
         if (this.chunkedLimit !== undefined && pieces.reduce((n, c) => n + c.bytes, 0) > this.chunkedLimit) {
           return Response.json({ error: "this snapshot is bigger than the gateway takes in pieces", limit: this.chunkedLimit }, { status: 413 });
         }
-        const gone = pieces.find((c) => !this.payloads.has("fleets/x/packs/" + c.hash));
-        if (gone) return Response.json({ error: "a piece of the pack was not stored: " + gone.hash }, { status: 400 });
+        const gone = pieces.filter((c) => !this.payloads.has("fleets/x/packs/" + c.hash));
+        if (gone.length > 0) return Response.json({ error: "a piece of the pack is not stored (or not at its size)", missing: gone.map((c) => c.hash) }, { status: 409 });
         packKey = String(manifest.packKey);
       } else {
         manifest.packKey = packKey;

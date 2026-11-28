@@ -178,11 +178,11 @@ describe("a snapshot bigger than one request", () => {
     expect(posts()).toBe(0);
   });
 
-  test("a piece that was not stored is a refused publish, not a head that names it", async () => {
+  test("a piece the gateway lost is sent again, and the publish goes through", async () => {
     const w = await world();
     const original = w.gateway.handle.bind(w.gateway);
     let dropped = 0;
-    // A gateway that takes the upload of a piece and loses it.
+    // A gateway that takes the upload of a piece and loses it, once.
     w.gateway.handle = async (creds, method, path, body, search) => {
       const res = await original(creds, method, path, body, search);
       if (method === "POST" && path.endsWith("/packs") && dropped++ === 3) {
@@ -191,8 +191,36 @@ describe("a snapshot bigger than one request", () => {
       }
       return res;
     };
+    const one = await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2);
+    expect(one.seq).toBe(1);
+    expect(w.gateway.head).not.toBeNull();
+  });
+
+  test("a gateway that keeps losing a piece is a refused publish, not a head that names it", async () => {
+    const w = await world();
+    const original = w.gateway.handle.bind(w.gateway);
+    let lost: string | undefined;
+    w.gateway.handle = async (creds, method, path, body, search) => {
+      const res = await original(creds, method, path, body, search);
+      if (method === "POST" && path.endsWith("/packs")) {
+        const { hash } = (await res.clone().json()) as { hash: string };
+        lost ??= hash;
+        if (hash === lost) w.gateway.payloads.delete("fleets/x/packs/" + hash);
+      }
+      return res;
+    };
     await expect(publish(credsFor("primary-device"), "x", w.primary, null, 0, 2)).rejects.toThrow(/head moved|another member/);
     expect(w.gateway.head).toBeNull();
+  });
+
+  test("a gateway that says a member cannot read pieces gives an error that says so", async () => {
+    const w = await world();
+    const original = w.gateway.handle.bind(w.gateway);
+    w.gateway.handle = async (creds, method, path, body, search) => {
+      if (method === "POST" && path.endsWith("/snapshot")) return Response.json({ error: "every member must list chunks", chunks: false, members: 2 }, { status: 409 });
+      return original(creds, method, path, body, search);
+    };
+    await expect(publish(credsFor("primary-device"), "x", w.primary, null, 0, 2)).rejects.toThrow(/cannot read a snapshot in pieces/);
   });
 });
 

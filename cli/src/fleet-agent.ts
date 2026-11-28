@@ -548,6 +548,16 @@ export async function publish(
     if (mainPieces) await putChunks(creds, fleet, main, chunkBytes);
     moved = await putSnapshot(creds, fleet, manifest, frame);
   }
+  // A piece the gateway does not have (it was swept, or stored at another size): pieces are stored under their own hashes, so they are sent
+  // again and the manifest once more.
+  if (!moved.ok && moved.status === 409 && moved.missing !== undefined && (mainPieces !== undefined || sendInPieces[1])) {
+    if (sealed.ciphertexts[1] && sendInPieces[1]) await putChunks(creds, fleet, sealed.ciphertexts[1], chunkBytes);
+    if (mainPieces) await putChunks(creds, fleet, main, chunkBytes);
+    moved = await putSnapshot(creds, fleet, manifest, frame);
+  }
+  if (!moved.ok && moved.status === 409 && moved.chunks === false) {
+    throw new Error("a member of the fleet cannot read a snapshot in pieces yet, so this one (" + main.length + " bytes) cannot be published: " + (moved.error ?? "the gateway refused it"));
+  }
   // Too big for the gateway to take: the head did not move, and nobody won; the gateway says what to do.
   if (!moved.ok && moved.status === 413) throw new Error(moved.error ?? "the snapshot is too big for the gateway");
   if (!moved.ok) {
