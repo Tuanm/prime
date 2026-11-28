@@ -451,11 +451,13 @@ async function main(argv: string[]): Promise<void> {
         const { restartFleetAgentAfterUpdate } = await import("./fleet-daemon.ts");
         agentRestart = await restartFleetAgentAfterUpdate(ctx.configPath, undefined, { target: outcome.target }).catch((err: unknown) => ({ error: err instanceof Error ? err.message + ((err as { hint?: string }).hint ? " (" + (err as { hint?: string }).hint + ")" : "") : String(err) }));
       }
-      if (ctx.json) process.stdout.write(`${JSON.stringify({ ...outcome, ...("error" in agentRestart ? { agent_restart_error: agentRestart.error } : agentRestart.restarted ? { agent_restarted: agentRestart.via, ...(agentRestart.pending ? { agent_restart_pending: true } : {}) } : {}) }, null, 2)}\n`);
+      if (ctx.json) process.stdout.write(`${JSON.stringify({ ...outcome, ...("error" in agentRestart ? { agent_restart_error: agentRestart.error } : agentRestart.restarted ? { agent_restarted: agentRestart.via, ...(agentRestart.pending ? { agent_restart_pending: true } : {}), ...(agentRestart.inProgress ? { agent_restart_in_progress: true } : {}) } : {}) }, null, 2)}\n`);
       else process.stdout.write(`${renderUpdate(outcome)}\n`);
       if (!ctx.json) {
         if ("error" in agentRestart) {
           ctx.note(`could not restart the fleet agent of ${ctx.configPath}: ${agentRestart.error}`);
+        } else if (agentRestart.restarted && agentRestart.inProgress) {
+          ctx.note(`an update of the fleet agent of ${ctx.configPath} is already in progress: its new build waits for the running agent to finish its round; this update left the agent alone`);
         } else if (agentRestart.restarted && agentRestart.pending) {
           ctx.note(`asked the fleet agent of ${ctx.configPath} to restart${agentRestart.via === "service" ? " (through its service)" : ""}: it is finishing its round, and the new build starts when it has; no other agent was touched`);
         } else if (agentRestart.restarted) {

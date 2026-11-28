@@ -23,6 +23,8 @@ export const STOP_FILE = "stop";
 /** How often a waiting successor touches its entry, and how long an entry that was touched is believed. */
 const TOUCH_MS = 5_000;
 const FRESH_MS = 30_000;
+/** How often a successor looks whether the agent it waits for is still there. */
+const TURN_MS = 1_000;
 
 function pidAlive(pid: number): boolean {
   try {
@@ -68,13 +70,15 @@ export interface Successor {
   pid: number;
   /** When it was written. */
   at: number;
+  /** The agent it was started to replace (an update says so, once it has started it). */
+  replaces?: number;
 }
 
 export function readSuccessor(agentDir: string): Successor | undefined {
   try {
-    const raw = JSON.parse(readFileSync(successorPath(agentDir), "utf8")) as { pid?: unknown; at?: unknown };
+    const raw = JSON.parse(readFileSync(successorPath(agentDir), "utf8")) as { pid?: unknown; at?: unknown; replaces?: unknown };
     if (typeof raw.pid !== "number" || typeof raw.at !== "number") return undefined;
-    return { pid: raw.pid, at: raw.at };
+    return { pid: raw.pid, at: raw.at, ...(typeof raw.replaces === "number" ? { replaces: raw.replaces } : {}) };
   } catch {
     return undefined;
   }
@@ -109,9 +113,9 @@ export function claimSuccessor(
 }
 
 /** Say which process the successor is, once it is started. */
-export function registerSuccessor(agentDir: string, pid: number, now: number = Date.now()): void {
+export function registerSuccessor(agentDir: string, pid: number, now: number = Date.now(), replaces?: number): void {
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  writeFileSync(successorPath(agentDir), JSON.stringify({ pid, at: now }), { mode: 0o600 });
+  writeFileSync(successorPath(agentDir), JSON.stringify({ pid, at: now, ...(replaces !== undefined ? { replaces } : {}) }), { mode: 0o600 });
 }
 
 /** Forget the successor (it holds the lock, or was never started): only if it is `pid`'s, when one is named. */
@@ -140,6 +144,52 @@ export function stopSuccessor(
     return undefined;
   }
   return there.pid;
+}
+
+/**
+ * Whether an update that finds the successor of another may ask the agent that runs to stop (the other update may have
+ * died before it did). Only a successor that is registered, is of this configuration and is waiting for exactly that
+ * agent, and that has been up for longer than the time an update gives a new build to show it starts, is one that an
+ * update is not still at: before that, the update that started it is the one to ask (and to leave the old agent be if the
+ * new build does not start), and an agent that the successor was not started to replace is not its to have stopped.
+ */
+export function mayAskAgainToStop(agentDir: string, running: number, startCheckMs: number, now: number = Date.now(), isAgent: (pid: number) => boolean = (pid) => isSuccessorProcess(agentDir, pid)): boolean {
+  const there = readSuccessor(agentDir);
+  if (!there || there.pid <= 0 || there.replaces !== running) return false;
+  return now - there.at > startCheckMs && isAgent(there.pid);
+}
+
+/** The values an update hands to the agent it starts (read once; see `takeHandoverEnv`). */
+export interface Handover {
+  /** The time of the update's claim, if it is believable for an agent that was started at `startedAt`. */
+  since?: number;
+  /** The agent it replaces. */
+  replaces?: number;
+  /** How long it waits for the lock. */
+  lockWaitMs?: number;
+}
+
+/** The claim of an update is older than the agent it started by a moment: a time further back than this is not one. */
+const SINCE_WINDOW_MS = 60_000;
+
+/**
+ * Read the handover variables of an agent's environment and remove them, so that what the agent starts (git, a container,
+ * another `prime`) does not take them for its own. A claim time is believed only if it is up to a minute before the
+ * moment the process started; one from further back (a variable left in a shell) would make every old stop request count.
+ */
+export function takeHandoverEnv(env: Record<string, string | undefined>, startedAt: number): Handover {
+  const since = Number(env.PRIME_FLEET_SINCE);
+  const replaces = Number(env.PRIME_FLEET_REPLACES);
+  const wait = env.PRIME_FLEET_LOCK_WAIT_MS;
+  const lockWait = Number(wait);
+  delete env.PRIME_FLEET_SINCE;
+  delete env.PRIME_FLEET_REPLACES;
+  delete env.PRIME_FLEET_LOCK_WAIT_MS;
+  return {
+    ...(Number.isFinite(since) && since > startedAt - SINCE_WINDOW_MS && since <= startedAt + SLACK_MS ? { since } : {}),
+    ...(Number.isInteger(replaces) && replaces > 0 ? { replaces } : {}),
+    ...(wait !== undefined && wait !== "" && Number.isFinite(lockWait) && lockWait >= 0 ? { lockWaitMs: lockWait } : {}),
+  };
 }
 
 /**
@@ -221,6 +271,8 @@ export interface StartingOptions {
   startedAt: number;
   /** The agent this one replaces, which was asked to stop: while it holds the lock, this one waits on. */
   replaces?: number;
+  /** How long one turn of that wait is (a test shortens it). */
+  turnMs?: number;
   /** Replaced in tests. */
   acquire?: (agentDir: string, opts: AgentLockOptions) => Promise<AgentLock>;
   isAgent?: (pid: number) => boolean;
@@ -251,10 +303,26 @@ export async function acquireStarting(agentDir: string, o: StartingOptions): Pro
   touch.unref?.();
   let lock: AgentLock;
   try {
-    lock = await acquire(agentDir, { ...o.lock, waitMs: o.waitMs });
-    while (!lock.held && o.replaces !== undefined && lock.holder === o.replaces && isAgent(o.replaces)) {
-      o.onWait?.(lock.holder);
-      lock = await acquire(agentDir, { ...o.lock, waitMs: o.waitMs });
+    if (o.replaces === undefined) lock = await acquire(agentDir, { ...o.lock, waitMs: o.waitMs });
+    else {
+      // The wait is made in short turns, to see whether the agent it was to replace is still the one it waits for.
+      let until = Date.now() + o.waitMs;
+      for (;;) {
+        lock = await acquire(agentDir, { ...o.lock, waitMs: Math.max(0, Math.min(until - Date.now(), o.turnMs ?? TURN_MS)) });
+        if (lock.held) break;
+        if (lock.holder === o.replaces && isAgent(o.replaces)) {
+          // It is still at its round: this one keeps waiting for it, for as long as it does.
+          if (Date.now() >= until) {
+            o.onWait?.(lock.holder);
+            until = Date.now() + Math.max(o.waitMs, TURN_MS);
+          }
+          continue;
+        }
+        // Another agent has the lock, and the one that was to be replaced is gone (someone started one meanwhile): there
+        // is nothing here to take over from, and waiting for a stranger's round would keep every later update waiting too.
+        if (lock.holder > 0 && lock.holder !== o.replaces) break;
+        if (Date.now() >= until) break;
+      }
     }
   } finally {
     clearInterval(touch);

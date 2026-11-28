@@ -29,7 +29,7 @@ import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { commandOf, isFleetAgentProcess } from "./fleet-agent-lock.ts";
-import { acquireStarting, claimSuccessor, clearSuccessor, isSuccessorProcess, readSuccessor, registerSuccessor, requestStop, stopSuccessor, stopWaitingSuccessor as stopWaiting, watchForStop } from "./fleet-agent-handover.ts";
+import { acquireStarting, claimSuccessor, clearSuccessor, isSuccessorProcess, mayAskAgainToStop, takeHandoverEnv, readSuccessor, registerSuccessor, requestStop, stopSuccessor, stopWaitingSuccessor as stopWaiting, watchForStop } from "./fleet-agent-handover.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { keyIdOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
@@ -667,7 +667,7 @@ function startAgentProcess(configPath: string, env: Record<string, string | unde
 /** What `restartFleetAgentAfterUpdate` did. */
 export type AgentRestart =
   | { restarted: false; reason?: string }
-  | { restarted: true; via: "service" | "direct"; pid?: number; pending?: boolean };
+  | { restarted: true; via: "service" | "direct"; pid?: number; pending?: boolean; inProgress?: boolean };
 
 export interface AgentRestartOptions {
   /** The file the update installed; the agent is restarted only if that is the program it runs. */
@@ -797,9 +797,14 @@ export async function restartFleetAgentAfterUpdate(
   // same moment, one starts it.
   const claim = claimSuccessor(dir, existing.pid);
   if (!claim.claimed) {
-    // The update that started it may have died before it asked the old agent to stop: asking again costs nothing.
-    askToStop();
-    return { restarted: true, via: "direct", ...(claim.pid > 0 ? { pid: claim.pid } : {}), pending: true };
+    // Another update has started one. If it is past the time it is given to show that it started, and was started for
+    // this agent, the update that started it may have died before it asked the agent to stop: asking again costs
+    // nothing. Before that (a claim with no process yet, or a build that is still being looked at) the update at it asks
+    // itself, and an agent that is stopped for a build that then fails to start is one that nothing runs.
+    const startCheck = opts.startCheckMs ?? (waitMs === undefined ? START_CHECK_MS : Math.min(START_CHECK_MS, waitMs));
+    const again = mayAskAgainToStop(dir, existing.pid, startCheck);
+    if (again) askToStop();
+    return { restarted: true, via: "direct", ...(claim.pid > 0 ? { pid: claim.pid } : {}), pending: true, ...(again ? {} : { inProgress: true }) };
   }
   const env = {
     ...buildAgentEnv(configPath, {}, process.env, false),
@@ -815,7 +820,7 @@ export async function restartFleetAgentAfterUpdate(
     clearSuccessor(dir);
     throw err;
   }
-  if (child) registerSuccessor(dir, child.pid);
+  if (child) registerSuccessor(dir, child.pid, Date.now(), existing.pid);
   const checkUntil = Date.now() + (opts.startCheckMs ?? (waitMs === undefined ? START_CHECK_MS : Math.min(START_CHECK_MS, waitMs)));
   while (Date.now() < checkUntil) {
     if (child && child.exitCode !== null) {
@@ -1757,15 +1762,11 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
 }
 
 /**
- * How long a starting agent waits for the holder of the lock. An agent that a command started
- * (after it had stopped any old one and waited for it to be gone) is told not to wait: a live
- * holder is a winner of a race, and it leaves at once. One a service manager restarts waits for
- * the old one to finish its round.
+ * How long a starting agent waits for the holder of the lock when it was not told (PRIME_FLEET_LOCK_WAIT_MS). An agent that
+ * a command started (after it had stopped any old one and waited for it to be gone) is told not to wait: a live holder is
+ * a winner of a race, and it leaves at once. One a service manager restarts waits for the old one to finish its round.
  */
-function lockWaitFromEnv(): number {
-  const n = Number(process.env.PRIME_FLEET_LOCK_WAIT_MS);
-  return process.env.PRIME_FLEET_LOCK_WAIT_MS !== undefined && Number.isFinite(n) && n >= 0 ? n : 10_000;
-}
+const DEFAULT_LOCK_WAIT_MS = 10_000;
 
 /**
  * The agent's loop.
@@ -1775,17 +1776,19 @@ function lockWaitFromEnv(): number {
  */
 export async function runFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<void> {
   // When this process was started: a stop that was asked for after that is for this agent too.
+  const realStart = Date.now() - process.uptime() * 1000;
+  // What an update that started this process told it (and which is not passed on to what it starts).
+  const handover = takeHandoverEnv(process.env, realStart);
   // (An agent that an update started was started on behalf of the update's claim, a moment earlier: see `claimSuccessor`.)
-  const since = Number(process.env.PRIME_FLEET_SINCE);
-  const startedAtMs = Math.min(Date.now() - process.uptime() * 1000, Number.isFinite(since) && since > 0 ? since - SINCE_MARGIN_MS : Infinity);
-  const replaces = Number(process.env.PRIME_FLEET_REPLACES);
+  const startedAtMs = Math.min(realStart, handover.since !== undefined ? handover.since - SINCE_MARGIN_MS : Infinity);
+  const replaces = handover.replaces;
   // Two agents for the same spaces would both act as the primary. A restart finds the old
   // one still finishing its round, so it is given a moment to let go (and one that was started to replace it
   // waits for as long as that agent is at it).
   const lock = await acquireStarting(fleetAgentDir(configPath), {
-    waitMs: options.lockWaitMs ?? lockWaitFromEnv(),
+    waitMs: options.lockWaitMs ?? handover.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
     startedAt: startedAtMs,
-    ...(Number.isInteger(replaces) && replaces > 0 ? { replaces } : {}),
+    ...(replaces !== undefined ? { replaces } : {}),
     onWait: (holder) => process.stderr.write("the fleet agent (pid " + holder + ") is still finishing its round; this one keeps waiting for it\n"),
     lock: {
       // Another agent has the lock: two took a dead one at the same moment. This one stops, and its

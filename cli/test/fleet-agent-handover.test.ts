@@ -11,6 +11,7 @@ import {
   acquireStarting,
   claimSuccessor,
   isSuccessorProcess,
+  mayAskAgainToStop,
   readSuccessor,
   registerSuccessor,
   requestStop,
@@ -19,6 +20,7 @@ import {
   stopSuccessor,
   stopWaitingSuccessor,
   successorPath,
+  takeHandoverEnv,
   watchForStop,
 } from "../src/fleet-agent-handover";
 import {
@@ -660,7 +662,8 @@ withProcesses("an update only signals what is still the agent it meant to stop",
     // The successor of an update that died: a process that is an agent to the process list, and an entry that was just touched.
     const waiting = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdout: "ignore", stderr: "ignore" });
     cleanups.push(() => waiting.kill("SIGKILL"));
-    registerSuccessor(fleetAgentDir(configPath), waiting.pid);
+    // Started for this agent, and past the time an update gives a new build to show it starts.
+    registerSuccessor(fleetAgentDir(configPath), waiting.pid, Date.now() - 10_000, old.pid);
     let spawned = 0;
     const result = await restartFleetAgentAfterUpdate(
       configPath,
@@ -671,6 +674,46 @@ withProcesses("an update only signals what is still the agent it meant to stop",
     expect(result).toEqual({ restarted: true, via: "direct", pid: waiting.pid, pending: true });
     expect(await until(() => said(log, old.pid).includes("sigterm"))).toBe(true);
   }, 20_000);
+
+  async function secondUpdate(entry: (dir: string, old: Spawned, waiting: Spawned) => void): Promise<{ result: unknown; old: Spawned; log: string; spawned: number }> {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const log = join(root, "log");
+    const old = await oldAgent(configPath, log, "never");
+    const waiting = Bun.spawn(["sh", "-c", "sleep 60", "__fleet-agent"], { stdout: "ignore", stderr: "ignore" });
+    cleanups.push(() => waiting.kill("SIGKILL"));
+    entry(fleetAgentDir(configPath), old, waiting as unknown as Spawned);
+    let spawned = 0;
+    const result = await restartFleetAgentAfterUpdate(
+      configPath,
+      unsupervised(() => (spawned++, waiting as unknown as StartedAgent)),
+      { platform: "linux", startCheckMs: 1500, isAgent: () => true },
+    );
+    await Bun.sleep(300);
+    return { result, old, log, spawned };
+  }
+
+  test("a claim that has no process yet is the other update's to finish: the running agent is left alone, and the update says so", async () => {
+    const { result, old, log, spawned } = await secondUpdate((dir) => void claimSuccessor(dir, undefined));
+    expect(spawned).toBe(0);
+    expect(result).toEqual({ restarted: true, via: "direct", pending: true, inProgress: true });
+    expect(said(log, old.pid)).not.toContain("sigterm");
+    expect(alive(old.pid)).toBe(true);
+  }, 20_000);
+
+  test("a successor that is still inside the time it is given to show that it starts is left to the update that started it", async () => {
+    const { result, old, log } = await secondUpdate((dir, o, w) => registerSuccessor(dir, w.pid, Date.now() - 200, o.pid));
+    expect(result).toMatchObject({ restarted: true, pending: true, inProgress: true });
+    expect(said(log, old.pid)).not.toContain("sigterm");
+  }, 20_000);
+
+  test("a successor that was not started for the agent that runs does not have that agent stopped", async () => {
+    const { result, old, log } = await secondUpdate((dir, _o, w) => registerSuccessor(dir, w.pid, Date.now() - 10_000, 4_000_000));
+    expect(result).toMatchObject({ restarted: true, pending: true, inProgress: true });
+    expect(said(log, old.pid)).not.toContain("sigterm");
+    const { result: noName } = await secondUpdate((dir, _o, w) => registerSuccessor(dir, w.pid, Date.now() - 10_000));
+    expect(noName).toMatchObject({ inProgress: true });
+  }, 30_000);
 
   test("the new agent is told when its claim was made, so that a stop from then on is for it", async () => {
     const root = scratch();
@@ -705,5 +748,113 @@ describe("what `agent status` says of a successor", () => {
     expect(fleetAgentStatus(configPath)).toMatchObject({ running: false, successor: waiting.pid });
     stopSuccessor(fleetAgentDir(configPath), () => false);
     expect(fleetAgentStatus(configPath).successor).toBeUndefined();
+  });
+});
+
+describe("when an update asks the agent again", () => {
+  const dir = (): string => join(scratch(), "a", "fleet-agent");
+  const alive3 = () => true;
+
+  test("only for a registered successor of that agent that is past its start check", () => {
+    const d = dir();
+    const now = 1_000_000;
+    expect(mayAskAgainToStop(d, 7, 1500, now, alive3)).toBe(false); // no entry
+    claimSuccessor(d, undefined, now - 9000);
+    expect(mayAskAgainToStop(d, 7, 1500, now, alive3)).toBe(false); // a claim
+    registerSuccessor(d, 55, now - 1000, 7);
+    expect(mayAskAgainToStop(d, 7, 1500, now, alive3)).toBe(false); // too young
+    expect(mayAskAgainToStop(d, 7, 1500, now + 1000, alive3)).toBe(true);
+    expect(mayAskAgainToStop(d, 8, 1500, now + 1000, alive3)).toBe(false); // for another agent
+    expect(mayAskAgainToStop(d, 7, 1500, now + 1000, () => false)).toBe(false); // gone
+    registerSuccessor(d, 55, now - 10_000);
+    expect(mayAskAgainToStop(d, 7, 1500, now, alive3)).toBe(false); // not told whom it replaces
+  });
+});
+
+describe("a successor whose agent has left", () => {
+  const dirOf = (): string => join(scratch(), "a", "fleet-agent");
+
+  test("does not wait out its time for a stranger's lock: it leaves at once, and its entry goes", async () => {
+    const dir = dirOf();
+    registerSuccessor(dir, process.pid, Date.now(), 555);
+    const turns: number[] = [];
+    const began = Date.now();
+    const r = await acquireStarting(dir, {
+      waitMs: 60_000,
+      startedAt: Date.now(),
+      replaces: 555,
+      isAgent: () => false,
+      acquire: async (_d, o) => (turns.push(o?.waitMs ?? -1), { held: false as const, holder: 777 }),
+    });
+    expect(r.held).toBe(false);
+    expect(Date.now() - began).toBeLessThan(2000);
+    expect(turns).toHaveLength(1);
+    expect(existsSync(successorPath(dir))).toBe(false);
+  });
+
+  test("takes the lock when the agent it waited for has gone, in the turn after, and not at the end of its wait", async () => {
+    const dir = dirOf();
+    let calls = 0;
+    const waits: number[] = [];
+    let agentIsThere = true;
+    const r = await acquireStarting(dir, {
+      waitMs: 60_000,
+      turnMs: 40,
+      startedAt: Date.now(),
+      replaces: 555,
+      isAgent: () => agentIsThere,
+      acquire: async (_d, o) => {
+        waits.push(o?.waitMs ?? -1);
+        calls++;
+        if (calls === 3) agentIsThere = false;
+        return calls < 4 ? { held: false as const, holder: 555 } : { held: true as const, release: () => {} };
+      },
+    });
+    expect(r.held).toBe(true);
+    expect(waits.every((w) => w <= 40)).toBe(true);
+    expect(calls).toBe(4);
+  });
+
+  test("keeps waiting for the agent while it is at its round, past its first wait", async () => {
+    const dir = dirOf();
+    let calls = 0;
+    let waited = 0;
+    const r = await acquireStarting(dir, {
+      waitMs: 30,
+      turnMs: 10,
+      startedAt: Date.now(),
+      replaces: 555,
+      isAgent: () => true,
+      onWait: () => void waited++,
+      acquire: async () => {
+        await Bun.sleep(10);
+        return ++calls < 12 ? { held: false as const, holder: 555 } : { held: true as const, release: () => {} };
+      },
+    });
+    expect(r.held).toBe(true);
+    expect(waited).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("what an update hands the agent it starts", () => {
+  test("a claim time within a minute before the start is believed; one from further back, or from after it, is not", () => {
+    const start = 10_000_000;
+    expect(takeHandoverEnv({ PRIME_FLEET_SINCE: String(start - 2000) }, start).since).toBe(start - 2000);
+    expect(takeHandoverEnv({ PRIME_FLEET_SINCE: String(start - 59_000) }, start).since).toBe(start - 59_000);
+    expect(takeHandoverEnv({ PRIME_FLEET_SINCE: String(start - 61_000) }, start).since).toBeUndefined();
+    expect(takeHandoverEnv({ PRIME_FLEET_SINCE: String(start + 5000) }, start).since).toBeUndefined();
+    expect(takeHandoverEnv({ PRIME_FLEET_SINCE: "x" }, start).since).toBeUndefined();
+    expect(takeHandoverEnv({}, start)).toEqual({});
+  });
+
+  test("the variables are read once and removed, so that what the agent starts does not inherit them", () => {
+    const env: Record<string, string | undefined> = {
+      PRIME_FLEET_SINCE: String(5_000_000 - 100),
+      PRIME_FLEET_REPLACES: "321",
+      PRIME_FLEET_LOCK_WAIT_MS: "900000",
+      PATH: "/bin",
+    };
+    expect(takeHandoverEnv(env, 5_000_000)).toEqual({ since: 5_000_000 - 100, replaces: 321, lockWaitMs: 900_000 });
+    expect(env).toEqual({ PATH: "/bin" });
   });
 });

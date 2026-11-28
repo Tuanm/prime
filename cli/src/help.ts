@@ -346,7 +346,10 @@ output says what was done.
     old agent is then asked to stop, finishes its round, and the new one takes
     over (for as long as that takes). If the new build does not start, the old
     agent is left as it was. 'prime fleets agent stop' during that wait stops the
-    new one too, and a second update does not start another.
+    new one too. A second update does not start another: it says an update is
+    already in progress and leaves the agent alone (only if the new build has
+    been waiting for longer than an update gives it to show it starts does it
+    ask the agent to stop again).
 
   current   26.10.3
   latest    26.10.4
