@@ -51,8 +51,9 @@ const ALLOWED_ACTIONS = new Set([
   "index",
   "events",
   "meta",
+  "audit",
 ]);
-const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys", "index"]);
+const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys", "index", "audit"]);
 
 /**
  * The routes a paused fleet does not serve.
@@ -602,6 +603,8 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     const headers = new Headers({ "content-type": "application/json" });
     headers.set("x-prime-caller", "admin");
     headers.set("x-prime-fleet", fleetId);
+    // The gateway clears the fleet at this device's asking, and the log says whose.
+    headers.set("x-prime-actor", "device:" + caller);
     const reaped = await stub.fetch("https://fleet/reap", { method: "POST", headers });
     if (!reaped.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
     const body = (await reaped.json()) as { members?: string[]; lastActivity?: number; created?: number; meta?: { disabled?: boolean } };
@@ -683,6 +686,13 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   const target = new URL("https://fleet" + (action ? "/" + action : "/create"));
   // The index is asked from a sequence on.
   if (action === "index") target.search = url.search;
+  // The log is read from the entry after `after`, a page at a time.
+  if (action === "audit") {
+    for (const name of ["after", "limit", "tail"]) {
+      const v = url.searchParams.get(name);
+      if (v !== null) target.searchParams.set(name, v);
+    }
+  }
   if (!action && request.method === "GET") {
     // GET /fleets/:id is the roster; forward as /members
     target.pathname = "/members";
@@ -720,6 +730,8 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     if (ask.reason === "lease-held" && ask.holder && !(await deps.deviceOnline(ask.holder, typeof ask.holderSince === "number" ? ask.holderSince : undefined))) {
       const vacateHeaders = new Headers(headers);
       vacateHeaders.set("x-prime-caller", "admin");
+      // The gateway's own doing, not the operator's.
+      vacateHeaders.set("x-prime-actor", "gateway");
       await stub
         .fetch("https://fleet/vacate", {
           method: "POST",

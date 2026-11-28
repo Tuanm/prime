@@ -4,6 +4,7 @@
 // writes matters at scale; what it MEANS must not move: a renewal keeps the holder's epoch and since,
 // extends the expiry, and a grant to anybody else is a new epoch.
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
+import { deleteRows, listRows } from "./fake-list";
 import { FleetDO, LEASE_TTL_MS } from "../src/fleet-do";
 
 const KEY = "A".repeat(43) + "=";
@@ -22,9 +23,12 @@ function world(opts: { socket: boolean }) {
       writes.push("put:" + key);
       data.set(key, JSON.parse(JSON.stringify(value)));
     },
-    async delete(key: string) {
-      writes.push("delete:" + key);
-      return data.delete(key);
+    async delete(key: string | string[]) {
+      for (const k of Array.isArray(key) ? key : [key]) writes.push("delete:" + k);
+      return Array.isArray(key) ? deleteRows(data, key) : data.delete(key);
+    },
+    async list(o: { prefix?: string; start?: string; limit?: number; reverse?: boolean }) {
+      return listRows(data, o);
     },
   };
   if (opts.socket) {

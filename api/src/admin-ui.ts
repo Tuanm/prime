@@ -1054,6 +1054,12 @@ ${UI_CSS}    </style>
                 },
               },
               {
+                text: "Audit",
+                onClick: function () {
+                  fleetAudit(f.fleet);
+                },
+              },
+              {
                 text: "Delete",
                 danger: true,
                 onClick: function () {
@@ -1332,6 +1338,41 @@ ${UI_CSS}    </style>
               else done();
             });
           }
+        }
+
+        // What was done to the fleet, newest last: who, what, to whom. Nothing a call carried is in it.
+        function fleetAudit(fleet) {
+          var d = openDialog("Audit log", esc(fleet));
+          api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/audit?tail=100")
+            .then(function (j) {
+              var entries = (j && j.entries) || [];
+              d.bodyEl.innerHTML = "";
+              var note = document.createElement("div");
+              note.className = "dlg-msg";
+              note.textContent = entries.length
+                ? "The last " + entries.length + " of " + (j.head ? j.head.n : entries.length) + " entries. Older ones are in the bucket under audit/" + fleet + "/."
+                : "Nothing has been done to this fleet yet.";
+              if (j && j.unrecorded) note.textContent += " " + j.unrecorded + " could not be written down since the object last woke.";
+              d.bodyEl.appendChild(note);
+              entries.forEach(function (e) {
+                var row = document.createElement("div");
+                row.className = "dlg-tool";
+                var head = document.createElement("div");
+                head.className = "t-name";
+                var who = e.actor ? (e.actor.email || e.actor.id || "") : "";
+                head.textContent = new Date(e.at).toLocaleString() + "  " + e.action + (e.target ? " " + e.target : "");
+                var what = document.createElement("div");
+                what.className = "t-desc";
+                var detail = e.detail ? Object.keys(e.detail).map(function (k) { return k + "=" + e.detail[k]; }).join(" ") : "";
+                what.textContent = ((e.actor && e.actor.kind) || "?") + (who ? " " + who : "") + (detail ? "  " + detail : "");
+                row.appendChild(head);
+                row.appendChild(what);
+                d.bodyEl.appendChild(row);
+              });
+            })
+            .catch(function (e) {
+              d.bodyEl.innerHTML = '<div class="dlg-msg err">' + esc((e && e.message) || "failed to load the log") + "</div>";
+            });
         }
 
         function fleetInvite(fleet) {

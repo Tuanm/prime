@@ -245,6 +245,21 @@ try {
   const pongsBefore = a.texts.filter((t) => t === "pong").length;
   await Bun.sleep(1500);
   check("the others are not hung up on", !a.closed && a.texts.filter((t) => t === "pong").length > pongsBefore);
+  // ---- what was done is written down -----------------------------------------------------
+  const log = await admin("/admin/api/fleets/e2e/audit?tail=500", {}, "GET");
+  const done: string[] = (log.json.entries ?? []).map((e: { action: string }) => e.action);
+  for (const action of ["fleet-created", "member-admitted", "lease-taken", "lease-released", "fleet-changed", "member-removed"]) {
+    check("the log says " + action, done.includes(action), JSON.stringify(done));
+  }
+  // The entries chain: each carries the hash of the one before.
+  let chained = true;
+  let prev = "0".repeat(64);
+  for (const e of log.json.entries ?? []) {
+    if (e.prev !== prev) chained = false;
+    const sorted = (v: unknown): unknown => (Array.isArray(v) ? v.map(sorted) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v as object).sort().map((k) => [k, sorted((v as Record<string, unknown>)[k])])) : v);
+    prev = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(sorted(e))))), (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  check("and the entries are a chain", chained && (log.json.entries ?? []).length > 0 && log.json.head?.hash === prev);
   const gone = await admin("/admin/api/fleets/e2e", {}, "DELETE");
   check("the fleet is deleted", gone.status === 200, JSON.stringify(gone.json));
   check("everyone is told, and the fleet lets go", (await a.waitFor(() => a.of("bye").length > 0)) && (await letGo(a)));
