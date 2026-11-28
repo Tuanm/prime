@@ -9,6 +9,7 @@
 // space.
 
 import { bool, num, str, strList, type ParsedArgs } from "./args.ts";
+import { addCaller, loadOrCreateCallerKey } from "./caller-key.ts";
 import { saveConfig, type Config, type SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
@@ -543,7 +544,8 @@ function shellArg(value: string): string {
 export function entrypointScript(space: SpaceEntry): string {
   const base =
     'set -e; token=$(cat /run/prime/token); [ -n "$token" ] || { echo "prime: token file missing" >&2; exit 1; }; ' +
-    'export PRIME_VAULT_FILE=/run/prime/vault.json; ';
+    'export PRIME_VAULT_FILE=/run/prime/vault.json; ' +
+    SPACE_AUTH_PROBE;
   // A space that is exposed, and a space that is in a fleet, both talk to
   // the gateway: a fleet's primary has to be reachable, or a client that
   // addresses the fleet has nothing to call.
@@ -554,10 +556,60 @@ export function entrypointScript(space: SpaceEntry): string {
       'exec /usr/local/bin/prime code-mcp --bind 0.0.0.0 --port 7777 --token "$token" --gateway ' +
       shellArg(space.gateway) +
       " --id " +
-      shellArg(space.gateway_device)
+      shellArg(space.gateway_device) +
+      ' "$@"'
     );
   }
-  return base + 'exec /usr/local/bin/prime code-mcp --bind 0.0.0.0 --port 7777 --token "$token"';
+  return base + 'exec /usr/local/bin/prime code-mcp --bind 0.0.0.0 --port 7777 --token "$token" "$@"';
+}
+
+/** Where the host's two directories for a space are inside it. */
+const SPACE_CALLERS_FILE = "/run/prime/callers.json";
+const SPACE_STATE_DIR = "/run/prime-state";
+/**
+ * The tool server of a space is told which keys may sign calls to it (a file the host writes and the space can only
+ * read), where it keeps its own state, and where to journal the calls it runs (a file the host reads). The image of a
+ * space is the one it was made with, which may be older than this CLI and not know an option (a space that is not in a
+ * fleet stays on its image when `prime update` runs): each option is passed only if the image's `prime` lists it, so
+ * an old image starts as it always did.
+ */
+const SPACE_AUTH_PROBE =
+  'help=$(/usr/local/bin/prime code-mcp --help 2>&1) || true; set --; ' +
+  `case "$help" in *'--callers <file>'*) set -- "$@" --callers ${SPACE_CALLERS_FILE};; esac; ` +
+  `case "$help" in *'--caller-state <dir>'*) set -- "$@" --caller-state ${SPACE_STATE_DIR}/caller-auth;; esac; ` +
+  `case "$help" in *'--activity-log <file>'*) set -- "$@" --activity-log ${SPACE_STATE_DIR}/activity.jsonl;; esac; `;
+
+/** The directory the host keeps for what a space's tool server writes: the journal of its calls, its reply key and log. */
+export function spaceStateDir(secretDir: string): string {
+  return secretDir.replace(/[\\/]+$/, "") + ".state";
+}
+
+/** The journal of the tool calls a space ran (see activity-journal.ts), where a host process reads it. */
+export function spaceActivityFile(secretDir: string): string {
+  return join(spaceStateDir(secretDir), "activity.jsonl");
+}
+
+/** The keys the space trusts to sign calls to it. It lives in the (read-only for the space) secret directory. */
+export function spaceCallersFile(secretDir: string): string {
+  return join(secretDir, "callers.json");
+}
+
+/**
+ * Make the space's directories: its state (writable by the space) and its callers file. A callers file that is not
+ * there yet gets this machine's caller key, so the CLI that created the space can call it once the device checks
+ * signatures; a file that is there is left as it is (a key that was revoked stays revoked).
+ */
+export function ensureSpaceAuth(ctx: Ctx, secretDir: string): void {
+  const state = spaceStateDir(secretDir);
+  mkdirSync(state, { recursive: true, mode: 0o700 });
+  chmodSync(state, 0o700);
+  const file = spaceCallersFile(secretDir);
+  if (existsSync(file)) return;
+  try {
+    addCaller(file, { pub: loadOrCreateCallerKey().publicKey, label: "host" });
+  } catch (err) {
+    ctx.note(yellow("  warning: this machine's caller key was not allowed in the space: " + (err instanceof Error ? err.message : String(err))));
+  }
 }
 
 /** Host directory (0700) with a 0600 token file, mounted read-only into the
@@ -583,7 +635,9 @@ function ensureSecret(dir: string, token: string, remoteToken?: string): void {
 }
 
 function removeSecret(dir: string | undefined): void {
-  if (dir) rmSync(dir, { recursive: true, force: true });
+  if (!dir) return;
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(spaceStateDir(dir), { recursive: true, force: true });
 }
 
 /** Plaintext secret files only need to exist until the entrypoint read them.
@@ -711,10 +765,11 @@ async function activateBroker(ctx: Ctx, pending: PendingBroker | undefined): Pro
 
 }
 
-function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, secretDir: string, limits = true): string[] {
+export function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, secretDir: string, limits = true): string[] {
   const args: string[] = ["run", "-d", "--name", space.container, "--label", "prime.space=" + space.id];
   args.push("--entrypoint", "/bin/sh");
   args.push("-v", secretDir + ":/run/prime:ro");
+  args.push("-v", spaceStateDir(secretDir) + ":" + SPACE_STATE_DIR);
   if (runtime.kind === "apple") {
     args.push("-c", String(space.cpus ?? 2), "-m", space.memory ?? "4g");
     if (space.network) args.push("--network", space.network);
@@ -1103,6 +1158,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   networkCreate(runtime, network, offline);
   const secretDir = secretDirFor(ctx, container);
   ensureSecret(secretDir, token);
+  ensureSpaceAuth(ctx, secretDir);
   space.secret_dir = secretDir;
   let pendingBroker: PendingBroker | undefined;
   if (vaultCompanies.length > 0) {
@@ -1415,6 +1471,7 @@ async function startSpace(ctx: Ctx, name: string): Promise<void> {
     await refreshExposure(ctx, name, space, gatewayToken);
   }
   ensureSecret(space.secret_dir, space.token, expose || space.fleet ? space.remote_token : undefined);
+  ensureSpaceAuth(ctx, space.secret_dir);
   let pendingBroker: PendingBroker | undefined;
   try {
     pendingBroker = await prepareVault(ctx, space, runtime);

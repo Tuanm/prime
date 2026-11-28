@@ -26,6 +26,7 @@ export const CODE_MCP_OPTIONS: Readonly<Record<string, OptionType>> = {
   "gateway-token": "string",
   "caller-auth": "string",
   callers: "string",
+  "caller-state": "string",
   "activity-log": "string",
 };
 
