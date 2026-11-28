@@ -547,6 +547,7 @@ USAGE
   prime fleets status <fleet-id>                 Show this device's standing in the fleet
   prime fleets log <fleet-id> [--tail <n>|--after <n>|--all]  What was done to the fleet, by whom; checks the log's hash chain
   (any operator command)  --sso                 Speak as yourself through Cloudflare Access (cloudflared) rather than with the operator token
+  prime fleets secrets list|allow|disallow <fleet-id> --space <name> [<glob>...]  Files left out of snapshots as secrets, and which are let through
   prime fleets trust accept <fleet-id> --space <name> --manifest <hash>  Take one snapshot that has no seal (see docs/fleets.md)
   prime fleets trust pin <fleet-id> --space <name> --owner <fingerprint> | --clear  The owner key this member believes the roster is signed by
   prime fleets roster init <fleet-id> [--yes --expect <digest>]    Sign the fleet's roster with an owner key made on this machine (shows first)

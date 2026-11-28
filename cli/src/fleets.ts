@@ -64,6 +64,8 @@ export function useAccessRunner(run: AccessRunner | undefined): void {
   accessRunner = run ?? defaultAccessRunner;
 }
 
+import { readAllow, secretGateMode, writeAllow } from "./fleet-secrets.ts";
+
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 export interface FleetTarget {
@@ -1995,4 +1997,34 @@ export async function fleetsLog(ctx: Ctx): Promise<void> {
     else ctx.out(yellow("BROKEN: " + problem));
   }
   if (problem) throw new CliError("the audit log does not verify: " + problem, "The gateway (or whoever holds it) changed the log. Do not rely on it.");
+}
+
+// ---- what the publish leaves out as secrets (see fleet-secrets.ts) --------------------------------------------
+
+/** `prime fleets secrets list|allow|disallow <fleet-id> --space <name> [glob...]` */
+export async function fleetsSecrets(ctx: Ctx): Promise<void> {
+  const what = ctx.parsed.positionals[2] ?? "";
+  const fleetId = requireFleetId(ctx.parsed.positionals[3] ?? "");
+  const spaceName = spaceArg(ctx);
+  const usage = "Usage: prime fleets secrets list|allow|disallow <fleet-id> --space <name> [<path or glob>...]";
+  if (!["list", "allow", "disallow"].includes(what)) throw new UsageError("unknown secrets command \"" + what + "\"", usage);
+  if (!spaceName) throw new UsageError("missing --space", "Name the space that belongs to the fleet.");
+  const space = ctx.config.spaces[spaceName];
+  if (!space) throw new UsageError("unknown space \"" + spaceName + "\"", "Run 'prime spaces list' to see the spaces.");
+  if (space.fleet !== fleetId) throw new UsageError("the space \"" + spaceName + "\" is not in the fleet " + fleetId);
+  const keyFile = fleetKeyFile(ctx.configPath, fleetId, spaceName);
+  const globs = ctx.parsed.positionals.slice(4);
+  const current = readAllow(keyFile);
+  if (what !== "list") {
+    if (globs.length === 0) throw new UsageError("name the path or glob", usage);
+    for (const g of globs) if (g.startsWith("/") || g.includes("..") || g.length > 512) throw new UsageError("not a path inside the work tree: " + g, "Paths are relative to the work tree, like src/.env or **/*.pem.");
+    writeAllow(keyFile, what === "allow" ? [...current, ...globs] : current.filter((g) => !globs.includes(g)));
+  }
+  const allow = what === "list" ? current : readAllow(keyFile);
+  if (ctx.json) {
+    printJson({ fleet: fleetId, space: spaceName, gate: secretGateMode(), allow });
+    return;
+  }
+  ctx.out(bold(fleetId) + dim("  secret gate: " + secretGateMode() + " (PRIME_FLEET_SECRET_GATE=off|warn|exclude)"));
+  ctx.out(allow.length === 0 ? dim("nothing is allowed: files that look like secrets are left out of every snapshot") : "allowed to be published:\n" + allow.map((g) => "  " + g).join("\n"));
 }
