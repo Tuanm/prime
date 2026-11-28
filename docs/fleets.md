@@ -152,6 +152,20 @@ own `.git`. Those two are never sent, and a directory that was synced and then
 became a repository is no longer published (the copies other replicas already
 have stay where they are).
 
+A change is taken once the files a snapshot would take have been still for 50 ms
+(`PRIME_FLEET_SETTLE_MS`): two looks that far apart find every file's size, times and
+identity unchanged, and none of them was written in the last 50 ms. A writer that pauses
+for longer between two writes can be captured part-way, and its next write publishes the
+rest. Where a file system keeps whole seconds for its times, the look is repeated until the
+last write is a couple of seconds old. A tree that is written to without a pause (a log that
+is not in `.gitignore`) is published at most every few seconds: after publishes that follow
+each other within a second, the next change is held back a second, then two, and so on up
+to 5 s; a change after a pause is never held.
+On Windows, git cannot see a rewrite that keeps a file's size and puts its old write time
+back (it looks at neither the change time nor the identity there), so such an edit may not
+replicate until the next change to the content. That is git's own behaviour, and it was so
+before the quiet period was shortened.
+
 When a snapshot arrives, the replica writes the files it has and removes the
 files the *previous* snapshot had and this one does not: the ones the primary
 deleted. A removal stays inside the work tree (a directory turned into a symlink
@@ -528,9 +542,9 @@ the rounds are failing.
 
 ### The agent's settings
 
-Four things can be set for the agent, in the shell that runs `prime fleets agent start`
+Five things can be set for the agent, in the shell that runs `prime fleets agent start`
 (or `install`): `PRIME_FLEET_REPLICA` (`lazy` or `mirror`), `PRIME_FLEET_CACHE_MB`,
-`PRIME_FLEET_POLL_MS` and `PRIME_FLEET_HEARTBEAT_MS`. They are written down in
+`PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` and `PRIME_FLEET_SETTLE_MS`. They are written down in
 `fleet-agent/settings.json`, so the login service, and an agent restarted after a crash, run
 with the same.
 
@@ -697,6 +711,7 @@ says; it now means twenty dollars.
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
 | `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (15000 ms; the fleet's own lease can lower it); saved like the others |
+| `PRIME_FLEET_SETTLE_MS` | how long the files must have been still before the primary takes a change (50 ms; `250` is what it was before); saved like the others |
 | asks from one address, without a device the gateway knows | 30 invite-code checks (made when a device is asked for with a fleet and a code) and 60 requests naming an unknown device a minute for each address (`FLEET_INVITE_RATE_MAX`, `FLEET_UNKNOWN_RATE_MAX`; 0 turns one off); beyond that the gateway answers 429 with `Retry-After`, before any fleet object is woken. Kept in the isolate and, with the `[[ratelimits]]` bindings, across the location. A gateway with no registered device is open and every id is unknown there, so the unknown-device count does not apply to it. |
 | a request body on a fleet route | 64 KB (`FLEET_BODY_MAX_BYTES`), 4 KB for the body that asks for a device with a code; the snapshot and change-pack uploads have their own limit above. The gateway answers 413 |
 | a fleet nobody touches | kept: only the operator or the owner deletes it (`reap` also takes one whose members the gateway has all forgotten, after a week) |

@@ -982,14 +982,103 @@ async function capturedFiles(work: string, gitDir: string, left: string[]): Prom
   }
 }
 
+/** How long the files a snapshot would take must have been still before it is taken, in milliseconds. */
+export const SETTLE_QUIET_MS = 50;
+
+// The longest a tree that keeps changing (a log written to all the time) is waited for.
+const SETTLE_LIMIT_MS = 5000;
+
+// How recent a change has to be to be told apart from the file's last write only by the clock: the
+// timestamps of a file system are made on a tick, and a write within the tick of the one before it
+// leaves the same time behind. Ticks are a few milliseconds on the file systems that keep fine times
+// and a second or two on those that do not (their times are whole seconds). It is decided for each
+// file by its own times: one file that was given a whole second (unpacked from an archive) says
+// nothing about the rest of the tree.
+const TIMESTAMP_TICK_MS = 40;
+const COARSE_TICK_MS = 2000;
+
+/**
+ * What a look at the files of a work tree found: one string that changes when a file a snapshot
+ * would take is written, replaced, resized or has its mode changed (its size, times and identity),
+ * and whether any change is too recent for the string to be trusted.
+ */
+export interface TreeStamp {
+  key: string;
+  /**
+   * A file was changed so lately, by the clock of its file system, that a write straight after would
+   * leave the same stamp. Such a stamp says "nothing changed" only for as long as it is looked at
+   * again later than the file's tick, never as proof for a tree that is built from it.
+   */
+  racy: boolean;
+  /** When the last of the doubtful times is a tick old (ms since the epoch); 0 when none is. */
+  racyUntil: number;
+  /** The newest time of any of the files (the later of its write and its change), in ms. 0: no file. */
+  newest: number;
+  /** The directories left alone that it was taken with. */
+  left: string[];
+}
+
+/** What a stamp needs of a file's `lstat` (a test gives it a file system with coarse times). */
+export interface StatTimes {
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  ino: number;
+}
+
+/**
+ * Look at the files a snapshot of this work tree would take: what git would add (see `capturedFiles`),
+ * by size, write time, change time and identity. null: git could not say (no store yet).
+ *
+ * A time later than the clock (a file dated in the future by a skewed clock or an archive) cannot hide
+ * a write: the write would put the present time on it, which is a change. It is not held against the stamp.
+ */
+export async function stampTree(
+  work: string,
+  gitDir: string,
+  left: string[] = [],
+  stat: (path: string) => StatTimes = lstatSync,
+): Promise<TreeStamp | null> {
+  const files = await capturedFiles(work, gitDir, left);
+  if (files === null) return null;
+  const now = Date.now();
+  const parts: string[] = [];
+  let newest = 0;
+  let racyUntil = 0;
+  for (const rel of files) {
+    try {
+      const st = stat(join(work, rel));
+      parts.push(rel + ":" + st.size + ":" + st.mtimeMs + ":" + st.ctimeMs + ":" + st.ino);
+      // Whole seconds: a file system that does not keep finer times (or a file that was given one).
+      const tick = st.mtimeMs % 1000 === 0 || st.ctimeMs % 1000 === 0 ? COARSE_TICK_MS : TIMESTAMP_TICK_MS;
+      for (const t of [st.mtimeMs, st.ctimeMs]) {
+        if (t > now) continue;
+        if (t > newest) newest = t;
+        if (now - t < tick) racyUntil = Math.max(racyUntil, t + tick);
+      }
+    } catch {}
+  }
+  return { key: parts.sort().join("|"), racy: racyUntil > 0, racyUntil, newest, left };
+}
+
 /**
  * Wait until the work tree stops changing, so a half-written file is not captured.
  *
  * It is only the files a snapshot would take that matter: a build running in an ignored folder, or
  * an IDE writing inside a nested repository's `.git`, has no effect on what is published, and
  * neither costs a look at its files nor makes this wait.
+ *
+ * The tree has settled when two looks `settleMs` apart found every file as it was (size, write and
+ * change time, identity) and none of them was written within the last `settleMs`: a writer that
+ * pauses for less than that between its writes is waited for, one that stops for longer is
+ * taken to be done. On a file system whose times are whole seconds a write cannot be told from the
+ * next one inside the second, so the look is repeated until the last write is older than that (up
+ * to about two seconds). It gives up on a tree that never stops after a few seconds.
+ *
+ * Returns the stamp it settled on when it could take one (see `stampTree`), so the caller can ask later
+ * whether the tree is still the one it saw; null when it could not, or the tree never settled.
  */
-export async function settle(work: string, settleMs = 120, opts: SettleOptions = {}): Promise<void> {
+export async function settle(work: string, settleMs = SETTLE_QUIET_MS, opts: SettleOptions = {}, stat?: (path: string) => StatTimes): Promise<TreeStamp | null> {
   const walked = (): string => {
     const parts: string[] = [];
     const walk = (dir: string): void => {
@@ -1004,32 +1093,31 @@ export async function settle(work: string, settleMs = 120, opts: SettleOptions =
         try {
           const st = statSync(full);
           if (st.isDirectory()) walk(full);
-          else parts.push(name + ":" + st.size + ":" + st.mtimeMs);
+          else parts.push(name + ":" + st.size + ":" + st.mtimeMs + ":" + st.ctimeMs);
         } catch {}
       }
     };
     walk(work);
     return parts.sort().join("|");
   };
-  const stamp = async (): Promise<string> => {
-    const files = opts.gitDir ? await capturedFiles(work, opts.gitDir, opts.left ?? []) : null;
-    if (files === null) return walked();
-    const parts: string[] = [];
-    for (const rel of files) {
-      try {
-        const st = lstatSync(join(work, rel));
-        parts.push(rel + ":" + st.size + ":" + st.mtimeMs);
-      } catch {}
-    }
-    return parts.sort().join("|");
+  const left = opts.left ?? [];
+  // `stamp` is what a snapshot would see, when git can say; `key` alone otherwise.
+  const look = async (): Promise<{ key: string; newest: number; stamp: TreeStamp | null }> => {
+    const taken = opts.gitDir ? await stampTree(work, opts.gitDir, left, stat) : null;
+    return taken ? { key: taken.key, newest: taken.newest, stamp: taken } : { key: walked(), newest: 0, stamp: null };
   };
-  let previous = await stamp();
-  for (let attempt = 0; attempt < 20; attempt++) {
-    await new Promise((r) => setTimeout(r, settleMs));
-    const next = await stamp();
-    if (next === previous) return;
+  const deadline = Date.now() + SETTLE_LIMIT_MS;
+  let previous = await look();
+  while (Date.now() < deadline) {
+    // As long as the last look says (a tick of a coarse file system), if that is longer than the quiet period.
+    await new Promise((r) => setTimeout(r, Math.max(settleMs, (previous.stamp?.racyUntil ?? 0) - Date.now())));
+    const next = await look();
+    // A file written a moment ago by the clock is not still: the writer may be between two writes.
+    const lately = next.newest > 0 && next.newest <= Date.now() && Date.now() - next.newest < settleMs;
+    if (next.key === previous.key && !lately && !next.stamp?.racy) return next.stamp;
     previous = next;
   }
+  return null;
 }
 
 /**

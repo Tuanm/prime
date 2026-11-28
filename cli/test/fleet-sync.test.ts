@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync, utimesSync } from "node:fs";
+import { lstatSync, chmodSync, closeSync, mkdtempSync, mkdirSync, openSync, writeFileSync, writeSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -21,8 +21,10 @@ import {
   NestedRepoCache,
   preserveLocalChange,
   removedBetween,
+  SETTLE_QUIET_MS,
   settle,
   snapshot,
+  stampTree,
 } from "../src/fleet-sync";
 import { applyTestTimeout } from "./setup";
 
@@ -1461,6 +1463,183 @@ describe("settling the work tree", () => {
       const began = Date.now();
       await settle(work, 40, { gitDir });
       expect(Date.now() - began).toBeGreaterThanOrEqual(240);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("waits 50 ms of quiet, not a quarter of a second", () => {
+    expect(SETTLE_QUIET_MS).toBe(50);
+  });
+
+  // A file written in pieces with pauses: it is not captured until the last piece is in.
+  async function chunkedWrite(file: string, chunks: number, pauseMs: number): Promise<{ done: Promise<void>; content: string }> {
+    const piece = "0123456789".repeat(100);
+    const fd = openSync(file, "w");
+    let written = 0;
+    const done = new Promise<void>((resolve) => {
+      const next = (): void => {
+        writeSync(fd, piece);
+        written++;
+        if (written === chunks) {
+          closeSync(fd);
+          resolve();
+        } else setTimeout(next, pauseMs);
+      };
+      next();
+    });
+    return { done, content: piece.repeat(chunks) };
+  }
+
+  for (const [quiet, pause] of [[SETTLE_QUIET_MS, 10], [150, 60]] as const) {
+    test("a file written in pieces " + pause + " ms apart is captured only when it is complete (quiet " + quiet + " ms)", async () => {
+      const root = scratch();
+      const work = join(root, "work");
+      const gitDir = join(root, "store");
+      mkdirSync(work, { recursive: true });
+      writeFileSync(join(work, "other.txt"), "other");
+      try {
+        await snapshot({ work, gitDir, base: null, treeOnly: true });
+        const writer = await chunkedWrite(join(work, "big.bin"), 10, pause);
+        const stamp = await settle(work, quiet, { gitDir });
+        const snap = await snapshot({ work, gitDir, base: null, treeOnly: true });
+        const blob = execFileSync("git", ["--git-dir=" + gitDir, "show", snap.tree + ":big.bin"], { maxBuffer: 1 << 24 }).toString();
+        expect(blob.length).toBe(writer.content.length);
+        expect(blob).toBe(writer.content);
+        await writer.done;
+        expect(stamp).not.toBeNull();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("a rewrite that keeps the size and puts the old write time back is still a change", async () => {
+    const root = scratch();
+    const work = join(root, "work");
+    const gitDir = join(root, "store");
+    mkdirSync(work, { recursive: true });
+    const file = join(work, "a.txt");
+    writeFileSync(file, "aaaaaaaa");
+    const then = new Date(Date.now() - 3600_000);
+    utimesSync(file, then, then);
+    try {
+      await snapshot({ work, gitDir, base: null, treeOnly: true });
+      let n = 0;
+      const writing = setInterval(() => {
+        writeFileSync(file, String(++n % 10).repeat(8));
+        utimesSync(file, then, then);
+      }, 15);
+      setTimeout(() => clearInterval(writing), 300);
+      const began = Date.now();
+      await settle(work, 40, { gitDir });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(280);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a stamp of the tree says a file changed, a file arrived and a file went, and not a write that is too fresh to tell", async () => {
+    const root = scratch();
+    const work = join(root, "work");
+    const gitDir = join(root, "store");
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "a.txt"), "a");
+    writeFileSync(join(work, "b.txt"), "b");
+    const old = new Date(Date.now() - 3600_000);
+    utimesSync(join(work, "a.txt"), old, old);
+    utimesSync(join(work, "b.txt"), old, old);
+    try {
+      await snapshot({ work, gitDir, base: null, treeOnly: true });
+      // The files were given their old write time a moment ago, which is a change of the file (its change time).
+      await Bun.sleep(100);
+      const first = (await stampTree(work, gitDir))!;
+      expect(first.racy).toBe(false);
+      expect((await stampTree(work, gitDir))!.key).toBe(first.key);
+      writeFileSync(join(work, "a.txt"), "aa");
+      expect((await stampTree(work, gitDir))!.key).not.toBe(first.key);
+      const second = (await stampTree(work, gitDir))!;
+      writeFileSync(join(work, "new.txt"), "n");
+      expect((await stampTree(work, gitDir))!.key).not.toBe(second.key);
+      const third = (await stampTree(work, gitDir))!;
+      rmSync(join(work, "b.txt"));
+      expect((await stampTree(work, gitDir))!.key).not.toBe(third.key);
+      // A write a moment ago, on a file system that keeps whole seconds, cannot be told from the next one.
+      const whole = new Date(Math.floor(Date.now() / 1000) * 1000);
+      utimesSync(join(work, "new.txt"), whole, whole);
+      await Bun.sleep(100);
+      expect((await stampTree(work, gitDir))!.racy).toBe(true);
+      // No store: nothing is said.
+      expect(await stampTree(work, join(root, "no-store"))).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // A work tree with a store that has taken it, and a file system to look at it with.
+  async function coarseTree(): Promise<{ root: string; work: string; gitDir: string }> {
+    const root = scratch();
+    const work = join(root, "work");
+    const gitDir = join(root, "store");
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "unpacked.txt"), "from an archive");
+    writeFileSync(join(work, "edited.txt"), "e");
+    await snapshot({ work, gitDir, base: null, treeOnly: true });
+    return { root, work, gitDir };
+  }
+
+  test("one file with a whole-second time does not make the rest of the tree uncertain", async () => {
+    const { root, work, gitDir } = await coarseTree();
+    try {
+      // What an unpacked archive leaves: whole-second times, long ago.
+      const hourAgo = Math.floor((Date.now() - 3600_000) / 1000) * 1000;
+      const real = (p: string) => {
+        const st = lstatSync(p);
+        return { size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, ino: st.ino };
+      };
+      const archive = (p: string) => (p.endsWith("unpacked.txt") ? { size: 15, mtimeMs: hourAgo, ctimeMs: hourAgo, ino: 7 } : real(p));
+      writeFileSync(join(work, "edited.txt"), "edited now");
+      await Bun.sleep(100);
+      const stamp = (await stampTree(work, gitDir, [], archive))!;
+      expect(stamp.racy).toBe(false);
+      expect(stamp.racyUntil).toBe(0);
+      // The file that was edited is still the doubtful one, when it is the one with whole seconds.
+      const edited = (p: string) => (p.endsWith("edited.txt") ? { size: 10, mtimeMs: Math.floor(Date.now() / 1000) * 1000, ctimeMs: Date.now() - 100, ino: 8 } : real(p));
+      expect((await stampTree(work, gitDir, [], edited))!.racy).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("on a file system with whole-second times a write that keeps the size is waited out", async () => {
+    const { root, work, gitDir } = await coarseTree();
+    try {
+      // The file is written to all the time, but its size, write time and change time stay what they were
+      // in the second it began: all a file system with whole seconds can say.
+      const second = Math.floor(Date.now() / 1000) * 1000;
+      const coarse = (p: string) => ({ size: 10, mtimeMs: second, ctimeMs: second, ino: p.length });
+      const stamp = await settle(work, 40, { gitDir }, coarse);
+      // Not before a tick has passed since that second: a write in it would have left the same stamp.
+      expect(Date.now()).toBeGreaterThanOrEqual(second + 2000);
+      expect(stamp).not.toBeNull();
+      expect(stamp!.racy).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a file dated in the future does not make the tree uncertain", async () => {
+    const { root, work, gitDir } = await coarseTree();
+    try {
+      const future = new Date(Date.now() + 3600_000);
+      utimesSync(join(work, "unpacked.txt"), future, future);
+      await Bun.sleep(100);
+      const stamp = (await stampTree(work, gitDir))!;
+      // Its write time is later than the clock; its change time (the utimes call) is a moment ago, and is old by now.
+      expect(stamp.racy).toBe(false);
+      const began = Date.now();
+      expect(await settle(work, 40, { gitDir })).not.toBeNull();
+      expect(Date.now() - began).toBeLessThan(2000);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
