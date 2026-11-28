@@ -750,6 +750,38 @@ describe("the log's files are the fleet's own", () => {
     expect(await brokenAt(entries)).toBeNull();
   });
 
+  test("a deleted fleet's log that could not be copied is read by the operator, and copied when the bucket is back", async () => {
+    const w = await fleetWith(["dev-a"]);
+    const n = (await logOf(w)).entries.length;
+    const put = w.bucket.put;
+    w.bucket.put = async (k: string, b: string) => {
+      if (k.startsWith("audit/")) throw new Error("bucket down");
+      return put(k, b);
+    };
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      await call(w, "/delete", "", "admin");
+      // Still down: the operator reads what the object holds; nobody else does.
+      const read = await call(w, "/audit?tail=500", "", "admin", {}, "GET");
+      expect(read.status).toBe(200);
+      expect(read.json.entries.length).toBe(n + 1);
+      expect(read.json.entries[read.json.entries.length - 1].action).toBe("fleet-deleted");
+      expect((await call(w, "/audit", "dev-a", "device", {}, "GET")).status).toBe(403);
+    } finally {
+      console.error = quiet;
+    }
+    expect([...w.objects.keys()].some((k) => k.startsWith("audit/"))).toBe(false);
+    // The bucket is back: the next read copies it, and then there is nothing to read.
+    w.bucket.put = put;
+    const copied = await call(w, "/audit?tail=500", "", "admin", {}, "GET");
+    expect(copied.status).toBe(404);
+    expect([...w.objects.keys()].some((k) => k.startsWith("audit/acme/"))).toBe(true);
+    expect([...w.data.keys()].filter((k) => k.startsWith("audit:"))).toEqual([]);
+    expect(w.data.get("fleetName")).toBeUndefined();
+    expect(w.data.get("auditOrphan")).toBeUndefined();
+  });
+
   test("a delete that copies the log leaves no name behind, and a file says which fleet it is of", async () => {
     const w = await fleetWith(["dev-a"]);
     await call(w, "/delete", "", "admin");
