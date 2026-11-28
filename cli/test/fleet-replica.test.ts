@@ -1864,7 +1864,7 @@ describe("the lease the fleet reports", () => {
       s.loop.lastBootstrap = 1;
       s.loop.primary = true;
       await heartbeat(s.loop as never, () => undefined, 10_000_000);
-      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline"]); // what this build reads
+      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline", "chunks"]); // what this build reads
       const caps = MEMBER_CAPS as string[];
       caps.push("test1");
       try {
@@ -1873,7 +1873,7 @@ describe("the lease the fleet reports", () => {
       } finally {
         caps.pop();
       }
-      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline", "test1"]);
+      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline", "chunks", "test1"]);
     } finally {
       finish(w);
     }
