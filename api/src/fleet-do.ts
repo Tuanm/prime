@@ -134,6 +134,9 @@ const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 }
  */
 export const LEASE_TTL_MS = 45_000;
 
+/** How seldom the fleet is marked as touched: see `touch`. */
+const TOUCH_EVERY_MS = 60_000;
+
 /** How long the first replica to ask for a free lease has to catch up before another may. */
 const CLAIM_MS = 30_000;
 
@@ -362,8 +365,16 @@ export class FleetDO implements DurableObject {
   //
   // The gateway reads it when a device asks to clear away a fleet it thinks is abandoned (`reap`):
   // one more condition, never the reason to allow a delete.
+  //
+  // Written once a minute at most: the gateway reads it in days, and a primary that asks for its place
+  // every fifteen seconds would otherwise write it every time, and the row is billed. What is kept
+  // in memory is only when it was last written, so an object that is woken again writes it at once.
+  private lastTouched = 0;
   private async touch(): Promise<void> {
-    await this.storage.put("lastActivity", Date.now());
+    const now = Date.now();
+    if (now >= this.lastTouched && now - this.lastTouched < TOUCH_EVERY_MS) return;
+    await this.storage.put("lastActivity", now);
+    this.lastTouched = now;
   }
 
   // Everything this fleet put in the bucket: the head, and every snapshot's manifest and packs. The
@@ -415,6 +426,7 @@ export class FleetDO implements DurableObject {
     await this.storage.delete("proofKey");
     await this.storage.delete("proofNonces");
     await this.storage.delete("lastActivity");
+    this.lastTouched = 0;
     this.proofKeyMemo = undefined;
     await this.deleteStored(fleetId);
     // The fleet is gone, so the registry should stop listing it.
@@ -1329,11 +1341,15 @@ export class FleetDO implements DurableObject {
       // (The head's epoch is the floor, so a fleet whose object storage was lost does not go back.)
       // A holder that asks again while its lease lives keeps it as it is (its epoch, and since when it has held it):
       // only a grant to another holder, or a new one after the lease lapsed, is a new epoch.
-      const epoch = held && held.holder === caller.deviceId ? held.epoch : Math.max((await this.storage.get<number>("epoch")) ?? 0, head.epoch) + 1;
+      // Every write below is a row that is billed, and a holder renews every fifteen seconds: what is
+      // already as it should be is not written again. The epoch and the claim are read first (a row read
+      // costs a twentieth of that), so a stored epoch that is not the lease's is still put right.
+      const storedEpoch = await this.storage.get<number>("epoch");
+      const epoch = held && held.holder === caller.deviceId ? held.epoch : Math.max(storedEpoch ?? 0, head.epoch) + 1;
       const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs, since: held && held.holder === caller.deviceId ? (held.since ?? now) : now };
       await this.storage.put("lease", lease);
-      await this.storage.put("epoch", epoch);
-      await this.storage.delete("claim");
+      if (storedEpoch !== epoch) await this.storage.put("epoch", epoch);
+      if ((await this.storage.get<Claim>("claim")) !== undefined) await this.storage.delete("claim");
       await this.scheduleLeaseAlarm(lease.expiresAt);
       out = Response.json({
         ok: true,
