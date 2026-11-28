@@ -1,23 +1,33 @@
 // The activity journal: one line per tool call this device was asked to run, for the people who need to
 // know afterwards what ran here and on whose word (a fleet's snapshots record it as their provenance).
 //
-//   {"seq":41,"ts":"2026-12-01T10:00:00.000Z","tool":"write","caller":"<key id of the signer>"}
+//   {"seq":41,"fid":"3fa9c01b","ts":"2026-12-01T10:00:00.000Z","tool":"write","caller":"<key id of the signer>"}
 //
 // `caller` is the key id of the machine that signed the call, "unsigned" when no trusted key did, and "local"
 // for a call that came to this device's own port. The arguments of a call are never recorded. The file is a
 // ring: it never grows past a limit (in bytes), and when it would, the oldest lines go. `seq` counts the calls of the
 // file, one more each time and never twice, so a reader can say "everything after 41" without a clock, and can tell
-// when the ring dropped lines it had not read. One file belongs to one device, but two processes that share it (the
-// service and an ad-hoc run, a restart that overlaps) do not lose lines: every write takes a lock.
+// when the ring dropped lines it had not read. `fid` is made when the file is made and kept as long as the file lives:
+// a reader that finds another `fid` than the one it has is reading another file (deleted and made again), however far
+// that one has grown.
+//
+// A call is only queued when it is noted (microseconds, nothing touches the disk), and the queue is written in batches,
+// one at a time, under the file's lock taken without blocking the event loop: the lines of a batch get their numbers
+// and are appended together, so two processes that share a file (the service and an ad-hoc run, a restart that overlaps)
+// lose no line and take no number twice. A process that is killed loses the calls still in the queue (a few
+// milliseconds of them); `flushSync` writes them at a clean exit.
 
 import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
-import { withDirLockSync } from "./dir-lock.ts";
+import { withDirLock, withDirLockSync } from "./dir-lock.ts";
 
 export interface ActivityEntry {
   /** 1, 2, 3, ...: the call's place in this file. */
   seq: number;
+  /** The file's own id: made with the file, the same on every line of it. */
+  fid: string;
   /** ISO 8601, UTC. */
   ts: string;
   tool: string;
@@ -27,12 +37,19 @@ export interface ActivityEntry {
 export const ACTIVITY_LIMIT_BYTES = 1024 * 1024;
 const TOOL_NAME_MAX = 128;
 const TAIL_BYTES = 4096;
+const FID_RE = /^[0-9a-f]{8,32}$/;
 
 export interface ActivityOptions {
   limit?: number;
   now?: () => number;
-  /** Told, once, why a call could not be written down. */
+  /** Told, once, why calls could not be written down. */
   onError?: (message: string) => void;
+}
+
+interface Queued {
+  ts: string;
+  tool: string;
+  caller: string;
 }
 
 export class ActivityJournal {
@@ -41,6 +58,8 @@ export class ActivityJournal {
   private readonly now: () => number;
   private readonly onError?: (message: string) => void;
   private errorSaid = false;
+  private queue: Queued[] = [];
+  private draining: Promise<void> | undefined;
 
   constructor(path: string, options: ActivityOptions = {}) {
     this.path = path;
@@ -49,34 +68,72 @@ export class ActivityJournal {
     this.onError = options.onError;
   }
 
-  /** Note one call. It never throws: a journal that cannot be written must not stop a tool from running. */
+  /** Note one call. It only queues it: it never touches the disk, never waits and never throws. */
   record(tool: string, caller: string): void {
+    this.queue.push({ ts: new Date(this.now()).toISOString(), tool: tool.slice(0, TOOL_NAME_MAX), caller });
+    if (!this.draining) {
+      this.draining = this.drain().finally(() => {
+        this.draining = undefined;
+      });
+    }
+  }
+
+  /** Wait until every call noted so far is in the file (tests, and whoever must know it is written). */
+  async flush(): Promise<void> {
+    while (this.draining) await this.draining;
+  }
+
+  /** Write what is queued, now, blocking: for a process that is about to exit. */
+  flushSync(): void {
+    const batch = this.queue.splice(0);
+    if (batch.length === 0) return;
     try {
       mkdirSync(dirname(this.path), { recursive: true });
-      withDirLockSync(
-        this.path + ".lock",
-        () => {
-          const entry: ActivityEntry = { seq: lastSeq(this.path) + 1, ts: new Date(this.now()).toISOString(), tool: tool.slice(0, TOOL_NAME_MAX), caller };
-          const line = JSON.stringify(entry) + "\n";
-          const bytes = Buffer.byteLength(line);
-          let size = 0;
-          try {
-            size = statSync(this.path).size;
-          } catch {}
-          if (size + bytes > this.limit) this.compact(bytes);
-          appendFileSync(this.path, line, { mode: 0o600 });
-        },
-        { waitMs: 1000 },
-      );
+      withDirLockSync(this.path + ".lock", () => this.write(batch), { waitMs: 1000 });
     } catch (err) {
-      if (!this.errorSaid) {
-        this.errorSaid = true;
-        this.onError?.(`the activity journal ${this.path} cannot be written (calls are not noted): ${err instanceof Error ? err.message : String(err)}`);
+      this.failed(err);
+    }
+  }
+
+  private async drain(): Promise<void> {
+    // Let the calls of this turn of the loop join the batch.
+    await Promise.resolve();
+    while (this.queue.length > 0) {
+      const batch = this.queue.splice(0);
+      try {
+        mkdirSync(dirname(this.path), { recursive: true });
+        await withDirLock(this.path + ".lock", () => this.write(batch), { waitMs: 1000 });
+      } catch (err) {
+        this.failed(err);
       }
     }
   }
 
-  /** Drop the oldest lines until the file is at most half of the limit (and has room for the line to come). The newest line always stays: it holds the count. */
+  private failed(err: unknown): void {
+    if (this.errorSaid) return;
+    this.errorSaid = true;
+    this.onError?.(`the activity journal ${this.path} cannot be written (calls are not noted): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  /** With the lock held: number the batch after the last line of the file and append it, the ring kept within its limit. */
+  private write(batch: Queued[]): void {
+    const last = tailOf(this.path);
+    const fid = last.fid ?? randomBytes(4).toString("hex");
+    let seq = last.seq;
+    let lines = batch.map((q) => JSON.stringify({ seq: ++seq, fid, ts: q.ts, tool: q.tool, caller: q.caller } satisfies ActivityEntry) + "\n");
+    // A batch bigger than half the limit keeps its newest lines.
+    let bytes = lines.reduce((n, l) => n + Buffer.byteLength(l), 0);
+    const half = Math.floor(this.limit / 2);
+    while (lines.length > 1 && bytes > half) bytes -= Buffer.byteLength(lines.shift()!);
+    let size = 0;
+    try {
+      size = statSync(this.path).size;
+    } catch {}
+    if (size + bytes > this.limit) this.compact(bytes);
+    appendFileSync(this.path, lines.join(""), { mode: 0o600 });
+  }
+
+  /** Drop the oldest lines until the file is at most half of the limit (and has room for the lines to come). The newest line always stays: it holds the count and the file's id. */
   private compact(incoming: number): void {
     let text = "";
     try {
@@ -101,20 +158,21 @@ export class ActivityJournal {
 function entryOf(line: string): ActivityEntry | undefined {
   try {
     const v = JSON.parse(line) as Partial<ActivityEntry>;
-    if (!Number.isSafeInteger(v.seq) || (v.seq as number) < 1 || typeof v.ts !== "string" || typeof v.tool !== "string" || typeof v.caller !== "string") return undefined;
-    return { seq: v.seq as number, ts: v.ts, tool: v.tool, caller: v.caller };
+    if (!Number.isSafeInteger(v.seq) || (v.seq as number) < 1 || typeof v.fid !== "string" || !FID_RE.test(v.fid)) return undefined;
+    if (typeof v.ts !== "string" || typeof v.tool !== "string" || typeof v.caller !== "string") return undefined;
+    return { seq: v.seq as number, fid: v.fid, ts: v.ts, tool: v.tool, caller: v.caller };
   } catch {
     return undefined;
   }
 }
 
-/** The number of the last call in the file (0 when there is none): read from the end of the file, not the whole of it. */
-function lastSeq(path: string): number {
+/** The number and the file id of the last call in the file (0 and none when there is none): read from the end of the file, not the whole of it. */
+function tailOf(path: string): { seq: number; fid?: string } {
   let fd: number;
   try {
     fd = openSync(path, "r");
   } catch {
-    return 0;
+    return { seq: 0 };
   }
   try {
     const size = fstatSync(fd).size;
@@ -124,36 +182,46 @@ function lastSeq(path: string): number {
     const lines = buffer.toString("utf8").split("\n").filter(Boolean);
     for (let i = lines.length - 1; i >= 0; i--) {
       const entry = entryOf(lines[i]!);
-      if (entry) return entry.seq;
+      if (entry) return { seq: entry.seq, fid: entry.fid };
     }
     // Nothing readable in the last lines (a long line, damage): go through the file.
     if (size > length) {
-      let max = 0;
-      for (const line of readFileSync(path, "utf8").split("\n")) max = Math.max(max, entryOf(line)?.seq ?? 0);
-      return max;
+      let found: { seq: number; fid?: string } = { seq: 0 };
+      for (const line of readFileSync(path, "utf8").split("\n")) {
+        const entry = line ? entryOf(line) : undefined;
+        if (entry && entry.seq >= found.seq) found = { seq: entry.seq, fid: entry.fid };
+      }
+      return found;
     }
-    return 0;
+    return { seq: 0 };
   } finally {
     closeSync(fd);
   }
 }
 
+/** Where a reader is in a journal: what `readActivity` gave it last. */
+export interface ActivityPosition {
+  seq: number;
+  /** The id of the file the position was taken in (none: the reader has not read this journal before). */
+  fid?: string;
+}
+
 export interface ActivityRead {
-  /** The calls after `afterSeq`, oldest first. */
+  /** The calls after the reader's position, oldest first. */
   entries: ActivityEntry[];
-  /** Where to resume: the number of the last call in the file (`afterSeq` when the file has none). */
-  lastSeq: number;
-  /** True when there are calls the reader cannot have: the ring dropped some before they were read, or the file is not the one the position was taken from. */
+  /** Where to resume. */
+  position: ActivityPosition;
+  /** True when there are calls the reader cannot have seen: the ring dropped some before they were read, or the file is another one (deleted and made again). */
   gap: boolean;
 }
 
-/** The calls in a journal after number `afterSeq` (0: all of them). Lines that are not entries are skipped. */
-export function readActivity(path: string, afterSeq = 0): ActivityRead {
+/** The calls in a journal after `after` (none: all of them). Lines that are not entries are skipped. */
+export function readActivity(path: string, after: ActivityPosition = { seq: 0 }): ActivityRead {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: [], lastSeq: afterSeq, gap: false };
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: [], position: after, gap: false };
     throw err;
   }
   const all: ActivityEntry[] = [];
@@ -161,9 +229,11 @@ export function readActivity(path: string, afterSeq = 0): ActivityRead {
     const entry = line ? entryOf(line) : undefined;
     if (entry) all.push(entry);
   }
-  const last = all.length > 0 ? all[all.length - 1]!.seq : 0;
-  // The file counts from a lower number than the reader's position: it is a new file (deleted and made again).
-  if (afterSeq > last) return { entries: all, lastSeq: last, gap: true };
-  const entries = all.filter((e) => e.seq > afterSeq);
-  return { entries, lastSeq: last > 0 ? last : afterSeq, gap: afterSeq > 0 && entries.length > 0 && entries[0]!.seq > afterSeq + 1 };
+  if (all.length === 0) return { entries: [], position: after, gap: false };
+  const lastEntry = all[all.length - 1]!;
+  const position: ActivityPosition = { seq: lastEntry.seq, fid: lastEntry.fid };
+  // Another file than the reader's (however far it has grown), or one that counts from less than the reader's position.
+  if ((after.fid !== undefined && after.fid !== lastEntry.fid) || after.seq > lastEntry.seq) return { entries: all, position, gap: true };
+  const entries = all.filter((e) => e.seq > after.seq);
+  return { entries, position, gap: after.seq > 0 && entries.length > 0 && entries[0]!.seq > after.seq + 1 };
 }
