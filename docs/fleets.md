@@ -709,8 +709,16 @@ PRIME_FLEET_SECRET_GATE=off|warn|exclude                   # exclude is the defa
 ```
 
 The allow list belongs to the member that publishes (it is kept beside its key). This is a net for accidents: a secret in a file the rules do not
-recognise goes through, and so does anything the operator allowed. Where a replica holds its own `.env`, a snapshot that leaves the file out does
-not delete it (the `kept` list is what an apply leaves alone); a replica of an earlier build deletes a `.env` it received before, once.
+recognise goes through, and so does anything the operator allowed.
+
+**What a replica does.** A replica that holds a file the gate now leaves out (it received it from a primary that had no gate) keeps it: an apply
+never removes a path in the snapshot's sealed `kept` list, and never removes a file that the name rules above call a secret, whatever the snapshot
+says (a list that was cut, or a primary of an earlier build). The other side of that: a `.env` that the primary really deletes stays on the
+replicas until someone removes it there. A member of an earlier build (before this release) still deletes the file once, so upgrade the replicas
+before the primary.
+
+**What it does not do.** The gate stops future snapshots only. A secret that was in a work tree before the gate was on is in the snapshots the
+gateway still holds (the last 64) and in every member's store: rotate it.
 
 ## Use cases
 

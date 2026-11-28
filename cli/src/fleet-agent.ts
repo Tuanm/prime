@@ -9,14 +9,14 @@
 // takes the lease. A primary that starts behind the head would fork the
 // fleet.
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write";
 import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
-import { findSecrets, keptForMeta, readAllow, secretGateMode, type SecretHit } from "./fleet-secrets";
-import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
+import { findSecrets, keptForMeta, keptFrom, readAllow, secretGateMode, secretPathReason, type SecretHit } from "./fleet-secrets";
+import { applyCommit, findNestedRepos, gitEnv, ingestPack, removedBetween, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
 import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
 import { FleetTrust, RosterRefusedError, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
@@ -1362,6 +1362,7 @@ async function ingestRoute(
     trust.save();
     // Taking in a snapshot wrapped to a newer epoch key is what lets go of the older ones (after a short while).
     bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation)?.epoch));
+    if (i === plan.chain.length - 1) writeKeptNote(paths.gitDir, m.tipCommit, m.kept ?? []);
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);
   }
@@ -1407,7 +1408,49 @@ export async function applyAndRecord(
 export async function applyFetched(paths: MemberPaths, applied: Position, fetched: Position): Promise<void> {
   if (fetched.commit === null) throw new Error("nothing has been fetched to apply");
   const exclude = paths.nested ? paths.nested.get() : findNestedRepos(paths.work);
-  await applyCommit(paths.work, paths.gitDir, fetched.commit, exclude, applied.commit);
+  // What the fleet's publisher left out as secrets is not the fleet taking the file away: a replica that holds one keeps it.
+  const leftOut = await keptOnApply(paths, applied, fetched.commit, readKeptNote(paths.gitDir, fetched.commit));
+  await applyCommit(paths.work, paths.gitDir, fetched.commit, [...exclude, ...leftOut], applied.commit);
+}
+
+/** Where the paths that the newest fetched snapshot leaves out are kept, beside the store, so that an apply after a restart still knows them. */
+const KEPT_NOTE = "apply.kept";
+
+function writeKeptNote(gitDir: string, commit: string, kept: string[]): void {
+  try {
+    mkdirSync(gitDir, { recursive: true });
+    writeFileSync(join(gitDir, KEPT_NOTE), JSON.stringify({ commit, kept }));
+  } catch {
+    // A note that cannot be written leaves the path rules (`keptOnApply`) as the guard.
+  }
+}
+
+function readKeptNote(gitDir: string, commit: string): string[] {
+  try {
+    const note = JSON.parse(readFileSync(join(gitDir, KEPT_NOTE), "utf8")) as { commit?: unknown; kept?: unknown };
+    return note.commit === commit ? keptFrom(note.kept) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The paths an apply must leave alone for what the publisher left out: the ones its sealed metadata lists, and - whatever
+ * the metadata says, since it can be absent, cut short, or from a publisher that has no gate - any path the secret rules
+ * name that this apply would otherwise remove. A file of that kind that the fleet really deleted stays on a replica, which is the
+ * side to be wrong on.
+ */
+async function keptOnApply(paths: MemberPaths, applied: Position, commit: string, listed: string[]): Promise<string[]> {
+  const out = new Set(listed);
+  if (applied.commit) {
+    try {
+      const env = gitEnv(paths.gitDir, paths.work, join(paths.gitDir, "apply.index"));
+      for (const rel of await removedBetween(paths.gitDir, env, applied.commit, commit)) if (secretPathReason(rel) !== null) out.add(rel);
+    } catch {
+      // No record to compare with: nothing is removed by this apply either.
+    }
+  }
+  return [...out];
 }
 
 /**
