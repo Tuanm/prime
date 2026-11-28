@@ -251,8 +251,24 @@ function sealMetaWith(snapshotKey: Buffer, binding: MetaBinding, meta: SnapshotM
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", metaKeyOf(snapshotKey), iv);
   cipher.setAAD(metaAad(binding));
-  const body = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(meta), "utf8")), cipher.final()]);
+  const body = Buffer.concat([cipher.update(fitMeta(meta)), cipher.final()]);
   return Buffer.concat([iv, body, cipher.getAuthTag()]).toString("base64");
+}
+
+/**
+ * The metadata as the bytes that are sealed. What a reader would refuse for its size (`META_MAX_BYTES`) is not sealed: the optional
+ * parts (what was left out as secrets, which can be long, then what ran) go before the snapshot does, since a snapshot nobody can read is worse than one that says less.
+ */
+function fitMeta(meta: SnapshotMeta): Buffer {
+  let bytes = Buffer.from(JSON.stringify(meta), "utf8");
+  for (const drop of ["kept", "actor"] as const) {
+    if (bytes.length <= META_MAX_BYTES) break;
+    const { [drop]: _dropped, ...rest } = meta;
+    meta = rest as SnapshotMeta;
+    bytes = Buffer.from(JSON.stringify(meta), "utf8");
+  }
+  if (bytes.length > META_MAX_BYTES) throw new Error("the snapshot's sealed metadata is " + bytes.length + " bytes, and a member reads at most " + META_MAX_BYTES);
+  return bytes;
 }
 
 function openMetaWith(snapshotKey: Buffer, binding: MetaBinding, blob: string): SnapshotMeta | null {
