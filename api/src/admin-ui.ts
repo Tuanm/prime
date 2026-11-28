@@ -1307,6 +1307,31 @@ ${UI_CSS}    </style>
             .catch(function (e) { setStatus("could not change the fleet: " + e.message, true); });
         }
 
+        // The code a device was just given, shown once: the gateway keeps only its verifier.
+        function showNewCode(label, j) {
+          var d = openDialog("New device code", esc(label));
+          var hours = j.previous_valid_ms ? Math.round(j.previous_valid_ms / 3600000) : 24;
+          d.bodyEl.innerHTML =
+            '<div class="dlg-msg">This is the code of the device from now on. It is shown once and is not kept anywhere the gateway can show it again. The code it had before works for ' +
+            hours +
+            ' more hours: give the new one to whatever holds it (on the machine: <code>prime devices rotate-code</code> does this for a device it holds), then restart that.</div>' +
+            '<div class="dlg-code">' +
+            esc(j.token || "") +
+            "</div>" +
+            '<div class="dlg-msg"><button type="button" class="btn" id="copyNewCode">Copy</button></div>';
+          var copy = d.bodyEl.querySelector("#copyNewCode");
+          if (copy) {
+            copy.addEventListener("click", function () {
+              var done = function () {
+                copy.textContent = "Copied";
+                setTimeout(function () { copy.textContent = "Copy"; }, 1500);
+              };
+              if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(j.token || "").then(done, done);
+              else done();
+            });
+          }
+        }
+
         function fleetInvite(fleet) {
           api("/admin/api/fleets/" + encodeURIComponent(fleet) + "/invite", { method: "POST", body: "{}" })
             .then(function (j) {
@@ -1452,6 +1477,7 @@ ${UI_CSS}    </style>
           var toolsItem = item("Tools");
           var clientsItem = item("Clients");
           var stateItem = item(dev.disabled ? "Activate" : "Deactivate", !dev.disabled);
+          var rotateItem = item("Make code again");
           var delItem = item("Delete", true);
           menuWrap.appendChild(btn);
           menuWrap.appendChild(menu);
@@ -1496,6 +1522,25 @@ ${UI_CSS}    </style>
                 loadAnon(true);
               })
               .catch(function (e) { setStatus("state change failed: " + e.message, true); });
+          });
+          rotateItem.addEventListener("click", function () {
+            closeMenus();
+            confirmDialog(
+              "Make the code again",
+              "Give " + label + " a new 25-character code? The code it has keeps working for 24 hours, so what holds it can be given the new one; after that it stops. A lock on the device is cleared. The new code is shown once, here.",
+              "Make code",
+              function () {
+                setStatus("making a new code for " + label + " ...");
+                api("/admin/api/anonymous/" + dev.ref + "/rotate", { method: "POST", body: "{}" })
+                  .then(function (j) {
+                    setStatus("made a new code for " + label);
+                    showNewCode(label, j);
+                    loadAnon(true);
+                  })
+                  .catch(function (e) { setStatus("could not make a new code: " + e.message, true); });
+              },
+              false,
+            );
           });
           delItem.addEventListener("click", function () {
             closeMenus();

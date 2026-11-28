@@ -1249,7 +1249,11 @@ export default {
         }
         if (request.method === "POST" && action === "rotate") {
           // The operator, proved by Access: a new code for the device, answered to the operator once.
-          return rotateAnonymous(env, url, deviceId, { operator: true });
+          // The page never holds a device's id: it is given the code and when the old one ends, and no URL.
+          const made = await rotateAnonymous(env, url, deviceId, { operator: true });
+          if (!made.ok) return made;
+          const j = (await made.json()) as { token: string; previous_valid_ms: number };
+          return Response.json({ ok: true, token: j.token, previous_valid_ms: j.previous_valid_ms }, { headers: { "cache-control": "no-store" } });
         }
         if (request.method === "GET" && action === "clients") {
           return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch("https://device/clients");

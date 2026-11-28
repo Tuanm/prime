@@ -372,7 +372,30 @@ describe("the gateway", () => {
       const res = await worker.fetch(post("/admin/api/anonymous/" + "a".repeat(24) + "/rotate", { "cf-connecting-ip": "198.51.100.97" }), env as never);
       expect(res.status).toBe(200);
       expect(rotated().at(-1)!.body).toEqual({ operator: true });
-      expect(((await res.json()) as { token: string }).token).toHaveLength(25);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.token).toHaveLength(25);
+      expect(body.previous_valid_ms).toBe(ROTATE_GRACE_MS);
+      // The page is not given the device's id (or a URL that holds it): it asks by the opaque ref.
+      expect(JSON.stringify(body)).not.toContain(ID);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    });
+
+    test("the admin page offers it, asks first, and shows the code once without the device's id", async () => {
+      const { ADMIN_HTML } = await import("../src/admin-ui");
+      expect(ADMIN_HTML).toContain("Make code again");
+      expect(ADMIN_HTML).toContain('"/admin/api/anonymous/" + dev.ref + "/rotate"');
+      expect(ADMIN_HTML).toContain("shown once");
+      // A question first, as for a delete: the click alone does not rotate.
+      // The page's script still parses (a stray quote in a template string would break the whole page).
+      for (const m of ADMIN_HTML.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) expect(() => new Function(m[1]!)).not.toThrow();
+      expect(ADMIN_HTML).toMatch(/confirmDialog\(\s*"Make the code again"/);
+    });
+
+    test("Access still guards the admin route: without it nothing is made", async () => {
+      const { env, rotated } = await gateway({ ADMIN_ACCESS: "enforce" });
+      const res = await worker.fetch(post("/admin/api/anonymous/" + "a".repeat(24) + "/rotate", { "cf-connecting-ip": "198.51.100.98" }), env as never);
+      expect(res.status).toBe(403);
+      expect(rotated()).toHaveLength(0);
     });
   });
 });
