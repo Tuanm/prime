@@ -5,8 +5,8 @@ import { execFileSync } from "node:child_process";
 import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyFetched, loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
-import { snapshot } from "../src/fleet-sync";
+import { applyFetched, loadOrCreateKeyPair, NotSealedYetError, publish, pull, type MemberPaths } from "../src/fleet-agent";
+import { hasCommit, snapshot } from "../src/fleet-sync";
 import {
   applyReady,
   placeDue,
@@ -2424,6 +2424,133 @@ describe("a tree that is written to without a pause", () => {
       // Round after round it would have been one publish every third of a second or so.
       expect(publishes).toBeLessThanOrEqual(6);
       expect(publishes).toBeGreaterThanOrEqual(2);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("fetching the manifest and the pack of a step", () => {
+  // The requests as they start and end, with the index made slow, to see what waits for what.
+  function watching(): { log: string[] } {
+    const inner = globalThis.fetch;
+    const log: string[] = [];
+    (globalThis as { fetch: unknown }).fetch = (async (url: string, init: { method?: string }) => {
+      const kind = new URL(String(url)).pathname.split("/")[3] ?? "";
+      const tag = (init?.method ?? "GET") + " " + kind;
+      log.push("start " + tag);
+      if (kind === "index") await Bun.sleep(200);
+      try {
+        return await (inner as (u: string, i: unknown) => Promise<Response>)(url, init);
+      } finally {
+        log.push("end " + tag);
+      }
+    }) as unknown as typeof fetch;
+    return { log };
+  }
+
+  async function oneBehind(w: World) {
+    const r = w.replica("r1");
+    await w.publishNext();
+    await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+    await w.publishNext();
+    return { r, hint: { seq: 2, manifestKey: w.gateway.head!.manifestKey } };
+  }
+
+  test("the manifest and the pack of the newest step are asked for while the index is, not after it", async () => {
+    const w = await world();
+    try {
+      const { r, hint } = await oneBehind(w);
+      w.gateway.packReads.length = 0;
+      const { log } = watching();
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save, hint);
+      expect(got.fetched.seq).toBe(2);
+      expect(got.steps).toBe(1);
+      const at = (e: string): number => log.indexOf(e);
+      expect(at("start GET manifests")).toBeGreaterThanOrEqual(0);
+      expect(at("start GET manifests")).toBeLessThan(at("end GET index"));
+      expect(at("start GET packs")).toBeGreaterThanOrEqual(0);
+      expect(at("start GET packs")).toBeLessThan(at("end GET index"));
+      // Asked for once, not twice.
+      expect(w.gateway.packReads.length).toBe(1);
+      expect(log.filter((e) => e === "start GET manifests").length).toBe(1);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("the pack asked for early is the one the route takes: the whole tree when the change is the bigger of the two", async () => {
+    const { planCatchUp } = await import("../src/fleet-agent");
+    const { createHash } = await import("node:crypto");
+    const w = await world();
+    try {
+      const { hint } = await oneBehind(w);
+      // The head's manifest says that it carries the change as well, and that the change is the bigger one.
+      const manifest = JSON.parse(w.gateway.payloads.get(hint.manifestKey)!.toString("utf8")) as Record<string, unknown> & { packKey: string };
+      Object.assign(manifest, { full: true, packBytes: 1000, delta: { packKey: "fleets/x/packs/" + "d".repeat(64), packHash: "d".repeat(64), bytes: 10_000_000 } });
+      const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
+      const key = "fleets/x/manifests/" + createHash("sha256").update(bytes).digest("hex");
+      w.gateway.payloads.set(key, bytes);
+      w.gateway.indexEntries = w.gateway.indexEntries.map((e) => (e.seq === 2 ? { ...e, manifestKey: key, full: true, packBytes: 1000, deltaBytes: 10_000_000 } : e));
+      const plan = await planCatchUp(credsFor("r1"), "x", 1, { seq: 2, manifestKey: key });
+      expect(plan.chain.map((c) => c.whole)).toEqual([true]);
+      expect([...plan.prefetched!.keys()]).toEqual([manifest.packKey]);
+      expect(plan.chain[0]!.packKey).toBe(manifest.packKey);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a manifest the head names is asked for once, even when the index is ahead of the head the socket said", async () => {
+    const w = await world();
+    try {
+      const { r } = await oneBehind(w);
+      await w.publishNext(); // the head is 3 now, and the socket's word is 2
+      const stale = { seq: 2, manifestKey: w.gateway.indexEntries.find((e) => e.seq === 2)!.manifestKey };
+      w.gateway.requests.clear();
+      const got = await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save, stale);
+      expect(got.fetched.seq).toBe(3);
+      // The manifests of 2 and 3, once each.
+      expect(w.gateway.requests.get("GET manifests")).toBe(2);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a snapshot that is not sealed for the member fetches no pack, and leaves nothing behind", async () => {
+    const w = await world();
+    try {
+      await w.publishNext();
+      await w.publishNext();
+      // Joined after both were published: neither is sealed for it.
+      const late = w.replica("late");
+      const hint = { seq: 2, manifestKey: w.gateway.head!.manifestKey };
+      w.gateway.packReads.length = 0;
+      watching();
+      let kept = 0;
+      await expect(prefetch(credsFor("late"), "x", late.paths, { ...late.state, seq: 1, fetchedSeq: 1 }, () => void kept++, hint)).rejects.toBeInstanceOf(NotSealedYetError);
+      await Bun.sleep(100);
+      expect(w.gateway.packReads).toEqual([]);
+      expect(kept).toBe(0);
+      expect(await hasCommit(late.paths.gitDir, "a".repeat(40))).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a pack that is gone is a refusal of the step, however early it was asked for, and nothing is kept", async () => {
+    const w = await world();
+    try {
+      const { r, hint } = await oneBehind(w);
+      const manifest = JSON.parse(w.gateway.payloads.get(hint.manifestKey)!.toString("utf8")) as { packKey: string; delta?: { packKey: string } };
+      w.gateway.payloads.delete(manifest.delta?.packKey ?? manifest.packKey);
+      watching();
+      let kept = 0;
+      await expect(prefetch(credsFor("r1"), "x", r.paths, r.state, () => void kept++, hint)).rejects.toThrow(/let go/);
+      await Bun.sleep(100);
+      expect(kept).toBe(0);
+      expect(r.state.seq).toBe(1);
+      expect(w.gateway.head!.seq).toBe(2);
     } finally {
       finish(w);
     }

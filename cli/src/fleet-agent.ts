@@ -439,6 +439,12 @@ export interface CatchUpPlan {
   head: FleetHead;
   /** Oldest first: a whole tree, if the route needs one, then changes. */
   chain: RouteStep[];
+  /**
+   * Packs already being downloaded, by key, because the plan was still being made when the manifest
+   * said which one the route would almost certainly take. A step takes its pack from here when it is
+   * there, and downloads it itself when it is not; one the route did not take is simply dropped.
+   */
+  prefetched?: Map<string, Promise<Buffer>>;
 }
 
 // How many manifests are looked at before giving up on finding a route.
@@ -582,14 +588,46 @@ export async function planCatchUp(
     : await fetchHead(creds, fleet);
   if (head.seq <= lastSeq) return { head, chain: [] };
 
-  const indexed = await planFromIndex(creds, fleet, lastSeq, head, who);
-  if (indexed) return indexed;
-  return planByWalking(creds, fleet, lastSeq, head, who);
+  // The head's manifest is asked for while the index is, not after it: it is where the route ends
+  // (nearly always), and the pack it names is asked for the moment it arrives, still before the plan is made.
+  const early = startHeadFetch(creds, fleet, lastSeq, head, who);
+  const indexed = await planFromIndex(creds, fleet, lastSeq, head, who, early);
+  if (indexed) return { ...indexed, prefetched: early.packs };
+  return { ...(await planByWalking(creds, fleet, lastSeq, head, who, early)), prefetched: early.packs };
+}
+
+/** What is already being fetched of the head while the route is planned. */
+interface HeadFetch {
+  /** The manifest the head names. A failure is the one of asking for it, reported where it is awaited. */
+  manifest: Promise<FleetManifest>;
+  manifestKey: string;
+  packs: Map<string, Promise<Buffer>>;
+}
+
+// Start fetching the head's manifest, and its pack as soon as the manifest says which. Nothing here is
+// written anywhere: what is not used is dropped with the plan, and a fetch that fails is only heard of
+// by the step that takes its pack.
+function startHeadFetch(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead, who: Asker): HeadFetch {
+  const packs = new Map<string, Promise<Buffer>>();
+  const manifest = fetchManifest(creds, fleet, manifestIdOf(head.manifestKey));
+  const quiet = (): void => undefined;
+  manifest.then((m) => {
+    // A member one snapshot behind has no other route than this snapshot, and the planner chooses the
+    // pack to take from it as it will from the index (the sizes are the same): the one it would take is
+    // asked for. A snapshot the member cannot open is not fetched at all.
+    if (m.seq !== lastSeq + 1 || m.seq !== head.seq) return;
+    const step = chooseRoute([m], lastSeq, who)?.[0];
+    if (!step || packs.has(step.packKey)) return;
+    const pack = getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
+    pack.catch(quiet);
+    packs.set(step.packKey, pack);
+  }, quiet);
+  return { manifest, manifestKey: head.manifestKey, packs };
 }
 
 // Choose the route from the index, then fetch the manifests it names. Returns
 // null whenever the index does not settle it, so the caller walks.
-async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead, who: Asker): Promise<CatchUpPlan | null> {
+async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead, who: Asker, early: HeadFetch): Promise<CatchUpPlan | null> {
   const entries = await fetchIndex(creds, fleet, lastSeq).catch(() => null);
   if (!entries || entries.length === 0) return null;
   // Consecutive, and reaching the head: otherwise the index is behind or has a hole.
@@ -622,7 +660,9 @@ async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: nu
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   // The newest snapshot first, on its own: if it is not sealed for this member no
   // route reaches it, and nothing else need be read.
-  const newest = await fetchManifest(creds, fleet, manifestIdOf(tip.manifestKey)).catch((err: unknown) => {
+  // The head's manifest is already being fetched: what is asked for by the same name is not asked for twice.
+  const manifestOf = (key: string): Promise<FleetManifest> => (key === early.manifestKey ? early.manifest : fetchManifest(creds, fleet, manifestIdOf(key)));
+  const newest = await manifestOf(tip.manifestKey).catch((err: unknown) => {
     if (err instanceof PayloadGoneError) return null; // the index is behind what the gateway keeps
     throw err;
   });
@@ -631,7 +671,7 @@ async function planFromIndex(creds: FleetCredentials, fleet: string, lastSeq: nu
   let real: FleetManifest[];
   try {
     real = await mapLimit(route, 6, async (step) =>
-      step.manifest.seq === newest.seq ? newest : fetchManifest(creds, fleet, manifestIdOf(bySeq.get(step.manifest.seq)!.manifestKey)),
+      step.manifest.seq === newest.seq ? newest : manifestOf(bySeq.get(step.manifest.seq)!.manifestKey),
     );
   } catch (err) {
     if (err instanceof PayloadGoneError) return null; // let go since the index was read
@@ -663,11 +703,11 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return out;
 }
 
-async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead, who: Asker): Promise<CatchUpPlan> {
+async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: number, head: FleetHead, who: Asker, early: HeadFetch): Promise<CatchUpPlan> {
   // Each snapshot names the one it was built against, so the chain is walked
   // backwards until it reaches what is already here.
   const walked: FleetManifest[] = [];
-  let manifest: FleetManifest | null = await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey));
+  let manifest: FleetManifest | null = await early.manifest;
   while (manifest !== null && manifest.seq > lastSeq) {
     walked.push(manifest);
     // The newest snapshot is not sealed for this member: no route reaches it.
@@ -727,8 +767,10 @@ async function downloadStep(
   keys: MemberKeyPair,
   step: RouteStep,
   trust?: FleetTrust,
+  /** The pack, when it is already being downloaded. */
+  ahead?: Promise<Buffer>,
 ): Promise<{ plain: Buffer }> {
-  const sealed = await getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
+  const sealed = await (ahead ?? getPayload(creds, fleet, "packs", manifestIdOf(step.packKey)));
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
   // A member that rotated its key still opens what was sealed for the key it had, until it has taken that in.
@@ -907,7 +949,8 @@ async function ingestRoute(
   const trust = FleetTrust.beside(paths.keyFile);
   const start = (i: number): void => {
     if (i < plan.chain.length && downloads[i] === undefined) {
-      const p = downloadStep(creds, fleet, keys, plan.chain[i]!, trust);
+      const step = plan.chain[i]!;
+      const p = downloadStep(creds, fleet, keys, step, trust, plan.prefetched?.get(step.packKey));
       // A failure is reported where it is awaited, in order.
       p.catch(() => undefined);
       downloads[i] = p;
