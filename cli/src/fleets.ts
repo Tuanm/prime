@@ -40,6 +40,7 @@ import {
   normalizeFingerprint,
   liveMembers,
   makeEntry,
+  mayPublishAt,
   ownerFingerprint,
   parseInviteCode,
   readOwnerKey,
@@ -2087,12 +2088,23 @@ export async function fleetsSnapshots(ctx: Ctx): Promise<void> {
   const rows: Array<{ seq: number; at: number; by: string; actor?: SnapshotActor; opened: boolean; fromMember: boolean }> = [];
   // Who the fleet's roster says its members' keys are, now and as of those that left: a snapshot is shown as its publisher's only when
   // its sender is one of them at that sequence. (Read here without noting anything in the trust file: listing is not taking in.)
-  const roster = await fetchRoster(creds, fleetId).catch(() => undefined);
+  // With a signed roster that is the chain, verified here against the owner key this member pinned: the gateway's list is not asked. A refused chain (a rollback, a fork) is said, and nothing is shown as a member's.
+  let chain: VerifiedRoster | null | undefined;
+  let chainProblem: string | undefined;
+  try {
+    chain = await FleetTrust.beside(keyFile).verifiedRoster(creds, fleetId);
+  } catch (err) {
+    chain = undefined;
+    chainProblem = err instanceof Error ? err.message : String(err);
+  }
+  const roster = chain === null && chainProblem === undefined ? await fetchRoster(creds, fleetId).catch(() => undefined) : undefined;
   const listed = await mapLimit(entries.slice(-limit), 6, async (e) => fetchManifest(creds, fleetId, manifestIdOf(e.manifestKey)).catch(() => undefined));
   for (const m of listed) {
     if (!m) continue;
     const left = roster?.left.find((l) => l.pubkey === m.senderPublicKey);
-    const fromMember = roster !== undefined && (roster.keys.includes(m.senderPublicKey) || (left !== undefined && left.until >= m.seq));
+    const fromMember = chain
+      ? mayPublishAt(chain, m.senderPublicKey, m.seq)
+      : roster !== undefined && (roster.keys.includes(m.senderPublicKey) || (left !== undefined && left.until >= m.seq));
     let actor: SnapshotActor | undefined;
     let opened = false;
     if (typeof m.meta === "string") {
@@ -2121,5 +2133,6 @@ export async function fleetsSnapshots(ctx: Ctx): Promise<void> {
     ),
   );
   ctx.out(dim("what the publisher said of itself in the snapshot; nothing proves it. A key the roster does not name as a member's is marked, and what it says is not shown"));
-  if (!roster) ctx.out(yellow("the roster could not be read, so no key was checked as a member's"));
+  if (chainProblem) ctx.out(yellow("the signed roster was refused (" + chainProblem + "), so no key was checked as a member's"));
+  else if (!chain && !roster) ctx.out(yellow("the roster could not be read, so no key was checked as a member's"));
 }
