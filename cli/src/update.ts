@@ -8,14 +8,18 @@
 // asset for this platform together with its SHA256SUMS, verify the digest, and
 // swap the file in atomically.
 //
-// On the checksum: it is fetched from the same origin as the asset, so it proves
-// the download is intact and is the artifact the release published - it is not a
-// defence against a compromised release. That is the honest guarantee.
+// On the checksum: it is fetched from the same origin as the asset, so by itself it proves only
+// that the download is intact. What makes a release trustworthy is its signature: the release
+// carries RELEASE (its version and the hash of its SHA256SUMS) and RELEASE.sig, made with a key that
+// is not on the release pipeline (see release-key.ts), and the update checks both before it trusts
+// the checksums. A release older than the running build may predate signing and is installed with a
+// warning; a release that is not older must be signed.
 
 import { accessSync, chmodSync, constants, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, yellow } from "./output.ts";
+import { parseReleaseFile, sha256OfBytes, verifyReleaseSignature } from "./release-key.ts";
 import { compareVersions, isValidVersion } from "./version.ts";
 
 export const TAG_PREFIX = "prime-v";
@@ -70,6 +74,8 @@ export interface UpdateOutcome {
   installed_version?: string;
   asset?: string;
   release_url?: string;
+  /** How the release was checked: "verified" (signed by the release key) or "unsigned" (an older release made before signing). */
+  signature?: "verified" | "unsigned";
 }
 
 // ---- pure helpers (unit tested) -------------------------------------------
@@ -322,6 +328,48 @@ function installBytes(target: string, bytes: Uint8Array, mode: number): void {
   }
 }
 
+// ---- the signature --------------------------------------------------------
+
+/**
+ * Check that the release's SHA256SUMS is the one the release key signed.
+ *
+ * A release that is not older than the running build must be signed. An older one (`--version` picked
+ * a release from before signing) is installed with a warning, because the running build cannot tell
+ * it from one that never was signed; a release with only half of the pair is never accepted.
+ */
+export async function verifySignedRelease(
+  release: Release,
+  sumsBytes: Uint8Array,
+  current: string,
+  say: (text: string) => void = () => {},
+): Promise<"verified" | "unsigned"> {
+  const releaseAsset = release.assets.find((a) => a.name === "RELEASE");
+  const signatureAsset = release.assets.find((a) => a.name === "RELEASE.sig");
+  const refuse = (why: string): CliError =>
+    new CliError(
+      `release ${release.version} is not signed by the prime release key; nothing was installed (${why})`,
+      "A release is signed by its publisher after it is built. If this one was just made, wait for the signature; if not, do not install it.",
+    );
+  if (!releaseAsset && !signatureAsset) {
+    if (compareVersions(release.version, current) < 0) {
+      say("warning: release " + release.version + " is older than this build and carries no signature; installing it unverified");
+      return "unsigned";
+    }
+    throw refuse("it has no RELEASE and RELEASE.sig");
+  }
+  if (!releaseAsset || !signatureAsset) throw refuse(`it has ${releaseAsset ? "RELEASE" : "RELEASE.sig"} but not ${releaseAsset ? "RELEASE.sig" : "RELEASE"}`);
+
+  say("verifying the release signature");
+  const releaseBytes = await download(releaseAsset.url, "RELEASE");
+  const signature = await download(signatureAsset.url, "RELEASE.sig");
+  if (!verifyReleaseSignature(releaseBytes, signature)) throw refuse("the signature does not match any release key");
+  const info = parseReleaseFile(new TextDecoder().decode(releaseBytes));
+  if (!info) throw refuse("RELEASE is malformed");
+  if (info.version !== release.version) throw refuse(`it was signed as version ${info.version}`);
+  if (info.sha256sums !== sha256OfBytes(sumsBytes)) throw refuse("SHA256SUMS is not the one that was signed");
+  return "verified";
+}
+
 // ---- the command ----------------------------------------------------------
 
 export async function runUpdate(current: string, options: UpdateOptions): Promise<UpdateOutcome> {
@@ -395,11 +443,7 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
     );
   }
 
-  say("downloading " + assetName + (asset.size ? " (" + (asset.size / 1_048_576).toFixed(1) + " MB)" : ""));
-  const bytes = await download(asset.url, assetName);
-
-  // Mandatory, not best-effort: a self-updater that silently installs whatever it
-  // downloaded when the checksums are missing is worse than one that refuses.
+  // The checksums come first, and are trusted only once the release's signature has vouched for them.
   const checksums = chosen.assets.find((a) => a.name === "SHA256SUMS");
   if (!checksums) {
     throw new CliError(
@@ -407,10 +451,15 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
       "Refusing to install a download that cannot be verified.",
     );
   }
-  const expected = parseChecksums(new TextDecoder().decode(await download(checksums.url, "SHA256SUMS"))).get(assetName);
+  const sumsBytes = await download(checksums.url, "SHA256SUMS");
+  outcome.signature = await verifySignedRelease(chosen, sumsBytes, current, say);
+  const expected = parseChecksums(new TextDecoder().decode(sumsBytes)).get(assetName);
   if (!expected) {
     throw new CliError(`SHA256SUMS has no entry for ${assetName}`, "Refusing to install an unverifiable download.");
   }
+
+  say("downloading " + assetName + (asset.size ? " (" + (asset.size / 1_048_576).toFixed(1) + " MB)" : ""));
+  const bytes = await download(asset.url, assetName);
   say("verifying the checksum");
   const actual = sha256Hex(bytes);
   if (expected !== actual) {
@@ -437,6 +486,7 @@ export function renderUpdate(outcome: UpdateOutcome): string {
   if (outcome.updated) {
     lines.push(`  installed ${green(outcome.installed_version ?? outcome.latest)} -> ${outcome.target}`);
     if (outcome.kind === "bundle") lines.push(dim("  (run it with: bun " + outcome.target + ")"));
+    if (outcome.signature === "unsigned") lines.push(yellow("  not verified: this release is older than this build and carries no signature"));
   } else if (outcome.update_available) {
     lines.push(`  ${yellow("update available")} ${dim("run 'prime update' without --check to install it")}`);
   } else {

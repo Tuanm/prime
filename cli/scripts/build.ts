@@ -67,10 +67,21 @@ if (versionProblem) {
   console.error(versionProblem);
   process.exit(1);
 }
+// --space-image-digest sha256:<hex> names the space image published with this release: the build then
+// uses it by digest (spaces.ts defaultImage) rather than by a tag that can be moved afterwards.
+const digestFlagIndex = process.argv.indexOf("--space-image-digest");
+const SPACE_IMAGE_DIGEST = digestFlagIndex === -1 ? undefined : process.argv[digestFlagIndex + 1];
+if (digestFlagIndex !== -1 && !/^sha256:[0-9a-f]{64}$/.test(SPACE_IMAGE_DIGEST ?? "")) {
+  console.error("--space-image-digest needs sha256:<64 hex digits>, the digest of the pushed image");
+  process.exit(1);
+}
+
 // `process.env.MCP_CLI_VERSION` is substituted with the literal at build time,
 // so the artifact reports the version it was built from - not the environment.
-const DEFINE = `--define=process.env.MCP_CLI_VERSION="${VERSION}"`;
-console.log(`version ${VERSION}`);
+const DEFINES: Record<string, string> = { "process.env.MCP_CLI_VERSION": JSON.stringify(VERSION) };
+if (SPACE_IMAGE_DIGEST) DEFINES["process.env.PRIME_SPACE_IMAGE_DIGEST"] = JSON.stringify(SPACE_IMAGE_DIGEST);
+const DEFINE = Object.entries(DEFINES).map(([k, v]) => `--define=${k}=${v}`);
+console.log(`version ${VERSION}${SPACE_IMAGE_DIGEST ? `  space image ${SPACE_IMAGE_DIGEST}` : ""}`);
 
 /** The bundled code-mcp must be reachable in the artifact, not just in src/. */
 function codeMcpSmoke(command: string[]): string | undefined {
@@ -97,7 +108,7 @@ if (!args.has("--no-bundle")) {
     minify: true,
     outdir: DIST,
     naming: "prime.js",
-    define: { "process.env.MCP_CLI_VERSION": JSON.stringify(VERSION) },
+    define: DEFINES,
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);

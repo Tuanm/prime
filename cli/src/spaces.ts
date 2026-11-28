@@ -341,9 +341,24 @@ function imageExists(runtime: RuntimeInfo, image: string): boolean {
   return runtimeExec(runtime, ["image", "inspect", image], 20_000).code === 0;
 }
 
-export function defaultImage(version: string): string {
+const IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * The space image a release uses. A release build has the digest of the image published with it built
+ * in (the release is built after its image is pushed), so the image is named by content and a tag
+ * that is moved afterwards cannot change what runs; a build without one names the tag.
+ */
+export function defaultImage(version: string, digest: string | undefined = process.env.PRIME_SPACE_IMAGE_DIGEST): string {
+  if (digest && IMAGE_DIGEST_RE.test(digest) && !/-dev$/.test(version)) return "ghcr.io/tuanm/prime-space@" + digest;
   const tag = version.replace(/-dev$/, "");
   return "ghcr.io/tuanm/prime-space:" + tag;
+}
+
+/** What to call an image in a message: its tag, or the start of its digest. */
+export function imageLabel(image: string): string {
+  const at = image.indexOf("@sha256:");
+  if (at !== -1) return "sha256:" + image.slice(at + 8, at + 20);
+  return image.split(":").pop() ?? image;
 }
 
 async function ensureImage(runtime: RuntimeInfo, image: string, note: (text: string) => void): Promise<void> {
@@ -1342,15 +1357,15 @@ export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promis
   for (const name of names) {
     const space = ctx.config.spaces[name]!;
     if (space.image === image) {
-      ctx.out(dim("  " + name + " " + green("already on " + image.split("/").pop())));
+      ctx.out(dim("  " + name + " " + green("already on " + imageLabel(image))));
       continue;
     }
-    const from = (space.image.split(":").pop() ?? space.image);
+    const from = imageLabel(space.image);
     try {
       const result = await refreshSpaceImage(ctx, name, image);
       if (result.changed) {
         moved++;
-        ctx.out(green("  " + name + " moved from ") + dim(from) + green(" to ") + (image.split(":").pop() ?? image));
+        ctx.out(green("  " + name + " moved from ") + dim(from) + green(" to ") + imageLabel(image));
       } else {
         ctx.out(yellow("  " + name + " left on " + from));
       }

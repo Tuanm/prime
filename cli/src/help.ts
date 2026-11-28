@@ -421,15 +421,22 @@ NOTES
   overwritten, the old binary is moved aside to <path>.old and removed on the
   next run.
 
-  The checksum comes from the same release as the artifact, so it proves the
-  download is intact and unmodified in transit - not that the release itself is
-  trustworthy.
+  The checksum comes from the same release as the artifact, so by itself it
+  proves only that the download is intact. A release is trusted because it is
+  signed: it carries RELEASE and RELEASE.sig, made with the prime release key
+  whose public half is built into this CLI. The update checks the signature, that
+  RELEASE names that release's version, and that SHA256SUMS is the one that was
+  signed, and only then the checksum of the file. A release that is not older
+  than this build and is not signed is refused, and nothing is installed; an
+  older one (made before releases were signed) installs with a warning.
 
   If the install directory is not writable, re-run with the privileges that own
   it (for example: sudo prime update), or use --to for a directory you own.
 
 ENVIRONMENT
   GITHUB_TOKEN        Raises the GitHub API rate limit (optional)
+  MCP_CLI_RELEASE_KEY Extra trusted release keys, base64, comma separated (a
+                      mirror or test build of your own)
   MCP_CLI_REPO        Override the repository, default Tuanm/prime
   MCP_CLI_API_BASE    Override the API base, default https://api.github.com
 `;
