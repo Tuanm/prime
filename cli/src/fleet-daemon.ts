@@ -51,7 +51,7 @@ import {
 import { fleetAgentServiceConfig, fleetAgentServiceRuns, fleetAgentServiceStatus, startFleetAgentTask, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
-import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot } from "./fleet-sync.ts";
+import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
@@ -1413,7 +1413,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     // A file that is still being written must not be captured half-written.
     // It only matters when something changed: otherwise there is nothing to
     // capture.
-    if (changed) await settle(paths.work, options.settleMs ?? SETTLE_QUIET_MS, { gitDir: paths.gitDir, left: paths.nested?.get() ?? [] });
+    const settled = changed ? await settle(paths.work, options.settleMs ?? SETTLE_QUIET_MS, { gitDir: paths.gitDir, left: paths.nested?.get() ?? [] }) : null;
     const snapBegan = Date.now();
     const snap = await snapshot({
       work: paths.work,
@@ -1443,6 +1443,25 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       state.seq ?? 0,
       state.memberCount ?? 0,
       state.roster,
+      // The tree just taken is published as it is when the files are still as they were when it was
+      // taken (a snapshot of the same files again would only find the same tree). The watcher having
+      // spoken since says they are not, and nothing is then looked at.
+      settled && !settled.racy && !loop.dirty
+        ? {
+            known: {
+              tree: snap.tree,
+              base: state.base ?? null,
+              // The watcher speaking after the look at the files, up to the moment the tree is used.
+              quiet: () => !loop.dirty,
+              unchanged: async () => {
+                const now = paths.nested?.get() ?? [];
+                if (now.length !== settled.left.length || now.some((p, i) => p !== settled.left[i])) return false;
+                const again = await stampTree(paths.work, paths.gitDir, now);
+                return again !== null && again.key === settled.key;
+              },
+            },
+          }
+        : undefined,
     );
     loop.timing.publish = Date.now() - publishBegan;
     writeFleetState(loop.configPath, fleet, loop.name, {

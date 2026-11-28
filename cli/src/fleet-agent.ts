@@ -136,6 +136,25 @@ export function rosterGained(before: string, now: string): boolean {
   return false;
 }
 
+/** A tree the caller has just taken, so that publishing it need not take it again. */
+export interface KnownTree {
+  /** The tree of the snapshot just taken. */
+  tree: string;
+  /** What that snapshot was built on; it is only the tree of this publish if the publish builds on the same. */
+  base: string | null;
+  /** Whether the files are still as they were when it was taken (a look that costs far less than taking it again). */
+  unchanged: () => Promise<boolean>;
+  /**
+   * Asked again at the moment the tree is used, after the requests to the fleet: false if something has been seen
+   * to change since (the watcher spoke). It covers what happened after the files were looked at.
+   */
+  quiet?: () => boolean;
+}
+
+export interface PublishOptions {
+  known?: KnownTree;
+}
+
 export interface PublishResult {
   seq: number;
   commit: string;
@@ -193,8 +212,15 @@ export async function publish(
   lastMemberCount = 0,
   /** Who the last publish sealed for (see `rosterOf`); tells a swap from no change. */
   lastRoster?: string,
+  options: PublishOptions = {},
 ): Promise<PublishResult> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
+  // Whether the work tree is still the one of the snapshot the caller took, asked while the fleet is
+  // being asked about the head (the two do not wait for each other). Not trusted if this publish
+  // writes into the work tree (it catches up first) or builds on something else.
+  const known = options.known;
+  const treeUnchanged: Promise<boolean> = known && known.base === base ? known.unchanged().catch(() => false) : Promise.resolve(false);
+  let caughtUp = false;
   const [members, head, role] = await Promise.all([
     fetchMemberKeys(creds, fleet),
     fetchHead(creds, fleet).catch(() => null),
@@ -214,6 +240,7 @@ export async function publish(
     }
     await reportApplied(creds, fleet, caught.seq);
     appliedSeq = caught.seq;
+    caughtUp = true;
     // What this snapshot is built on is the state it has just caught up to,
     // not the one the caller's state file remembered from before.
     base = caught.commit;
@@ -256,6 +283,10 @@ export async function publish(
   // the fleet's own also carries the change, so the members that hold that
   // snapshot (nearly all of them, at a checkpoint) do not have to take the tree.
   const withDelta = wantFull && base !== null;
+  // The tree the caller took is the tree to publish when the files have not changed since: the same
+  // files would be staged again and come out as the same tree. When they have, or when this publish
+  // is not built on what the caller's snapshot was, the work tree is taken again, as it is now.
+  const reuse = known !== undefined && !caughtUp && (await treeUnchanged) && (known.quiet?.() ?? true);
   const snap = await snapshot({
     work: paths.work,
     gitDir: paths.gitDir,
@@ -263,6 +294,7 @@ export async function publish(
     seq,
     wantFull,
     withDelta,
+    ...(reuse && known ? { tree: known.tree } : {}),
     ...(paths.nested ? { nested: paths.nested } : {}),
   });
   const payloads = [wantFull ? snap.pack : snap.delta!];

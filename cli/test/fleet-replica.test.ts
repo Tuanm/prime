@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { chooseRoute } from "../src/fleet-agent";
+import { execFileSync } from "node:child_process";
 import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyFetched, loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
+import { snapshot } from "../src/fleet-sync";
 import {
   applyReady,
   placeDue,
@@ -2108,6 +2110,209 @@ describe("what the primary writes down after it publishes", () => {
       expect(s.said).toContain("published 1");
       expect(s.state().seq).toBe(1);
       expect(Object.keys(s.state())).not.toContain("manifest");
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+// What the manifest at the gateway's head says the published tree is.
+const publishedTree = (w: World): string => (JSON.parse(w.gateway.payloads.get(w.gateway.head!.manifestKey)!.toString("utf8")) as { tree: string }).tree;
+
+// The tree of a work tree as it is now, taken in a store of its own.
+const treeOf = async (w: World, work: string): Promise<string> =>
+  (await snapshot({ work, gitDir: join(w.root, "check-" + Math.random().toString(36).slice(2)), base: null, treeOnly: true })).tree;
+
+describe("publishing a tree that was just taken", () => {
+  test("the tree the caller took is published when the files are as they were, and a tree taken again when they are not", async () => {
+    const w = await world();
+    try {
+      const first = await w.publishNext();
+      const snap = (): Promise<{ tree: string }> => snapshot({ work: w.primaryWork, gitDir: w.primary.gitDir, base: first.commit, treeOnly: true });
+      writeFileSync(join(w.primaryWork, "f0.txt"), "taken");
+      const taken = (await snap()).tree;
+      writeFileSync(join(w.primaryWork, "f0.txt"), "written after it was taken");
+      const now = await treeOf(w, w.primaryWork);
+      expect(now).not.toBe(taken);
+      const creds = credsFor("primary-device");
+
+      // Said to be unchanged: the tree taken is the one that goes out, and the work tree is not looked at again.
+      const a = await publish(creds, "x", w.primary, first.commit, first.seq, 1, first.roster, { known: { tree: taken, base: first.commit, unchanged: async () => true } });
+      expect(publishedTree(w)).toBe(taken);
+
+      // Said to have changed, or not answering: taken again, as it is now.
+      const b = await publish(creds, "x", w.primary, a.commit, a.seq, 1, a.roster, { known: { tree: taken, base: a.commit, unchanged: async () => false } });
+      expect(publishedTree(w)).toBe(now);
+      writeFileSync(join(w.primaryWork, "f1.txt"), "again");
+      const c = await publish(creds, "x", w.primary, b.commit, b.seq, 1, b.roster, {
+        known: { tree: taken, base: b.commit, unchanged: () => Promise.reject(new Error("could not look")) },
+      });
+      expect(publishedTree(w)).toBe(await treeOf(w, w.primaryWork));
+
+      // The tree was said to be unchanged, but something has been seen to change since: taken again.
+      writeFileSync(join(w.primaryWork, "f3.txt"), "seen to change");
+      const d = await publish(creds, "x", w.primary, c.commit, c.seq, 1, c.roster, { known: { tree: taken, base: c.commit, unchanged: async () => true, quiet: () => false } });
+      expect(publishedTree(w)).toBe(await treeOf(w, w.primaryWork));
+      expect(publishedTree(w)).not.toBe(taken);
+
+      // Built on something else than the snapshot the tree was taken on: not used.
+      writeFileSync(join(w.primaryWork, "f2.txt"), "third");
+      await publish(creds, "x", w.primary, d.commit, d.seq, 1, d.roster, { known: { tree: taken, base: first.commit, unchanged: async () => true } });
+      expect(publishedTree(w)).toBe(await treeOf(w, w.primaryWork));
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a publish that first has to catch up writes the fleet's files over the tree, so the tree taken is not used", async () => {
+    const w = await world();
+    try {
+      const other = w.replica("other");
+      const first = await w.publishNext();
+      await pull(credsFor("other"), "x", other.paths, 0, null, (s) => other.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      // Another member takes the lease and publishes a file of its own: this one is behind.
+      w.gateway.primary = "other";
+      writeFileSync(join(other.paths.work, "from-other.txt"), "other's");
+      const next = await publish(credsFor("other"), "x", other.paths, first.commit, first.seq, 2, first.roster);
+      w.gateway.primary = "primary-device";
+      const stale = await treeOf(w, w.primaryWork);
+      const done = await publish(credsFor("primary-device"), "x", w.primary, first.commit, first.seq, 2, first.roster, {
+        known: { tree: stale, base: first.commit, unchanged: async () => true },
+      });
+      expect(done.seq).toBe(next.seq + 1);
+      expect(readFileSync(join(w.primaryWork, "from-other.txt"), "utf8")).toBe("other's");
+      expect(publishedTree(w)).not.toBe(stale);
+      expect(publishedTree(w)).toBe(await treeOf(w, w.primaryWork));
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("the primary's round with a tree it has just taken", () => {
+  // How often git staged the work tree and wrote a tree, counted from git's own trace.
+  const counted = (trace: string): { add: number; writeTree: number } => {
+    const text = existsSync(trace) ? readFileSync(trace, "utf8") : "";
+    return { add: (text.match(/built-in: git add /g) ?? []).length, writeTree: (text.match(/built-in: git write-tree/g) ?? []).length };
+  };
+
+  async function primaryRound(w: World, between?: (work: string) => void) {
+    const s = await space(w, "r1");
+    w.gateway.primary = "r1";
+    s.loop.primary = true;
+    s.loop.dirty = true;
+    s.loop.lastBootstrap = Date.now();
+    writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+    await s.round();
+    expect(s.said).toContain("published 1");
+
+    // A change, and then the next round.
+    writeFileSync(join(s.paths.work, "made.txt"), "changed once\n");
+    s.loop.dirty = true;
+    s.loop.lastBootstrap = Date.now();
+    // The change in between: after the round has taken its tree, before it publishes (its next question to the fleet).
+    if (between) {
+      const handle = w.gateway.handle.bind(w.gateway);
+      let done = false;
+      w.gateway.handle = (async (...args: Parameters<FakeGateway["handle"]>) => {
+        if (!done && args[2].endsWith("/keys")) {
+          done = true;
+          between(s.paths.work);
+        }
+        return handle(...args);
+      }) as FakeGateway["handle"];
+    }
+    const trace = join(w.root, "git-trace-" + Math.random().toString(36).slice(2));
+    const before = process.env.GIT_TRACE;
+    process.env.GIT_TRACE = trace;
+    try {
+      await s.round();
+    } finally {
+      if (before === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = before;
+    }
+    return { s, ...counted(trace) };
+  }
+
+  test("is staged once, not twice, when nothing changed between", async () => {
+    const w = await world();
+    try {
+      const { s, add, writeTree } = await primaryRound(w);
+      expect(s.said).toContain("published 2");
+      expect(add).toBe(1);
+      expect(writeTree).toBe(1);
+      expect(publishedTree(w)).toBe(await treeOf(w, s.paths.work));
+    } finally {
+      finish(w);
+    }
+  });
+
+  for (const sameSize of [false, true]) {
+    test("a file written between the two looks (" + (sameSize ? "same size, old write time put back" : "longer") + ") is in what is published", async () => {
+      const w = await world();
+      try {
+        const { s, add } = await primaryRound(w, (work) => {
+          const file = join(work, "made.txt");
+          const was = statSync(file);
+          writeFileSync(file, sameSize ? "CHANGED ONCE\n" : "changed twice, and longer\n");
+          if (sameSize) utimesSync(file, was.atime, was.mtime);
+        });
+        expect(s.said).toContain("published 2");
+        // The tree was taken again: the staging ran twice.
+        expect(add).toBe(2);
+        // On Windows git itself does not see a rewrite that keeps the size and the write time (it looks at neither
+        // the change time nor the inode), so what it stages is not the file as it is; the look at the files is.
+        if (!(sameSize && process.platform === "win32")) expect(publishedTree(w)).toBe(await treeOf(w, s.paths.work));
+      } finally {
+        finish(w);
+      }
+    });
+  }
+
+  test("a file written after the files were looked at again, while the fleet is being asked, is in what is published", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+      await s.round();
+      expect(s.said).toContain("published 1");
+
+      writeFileSync(join(s.paths.work, "made.txt"), "changed once\n");
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      // The publish looks at the head's manifest after its first three questions; by then the look at the files
+      // is long done (it is made at the same time as the questions), and the watcher has the write.
+      const handle = w.gateway.handle.bind(w.gateway);
+      let seen = 0;
+      w.gateway.handle = (async (...args: Parameters<FakeGateway["handle"]>) => {
+        if (args[2].includes("/manifests/") && ++seen === 1) {
+          await Bun.sleep(300);
+          writeFileSync(join(s.paths.work, "made.txt"), "written while the fleet was asked, longer\n");
+          s.loop.dirty = true;
+        }
+        return handle(...args);
+      }) as FakeGateway["handle"];
+      await s.round();
+      expect(s.said).toContain("published 2");
+      expect(publishedTree(w)).toBe(await treeOf(w, s.paths.work));
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a file that arrives between them is in what is published too", async () => {
+    const w = await world();
+    try {
+      const { s } = await primaryRound(w, (work) => writeFileSync(join(work, "arrived.txt"), "new"));
+      expect(publishedTree(w)).toBe(await treeOf(w, s.paths.work));
+      expect(readFileSync(join(s.paths.work, "arrived.txt"), "utf8")).toBe("new");
+      // And it is a file of the published tree.
+      const listing = execFileSync("git", ["--git-dir=" + s.paths.gitDir, "ls-tree", "-r", "--name-only", publishedTree(w)], { encoding: "utf8" });
+      expect(listing).toContain("arrived.txt");
     } finally {
       finish(w);
     }
