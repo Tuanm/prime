@@ -52,7 +52,7 @@ import { fleetAgentServiceConfig, fleetAgentServiceRuns, fleetAgentServiceStatus
 import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { IgnoreFilter } from "./fleet-ignore.ts";
-import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
+import { MAX_STAGED_PATHS, NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
 import { capsBody, fetchMemberKeys, fetchRole, fetchRoster, noteInline, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, hasUnwrittenPosition, readFleetState, recordedPosition, recordPublished, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
@@ -1157,6 +1157,57 @@ export function watchTree(
   };
 }
 
+/** More changed paths than this are not named: the next snapshot walks the work tree, which costs less than naming them. */
+export const MAX_CHANGED_PATHS = MAX_STAGED_PATHS;
+
+/**
+ * Remember a change the watcher saw, to be staged by name (see `SnapshotOptions.paths`).
+ *
+ * A change that says nothing of where it was, or that changes what is staged at all (a `.gitignore` or `.gitattributes` anywhere:
+ * what is ignored, and how a file is read, is then another), or more of them than are worth naming, is a reason to stage the whole
+ * tree at the next snapshot, which is always right.
+ */
+export function noteChangedPath(loop: Pick<SpaceLoop, "changed" | "changedAll">, filename: string | null | undefined): void {
+  if (loop.changedAll) return;
+  if (!filename) {
+    loop.changedAll = true;
+    return;
+  }
+  const rel = filename.split("\\").join("/").replace(/^\.\//, "");
+  const name = rel.slice(rel.lastIndexOf("/") + 1);
+  if (name === ".gitignore" || name === ".gitattributes") {
+    loop.changedAll = true;
+    return;
+  }
+  const set = (loop.changed ??= new Set());
+  // A repository's own files are nobody's to stage, but one that appeared or went (`rm -rf sub/.git`) changes what is
+  // left alone: the folder it was in is what changed.
+  if (name === ".git") {
+    const parent = rel.slice(0, Math.max(0, rel.lastIndexOf("/")));
+    if (parent === "") loop.changedAll = true;
+    else set.add(parent);
+    return;
+  }
+  if (set.size >= MAX_CHANGED_PATHS) {
+    loop.changedAll = true;
+    return;
+  }
+  set.add(rel);
+}
+
+/**
+ * What the next snapshot may stage by name: the changes noted since the last time, when the snapshots' index is known to be
+ * right up to then; undefined when the whole tree has to be staged. Either way the notes start over.
+ */
+export function takeChangedPaths(loop: Pick<SpaceLoop, "changed" | "changedAll" | "indexTrusted">): string[] | undefined {
+  const named = loop.changed ? [...loop.changed] : [];
+  // A round that was asked for with nothing noted (the files changed in a way nobody named) has nothing to go by.
+  const all = loop.changedAll === true || loop.indexTrusted !== true || named.length === 0;
+  loop.changed = new Set();
+  loop.changedAll = false;
+  return all ? undefined : named;
+}
+
 /** How long each part of a round took, in milliseconds. */
 export interface RoundTiming {
   bootstrap?: number;
@@ -1346,6 +1397,18 @@ export interface SpaceLoop {
   creds: FleetCredentials;
   paths: MemberPaths;
   dirty: boolean;
+  /**
+   * The paths the watcher has seen change since the last round took them (see `noteChangedPath`), so that the next
+   * snapshot stages those and does not walk the work tree.
+   */
+  changed?: Set<string>;
+  /** Too many changed to name, or one that named nothing or that changes what is staged at all (`.gitignore`): stage everything. */
+  changedAll?: boolean;
+  /**
+   * The index of the snapshots is right as of the paths in `changed` having been taken: a snapshot of the whole tree has been
+   * made in this role, and nothing but this agent's rounds has written the index since. Without it everything is staged.
+   */
+  indexTrusted?: boolean;
   lastPublish: number;
   /** Publishes in a row that followed the one before within moments (see `holdAfterPublish`). */
   rapid?: number;
@@ -1515,6 +1578,8 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     }
   }
 
+  // A replica writes the work tree and does not stage it: what the index of the snapshots holds is out of date from here on.
+  if (!loop.primary) loop.indexTrusted = false;
   if (loop.primary) {
     const due = Date.now() - loop.lastCheck > (options.backstopMs ?? 60_000);
     const changed = loop.dirty;
@@ -1523,19 +1588,37 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     if (changed && !due && Date.now() < (loop.holdUntil ?? 0)) return;
     loop.dirty = false;
     loop.lastCheck = Date.now();
+    // What changed since the last look is staged by name, unless this look is the backstop (it takes the whole tree, in case an
+    // event was lost) or the index of the snapshots is not known to be right (see `indexTrusted`).
+    const stagedPaths = takeChangedPaths(loop);
+    const named = due ? undefined : stagedPaths;
 
     // A file that is still being written must not be captured half-written.
     // It only matters when something changed: otherwise there is nothing to
     // capture.
-    const settled = changed ? await settle(paths.work, options.settleMs ?? SETTLE_QUIET_MS, { gitDir: paths.gitDir, left: paths.nested?.get() ?? [] }) : null;
+    // Only the paths the watcher named are looked at while it waits, with those noted meanwhile (they are not staged by this
+    // round, which dirties it, but are waited for): the work tree is not walked twice for a change to one file.
+    const lookAt = named !== undefined ? () => [...new Set([...named, ...(loop.changed ?? [])])] : undefined;
+    const settled = changed
+      ? await settle(paths.work, options.settleMs ?? SETTLE_QUIET_MS, { gitDir: paths.gitDir, left: paths.nested?.get() ?? [], ...(lookAt ? { only: lookAt } : {}) })
+      : null;
     const snapBegan = Date.now();
-    const snap = await snapshot({
-      work: paths.work,
-      gitDir: paths.gitDir,
-      base: state.base ?? null,
-      treeOnly: true,
-      ...nestedOpt(paths),
-    });
+    let snap: Awaited<ReturnType<typeof snapshot>>;
+    try {
+      snap = await snapshot({
+        work: paths.work,
+        gitDir: paths.gitDir,
+        base: state.base ?? null,
+        treeOnly: true,
+        ...(named !== undefined ? { paths: named } : {}),
+        ...nestedOpt(paths),
+      });
+    } catch (err) {
+      // What was taken is not staged: the next one stages everything.
+      loop.indexTrusted = false;
+      throw err;
+    }
+    loop.indexTrusted = true;
     loop.timing.snapshot = Date.now() - snapBegan;
     const members = await fetchMemberKeys(creds, fleet);
     // Nothing changed in the workspace and nobody joined: publishing the same
@@ -1572,7 +1655,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
               unchanged: async () => {
                 const now = paths.nested?.get() ?? [];
                 if (now.length !== settled.left.length || now.some((p, i) => p !== settled.left[i])) return false;
-                const again = await stampTree(paths.work, paths.gitDir, now);
+                const again = await stampTree(paths.work, paths.gitDir, now, undefined, lookAt?.());
                 return again !== null && again.key === settled.key;
               },
             },
@@ -1940,6 +2023,8 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     }
     loop.refusedForMs = undefined;
     loop.paused = false;
+    // The index of the snapshots is not what it was when the member was last primary: a replica writes the work tree.
+    if (placed.primary !== loop.primary) loop.indexTrusted = false;
     loop.primary = placed.primary;
     // What the fleet says a place lasts. An agent that renews at its own pace
     // against a lease it never asked about is how a live primary loses it.
@@ -2217,6 +2302,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       (eventType, filename) => {
         // A repository that appeared or went away changes what is left alone.
         loop.paths.nested?.noteChange(eventType, filename);
+        noteChangedPath(loop, filename);
         loop.dirty = true;
         // A change held back by a rush of publishes wakes the round once the hold is over, not at every write.
         const held = (loop.holdUntil ?? 0) - Date.now();

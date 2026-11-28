@@ -18,7 +18,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyFetched, fetchAhead, type HeadHint, type MemberPaths, type Position } from "./fleet-agent";
-import { hasCommit, preserveLocalChange, readApplySidecar, snapshot, withApplyLock } from "./fleet-sync";
+import { hasCommit, preserveLocalChange, readApplySidecar, snapshot, withApplyLock, workTreeMatchesApply } from "./fleet-sync";
 import { reportApplied, type FleetCredentials, type FleetHead } from "./fleet-transport";
 
 /** `lazy` fetches ahead and applies on demand; `mirror` applies after every fetch. */
@@ -173,7 +173,11 @@ export async function applyReady(
     // The apply that wrote it finished; a note of what it was for that is still there
     // (the stop came between the sidecar and its removal) is done with.
     if (holds) rmSync(join(paths.gitDir, "apply.target"), { force: true });
-    if (!holds && current.tree !== undefined) {
+    // What the work tree holds is compared with what the last apply wrote by looking at the files' times against the apply
+    // index (no file is hashed, nothing is staged): a member that edited nothing, which is nearly every replica, has
+    // nothing to keep. Any doubt, and the work tree is taken as a snapshot and compared by tree, as it always was.
+    const untouched = !holds && current.tree !== undefined && (await workTreeMatchesApply(paths.work, paths.gitDir, current.base, paths.nested?.get()));
+    if (!holds && current.tree !== undefined && !untouched) {
       const local = await snapshot({
         work: paths.work,
         gitDir: paths.gitDir,

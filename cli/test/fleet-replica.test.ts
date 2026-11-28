@@ -2319,6 +2319,142 @@ describe("publishing a tree that was just taken", () => {
   });
 });
 
+describe("staging by name, and a replica that edited nothing", () => {
+  /** git's own trace of a call: the commands it ran. */
+  async function traced<T>(fn: () => Promise<T>): Promise<{ value: T; commands: string[] }> {
+    const trace = join(tmpdir(), "git-trace-" + Math.random().toString(36).slice(2));
+    const before = process.env.GIT_TRACE;
+    process.env.GIT_TRACE = trace;
+    try {
+      const value = await fn();
+      const text = existsSync(trace) ? readFileSync(trace, "utf8") : "";
+      return { value, commands: [...text.matchAll(/built-in: git (.*)$/gm)].map((m) => m[1]!) };
+    } finally {
+      rmSync(trace, { force: true });
+      if (before === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = before;
+    }
+  }
+  const whole = (commands: string[]): number => commands.filter((c) => /^add -A -- \./.test(c)).length;
+  const named = (commands: string[]): number => commands.filter((c) => /^add -A --pathspec-from-file/.test(c)).length;
+
+  test("the primary's round stages what the watcher named, by name; the backstop's round stages the whole tree", async () => {
+    const { noteChangedPath } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.lastBootstrap = Date.now();
+      writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+      s.loop.dirty = true;
+      await s.round();
+      expect(s.said).toContain("published 1");
+      expect(s.loop.indexTrusted).toBe(true);
+
+      // A change the watcher named is staged by name.
+      writeFileSync(join(s.paths.work, "made.txt"), "changed once\n");
+      noteChangedPath(s.loop, "made.txt");
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      const first = await traced(() => s.round());
+      expect(s.said).toContain("published 2");
+      expect(whole(first.commands)).toBe(0);
+      expect(named(first.commands)).toBeGreaterThan(0);
+
+      // A change nobody named (an event that was lost) is in the next whole staging, which the backstop's round makes.
+      writeFileSync(join(s.paths.work, "other.txt"), "nobody said\n");
+      s.loop.lastCheck = 0;
+      s.loop.lastBootstrap = Date.now();
+      const backstop = await traced(() => s.round());
+      expect(s.said).toContain("published 3");
+      // (The publish that follows a round with no watcher event takes the tree again itself, so that is two whole stagings.)
+      expect(whole(backstop.commands)).toBeGreaterThan(0);
+      expect(named(backstop.commands)).toBe(0);
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+
+  test("a round that was asked for with nothing named stages the whole tree", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.lastBootstrap = Date.now();
+      s.loop.dirty = true;
+      await s.round();
+      expect(s.loop.indexTrusted).toBe(true);
+      writeFileSync(join(s.paths.work, "made.txt"), "one\n");
+      s.loop.dirty = true;
+      s.loop.lastBootstrap = Date.now();
+      expect(whole((await traced(() => s.round())).commands)).toBe(1);
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+
+  test("a member that stops being the primary no longer trusts the index of its snapshots", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.lastBootstrap = Date.now();
+      s.loop.dirty = true;
+      await s.round();
+      expect(s.loop.indexTrusted).toBe(true);
+      w.gateway.primary = "someone-else";
+      s.loop.primary = false;
+      s.loop.lastBootstrap = 0;
+      await s.round();
+      expect(s.loop.primary).toBe(false);
+      expect(s.loop.indexTrusted).toBe(false);
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+
+  test("a replica that has edited nothing is brought to the next snapshot without staging its work tree", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      const done = await traced(() => applyReady(credsFor("r1"), "x", r.paths, r.state, r.save));
+      expect(done.value!.applied.seq).toBe(4);
+      expect(done.value!.kept).toBeUndefined();
+      // Before: the work tree was staged and written as a tree, to be compared with the one applied before.
+      expect(done.commands.filter((c) => /^(add|write-tree)/.test(c))).toEqual([]);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+
+  test("a replica's own new file is still kept when the next snapshot is written", async () => {
+    const w = await world();
+    try {
+      const r = w.replica("r1");
+      await w.publishNext();
+      await pull(credsFor("r1"), "x", r.paths, 0, null, (s) => r.save({ seq: s.seq, base: s.commit, tree: s.tree }));
+      for (let i = 0; i < 2; i++) await w.publishNext();
+      await prefetch(credsFor("r1"), "x", r.paths, r.state, r.save);
+      writeFileSync(join(r.paths.work, "mine.md"), "a note of the replica's own\n");
+      const done = await applyReady(credsFor("r1"), "x", r.paths, r.state, r.save);
+      expect(done!.kept?.moved).toBe(1);
+      expect(readFileSync(join(done!.kept!.to, "mine.md"), "utf8")).toBe("a note of the replica's own\n");
+      expect(existsSync(join(r.paths.work, "mine.md"))).toBe(false);
+      rmSync(done!.kept!.to, { recursive: true, force: true });
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+});
+
 describe("the primary's round with a tree it has just taken", () => {
   // How often git staged the work tree and wrote a tree, counted from git's own trace.
   const counted = (trace: string): { add: number; writeTree: number } => {
