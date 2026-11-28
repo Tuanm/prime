@@ -29,6 +29,36 @@ export interface MemberKeyPair {
   previous?: MemberKeyPair;
   /** The member's signing key (see `loadOrCreateSignKey`); made when it is first needed, and kept across rotations of the pair. */
   sign?: MemberSignKey;
+  /**
+   * The epoch keys this member holds (see `EpochKey`), oldest first. A snapshot can be wrapped to one of them rather than to the
+   * pair above, and deleting an epoch's private half is what makes the snapshots wrapped to it unreadable from this file.
+   */
+  epochs?: EpochKey[];
+}
+
+/**
+ * An X25519 pair a member makes every day or so and publishes (signed with its signing key) for the primary to wrap snapshot keys to.
+ * Its private half is deleted once the member has taken in a snapshot wrapped to a newer one, so a copy of the key file taken later
+ * opens only the snapshots of the epochs still on disk, not every snapshot the gateway still holds.
+ */
+export interface EpochKey {
+  /** Counts up from 1 and never repeats for a member of a fleet. */
+  n: number;
+  /** base64 of the raw 32 byte public key. */
+  publicKey: string;
+  /** PEM of the private key. */
+  privateKey: string;
+  createdAt: number;
+  /** The signing key (its public half) the fleet took this key under: a key not posted, or posted under a signing key since replaced, is posted again. */
+  posted?: string;
+  /** When a snapshot wrapped to a newer epoch was taken in: the private half is deleted a little after (see `pruneEpochs`). */
+  supersededAt?: number;
+}
+
+/** A new epoch key. */
+export function generateEpochKey(n: number, now: number = Date.now()): EpochKey {
+  const pair = generateMemberKeyPair();
+  return { n, publicKey: pair.publicKey, privateKey: pair.privateKey, createdAt: now };
 }
 
 /** The Ed25519 key a member signs with: its roster entries (rotate-self), its witness checkpoints, its calls. */
@@ -72,6 +102,28 @@ function sharedSecret(privateKeyPem: string, peerPublicKeyB64: string): Buffer {
   return Buffer.from(hkdfSync("sha256", secret, Buffer.alloc(32), INFO, 32));
 }
 
+const WRAP_V2_INFO = Buffer.from("prime-fleet-wrap-v2");
+
+/**
+ * The key a snapshot key is wrapped under for an epoch key: the secret the sender's ephemeral key shares with it and the secret the sender's
+ * long-term key shares with it, together. The first is what a later theft of the sender's key file cannot give back (the ephemeral
+ * private half is not kept); the second says who wrapped it.
+ */
+function epochWrapKey(epochPublicB64: string, ephemeralPrivatePem: string, senderPrivatePem: string): Buffer {
+  const peer = publicKeyFromRaw(Buffer.from(epochPublicB64, "base64"));
+  const a = diffieHellman({ privateKey: createPrivateKey({ key: ephemeralPrivatePem, format: "pem", type: "pkcs8" }), publicKey: peer });
+  const b = diffieHellman({ privateKey: createPrivateKey({ key: senderPrivatePem, format: "pem", type: "pkcs8" }), publicKey: peer });
+  return Buffer.from(hkdfSync("sha256", Buffer.concat([a, b]), Buffer.alloc(32), WRAP_V2_INFO, 32));
+}
+
+/** The same key, from the other end: the epoch's private half, the ephemeral public key, and the sender's long-term public key. */
+function epochUnwrapKey(epochPrivatePem: string, ephemeralPublicB64: string, senderPublicB64: string): Buffer {
+  const priv = createPrivateKey({ key: epochPrivatePem, format: "pem", type: "pkcs8" });
+  const a = diffieHellman({ privateKey: priv, publicKey: publicKeyFromRaw(Buffer.from(ephemeralPublicB64, "base64")) });
+  const b = diffieHellman({ privateKey: priv, publicKey: publicKeyFromRaw(Buffer.from(senderPublicB64, "base64")) });
+  return Buffer.from(hkdfSync("sha256", Buffer.concat([a, b]), Buffer.alloc(32), WRAP_V2_INFO, 32));
+}
+
 export interface WrappedKey {
   /** The member this key is for. */
   memberId: string;
@@ -83,6 +135,12 @@ export interface WrappedKey {
   keyId?: string;
   /** base64 of the sealed snapshot key. */
   wrapped: string;
+  /**
+   * The epoch key of the member this entry is wrapped to (see `EpochKey`), when it is: the key is then unwrapped with the
+   * epoch's private half and the manifest's `epk`, not with the member's long-term key. The entry's `keyId` and `mac` are the
+   * long-term key's all the same, so who made the snapshot is checked as it always was.
+   */
+  epoch?: number;
   /**
    * A tag over the manifest's seal fields made with a key only the sender and this member can
    * derive (their Diffie-Hellman secret): what the seal cannot say, which is that the sender
@@ -171,6 +229,8 @@ export interface SealedManyForMembers {
   ciphertexts: Buffer[];
   wrapped: WrappedKey[];
   senderPublicKey: string;
+  /** The ephemeral public key the entries wrapped to an epoch key were wrapped with (the manifest's `epk`); absent when there are none. */
+  epk?: string;
   /**
    * The seal of a manifest: a tag only a holder of this snapshot key can make
    * (see `SealFields`). It travels in the manifest. Sealing also puts each member's own
@@ -418,11 +478,13 @@ export interface OpenedPayload {
  */
 export function sealManyForMembers(
   plains: Buffer[],
-  members: Array<{ memberId: string; publicKey?: string }>,
+  members: Array<{ memberId: string; publicKey?: string; epoch?: { n: number; publicKey: string } }>,
   senderPrivateKeyPem: string,
   senderPublicKeyB64: string,
 ): SealedManyForMembers {
   const snapshotKey = randomBytes(32);
+  // One ephemeral key for the entries that are wrapped to an epoch key, made only when there is one.
+  const ephemeral = members.some((m) => m.publicKey && m.epoch) ? generateMemberKeyPair() : undefined;
   const ciphertexts = plains.map((plain) => {
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", snapshotKey, iv);
@@ -436,12 +498,14 @@ export function sealManyForMembers(
     if (!member.publicKey) continue;
     const wrapKey = sharedSecret(senderPrivateKeyPem, member.publicKey);
     const wrapIv = randomBytes(12);
-    const wrapper = createCipheriv("aes-256-gcm", wrapKey, wrapIv);
+    // The tag that says who made the snapshot is the long-term key's either way; only what the snapshot key is wrapped under changes.
+    const wrapper = createCipheriv("aes-256-gcm", member.epoch && ephemeral ? epochWrapKey(member.epoch.publicKey, ephemeral.privateKey, senderPrivateKeyPem) : wrapKey, wrapIv);
     const sealed = Buffer.concat([wrapper.update(snapshotKey), wrapper.final()]);
     const entry: WrappedKey = {
       memberId: member.memberId,
       keyId: keyIdOf(member.publicKey),
       wrapped: Buffer.concat([wrapIv, sealed, wrapper.getAuthTag()]).toString("base64"),
+      ...(member.epoch && ephemeral ? { epoch: member.epoch.n } : {}),
     };
     wrapped.push(entry);
     macKeys.push({ entry, key: macKeyOf(wrapKey) });
@@ -451,6 +515,7 @@ export function sealManyForMembers(
     ciphertexts,
     wrapped,
     senderPublicKey: senderPublicKeyB64,
+    ...(ephemeral ? { epk: ephemeral.publicKey } : {}),
     seal: (fields) => {
       for (const { entry, key } of macKeys) entry.mac = macOf(key, entry.memberId, fields);
       return tagOf(sealKey, fields);
@@ -502,6 +567,8 @@ export function openPayload(
   memberPrivateKeyPem: string,
   /** The fleet's incarnation, to find an entry listed under `wrapIdOf` rather than the device id. */
   incarnation?: string,
+  /** What an entry wrapped to an epoch key is opened with: the manifest's `epk`, and the epoch keys this member holds. */
+  epochs?: { epk?: string; keys: readonly EpochKey[] },
 ): OpenedPayload | null {
   const entry = wrappedEntryFor(wrapped, memberId, incarnation);
   if (!entry) return null;
@@ -513,7 +580,14 @@ export function openPayload(
   const wrapKey = sharedSecret(memberPrivateKeyPem, senderPublicKeyB64);
   let snapshotKey: Buffer;
   try {
-    const unwrapper = createDecipheriv("aes-256-gcm", wrapKey, wrapIv);
+    let unwrapKey = wrapKey;
+    if (entry.epoch !== undefined) {
+      // Wrapped to an epoch key: opened with that epoch's private half, which is gone once it has been deleted.
+      const held = epochs?.keys.find((k) => k.n === entry.epoch);
+      if (!held || typeof epochs?.epk !== "string") return null;
+      unwrapKey = epochUnwrapKey(held.privateKey, epochs.epk, senderPublicKeyB64);
+    }
+    const unwrapper = createDecipheriv("aes-256-gcm", unwrapKey, wrapIv);
     unwrapper.setAuthTag(wrapTag);
     snapshotKey = Buffer.concat([unwrapper.update(wrapBody), unwrapper.final()]);
   } catch {
