@@ -115,7 +115,75 @@ const member = async (path: string, id: string, token: string, body: unknown = {
   const r = await fetch(BASE + path, { method, headers: dev(id, token), body: method === "GET" ? undefined : JSON.stringify(body) });
   return { status: r.status, json: (await r.json().catch(() => ({}))) as any };
 };
+const runStart = Date.now();
 const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+
+let renewalTimer: ReturnType<typeof setInterval> | undefined;
+
+interface Attempt {
+  ok: boolean;
+  retriable: boolean;
+  fatal: boolean;
+  retryAfterMs?: number;
+  ms: number;
+  sent: number;
+  total: number;
+  status?: number;
+  body?: string;
+  error?: string;
+  cfRay?: string | null;
+  tell: { label: string; piece: number; lane: number };
+  n: number;
+}
+const describe = (a: Attempt) =>
+  a.tell.label + " piece " + a.tell.piece + " lane " + a.tell.lane + " attempt " + a.n + ": " +
+  (a.status === undefined ? "NO RESPONSE (" + a.error + ")" : "status " + a.status + (a.cfRay ? " cf-ray " + a.cfRay : "") + " " + (a.body ?? "").slice(0, 300)) +
+  "; " + a.sent + " of " + a.total + " bytes handed to the connection in " + a.ms + " ms";
+
+/**
+ * One upload of one piece. The body is a stream that counts what the connection has taken from it, so that a connection that is
+ * reset says how far it got. What is retried is told apart from what is not: a reset, or an answer of the gateway's own (it has a
+ * `code`), is tried once more; a 5xx that is not the gateway's JSON (Cloudflare's own page, error 1102 "exceeded memory", a
+ * `cf-ray` with no `code`) is fatal at once, because it is the platform's verdict and not something to try again.
+ */
+async function attempt(piece: Uint8Array, hash: string, withHash: boolean, tell: Attempt["tell"], n: number): Promise<Attempt> {
+  const headers: Record<string, string> = { ...dev(DEV, TOKEN), "content-type": "application/octet-stream", "content-length": String(piece.length) };
+  if (withHash) headers["x-prime-sha256"] = hash;
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(c) {
+      if (sent >= piece.length) return c.close();
+      const end = Math.min(piece.length, sent + 65536);
+      c.enqueue(piece.subarray(sent, end));
+      sent = end;
+    },
+  });
+  const t0 = Date.now();
+  const base = { ms: 0, sent: 0, total: piece.length, tell, n, ok: false, retriable: false, fatal: false } satisfies Attempt;
+  let r: Response;
+  try {
+    r = await fetch(BASE + "/fleets/" + FLEET + "/packs", { method: "POST", headers, body, duplex: "half" } as RequestInit);
+  } catch (error) {
+    return { ...base, ms: Date.now() - t0, sent, retriable: true, error: String((error as Error)?.message ?? error) };
+  }
+  const text = await r.text().catch((error) => "(the body could not be read: " + String(error) + ")");
+  const ms = Date.now() - t0;
+  const cfRay = r.headers.get("cf-ray");
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  if (r.status === 200 && json?.hash === hash) return { ...base, ok: true, ms, sent, status: 200, body: text, cfRay };
+  const ours = json !== null && typeof json === "object" && typeof json.code === "string";
+  const platform = !ours && (r.status >= 500 || /1102|exceeded (its )?memory|worker exceeded/i.test(text));
+  const retryAfter = Number(r.headers.get("retry-after"));
+  return {
+    ...base, ms, sent, status: r.status, body: text, cfRay,
+    fatal: platform,
+    retriable: !platform && ours && r.status >= 500,
+    retryAfterMs: retryAfter > 0 ? Math.min(retryAfter, 10) * 1000 : undefined,
+  };
+}
 
 try {
   await startWorker();
@@ -134,6 +202,25 @@ try {
   const role = await member("/fleets/" + FLEET + "/role", DEV, TOKEN, {}, "GET");
   check("the limits are told", role.json.chunkLimit === PIECE && role.json.chunkedLimit === 512 * MIB, JSON.stringify(role.json));
 
+  // A member renews its lease every third of it while it works, as the daemon does; a run of 16 x 8 MiB over a slow link takes longer than
+  // the lease (45 s), and a primary whose lease lapsed is refused ("only the primary may publish"). A renewal that fails is told, and the
+  // run says so at the end (a lapsed lease would otherwise show only as a refused piece).
+  const leaseMs = typeof role.json.leaseMs === "number" ? role.json.leaseMs : 45_000;
+  const renewals = { ok: 0, failed: [] as string[] };
+  renewalTimer = setInterval(async () => {
+    try {
+      const r = await member("/fleets/" + FLEET + "/lease/renew", DEV, TOKEN, {});
+      if (r.status === 200) renewals.ok++;
+      else {
+        renewals.failed.push(r.status + " " + JSON.stringify(r.json));
+        console.log("LEASE renewal refused after " + ((Date.now() - runStart) / 1000).toFixed(1) + " s: " + r.status + " " + JSON.stringify(r.json));
+      }
+    } catch (error) {
+      renewals.failed.push(String(error));
+      console.log("LEASE renewal failed after " + ((Date.now() - runStart) / 1000).toFixed(1) + " s: " + String(error));
+    }
+  }, Math.max(1000, Math.floor(leaseMs / 3)));
+
   // Eight pieces, four at a time, as a member uploads them; the process is watched while they go. Once with the hash of each piece
   // (the Worker streams it) and once without (it is held whole), so that the two can be told apart in the same run.
   // Made as each lane needs it, so that a run with many lanes does not hold every piece in the test's own memory.
@@ -144,6 +231,7 @@ try {
     b.fill(((i + salt) % 250) + 1, 65536);
     return b;
   };
+  let totalRetries = 0;
   async function round(label: string, salt: number, withHash: boolean) {
     const before = treeRss(root);
     let peak = before.all;
@@ -157,24 +245,39 @@ try {
     }, 50);
     const started = Date.now();
     const uploaded: Array<{ hash: string; bytes: number }> = new Array(PIECES);
+    const times: number[] = [];
+    const retries: string[] = [];
     let next = 0;
-    const lane = async () => {
+    const lane = async (laneNo: number) => {
       for (;;) {
         const i = next++;
         if (i >= PIECES) return;
         const piece = pieceOf(salt, i);
         const hash = sha(piece);
-        const headers: Record<string, string> = { ...dev(DEV, TOKEN), "content-type": "application/octet-stream" };
-        if (withHash) headers["x-prime-sha256"] = hash;
-        const r = await fetch(BASE + "/fleets/" + FLEET + "/packs", { method: "POST", headers, body: piece });
-        const j = (await r.json().catch(() => ({}))) as any;
-        if (r.status !== 200 || j.hash !== hash) throw new Error(label + " piece " + i + ": " + r.status + " " + JSON.stringify(j));
+        const tell = { label, piece: i, lane: laneNo };
+        let first: Attempt = await attempt(piece, hash, withHash, tell, 1);
+        if (!first.ok && first.retriable) {
+          const note = describe(first);
+          retries.push(note);
+          console.log("RETRY " + note + " (the piece is sent once more)");
+          await Bun.sleep(first.retryAfterMs ?? 2000);
+          first = await attempt(piece, hash, withHash, tell, 2);
+          if (first.ok) console.log("RETRY ok  " + label + " piece " + i + " lane " + laneNo + ": the second attempt took " + first.ms + " ms");
+        }
+        if (!first.ok) throw new Error((first.fatal ? "FATAL (the platform, not the gateway's own answer) " : "") + describe(first));
+        times.push(first.ms);
         uploaded[i] = { hash, bytes: piece.length };
       }
     };
-    await Promise.all(Array.from({ length: LANES }, () => lane()));
+    await Promise.all(Array.from({ length: LANES }, (_, n) => lane(n)));
     clearInterval(watch);
     const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    times.sort((x, y) => x - y);
+    const at = (q: number) => times[Math.min(times.length - 1, Math.floor(q * times.length))] ?? 0;
+    console.log(
+      "TIMES " + label + ": " + times.length + " pieces, per piece " + times[0] + " / median " + at(0.5) + " / p90 " + at(0.9) + " / slowest " + times[times.length - 1] + " ms (" + (PIECE / MIB / ((at(0.5) || 1) / 1000)).toFixed(1) + " MiB/s per lane at the median)" + (retries.length ? "; " + retries.length + " needed a second attempt" : "; none needed a second attempt"),
+    );
+    totalRetries += retries.length;
     if (!Number.isNaN(before.all)) {
       console.log(
         "MEMORY " + label + ": whole tree " + before.all + " MiB before, peak " + peak + " (" + (peak - before.all) + " over); workerd alone " + before.workerd + " before, peak " + peakWorkerd + " (" + (peakWorkerd - before.workerd) + " over); " + LANES + " x 8 MiB in flight, " + PIECES * 8 + " MiB in " + seconds + " s",
@@ -230,12 +333,16 @@ try {
   const refused = await fetch(BASE + "/fleets/" + FLEET + "/snapshot", { method: "POST", headers: { ...dev(DEV, TOKEN), "content-type": "application/octet-stream" }, body: f2 });
   const refusedJson = (await refused.json().catch(() => ({}))) as any;
   check("a piece that is not in the bucket is named and nothing moves", refused.status === 409 && refusedJson.missing?.[0] === "e".repeat(64), JSON.stringify(refusedJson));
+  clearInterval(renewalTimer);
+  check("the lease was renewed while the pieces went up and never lapsed", renewals.failed.length === 0, renewals.failed.join("; "));
+  console.log("LEASE " + renewals.ok + " renewals every " + Math.floor(leaseMs / 3000) + " s over " + ((Date.now() - runStart) / 1000).toFixed(0) + " s; " + totalRetries + " piece uploads needed a second attempt");
 } catch (error) {
   fail++;
   failures.push(String(error));
   console.log("FAIL " + String(error));
   console.log(log.join("").slice(-2500));
 } finally {
+  clearInterval(renewalTimer);
   wrangler?.kill();
   if (EXTERNAL) {
     // The deployed gateway is left as it was found: the fleet and with it every piece it holds go.
