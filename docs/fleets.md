@@ -624,6 +624,9 @@ accepts a chain whose genesis names another key.
   `add` to the `remove`, with the `seqAt` the owner signed. What the gateway lists no longer decides.
 - **A viewer never writes.** With a signed roster the chain's role decides; with the gateway's own roster, a key of a member whose role is
   `viewer` is not a key a snapshot may come from. A viewer is still sealed for, and reads.
+  A member made a viewer (with the gateway's own roster) is listed as `left` up to the head at that moment, like one that is removed, so that the
+  snapshots it made as a member are still taken from it by a replica that is behind or a member that joins later; made a member again, it
+  is no longer listed. (With a signed roster the chain's tenures say the same.)
 - **A publisher seals only for the members the chain names, with the keys it names.** A key the gateway adds to its list, or
   puts in place of a member's, is skipped and named ("the gateway lists a key the signed roster does not"); the
   publisher itself must be a member in the chain.

@@ -194,6 +194,72 @@ describe("what a viewer is never given", () => {
   });
 });
 
+describe("a member made a viewer", () => {
+  const leftOf = async (w: World) => (await call(w, "/members", "", "admin", {}, "GET")).json.left as Array<{ pubkey: string; until: number }>;
+  const headAt = (w: World, seq: number) => w.objects.set("fleets/acme/head", { body: JSON.stringify({ seq, manifestKey: "m", manifestHash: "h", epoch: 1 }), etag: "e" + seq });
+
+  test("its key is recorded as left, up to the head, so that what it published as a member is still taken from it", async () => {
+    const w = await fleetOf(["dev-a", "dev-b"]);
+    headAt(w, 4);
+    expect(await leftOf(w)).toEqual([]);
+    expect((await call(w, "/approve", "operator", "admin", { deviceId: "dev-a", role: "viewer" })).status).toBe(200);
+    expect(await leftOf(w)).toEqual([{ pubkey: KEY, until: 4 }]);
+  });
+
+  test("the owner may demote too, and a viewer that is demoted again (no change) is not recorded twice", async () => {
+    const w = await fleetOf(["dev-a"]);
+    headAt(w, 2);
+    expect((await call(w, "/approve", "owner", "device", { deviceId: "dev-a", role: "viewer" })).status).toBe(200);
+    headAt(w, 6);
+    expect((await call(w, "/approve", "owner", "device", { deviceId: "dev-a", role: "viewer" })).json.unchanged).toBe(true);
+    expect(await leftOf(w)).toEqual([{ pubkey: KEY, until: 2 }]);
+  });
+
+  test("made a member again, it is no longer a key that has left; made a viewer once more, it is recorded at the head then", async () => {
+    const w = await fleetOf(["dev-a"]);
+    headAt(w, 3);
+    await call(w, "/approve", "operator", "admin", { deviceId: "dev-a", role: "viewer" });
+    headAt(w, 5);
+    expect((await call(w, "/approve", "operator", "admin", { deviceId: "dev-a", role: "member" })).status).toBe(200);
+    expect(await leftOf(w)).toEqual([]);
+    headAt(w, 8);
+    await call(w, "/approve", "operator", "admin", { deviceId: "dev-a", role: "viewer" });
+    expect(await leftOf(w)).toEqual([{ pubkey: KEY, until: 8 }]);
+  });
+
+  test("a member admitted as a viewer was never a member's key: nothing is recorded for it", async () => {
+    const w = await fleetOf(["dev-a"], ["watcher"]);
+    expect(await leftOf(w)).toEqual([]);
+  });
+
+  test("a publish that was in flight when it was demoted is credited to the key up to its own sequence", async () => {
+    const w = await fleetOf(["dev-a"]);
+    await ask(w, "dev-a");
+    const manifest = "a".repeat(64);
+    // The demotion lands while the publish is in progress, before the head is written, so the key is recorded as left at the old head.
+    const fleet = w.fleet as unknown as { bucket: () => { put: (k: string, ...rest: unknown[]) => Promise<unknown> } };
+    const real = fleet.bucket.bind(fleet);
+    let demoted = false;
+    fleet.bucket = () => {
+      const bucket = real();
+      return {
+        ...bucket,
+        get: (bucket as never as { get: (k: string) => unknown }).get.bind(bucket),
+        put: async (k: string, ...rest: unknown[]) => {
+          if (k === "fleets/acme/head" && !demoted) {
+            demoted = true;
+            expect((await call(w, "/approve", "operator", "admin", { deviceId: "dev-a", role: "viewer" })).status).toBe(200);
+          }
+          return bucket.put(k, ...rest);
+        },
+      };
+    };
+    const res = await call(w, "/head/advance", "dev-a", "device", { expectedSeq: 0, manifestKey: "fleets/acme/manifests/" + manifest, manifestHash: manifest, packKey: "", meta: { sealed: true } });
+    expect(res.status).toBe(200);
+    expect(await leftOf(w)).toEqual([{ pubkey: KEY, until: 1 }]);
+  });
+});
+
 describe("a viewer and the owner of the fleet", () => {
   test("the fleet is handed to the longest-standing member that is not a viewer, and to nobody when only viewers are left", async () => {
     const w = await fleetOf(["dev-a", "dev-b"], ["watcher"]);
