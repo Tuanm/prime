@@ -1,0 +1,40 @@
+# The witness: a second Worker, deliberately separate from the gateway ("prime")
+# so that it keeps no state of the gateway's and shares none of its code path.
+# It holds no secret.
+#
+# Deploy (by the maintainer, never from CI):
+#   cd api && wrangler deploy -c witness/wrangler.toml
+
+name = "prime-witness"
+account_id = "b04dd6c1528d6cf40ffd645269716025" # tuanm, the gateway's account (a second account is a later option)
+main = "src/witness.ts"
+compatibility_date = "2024-11-01"
+
+[durable_objects]
+bindings = [
+  { name = "WITNESS", class_name = "WitnessDO" },
+  { name = "REGISTRY", class_name = "WitnessRegistry" },
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WitnessDO", "WitnessRegistry"]
+
+# Per-address request limit across isolates (the Worker also counts per isolate).
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "7311"
+simple = { limit = 60, period = 60 }
+
+[vars]
+RATE_LIMIT_MAX = "60"
+# The most fleets the witness holds. A full witness answers 507 and counts it in GET /status.
+MAX_FLEETS = "1000"
+# Fleets one address (one /64 for IPv6) may create in an hour.
+FLEET_CREATES_PER_HOUR = "10"
+# The owners whose fleets this witness holds: comma-separated base64url of the raw 32-byte Ed25519 key
+# (the genesis entry's `extra`), or "*" for any owner. EMPTY MEANS NONE: the witness refuses every fleet
+# until this is set, so it cannot be left open by accident. Set it at the first deploy to the owner key(s)
+# of the fleets this witness serves (the key `prime fleets roster init` makes); it is public, not a secret.
+# A fleet whose owner is no longer listed is refused at once and deleted by the daily alarm.
+OWNER_KEYS = ""
