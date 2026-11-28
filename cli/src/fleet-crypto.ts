@@ -168,6 +168,8 @@ export interface SealedManyForMembers {
    * fields are known and before the manifest is stored.
    */
   seal(fields: SealFields): string;
+  /** The metadata of the manifest, sealed with a key derived from the snapshot key (see `SnapshotMeta`). */
+  sealMeta(binding: MetaBinding, meta: SnapshotMeta): string;
 }
 
 /**
@@ -198,6 +200,107 @@ export interface SealFields {
   roster: string | null;
   /** Which fleet of this name it is; null from a publisher that does not know. */
   incarnation: string | null;
+}
+
+/**
+ * What a snapshot's sealed metadata holds: the facts of the snapshot that the gateway has no need
+ * to read (see `FleetManifest.meta`). `tipCommit` and `tree` are what the seal binds; `roster` is who
+ * the snapshot is sealed for; `actor` and `kept` are filled by what produces them and opaque here.
+ */
+export interface SnapshotMeta {
+  tipCommit: string;
+  tree: string;
+  roster?: string;
+  actor?: unknown;
+  kept?: unknown;
+}
+
+/**
+ * Which manifest a sealed metadata belongs to: the parts of the manifest it does not itself hold. It is
+ * the associated data of the encryption, so metadata moved to another manifest (another sequence, parent,
+ * pack, sender or fleet of the name) does not open. (The seal that follows binds the metadata's own contents.)
+ */
+export interface MetaBinding {
+  fleet: string;
+  seq: number;
+  parentSeq: number | null;
+  parentManifest: string | null;
+  full: boolean;
+  /** sha256 of the sealed main pack. */
+  packHash: string;
+  deltaHash: string | null;
+  senderPublicKey: string;
+  incarnation: string | null;
+}
+
+const META_INFO = Buffer.from("prime-fleet-meta-v1");
+/** The most a sealed metadata may be when opened, in bytes of plaintext: a manifest's metadata is a few hundred. */
+const META_MAX_BYTES = 64 * 1024;
+
+function metaKeyOf(snapshotKey: Buffer): Buffer {
+  return Buffer.from(hkdfSync("sha256", snapshotKey, Buffer.alloc(32), META_INFO, 32));
+}
+
+function metaAad(b: MetaBinding): Buffer {
+  return createHash("sha256")
+    .update(JSON.stringify(["prime-fleet-meta-v1", b.fleet, b.seq, b.parentSeq, b.parentManifest, b.full, b.packHash, b.deltaHash, b.senderPublicKey, b.incarnation]), "utf8")
+    .digest();
+}
+
+function sealMetaWith(snapshotKey: Buffer, binding: MetaBinding, meta: SnapshotMeta): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", metaKeyOf(snapshotKey), iv);
+  cipher.setAAD(metaAad(binding));
+  const body = Buffer.concat([cipher.update(fitMeta(meta)), cipher.final()]);
+  return Buffer.concat([iv, body, cipher.getAuthTag()]).toString("base64");
+}
+
+/**
+ * The metadata as the bytes that are sealed. What a reader would refuse for its size (`META_MAX_BYTES`) is not sealed: the optional
+ * parts (what was left out as secrets, which can be long, then what ran) go before the snapshot does, since a snapshot nobody can read is worse than one that says less.
+ */
+function fitMeta(meta: SnapshotMeta): Buffer {
+  let bytes = Buffer.from(JSON.stringify(meta), "utf8");
+  for (const drop of ["kept", "actor"] as const) {
+    if (bytes.length <= META_MAX_BYTES) break;
+    const { [drop]: _dropped, ...rest } = meta;
+    meta = rest as SnapshotMeta;
+    bytes = Buffer.from(JSON.stringify(meta), "utf8");
+  }
+  if (bytes.length > META_MAX_BYTES) throw new Error("the snapshot's sealed metadata is " + bytes.length + " bytes, and a member reads at most " + META_MAX_BYTES);
+  return bytes;
+}
+
+function openMetaWith(snapshotKey: Buffer, binding: MetaBinding, blob: string): SnapshotMeta | null {
+  const raw = Buffer.from(blob, "base64");
+  if (raw.length < 12 + 16 || raw.length > META_MAX_BYTES + 12 + 16) return null;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", metaKeyOf(snapshotKey), raw.subarray(0, 12));
+    decipher.setAAD(metaAad(binding));
+    decipher.setAuthTag(raw.subarray(raw.length - 16));
+    const parsed = JSON.parse(Buffer.concat([decipher.update(raw.subarray(12, raw.length - 16)), decipher.final()]).toString("utf8")) as Partial<SnapshotMeta> | null;
+    if (typeof parsed !== "object" || parsed === null || typeof parsed.tipCommit !== "string" || typeof parsed.tree !== "string") return null;
+    if (parsed.roster !== undefined && typeof parsed.roster !== "string") return null;
+    return parsed as SnapshotMeta;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The id a snapshot lists a member under when it does not list device ids (phase two of sealed
+ * metadata): a hash of the fleet's incarnation and the device id, cut to 22 characters (132 bits). The
+ * incarnation is in it so the same device has a different id in another fleet of the name, and the
+ * hash so that a manifest read in storage does not name devices. A member finds its entry by this or by its device id.
+ */
+export function wrapIdOf(incarnation: string | undefined, deviceId: string): string {
+  return createHash("sha256").update(JSON.stringify(["prime-fleet-mid-v1", incarnation ?? "", deviceId]), "utf8").digest("base64url").slice(0, 22);
+}
+
+/** This member's entry of a snapshot's wrapped keys, listed under its device id or under `wrapIdOf`. */
+export function wrappedEntryFor<T extends { memberId: string }>(wrapped: T[], deviceId: string, incarnation: string | undefined): T | undefined {
+  const id = wrapIdOf(incarnation, deviceId);
+  return wrapped.find((w) => w.memberId === deviceId) ?? wrapped.find((w) => w.memberId === id);
 }
 
 const SEAL_INFO = Buffer.from("prime-fleet-seal-v1");
@@ -291,6 +394,8 @@ export interface OpenedPayload {
    * these fields: true or false, or null when the entry has none (a publisher that predates it).
    */
   macMatches(fields: SealFields): boolean | null;
+  /** The manifest's sealed metadata, or null when it does not open for this manifest (damaged, or from another). */
+  openMeta(binding: MetaBinding, blob: string): SnapshotMeta | null;
 }
 
 /**
@@ -340,6 +445,7 @@ export function sealManyForMembers(
       for (const { entry, key } of macKeys) entry.mac = macOf(key, entry.memberId, fields);
       return tagOf(sealKey, fields);
     },
+    sealMeta: (binding, meta) => sealMetaWith(snapshotKey, binding, meta),
   };
 }
 
@@ -384,8 +490,10 @@ export function openPayload(
   senderPublicKeyB64: string,
   memberId: string,
   memberPrivateKeyPem: string,
+  /** The fleet's incarnation, to find an entry listed under `wrapIdOf` rather than the device id. */
+  incarnation?: string,
 ): OpenedPayload | null {
-  const entry = wrapped.find((w) => w.memberId === memberId);
+  const entry = wrappedEntryFor(wrapped, memberId, incarnation);
   if (!entry) return null;
   const raw = Buffer.from(entry.wrapped, "base64");
   if (raw.length < 12 + 16) return null;
@@ -416,6 +524,7 @@ export function openPayload(
       plain,
       sealMatches: (fields, tag) => tagMatches(sealKey, fields, tag),
       macMatches: (fields) => (typeof entry.mac === "string" ? sameBase64(macOf(macKey, entry.memberId, fields), entry.mac) : null),
+      openMeta: (binding, blob) => openMetaWith(snapshotKey, binding, blob),
     };
   } catch {
     return null;

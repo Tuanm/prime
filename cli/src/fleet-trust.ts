@@ -33,8 +33,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { keyFingerprintOf, knownSealKind, type OpenedPayload, type SealFields } from "./fleet-crypto";
-import { fetchRole, fetchRoster, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
+import { keyFingerprintOf, knownSealKind, wrappedEntryFor, type MetaBinding, type OpenedPayload, type SealFields } from "./fleet-crypto";
+import { fetchRole, fetchRoster, manifestCopy, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
 export class TamperedSnapshotError extends Error {
@@ -59,7 +59,7 @@ const KEEP_LEFT_KEYS = 2 * 32 + 1;
 /** How much protection a snapshot carries for this member: none, a seal, or a seal and its sender's own tag. */
 function protectionOf(m: FleetManifest, memberId: string): 0 | 1 | 2 {
   if (m.seal === undefined) return 0;
-  return m.wrapped.find((w) => w.memberId === memberId)?.mac !== undefined ? 2 : 1;
+  return wrappedEntryFor(m.wrapped, memberId, m.incarnation)?.mac !== undefined ? 2 : 1;
 }
 
 interface TrustFile {
@@ -449,6 +449,45 @@ export function sealFieldsOf(m: FleetManifest, packHash: string, deltaHash: stri
   };
 }
 
+/** What a manifest's sealed metadata is bound to (see `MetaBinding`): the parts of the manifest it does not itself hold. */
+export function metaBindingOf(m: FleetManifest, packHash: string, deltaHash: string | null): MetaBinding {
+  return {
+    fleet: m.fleet,
+    seq: m.seq,
+    parentSeq: m.parentSeq ?? null,
+    parentManifest: m.parentManifest ?? null,
+    full: m.full,
+    packHash,
+    deltaHash,
+    senderPublicKey: m.senderPublicKey,
+    incarnation: m.incarnation ?? null,
+  };
+}
+
+/**
+ * The manifest with what its sealed metadata says in the places the commit, tree and roster are read from.
+ *
+ * A manifest with no metadata is returned as it is (a publisher that predates it). One whose metadata does not
+ * open for it (damaged, or taken from another manifest) is refused, and so is one beside which the commit, tree or
+ * roster say something else. What the metadata says is what is believed; the seal then binds it.
+ */
+export function withOpenedMeta(m: FleetManifest, packHash: string, deltaHash: string | null, opened: OpenedPayload): FleetManifest {
+  if (m.meta === undefined) return m;
+  const meta = typeof m.meta === "string" ? opened.openMeta(metaBindingOf(m, packHash, deltaHash), m.meta) : null;
+  if (meta === null) {
+    throw new TamperedSnapshotError(m.seq, "its sealed metadata does not open for this manifest (it was damaged, or taken from another snapshot's)");
+  }
+  // What is shown beside the metadata (while a member that predates it is in the fleet) is what the publisher made it,
+  // or nothing: a different commit, tree or roster is a manifest that was edited.
+  if ((m.tipCommit !== "" && m.tipCommit !== meta.tipCommit) || (m.tree !== "" && m.tree !== meta.tree) || (m.roster !== undefined && m.roster !== meta.roster)) {
+    throw new TamperedSnapshotError(m.seq, "its manifest does not match what its publisher sealed (the commit, tree or roster beside its sealed metadata were changed)");
+  }
+  const read = manifestCopy(m, { tipCommit: meta.tipCommit, tree: meta.tree });
+  if (meta.roster !== undefined) read.roster = meta.roster;
+  else delete read.roster;
+  return read;
+}
+
 /**
  * Check a snapshot whose pack has been opened.
  *
@@ -458,6 +497,9 @@ export function sealFieldsOf(m: FleetManifest, packHash: string, deltaHash: stri
  * Throws `TamperedSnapshotError`; a failure to read the roster is the transport's
  * error and is retried like any other. Whether a snapshot may be taken in after the
  * ones before it (the downgrade guard) is asked in order, by `FleetTrust.checkNotDowngrade`.
+ *
+ * Returns the manifest with its sealed metadata read into the places the commit, tree and roster are
+ * read from (see `withOpenedMeta`): what the seal is checked over, and what the caller goes on with.
  */
 export async function verifySnapshot(
   creds: FleetCredentials,
@@ -467,7 +509,7 @@ export async function verifySnapshot(
   usesDelta: boolean,
   opened: OpenedPayload,
   trust: FleetTrust | undefined,
-): Promise<void> {
+): Promise<FleetManifest> {
   if (m.fleet !== fleet) throw new TamperedSnapshotError(m.seq, "it belongs to fleet " + m.fleet + ", not " + fleet);
   if (trust && m.seal !== undefined) {
     // A fleet that is deleted frees its name, and a snapshot of the one that had it is sealed and
@@ -477,6 +519,9 @@ export async function verifySnapshot(
       throw new TamperedSnapshotError(m.seq, "it belongs to an earlier fleet that had the name " + fleet + ", not to this one");
     }
   }
+
+  // The commit, tree and roster are what its publisher sealed them as, from here on.
+  m = withOpenedMeta(m, m.packHash, m.delta?.packHash ?? null, opened);
 
   if (m.seal !== undefined) {
     if (!knownSealKind(m.seal)) throw new TamperedSnapshotError(m.seq, "its seal is of a kind this version does not know");
@@ -504,4 +549,5 @@ export async function verifySnapshot(
       true,
     );
   }
+  return m;
 }

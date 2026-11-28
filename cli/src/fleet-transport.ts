@@ -8,12 +8,18 @@
 import { createHash } from "node:crypto";
 
 /**
+ * What a member says it can read, by name (`meta2`: a manifest whose commit, tree and roster are sealed, see `SnapshotMeta`): a
+ * format is published only when every member of the fleet lists it (the keys listed for the snapshot carry each member's).
+ */
+export const META_CAP = "meta2";
+
+/**
  * What this build can do beyond the first form of the wire, said to the fleet each time a place is taken (`caps` in
  * the body of a bootstrap). A format that only some members read is used by a publisher only when every member of the
  * fleet lists its name (`role.fleetCaps`; see `fleetHas`). Short lower-case names, added here as the code that
  * reads and writes the form lands, and nowhere else: this build says only what it does.
  */
-export const MEMBER_CAPS: readonly string[] = [];
+export const MEMBER_CAPS: readonly string[] = [META_CAP];
 
 /** What a capability's name looks like: the pattern the gateway keeps (`^[a-z0-9][a-z0-9-]{0,23}$`), so that both sides read the same names. */
 export const CAP_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/;
@@ -95,6 +101,14 @@ export interface FleetManifest {
    * does not match. Absent from snapshots of publishers that predate it.
    */
   seal?: string;
+  /**
+   * What the gateway has no need to read, sealed with a key derived from the snapshot key (see `SnapshotMeta` in
+   * fleet-crypto.ts): the commit and tree, who the snapshot is sealed for, and what a feature adds. A member
+   * reads these from here when it is present, and from the fields above only when it is not. When every member can
+   * read it (`META_CAP`), those fields are left empty (`tipCommit` and `tree` are "", `roster` is absent) and the
+   * entries of `wrapped` are listed under `wrapIdOf`, not device ids. Absent from snapshots of publishers that predate it.
+   */
+  meta?: string;
   /** Which epoch published this, for the fencing check. */
   epoch: number;
   createdAt: number;
@@ -182,6 +196,14 @@ const fetchedAs = new WeakMap<FleetManifest, string>();
 /** The id (hash) a manifest was fetched under, if it was fetched. */
 export function manifestHashOf(m: FleetManifest): string | undefined {
   return fetchedAs.get(m);
+}
+
+/** A copy of a manifest (with its metadata read into it) is the same manifest as far as the hash it was fetched under goes. */
+export function manifestCopy(from: FleetManifest, changes: Partial<FleetManifest>): FleetManifest {
+  const copy: FleetManifest = { ...from, ...changes };
+  const hash = fetchedAs.get(from);
+  if (hash !== undefined) fetchedAs.set(copy, hash);
+  return copy;
 }
 
 export async function fetchManifest(creds: FleetCredentials, fleet: string, id: string): Promise<FleetManifest> {
@@ -353,11 +375,16 @@ export async function releaseLease(creds: FleetCredentials, fleet: string): Prom
 export async function fetchMemberKeys(
   creds: FleetCredentials,
   fleet: string,
-): Promise<Array<{ deviceId: string; pubkey?: string; applied?: number }>> {
+): Promise<Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: string[] }>> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/keys");
   if (!res.ok) throw new FleetTransportError("could not read the members' keys: " + res.status);
-  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number }> };
-  return body.members ?? [];
+  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: unknown }> };
+  // What each member says it can do comes in the same answer as the keys it is sealed for: a format is used only when
+  // every member that is sealed for can read it, and a member admitted between two answers cannot slip between them.
+  return (body.members ?? []).map((m) => {
+    const { caps, ...rest } = m;
+    return Array.isArray(caps) ? { ...rest, caps: caps.filter((c): c is string => typeof c === "string") } : rest;
+  });
 }
 
 /**
