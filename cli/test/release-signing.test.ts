@@ -25,7 +25,7 @@ const SAMPLE = "prime-release-v1\nversion 0.0.0-test\nsha256sums 000000000000000
 const SAMPLE_SIGNED_BY_CURRENT =
   "1JTGeYdS2DmcjIzdg/FHmHYBCIcTS5XdVH6xCdWlZxwe8xMvoB4NiJOni3Xd4oxBmBKBJBz+GJOc1XnPO3scAg==";
 const SAMPLE_SIGNED_BY_NEXT =
-  "DAwuldUC/ClY1RH8MybE6fyNA+LjNvhbmJOk7/HSVGnuMEA5xVSKlfYnKmTexvfR7azkvckcBFRNu/QfQBUZDw==";
+  "5/WA7Z59cxq+KAPmN8S9mAhi6/RdjbIA4SCXGn8ktw3AwiTUD6GSDoc2znv3W64mvCQiZNNqDtEaglST0SMsCw==";
 
 describe("the release keys built into the CLI", () => {
   const embedded = RELEASE_KEYS.map((k) => Buffer.from(k, "base64"));
