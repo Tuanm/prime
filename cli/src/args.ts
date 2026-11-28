@@ -46,7 +46,14 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   flag("quiet", "boolean", "Only print errors"),
 ];
 
-export function parseArgs(argv: string[], specs: FlagSpec[]): ParsedArgs {
+/**
+ * A key id is base64url, so one in 64 starts with "-": a word like `-PnuvxlrSxamvRKvbp9WM6` is a value, not an option.
+ * Commands that take a key id say so (`keyIdWords`), and then a single-dash word of that shape that names no option is a
+ * positional. Options are a single letter after one dash, so nothing that long is taken for one.
+ */
+export const KEY_ID_WORD = /^-[A-Za-z0-9_-]{15,}$/;
+
+export function parseArgs(argv: string[], specs: FlagSpec[], options: { keyIdWords?: boolean } = {}): ParsedArgs {
   const byName = new Map<string, FlagSpec>();
   const byShort = new Map<string, FlagSpec>();
   for (const spec of [...specs, ...GLOBAL_FLAGS]) {
@@ -93,6 +100,10 @@ export function parseArgs(argv: string[], specs: FlagSpec[]): ParsedArgs {
       const name = token.slice(1);
       spec = byShort.get(name);
       display = `-${name}`;
+      if (!spec && options.keyIdWords && KEY_ID_WORD.test(token)) {
+        positionals.push(token);
+        continue;
+      }
     } else {
       positionals.push(token);
       continue;

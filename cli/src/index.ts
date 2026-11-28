@@ -360,7 +360,8 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  const ctx: Ctx = makeCtx(parseArgs(argv, flagsFor(topic, sub)));
+  // revoke-caller takes a key id, and one in 64 of them starts with "-".
+  const ctx: Ctx = makeCtx(parseArgs(argv, flagsFor(topic, sub), { keyIdWords: topic === "devices" && sub === "revoke-caller" }));
 
   switch (topic) {
     case "devices":
