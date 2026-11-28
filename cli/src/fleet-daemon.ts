@@ -1317,12 +1317,12 @@ export function holdAfterPublish(
   return { rapid, holdMs: rapid === 0 ? 0 : Math.min(HOLD_MAX_MS, HOLD_FIRST_MS * 2 ** (rapid - 1)) };
 }
 
-/** One space as the agent keeps it (exported so a round can be driven in a test). */
 /** What a head event carries of the snapshot itself is kept, so the manifest and pack asked for next are answered from it. */
 export function noteHeadInline(fleet: string, event: FleetEvent): void {
   if (event.type === "head" && event.inline) noteInline(fleet, event.inline);
 }
 
+/** One space as the agent keeps it (exported so a round can be driven in a test). */
 export interface SpaceLoop {
   configPath: string;
   name: string;

@@ -224,7 +224,9 @@ export async function fetchManifest(creds: FleetCredentials, fleet: string, id: 
 // What the socket brought of the newest snapshots: found by the hash of the bytes, which is the id the gateway
 // stores them under (a manifest by the hash of its text, a pack by the hash of the sealed pack), so a part that
 // is asked for by its id is exactly the bytes that hash to it. A few small snapshots, for a few minutes.
-const INLINE_KEEP = 16;
+// (Entries are not tied to a gateway: two gateways hosting a fleet of the same name share them, and that is harmless,
+// since what is served is only what hashes to the id asked for.)
+const INLINE_KEEP = 16; // parts: a manifest and a pack each, so 8 snapshots
 const INLINE_TTL_MS = 5 * 60_000;
 const inlineHeld = new Map<string, { bytes: Buffer; at: number }>();
 
