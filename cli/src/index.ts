@@ -84,6 +84,7 @@ const CONNECT_FLAGS: FlagSpec[] = [
   ...GATEWAY_FLAGS,
   flag("no-verify", "boolean", "Skip the reachability probe after saving"),
   flag("set-default", "boolean", "Also store the given values as defaults"),
+  flag("fleet", "boolean", "The id is a fleet, reached with its fleet token (calls are signed for the fleet)"),
 ];
 
 const LIST_FLAGS: FlagSpec[] = [
@@ -100,11 +101,13 @@ const ALLOW_CALLER_FLAGS: FlagSpec[] = [
   flag("label", "string", "A name for the key, to tell it apart in 'prime devices callers'", { placeholder: "<text>" }),
   flag("tools", "string", "Allow only these tools, comma separated (default: all)", { placeholder: "<a,b>" }),
   flag("self", "boolean", "Allow this machine's own caller key"),
+  flag("all-tools", "boolean", "Lift a restriction to some tools: the key may call every tool"),
 ];
 
 const TOOL_FLAGS: FlagSpec[] = [
   ...GATEWAY_FLAGS,
   flag("handshake", "string", "When to send the MCP initialize handshake: auto|always|never", { placeholder: "<mode>" }),
+  flag("fleet", "boolean", "The device id is a fleet, reached with its fleet token (calls are signed for the fleet)"),
 ];
 
 const CALL_FLAGS: FlagSpec[] = [

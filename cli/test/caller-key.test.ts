@@ -1,9 +1,10 @@
 // Signed tool calls, the client side: the caller key, the signature a client puts on a call, and the
 // callers file a device reads. Offline: the gateway is a stub in-process.
 
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,8 @@ import {
   parsePublicKey,
   readCallers,
   removeCaller,
+  callTarget,
+  callerRefusedHint,
   signCall,
   signTarget,
   verifyCallSignature,
@@ -34,6 +37,7 @@ applyTestTimeout();
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ENTRY = join(ROOT, "src", "index.ts");
 const POSIX = process.platform !== "win32";
+const NONCE = "bm9uY2Vub25jZW5vbmNlMQ"; // 22 characters, as a real one is
 
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), "prime-caller-"));
@@ -65,6 +69,53 @@ describe("caller key", () => {
     expect(readFileSync(path, "utf8")).toBe("not a key");
   });
 
+  test("a key file that others can read is refused with the command that fixes it, and used again once fixed", () => {
+    if (!POSIX) return;
+    const path = join(scratch(), "caller.pem");
+    const key = loadOrCreateCallerKey(path);
+    chmodSync(path, 0o644);
+    expect(() => loadOrCreateCallerKey(path)).toThrow(new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: the key file is readable by others \\(mode 644\\); run: chmod 600`));
+    chmodSync(path, 0o600);
+    expect(loadOrCreateCallerKey(path).keyId).toBe(key.keyId);
+  });
+
+  test("an unreadable key names the file", () => {
+    const path = join(scratch(), "caller.pem");
+    writeFileSync(path, "garbage", { mode: 0o600 });
+    expect(() => loadOrCreateCallerKey(path)).toThrow(`${path}: not a readable Ed25519 PEM key`);
+  });
+
+  test("on a file system with no hard links the name is created exclusively: a rival that got there first keeps its key", () => {
+    const noLinks = { link: () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); } };
+    const path = join(scratch(), "caller.pem");
+    const first = loadOrCreateCallerKey(path, noLinks);
+    expect(loadOrCreateCallerKey(path, noLinks).keyId).toBe(first.keyId);
+
+    const racePath = join(scratch(), "caller.pem");
+    let rival = "";
+    const racing = {
+      link: () => {
+        // Another process makes the key while this one is failing to link its own.
+        rival = loadOrCreateCallerKey(racePath).keyId;
+        throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+      },
+    };
+    const mine = loadOrCreateCallerKey(racePath, racing);
+    expect(rival).toHaveLength(22);
+    expect(mine.keyId).toBe(rival);
+    expect(loadOrCreateCallerKey(racePath).keyId).toBe(rival);
+  });
+
+  test("twelve processes starting together all get the same key", async () => {
+    const path = join(scratch(), "fresh", "sub", "caller.pem");
+    const script = `import { loadOrCreateCallerKey } from ${JSON.stringify(join(ROOT, "src", "caller-key.ts"))};
+      console.log(loadOrCreateCallerKey(${JSON.stringify(path)}).keyId);`;
+    const procs = Array.from({ length: 12 }, () => Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe" }));
+    const ids = await Promise.all(procs.map(async (p) => (await new Response(p.stdout).text()).trim()));
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).toHaveLength(22);
+  });
+
   test("parsePublicKey takes base64 and base64url of 32 bytes and nothing else", () => {
     const key = newKey();
     expect(parsePublicKey(key.publicKeyB64)?.equals(key.publicKey)).toBe(true);
@@ -80,17 +131,17 @@ describe("call signature", () => {
 
   test("carries the version, key id, time, nonce and a signature over the target and the body hash", () => {
     const key = newKey();
-    const header = signCall(key, "device:laptop", body, { now: 1_700_000_000_000, nonce: "bm9uY2U" });
+    const header = signCall(key, "device:laptop", body, { now: 1_700_000_000_000, nonce: NONCE });
     const parts = header.split(".");
-    expect(parts.slice(0, 4)).toEqual(["v1", key.keyId, "1700000000000", "bm9uY2U"]);
+    expect(parts.slice(0, 4)).toEqual(["v1", key.keyId, "1700000000000", NONCE]);
     const parsed = parseCallSig(header)!;
     expect(parsed.keyId).toBe(key.keyId);
     expect(parsed.sig).toHaveLength(64);
     expect(verifyCallSignature(parsed, key.publicKey, "device:laptop", body)).toBe(true);
     // The message is the documented one, byte for byte.
     const digest = createHash("sha256").update(body).digest("hex");
-    expect(callSigMessage("device:laptop", "1700000000000", "bm9uY2U", digest).toString()).toBe(
-      `prime-call-v1\ndevice:laptop\n1700000000000\nbm9uY2U\n${digest}`,
+    expect(callSigMessage("device:laptop", "1700000000000", NONCE, digest).toString()).toBe(
+      `prime-call-v1\ndevice:laptop\n1700000000000\n${NONCE}\n${digest}`,
     );
   });
 
@@ -103,7 +154,7 @@ describe("call signature", () => {
     expect(verifyCallSignature(parsed, key.publicKey, "fleet:laptop", body)).toBe(false);
     expect(verifyCallSignature(parsed, other.publicKey, "device:laptop", body)).toBe(false);
     expect(verifyCallSignature({ ...parsed, tsText: String(parsed.ts + 1) }, key.publicKey, "device:laptop", body)).toBe(false);
-    expect(verifyCallSignature({ ...parsed, nonce: "AAAA" }, key.publicKey, "device:laptop", body)).toBe(false);
+    expect(verifyCallSignature({ ...parsed, nonce: "A".repeat(22) }, key.publicKey, "device:laptop", body)).toBe(false);
   });
 
   test("covers a body with non-ASCII text as the bytes that are sent", () => {
@@ -126,6 +177,26 @@ describe("call signature", () => {
   test("targets: a device for a direct call, the fleet for a call that addresses one", () => {
     expect(signTarget({ deviceId: "laptop" })).toBe("device:laptop");
     expect(signTarget({ deviceId: "member", fleet: "acme" })).toBe("fleet:acme");
+    // A fleet reached by its own name with its fleet token is signed for the fleet, not for a device of that name.
+    expect(signTarget({ deviceId: "acme", fleetBuddy: true })).toBe("fleet:acme");
+    expect(callTarget("device", "laptop")).toBe(signTarget({ deviceId: "laptop" }));
+    expect(callTarget("fleet", "acme")).toBe(signTarget({ deviceId: "acme", fleetBuddy: true }));
+  });
+
+  test("the id, nonce and signature have their exact lengths", () => {
+    const good = signCall(newKey(), "device:d", body);
+    const [v, id, ts, nonce, sig] = good.split(".") as [string, string, string, string, string];
+    expect(parseCallSig(good)).toBeDefined();
+    for (const bad of [
+      [v, id.slice(1), ts, nonce, sig],
+      [v, id + "A", ts, nonce, sig],
+      [v, id, ts, nonce.slice(1), sig],
+      [v, id, ts, nonce + "A", sig],
+      [v, id, ts, nonce, sig.slice(1)],
+      [v, id, ts, nonce, sig + "A"],
+    ]) {
+      expect(parseCallSig(bad.join("."))).toBeUndefined();
+    }
   });
 
   test("the methods a device answers unsigned are not signed", () => {
@@ -221,6 +292,44 @@ describe("GatewayClient signing", () => {
     expect(verifyCallSignature(b, signer.callerKey()!.publicKey, "device:laptop", seen[1]!.body)).toBe(true);
   });
 
+  test("a call to a fleet reached with its fleet token is signed for the fleet", async () => {
+    const seen = stubFetch(ok);
+    const signer = new CallSigner({ path: join(scratch(), "k.pem") });
+    await new GatewayClient({ ...target, deviceId: "acme", fleetBuddy: true }, { signer }).callTool("bash", {}, { handshake: "never" });
+    expect(seen[0]!.url).not.toContain("fleet=");
+    const parsed = parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!;
+    const pub = signer.callerKey()!.publicKey;
+    expect(verifyCallSignature(parsed, pub, "fleet:acme", seen[0]!.body)).toBe(true);
+    expect(verifyCallSignature(parsed, pub, "device:acme", seen[0]!.body)).toBe(false);
+  });
+
+  test("a key file others can read leaves the call unsigned, names the file and the cure, and is used again after it is fixed", async () => {
+    if (!POSIX) return;
+    const seen = stubFetch(ok);
+    const path = join(scratch(), "k.pem");
+    loadOrCreateCallerKey(path);
+    chmodSync(path, 0o644);
+    let now = 1_000_000;
+    const warnings: string[] = [];
+    const signer = new CallSigner({ path, warn: (t) => warnings.push(t), now: () => now });
+    const client = new GatewayClient(target, { signer });
+    await client.callTool("bash", {}, { handshake: "never" });
+    expect(seen[0]!.headers[CALL_SIG_HEADER]).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(`${path}: the key file is readable by others`);
+    // The hint a refused call gets says why there is no signature, with the file.
+    expect(callerRefusedHint(signer)).toContain(`${path}: the key file is readable by others`);
+    expect(signer.problem()).toContain("chmod 600");
+    // It is not retried at once, and it is after a while: no restart is needed.
+    chmodSync(path, 0o600);
+    await client.callTool("bash", {}, { handshake: "never" });
+    expect(seen[1]!.headers[CALL_SIG_HEADER]).toBeUndefined();
+    now += 31_000;
+    await client.callTool("bash", {}, { handshake: "never" });
+    expect(seen[2]!.headers[CALL_SIG_HEADER]).toBeDefined();
+    expect(signer.problem()).toBeUndefined();
+  });
+
   test("a key that cannot be made leaves the call unsigned and says so once", async () => {
     const seen = stubFetch(ok);
     const dir = scratch();
@@ -266,12 +375,20 @@ describe("prime serve: a device that refuses an unsigned call", () => {
     };
     expect(reply.error?.code).toBe(-32001);
     expect(reply.error?.message).toContain(allowCallerCommand(signer.callerKey()!));
+    // ...and a hint for a call sent bare on purpose says that, not that there is no key.
+    expect(callerRefusedHint(undefined)).toContain("--no-sign");
+    expect(callerRefusedHint(undefined)).not.toContain("no caller key");
+    // A fleet is let in by its owner, not by a device's callers file.
+    expect(callerRefusedHint(signer, { fleet: true })).not.toContain("prime devices allow-caller");
+    expect(callerRefusedHint(signer, { fleet: true })).toContain(signer.callerKey()!.publicKeyB64);
   });
 });
 
 // ---- the callers file -----------------------------------------------------------------------
 
 describe("callers file", () => {
+  const fileOf = (callers: unknown[]) => JSON.stringify({ version: 1, callers });
+
   test("a missing file is no callers; add, update and revoke round-trip", () => {
     const path = join(scratch(), "sub", "callers.json");
     expect(readCallers(path)).toEqual([]);
@@ -280,36 +397,106 @@ describe("callers file", () => {
     const first = addCaller(path, { pub: a.publicKey, label: "laptop", tools: ["bash"] }, new Date("2026-01-01T00:00:00Z"));
     expect(first.added).toBe(true);
     expect(first.entry).toMatchObject({ keyId: a.keyId, label: "laptop", tools: ["bash"], addedAt: "2026-01-01T00:00:00.000Z" });
+    expect(JSON.parse(readFileSync(path, "utf8")).version).toBe(1);
     if (POSIX) expect(statSync(path).mode & 0o777).toBe(0o600);
     addCaller(path, { pub: b.publicKey });
-    // Adding again updates and keeps the first date.
+    // Adding again updates the label and keeps the first date.
     const again = addCaller(path, { pub: a.publicKey, label: "renamed" }, new Date("2030-01-01T00:00:00Z"));
     expect(again.added).toBe(false);
     expect(again.entry.addedAt).toBe("2026-01-01T00:00:00.000Z");
-    expect(again.entry.tools).toBeUndefined();
     expect(readCallers(path).map((e) => e.keyId).sort()).toEqual([a.keyId, b.keyId].sort());
     expect(removeCaller(path, a.keyId)).toBe(true);
     expect(removeCaller(path, a.keyId)).toBe(false);
     expect(readCallers(path).map((e) => e.keyId)).toEqual([b.keyId]);
+    // Revoking the last caller leaves a whole file that says there are none, which is not a damaged file.
+    expect(removeCaller(path, b.keyId)).toBe(true);
+    expect(readCallers(path)).toEqual([]);
+    expect(existsSync(path + ".lock")).toBe(false);
+  });
+
+  test("the file is written durably: its data is flushed before the name moves", () => {
+    const path = join(scratch(), "callers.json");
+    const flushed = spyOn(fs, "fsyncSync");
+    try {
+      addCaller(path, { pub: newKey().publicKey });
+      expect(flushed).toHaveBeenCalled();
+    } finally {
+      flushed.mockRestore();
+    }
+  });
+
+  test("allowing a key again keeps its tool restriction; only --all-tools or new tools change it", () => {
+    const path = join(scratch(), "callers.json");
+    const a = newKey();
+    addCaller(path, { pub: a.publicKey, label: "laptop", tools: ["read"] });
+    expect(addCaller(path, { pub: a.publicKey, label: "renamed" }).entry.tools).toEqual(["read"]);
+    expect(addCaller(path, { pub: a.publicKey, tools: ["read", "write"] }).entry.tools).toEqual(["read", "write"]);
+    expect(addCaller(path, { pub: a.publicKey, allTools: true }).entry.tools).toBeUndefined();
+    expect(readCallers(path)[0]!.tools).toBeUndefined();
+    expect(() => addCaller(path, { pub: a.publicKey, tools: [] })).toThrow(/non-empty/);
+    expect(() => addCaller(path, { pub: a.publicKey, tools: [""] })).toThrow(/non-empty/);
+    expect(() => addCaller(path, { pub: a.publicKey, tools: ["x"], allTools: true })).toThrow();
+  });
+
+  test.each([
+    ["an empty list", []],
+    ["a string", "bash"],
+    ["a number in the list", [1]],
+    ["an empty name", [""]],
+    ["an object", { "0": "read" }],
+    ["null", null],
+  ])("a tool restriction that cannot be read is an error, not every tool: %s", (_name, tools) => {
+    const path = join(scratch(), "callers.json");
+    writeFileSync(path, fileOf([{ pub: newKey().publicKeyB64, label: "x", addedAt: "", tools }]));
+    expect(() => readCallers(path)).toThrow(/tools of caller .* non-empty list of tool names/);
   });
 
   test("a key id in the file is derived from the key, not taken on trust", () => {
     const path = join(scratch(), "callers.json");
     const a = newKey();
-    writeFileSync(path, JSON.stringify([{ keyId: "AAAAAAAAAAAAAAAAAAAAAA", pub: a.publicKeyB64, label: "x", addedAt: "" }]));
+    writeFileSync(path, fileOf([{ keyId: "AAAAAAAAAAAAAAAAAAAAAA", pub: a.publicKeyB64, label: "x", addedAt: "" }]));
     expect(readCallers(path)[0]!.keyId).toBe(keyIdOf(a.publicKey));
   });
 
-  test("a malformed file is an error, never read as no callers", () => {
+  test("a key listed twice is an error", () => {
     const path = join(scratch(), "callers.json");
-    writeFileSync(path, "{ nope");
-    expect(() => readCallers(path)).toThrow(/not valid JSON/);
-    writeFileSync(path, '{"a":1}');
-    expect(() => readCallers(path)).toThrow(/array/);
-    writeFileSync(path, '[{"pub":"short"}]');
-    expect(() => readCallers(path)).toThrow(/public key/);
-    expect(() => addCaller(path, { pub: newKey().publicKey })).toThrow();
-    expect(readFileSync(path, "utf8")).toBe('[{"pub":"short"}]');
+    const a = newKey();
+    writeFileSync(path, fileOf([{ pub: a.publicKeyB64, tools: ["read"] }, { pub: a.publicKeyB64 }]));
+    expect(() => readCallers(path)).toThrow(/listed twice/);
+  });
+
+  test("a file that is empty, cut short, of another version or another shape is an error, never no callers", () => {
+    const path = join(scratch(), "callers.json");
+    const good = fileOf([{ pub: newKey().publicKeyB64 }]);
+    for (const [text, message] of [
+      ["", /empty/],
+      ["  \n", /empty/],
+      [good.slice(0, 20), /not valid JSON/],
+      ["{ broken", /not valid JSON/],
+      ["[]", /version/],
+      [JSON.stringify([{ pub: newKey().publicKeyB64 }]), /version/],
+      [JSON.stringify({ version: 2, callers: [] }), /version 2/],
+      [JSON.stringify({ version: 1 }), /no callers list/],
+      [fileOf([{ pub: "short" }]), /public key/],
+      [fileOf(["x"]), /not an object/],
+    ] as [string, RegExp][]) {
+      writeFileSync(path, text);
+      expect(() => readCallers(path)).toThrow(message);
+      // And an update refuses to build on it, leaving the file as it was.
+      expect(() => addCaller(path, { pub: newKey().publicKey })).toThrow();
+      expect(() => removeCaller(path, "x")).toThrow();
+      expect(readFileSync(path, "utf8")).toBe(text);
+    }
+  });
+
+  test("changes made by several processes at once are all kept", async () => {
+    const path = join(scratch(), "callers.json");
+    const keys = Array.from({ length: 8 }, () => newKey());
+    const script = `import { addCaller } from ${JSON.stringify(join(ROOT, "src", "caller-key.ts"))};
+      addCaller(${JSON.stringify(path)}, { pub: Buffer.from(process.argv[1], "base64"), label: process.argv[1].slice(0, 4) });`;
+    const procs = keys.map((k) => Bun.spawn(["bun", "-e", script, k.publicKeyB64], { stdout: "ignore", stderr: "pipe" }));
+    for (const p of procs) expect(await p.exited).toBe(0);
+    expect(readCallers(path).map((e) => e.keyId).sort()).toEqual(keys.map((k) => k.keyId).sort());
   });
 });
 
@@ -411,6 +598,84 @@ describe("prime (spawned)", () => {
     expect(JSON.parse(missing.out)).toMatchObject({ removed: false });
   });
 
+  test("a refused call under --no-sign says it was sent unsigned, and a fleet's refusal points to its owner", async () => {
+    refuse = true;
+    try {
+      const bare = await cli(["tools", "call", "laptop.bash", "{}", "--gateway", gw(), "--token", "t", "--handshake", "never", "--no-sign"]);
+      expect(bare.err).toContain("--no-sign");
+      expect(bare.err).not.toContain("no caller key");
+      const fleet = await cli(["tools", "call", "acme.bash", "{}", "--fleet", "--gateway", gw(), "--token", "t", "--handshake", "never"]);
+      expect(fleet.err).toContain("Ask the fleet's owner");
+      expect(fleet.err).not.toContain("prime devices allow-caller");
+    } finally {
+      refuse = false;
+    }
+  });
+
+  test("a fleet token call is signed for the fleet, whether --fleet is given or the device was connected with it", async () => {
+    seen.length = 0;
+    const key = loadOrCreateCallerKey(join(dir, "caller.pem"));
+    const flag = await cli(["tools", "call", "acme.bash", "{}", "--fleet", "--gateway", gw(), "--token", "t", "--handshake", "never"]);
+    expect(flag.code).toBe(0);
+    expect(verifyCallSignature(parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!, key.publicKey, "fleet:acme", seen[0]!.body)).toBe(true);
+    const connected = await cli(["devices", "connect", "acme2", "--fleet", "--no-verify", "--gateway", gw(), "--token", "t"]);
+    expect(connected.code).toBe(0);
+    expect(readFileSync(join(dir, "config.yaml"), "utf8")).toContain("fleet_token: true");
+    seen.length = 0;
+    const stored = await cli(["tools", "call", "acme2.bash", "{}", "--handshake", "never", "--gateway", gw()]);
+    expect(stored.code).toBe(0);
+    expect(verifyCallSignature(parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!, key.publicKey, "fleet:acme2", seen[0]!.body)).toBe(true);
+    // A plain device is still signed for the device.
+    seen.length = 0;
+    await cli(["tools", "call", "laptop.bash", "{}", "--gateway", gw(), "--token", "t", "--handshake", "never"]);
+    expect(verifyCallSignature(parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!, key.publicKey, "device:laptop", seen[0]!.body)).toBe(true);
+  });
+
+  test("allow-caller: --tools that names no tool is refused, a restriction is kept when the key is allowed again, --all-tools lifts it", async () => {
+    const pub = loadOrCreateCallerKey(join(dir, "caller.pem")).publicKeyB64;
+    rmSync(join(dir, "callers.json"), { force: true });
+    for (const empty of [",", ""]) {
+      const r = await cli(["devices", "allow-caller", pub, "--tools", empty]);
+      expect(r.code).toBe(2);
+      expect(r.err).toContain("names no tool");
+    }
+    expect(existsSync(join(dir, "callers.json"))).toBe(false);
+    await cli(["devices", "allow-caller", pub, "--tools", "read"]);
+    await cli(["devices", "allow-caller", pub, "--label", "again"]);
+    expect(readCallers(join(dir, "callers.json"))[0]).toMatchObject({ label: "again", tools: ["read"] });
+    expect((await cli(["devices", "allow-caller", pub, "--tools", "read", "--all-tools"])).code).toBe(2);
+    await cli(["devices", "allow-caller", pub, "--all-tools"]);
+    expect(readCallers(join(dir, "callers.json"))[0]!.tools).toBeUndefined();
+  });
+
+  test("callers still lists the callers when this machine's own key is unusable", async () => {
+    const bad = join(dir, "bad.pem");
+    writeFileSync(bad, "garbage", { mode: 0o600 });
+    const proc = Bun.spawn(["bun", ENTRY, "devices", "callers", "--json"], {
+      env: { ...process.env, PRIME_CONFIG: join(dir, "config.yaml"), PRIME_CALLER_KEY: bad, PRIME_CALLERS: join(dir, "callers.json"), NO_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    const listed = JSON.parse(out) as { callers: unknown[]; this_machine: { unusable: string } };
+    expect(listed.callers.length).toBeGreaterThan(0);
+    expect(listed.this_machine.unusable).toContain("not a readable Ed25519 PEM key");
+  });
+
+  test("the callers file follows --config, so it is the file the device with that config reads", async () => {
+    const other = mkdtempSync(join(tmpdir(), "prime-other-"));
+    const proc = Bun.spawn(["bun", ENTRY, "devices", "allow-caller", "--self", "--json", "--config", join(other, "config.yaml")], {
+      env: { ...process.env, PRIME_CONFIG: join(dir, "config.yaml"), PRIME_CALLER_KEY: join(dir, "caller.pem"), PRIME_CALLERS: "", NO_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = JSON.parse(await new Response(proc.stdout).text()) as { callers_file: string };
+    expect(await proc.exited).toBe(0);
+    expect(out.callers_file).toBe(join(other, "callers.json"));
+    expect(readCallers(join(other, "callers.json"))).toHaveLength(1);
+  });
+
   test("allow-caller refuses what is not a public key, and a malformed callers file is left as it is", async () => {
     const notKey = await cli(["devices", "allow-caller", "hello"]);
     expect(notKey.code).toBe(2);
@@ -422,7 +687,7 @@ describe("prime (spawned)", () => {
     const bad = await cli(["devices", "allow-caller", "--self"]);
     expect(bad.code).toBe(2);
     expect(readFileSync(join(dir, "callers.json"), "utf8")).toBe("garbage");
-    writeFileSync(join(dir, "callers.json"), "[]");
+    rmSync(join(dir, "callers.json"));
     const self = await cli(["devices", "allow-caller", "--self", "--json"]);
     expect(self.code).toBe(0);
     expect(JSON.parse(self.out)).toMatchObject({ key_id: loadOrCreateCallerKey(join(dir, "caller.pem")).keyId, added: true });

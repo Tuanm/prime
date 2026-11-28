@@ -88,9 +88,9 @@ USAGE
   prime devices status <device-id> [--json]
   prime devices list [--no-probe] [--json]
   prime devices rotate-code <device-id> [--operator [--revoke-previous]] [--json]
-  prime devices allow-caller <public-key> | --self [--label <text>] [--tools a,b]
-  prime devices callers [--json]
-  prime devices revoke-caller <key-id>
+  prime devices allow-caller <public-key> | --self [--label <text>] [--tools a,b | --all-tools] [--callers <path>]
+  prime devices callers [--json] [--callers <path>]
+  prime devices revoke-caller <key-id> [--callers <path>]
 
 ${bold("rotate-code")}
   A device made when codes were six characters keeps a code that can be guessed
@@ -138,18 +138,25 @@ ${bold("list")}
 
 ${bold("allow-caller, callers, revoke-caller")}
   Every tool call that 'prime serve' and 'prime tools call' send is signed with
-  this machine's caller key (made on first use, kept in ~/.prime/caller-ed25519.pem,
-  never printed), so a device can tell a call from your machine from one the
-  gateway made up. A device runs the calls of the keys in its callers file
-  (callers.json beside its config; --callers <path> to use another) and lets you
-  put the file to work with its --caller-auth setting.
-  Run these on the machine the device runs on:
+  this machine's caller key, so a device that checks signatures can tell a call
+  from your machine from one the gateway made up. The key is made on first use
+  in ~/.prime/caller-ed25519.pem (PRIME_CALLER_KEY for another place) and is never
+  printed; a key file that others can read is refused. On Windows the file is
+  protected by your profile's access rules, not by a mode.
+  A device that checks signatures trusts the keys in its callers file: callers.json
+  beside the config file (the --config of this command; PRIME_CALLERS or --callers
+  <path> for another). Run these on the machine the device runs on; nothing a
+  gateway sends can edit the file:
     allow-caller <public-key>   Allow a key (a refused call prints it); --self allows
-                                this machine's own key. --label names it, --tools a,b
-                                limits it to those tools.
+                                this machine's own key. --label names it. --tools a,b
+                                limits it to those tools and is kept when the key is
+                                allowed again; --all-tools lifts the limit.
     callers                     List the allowed keys.
     revoke-caller <key-id>      Stop trusting a key.
-  Only a person at that machine edits the file; nothing a gateway sends can.
+  The file is {"version": 1, "callers": [...]}. A file that is empty or damaged is an
+  error, never "no callers".
+  A fleet reached with its fleet token is addressed by 'prime devices connect <id>
+  --fleet' (or --fleet on 'prime tools'), so its calls are signed for the fleet.
 `;
 
 const TOOLS = `prime tools - list, inspect and call device tools

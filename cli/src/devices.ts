@@ -359,7 +359,7 @@ export async function devicesRotateCode(ctx: Ctx): Promise<void> {
 
 /** The callers file this command works on: --callers, else the one the device on this machine reads. */
 function callersFile(ctx: Ctx): string {
-  return str(ctx.parsed, "callers") ?? callersPath();
+  return str(ctx.parsed, "callers") ?? callersPath(ctx.configPath);
 }
 
 /** The file's callers, or a usage error that names the file when it cannot be read. */
@@ -378,7 +378,7 @@ export async function devicesAllowCaller(ctx: Ctx): Promise<void> {
   if (self === (positionals.length === 1)) {
     throw new UsageError(
       "give the public key to allow, or --self for this machine's own",
-      "Usage: prime devices allow-caller <public-key> [--label <text>] [--tools a,b]   (the key is what a refused call prints)",
+      "Usage: prime devices allow-caller <public-key> [--label <text>] [--tools a,b | --all-tools]   (the key is what a refused call prints)",
     );
   }
   let pub: Buffer;
@@ -394,13 +394,22 @@ export async function devicesAllowCaller(ctx: Ctx): Promise<void> {
     }
     pub = given;
   }
-  const tools = str(ctx.parsed, "tools")
-    ?.split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
+  const toolsText = str(ctx.parsed, "tools");
+  const tools = toolsText?.split(",").map((t) => t.trim()).filter(Boolean);
+  // A restriction that names no tool must not silently mean "all of them".
+  if (toolsText !== undefined && (tools?.length ?? 0) === 0) {
+    throw new UsageError("--tools names no tool", "Give the tools the key may call, e.g. --tools read,write; to allow every tool use --all-tools.");
+  }
+  const allTools = bool(ctx.parsed, "all-tools");
+  if (tools && allTools) throw new UsageError("--tools and --all-tools cannot be used together");
   const path = callersFile(ctx);
   callersOrFail(path); // a malformed file is reported, not overwritten
-  const { entry, added } = addCaller(path, { pub, ...(str(ctx.parsed, "label") !== undefined ? { label: str(ctx.parsed, "label")! } : {}), ...(tools ? { tools } : {}) });
+  const { entry, added } = addCaller(path, {
+    pub,
+    ...(str(ctx.parsed, "label") !== undefined ? { label: str(ctx.parsed, "label")! } : {}),
+    ...(tools ? { tools } : {}),
+    ...(allTools ? { allTools: true } : {}),
+  });
   if (ctx.json) {
     printJson({ key_id: entry.keyId, label: entry.label, tools: entry.tools ?? null, added, callers_file: path });
     return;
@@ -415,11 +424,20 @@ export async function devicesCallers(ctx: Ctx): Promise<void> {
   const callers = callersOrFail(path);
   const keyPath = callerKeyPath();
   // This machine's own key is shown when it exists; listing must not make one.
-  const own = existsSync(keyPath) ? loadOrCreateCallerKey(keyPath) : undefined;
+  // Listing the callers does not depend on this machine's key being usable.
+  let own: ReturnType<typeof loadOrCreateCallerKey> | undefined;
+  let ownProblem: string | undefined;
+  if (existsSync(keyPath)) {
+    try {
+      own = loadOrCreateCallerKey(keyPath);
+    } catch (err) {
+      ownProblem = err instanceof Error ? err.message : String(err);
+    }
+  }
   if (ctx.json) {
     printJson({
       callers_file: path,
-      this_machine: own ? { key_id: own.keyId, public_key: own.publicKeyB64 } : null,
+      this_machine: own ? { key_id: own.keyId, public_key: own.publicKeyB64 } : ownProblem ? { unusable: ownProblem } : null,
       callers: callers.map((c) => ({ key_id: c.keyId, label: c.label, added_at: c.addedAt, tools: c.tools ?? null })),
     });
     return;
@@ -431,6 +449,7 @@ export async function devicesCallers(ctx: Ctx): Promise<void> {
     ctx.out(table(["KEY", "LABEL", "ADDED", "TOOLS"], callers.map((c) => [bold(c.keyId), c.label || dim("-"), dim(c.addedAt || "-"), c.tools ? c.tools.join(", ") : dim("all")])));
   }
   if (own) ctx.note(dim(`this machine's caller key: ${own.keyId}  ${own.publicKeyB64}`));
+  else if (ownProblem) ctx.note(dim(`this machine's caller key: unusable (${ownProblem})`));
 }
 
 export async function devicesRevokeCaller(ctx: Ctx): Promise<void> {

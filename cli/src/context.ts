@@ -47,6 +47,7 @@ export function overridesFrom(parsed: ParsedArgs): TargetOverrides {
   if (token !== undefined) overrides.deviceToken = token;
   if (gatewayToken !== undefined) overrides.gatewayToken = gatewayToken;
   if (timeout !== undefined) overrides.timeoutMs = timeout;
+  if (bool(parsed, "fleet")) overrides.fleetBuddy = true;
   return overrides;
 }
 
