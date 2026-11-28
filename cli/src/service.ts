@@ -238,10 +238,45 @@ export function parseSystemdCommand(unit: string): string[] | undefined {
     line = value === "" ? undefined : value;
   }
   if (line === undefined) return undefined;
-  const quoted = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$"));
-  if (quoted.length > 0) return quoted;
-  // systemd's own prefixes ("-", "@", ":", "+", "!") are not part of the program.
-  return line.replace(/^[-@:+!]+/, "").split(/\s+/).filter((word) => word !== "");
+  return splitExecStart(line);
+}
+
+/**
+ * The words of an ExecStart line as systemd reads them: blanks separate them; a word may be in double quotes (with
+ * C-style escapes, as `systemdQuote` writes) or in single quotes (literal), and a line can mix them (an unquoted program
+ * with quoted arguments). `%%` and `$$` stand for `%` and `$`. The prefixes systemd allows on the program ("-", "@", ":",
+ * "+", "!") are not part of it.
+ */
+export function splitExecStart(line: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote === '"') {
+      if (ch === "\\" && i + 1 < line.length) word += line[++i]!;
+      else if (ch === '"') quote = "";
+      else word += ch;
+    } else if (quote === "'") {
+      if (ch === "'") quote = "";
+      else word += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      inWord = true;
+    } else if (/\s/.test(ch)) {
+      if (inWord) words.push(word);
+      word = "";
+      inWord = false;
+    } else {
+      word += ch;
+      inWord = true;
+    }
+  }
+  if (inWord) words.push(word);
+  const unescaped = words.map((w) => w.replace(/%%/g, "%").replace(/\$\$/g, "$"));
+  if (unescaped.length > 0 && !/^["']/.test(line.trimStart())) unescaped[0] = unescaped[0]!.replace(/^[-@:+!]+/, "");
+  return unescaped;
 }
 
 /**

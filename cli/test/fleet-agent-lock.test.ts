@@ -6,7 +6,7 @@ import { acquireAgentLock, agentLockPath, isFleetAgentProcess, probeFor, procPro
 import { exePath } from "../src/code-mcp-host";
 import { commandRuns, runsProgram } from "../src/fleet-paths";
 import { bindServiceStatus, fleetAgentServiceStatus, programNamed } from "../src/fleet-service";
-import { launchdAnswered, systemdQuote } from "../src/service";
+import { launchdAnswered, splitExecStart, systemdQuote } from "../src/service";
 import {
   SettingsPendingError,
   agentCommand,
@@ -835,6 +835,11 @@ describe("switching the replica mode of a running agent", () => {
     expect(programNamed(plist, spaced)).toBe(true);
     expect(programNamed(plist, real)).toBe(false);
     expect(programNamed("[Service]\nRestart=always", real)).toBeUndefined();
+    // As a person writes one: single quotes, and an unquoted program with quoted arguments.
+    expect(programNamed("ExecStart='" + spaced + "' __fleet-agent --config /c", spaced)).toBe(true);
+    expect(programNamed("ExecStart=" + real + ' "__fleet-agent" "--config" "/c"', real)).toBe(true);
+    expect(programNamed("ExecStart=-" + real + " __fleet-agent", real)).toBe(true);
+    expect(splitExecStart("/a/b 'c d' \"e f\" g%%h i$$j")).toEqual(["/a/b", "c d", "e f", "g%h", "i$j"]);
   });
 
   test("a service whose manager cannot be reached from here is not restarted, and no second agent is started beside it", async () => {
