@@ -73,6 +73,8 @@ export class FakeGateway {
   serverDate: string | undefined = undefined;
   /** A key other than the one on the roster waits for the operator: the ask is refused, as the real object does without a proof. */
   keyChangePending = false;
+  /** What each pack upload said its hash was (`x-prime-sha256`), in order. */
+  packHashHeaders: Array<string | undefined> = [];
   /** Requests of each kind, by route. */
   requests = new Map<string, number>();
   /** Pack downloads, by the pack's key. */
@@ -314,6 +316,7 @@ export function useFakeGateway(gateway: FakeGateway): void {
     const parsed = new URL(url);
     const path = parsed.pathname;
     const deviceId = init.headers["x-prime-device"] ?? "";
+    if (init.method === "POST" && path.endsWith("/packs")) gateway.packHashHeaders.push(init.headers["x-prime-sha256"]);
     const answer = gateway.handle(credsFor(deviceId), init.method, path, init.body, parsed.search);
     const signal = init.signal;
     if (!signal) return answer;
