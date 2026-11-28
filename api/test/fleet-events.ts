@@ -38,7 +38,7 @@ async function startWorker(): Promise<{ stop: () => void }> {
   const proc = spawn(
     "node",
     [WRANGLER, "dev", "--local", "-c", ROOT + "/wrangler.dev.toml", "--port", String(PORT), "--ip", "127.0.0.1",
-      "--persist-to", ROOT + "/.wrangler/state-" + PORT, "--var", "RATE_LIMIT_MAX:100000"],
+      "--persist-to", ROOT + "/.wrangler/state-" + PORT, "--var", "RATE_LIMIT_MAX:100000", "--var", "FLEET_LEASE_MIN_MS:1000"],
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] },
   );
   const log: string[] = [];
@@ -210,16 +210,24 @@ try {
   check("a resumed fleet serves again", again.status === 200 && again.json.role === "primary", JSON.stringify(again.json));
 
   // ---- the lease ending, with nobody to say so ---------------------------------
-  // The holder renews for a short moment and then says nothing. The only thing that
-  // can announce it is the alarm the fleet set for that moment.
-  const renew = await member("/fleets/e2e/lease/renew", "dev-a", "token-a-1234", { ttlMs: 1500 });
-  check("the holder renews for a short while", renew.status === 200, JSON.stringify(renew.json));
-  const renewedAt = Date.now();
-  const before = late.of("lease-free").length;
-  check("the lease ending is announced by the alarm", await late.waitFor(() => late.of("lease-free").length > before, 8000));
-  const waited = Date.now() - renewedAt;
-  check("...not before it ended", waited >= 1400, waited + "ms");
-  check("...and soon after", waited < 5000, waited + "ms");
+  // The holder renews and then says nothing. The only thing that can announce the lease ending is the alarm
+  // the fleet set for that moment. The lease is the fleet's, not the holder's: it is set short here (the
+  // local worker lowers the floor for this), because a deployed gateway keeps it between 30 and 180 seconds.
+  if (EXTERNAL) {
+    console.log("SKIP the lease ending (a deployed gateway's lease is at least 30 s)");
+  } else {
+    const set = await admin("/admin/api/fleets/e2e/meta", { leaseMs: 2000 });
+    check("the operator sets a short lease", set.status === 200 && set.json.leaseMs === 2000, JSON.stringify(set.json));
+    const renew = await member("/fleets/e2e/lease/renew", "dev-a", "token-a-1234", { ttlMs: 300000 });
+    check("the holder renews, and the fleet's lease is the one that applies", renew.status === 200, JSON.stringify(renew.json));
+    const renewedAt = Date.now();
+    const before = late.of("lease-free").length;
+    check("the lease ending is announced by the alarm", await late.waitFor(() => late.of("lease-free").length > before, 8000));
+    const waited = Date.now() - renewedAt;
+    check("...not before it ended", waited >= 1900, waited + "ms");
+    check("...and soon after", waited < 6000, waited + "ms");
+    await admin("/admin/api/fleets/e2e/meta", { leaseMs: null });
+  }
 
   // ---- giving it up ------------------------------------------------------------------
   await member("/fleets/e2e/bootstrap", "dev-a", "token-a-1234", {});

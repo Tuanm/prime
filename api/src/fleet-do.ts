@@ -26,7 +26,13 @@ import {
   KEY_PROOF_INFO,
   KEY_PROOF_WINDOW_MS,
   clampTtl,
+  cleanCaps,
+  commonCaps,
+  effectiveLeaseMs,
   hashCode,
+  LEASE_DEFAULT_MS,
+  LEASE_MIN_MS,
+  leaseBounds,
   inviteShape,
   MAX_MEMBERS,
   MAX_SNAPSHOT_BYTES,
@@ -65,6 +71,8 @@ interface FleetMeta {
   label?: string;
   /** A paused fleet takes no part in anything. */
   disabled?: boolean;
+  /** How long a place in the fleet lasts without being renewed (held between the bounds; see `effectiveLeaseMs`). */
+  leaseMs?: number;
 }
 
 /** The routes a paused fleet refuses. */
@@ -132,7 +140,7 @@ const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 }
  * heartbeat to the `ttlMs` this file returns, but an older agent still polls at
  * its own pace, so the lease is set to three of the slowest one.
  */
-export const LEASE_TTL_MS = 45_000;
+export const LEASE_TTL_MS = LEASE_DEFAULT_MS;
 
 /** How seldom the fleet is marked as touched: see `touch`. */
 const TOUCH_EVERY_MS = 60_000;
@@ -308,7 +316,7 @@ export class FleetDO implements DurableObject {
   private async helloFrame(): Promise<Record<string, unknown>> {
     const meta = await this.meta();
     const held = await this.lease();
-    return { type: "hello", paused: meta.disabled === true, leaseHolder: held ? held.holder : null, leaseMs: LEASE_TTL_MS };
+    return { type: "hello", paused: meta.disabled === true, leaseHolder: held ? held.holder : null, leaseMs: effectiveLeaseMs(meta.leaseMs, this.env) };
   }
 
   /** A member opens a socket to be told what happens in the fleet. */
@@ -421,6 +429,7 @@ export class FleetDO implements DurableObject {
     this.hangUp("the fleet is gone");
     // A fleet that is deleted is not still paused: the name can be made again.
     await this.storage.delete("meta");
+    this.metaKept = undefined;
     await this.storage.delete("members");
     await this.storage.delete("created");
     await this.storage.delete("incarnation");
@@ -565,6 +574,8 @@ export class FleetDO implements DurableObject {
       members: Object.values(members).map((m) => ({
         deviceId: m.deviceId,
         ...(m.pubkey ? { pubkey: m.pubkey } : {}),
+        // What it says it can do, so that a format is used only when every member can read it.
+        ...(m.caps && m.caps.length > 0 ? { caps: m.caps } : {}),
         // How far this member has got. The admin page shows it; the publisher
         // does not decide anything from it (a member that fell behind catches
         // up from the newest checkpoint).
@@ -615,29 +626,76 @@ export class FleetDO implements DurableObject {
 
   /** What the operator has set about the fleet itself. */
   private async meta(): Promise<FleetMeta> {
-    return (await this.storage.get<FleetMeta>("meta")) ?? {};
+    // Kept in memory: it is read by every renewal (for the lease), and changes only here. An object that was
+    // evicted reads it again, which is the same value.
+    if (this.metaKept === undefined) this.metaKept = (await this.storage.get<FleetMeta>("meta")) ?? {};
+    return { ...this.metaKept };
   }
+  private metaKept?: FleetMeta;
 
   /** A fleet the operator has paused takes no part in anything. */
   private async paused(): Promise<boolean> {
     return (await this.meta()).disabled === true;
   }
 
-  /** Set what the operator has decided about the fleet. */
+  /**
+   * Set what the operator has decided about the fleet. The label and the pause are the operator's (the admin
+   * page). The lease is the operator's or the fleet owner's: `leaseMs` between the bounds, or null to go back to
+   * the gateway's. A value outside the bounds is refused, not clamped, so that nobody believes a fleet runs on a
+   * lease it does not.
+   */
   private async setMeta(caller: Caller, body: Record<string, unknown>): Promise<Response> {
-    if (caller.kind !== "admin") return this.deny();
-    if (!(await this.exists())) return Response.json({ error: "no such fleet" }, { status: 404 });
-    const meta = await this.meta();
-    if (typeof body.label === "string") {
-      const label = cleanLabel(body.label);
-      if (label === undefined) delete meta.label;
-      else meta.label = label;
+    if (caller.kind !== "admin") {
+      const denied = await this.requireOperatorOrOwner(caller);
+      if (denied) return denied;
+      // The owner of a fleet sets its lease and nothing else of it: pausing and naming are the operator's, and the
+      // registry that answers for a paused fleet is told by the operator's route only.
+      if (typeof body.label === "string" || typeof body.disabled === "boolean") return this.deny();
     }
-    const wasPaused = meta.disabled === true;
-    if (typeof body.disabled === "boolean") meta.disabled = body.disabled;
-    await this.storage.put("meta", meta);
-    if ((meta.disabled === true) !== wasPaused) this.broadcast({ type: meta.disabled === true ? "paused" : "resumed" });
-    return Response.json({ ok: true, meta });
+    // The floor FLEET_LEASE_MIN_MS lowers (for a test that must see a lease end in seconds) is the operator's alone: an
+    // owner device, which any member of a gateway that hands out devices may be, never sets a lease under thirty seconds.
+    const { min, max } = caller.kind === "admin" ? leaseBounds(this.env) : leaseBounds({});
+    let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
+    let leaseChanged = false;
+    let pauseChanged: boolean | undefined;
+    // Read, changed and written as one step: two changes (the page's label or pause, an owner's lease) that ran at once
+    // would each start from the same copy, and one would be lost.
+    await this.state.blockConcurrencyWhile(async () => {
+      if (!(await this.exists())) {
+        out = Response.json({ error: "no such fleet" }, { status: 404 });
+        return;
+      }
+      const meta = await this.meta();
+      const wasPaused = meta.disabled === true;
+      const wasLease = effectiveLeaseMs(meta.leaseMs, this.env);
+      if (typeof body.label === "string") {
+        const label = cleanLabel(body.label);
+        if (label === undefined) delete meta.label;
+        else meta.label = label;
+      }
+      if (typeof body.disabled === "boolean") meta.disabled = body.disabled;
+      if (body.leaseMs === null) delete meta.leaseMs;
+      else if (body.leaseMs !== undefined) {
+        const asked = body.leaseMs;
+        if (typeof asked !== "number" || !Number.isFinite(asked) || asked < min || asked > max) {
+          out = Response.json({ error: "leaseMs must be a number between " + min + " and " + max, min, max }, { status: 400 });
+          return;
+        }
+        meta.leaseMs = Math.round(asked);
+        if (meta.leaseMs < LEASE_MIN_MS) console.warn("fleet: a lease of " + meta.leaseMs + " ms was set, under the " + LEASE_MIN_MS + " ms floor, by FLEET_LEASE_MIN_MS (for tests only)");
+      }
+      await this.storage.put("meta", meta);
+      this.metaKept = { ...meta };
+      leaseChanged = effectiveLeaseMs(meta.leaseMs, this.env) !== wasLease;
+      if ((meta.disabled === true) !== wasPaused) pauseChanged = meta.disabled === true;
+      out = Response.json({ ok: true, meta, leaseMs: effectiveLeaseMs(meta.leaseMs, this.env) });
+    });
+    // Told after the decision is stored, outside the block that made it.
+    if (pauseChanged !== undefined) this.broadcast({ type: pauseChanged ? "paused" : "resumed" });
+    // A replica that only heard the lease in its first hello would go on asking for the place at that lease's pace;
+    // a member of an earlier build ignores a frame it does not know.
+    if (leaseChanged) this.broadcast({ type: "lease", leaseMs: effectiveLeaseMs(this.metaKept?.leaseMs, this.env) });
+    return out;
   }
 
   /** What this fleet served this month, sent on in batches. */
@@ -1180,7 +1238,7 @@ export class FleetDO implements DurableObject {
     // lease between two renewals and the fleet flaps with no primary at all -
     // which is exactly what happened when the agents renewed every fifteen
     // seconds against a fifteen-second lease.
-    const ttlMs = LEASE_TTL_MS;
+    const ttlMs = effectiveLeaseMs((await this.meta()).leaseMs, this.env);
     // The head decides whether this member is caught up, and the lease must not
     // be granted on a guess: a failed read refuses the bootstrap instead of
     // pretending the fleet has published nothing.
@@ -1190,6 +1248,9 @@ export class FleetDO implements DurableObject {
     }
     const pubkey = cleanPubkey(body.pubkey);
     const label = cleanLabel(body.label);
+    // What the member can do, as it says it now: a member that says nothing (an earlier build) has nothing, so a
+    // member that went back to an earlier build is not kept as if it still could.
+    const caps = cleanCaps(body.caps);
     // The roster is read, changed and written in one step: a key change and a name change are made against
     // the roster as it is when they are written (an operator's removal that commits in between is not undone
     // by a copy read before it). A key other than the one the fleet holds is not taken on the strength of the
@@ -1212,10 +1273,19 @@ export class FleetDO implements DurableObject {
       // now. The name is only for the operator to read, but it is read on every round of the agent, so a
       // stale one is corrected the next time the space takes its place. A name another member already uses is
       // not taken on: the list would then show two spaces that cannot be told apart.
+      let changedRoster = false;
       if (label !== undefined && roster[caller.deviceId]!.label !== label && !findClash(roster, {}, caller.deviceId, label)) {
         roster[caller.deviceId]!.label = label;
-        await this.storage.put("members", roster);
+        changedRoster = true;
       }
+      // Written only when it differs: a member says its caps on every renewal, and a row is billed.
+      const held = roster[caller.deviceId]!.caps ?? [];
+      if (held.length !== caps.length || held.some((c, i) => c !== caps[i])) {
+        if (caps.length > 0) roster[caller.deviceId]!.caps = caps;
+        else delete roster[caller.deviceId]!.caps;
+        changedRoster = true;
+      }
+      if (changedRoster) await this.storage.put("members", roster);
     });
     if (refused) return refused;
 
@@ -1239,6 +1309,7 @@ export class FleetDO implements DurableObject {
           ...(held.since !== undefined ? { holderSince: held.since } : {}),
           head,
           epoch: head.epoch,
+          ttlMs,
         });
         return;
       }
@@ -1258,6 +1329,7 @@ export class FleetDO implements DurableObject {
           holder: held?.holder ?? null,
           head,
           epoch: head.epoch,
+          ttlMs,
           error: "this fleet's snapshots are sealed: upgrade prime on this member",
         });
         return;
@@ -1284,7 +1356,7 @@ export class FleetDO implements DurableObject {
         const claim = await this.storage.get<Claim>("claim");
         const live = claim !== undefined && claim.until > now && members[claim.device] !== undefined;
         const wait = (holder: string, ms: number): Response =>
-          Response.json({ ok: true, role: "replica", reason: "claimed", holder, head, epoch: head.epoch, retryAfterMs: Math.max(1000, ms) });
+          Response.json({ ok: true, role: "replica", reason: "claimed", holder, head, epoch: head.epoch, ttlMs, retryAfterMs: Math.max(1000, ms) });
         // Those waiting, in the order they asked, minus the ones that stopped coming back.
         const queue = (claim?.queue ?? []).filter((w) => w.by > now && members[w.device] !== undefined);
         // Put the caller in the queue (or keep its place) and tell it to ask again in `ms`.
@@ -1342,6 +1414,7 @@ export class FleetDO implements DurableObject {
           reason: "not-caught-up",
           head,
           epoch: head.epoch,
+          ttlMs,
           catchUpTo: head.seq,
         });
         return;
@@ -1381,7 +1454,9 @@ export class FleetDO implements DurableObject {
 
   private async renew(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
-    const ttlMs = typeof body.ttlMs === "number" && body.ttlMs > 0 ? Math.min(body.ttlMs, 300_000) : LEASE_TTL_MS;
+    // The fleet's lease, whatever the caller asks for: a holder that could name its own would keep the place for
+    // as long as it liked (up to five minutes it used to), and the lease is the fleet's failover clock.
+    const ttlMs = effectiveLeaseMs((await this.meta()).leaseMs, this.env);
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
     await this.state.blockConcurrencyWhile(async () => {
       const held = await this.lease();
@@ -1893,6 +1968,9 @@ export class FleetDO implements DurableObject {
       epoch: held ? held.epoch : 0,
       role: member.role,
       incarnation: await this.incarnation(),
+      // What every member of the fleet can do, and the lease the fleet runs on (the heartbeat follows it).
+      fleetCaps: commonCaps(Object.values(members).map((m) => m.caps)),
+      leaseMs: effectiveLeaseMs((await this.meta()).leaseMs, this.env),
       // This object does not move the head from a sealed snapshot to one that is not (see `advance`).
       sealGate: true,
       // The most one upload may be: a member says so before it sends what the gateway would refuse.

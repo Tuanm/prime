@@ -1367,10 +1367,14 @@ export default {
           return new Response(res.body, { status: res.status, headers: res.headers });
         }
         if (request.method === "POST" && step === "meta") {
-          const body = (await request.json().catch(() => ({}))) as { label?: unknown; disabled?: unknown };
+          const body = (await request.json().catch(() => ({}))) as { label?: unknown; disabled?: unknown; leaseMs?: unknown };
           const patch: Record<string, unknown> = {};
           if (typeof body.label === "string") patch.label = body.label;
           if (typeof body.disabled === "boolean") patch.disabled = body.disabled;
+          // How long a place in the fleet lasts (a number, or null for the gateway's): the fleet checks the bounds.
+          // Whatever it is, so that a value that is not a number (a string from a form) is refused by the fleet's bounds,
+          // as it is on /fleets, and not taken for no change.
+          if (body.leaseMs !== undefined) patch.leaseMs = body.leaseMs;
           const done = await adminFleetAction(env, fleetId, "meta", patch, adminActor);
           // The fleet object decided; the registry is told so the Worker can answer
           // for a paused fleet without waking the object.
