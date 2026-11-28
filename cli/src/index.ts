@@ -4,7 +4,7 @@
 // Command surface:
 //   prime connect [--gateway <url>]     this machine as an anonymous device (runs code-mcp)
 //   prime serve [--port <n>]           all devices' tools as one MCP server
-//   prime devices connect|disconnect|status|list
+//   prime devices connect|disconnect|status|list|rotate-code
 //   prime tools   list|view|call
 //   prime code-mcp [flags]             (advanced) the bundled device buddy
 //   prime service install|uninstall|status   code-mcp as a user service
@@ -21,7 +21,7 @@ import { vaultsCommand } from "./vaults.ts";
 import { serveCommand } from "./serve.ts";
 import { type Ctx, makeCtx } from "./context.ts";
 import { defaultConfigPath } from "./config.ts";
-import { devicesConnect, devicesDisconnect, devicesList, devicesStatus } from "./devices.ts";
+import { devicesConnect, devicesDisconnect, devicesList, devicesRotateCode, devicesStatus } from "./devices.ts";
 import { filesDownload, filesList, filesUpload } from "./files.ts";
 import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
@@ -342,8 +342,10 @@ async function main(argv: string[]): Promise<void> {
           return devicesStatus(ctx);
         case "list":
           return devicesList(ctx);
+        case "rotate-code":
+          return devicesRotateCode(ctx);
         default:
-          throw new UsageError(`unknown devices command "${sub}"`, `Valid: connect, disconnect, status, list. ${usageLine("devices")}`);
+          throw new UsageError(`unknown devices command "${sub}"`, `Valid: connect, disconnect, status, list, rotate-code. ${usageLine("devices")}`);
       }
     case "fleets":
       switch (sub) {
@@ -487,7 +489,7 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
   if (topic === "devices") {
     if (sub === "connect") return CONNECT_FLAGS;
     if (sub === "list") return LIST_FLAGS;
-    if (sub === "status" || sub === "disconnect") return GATEWAY_FLAGS;
+    if (sub === "status" || sub === "disconnect" || sub === "rotate-code") return GATEWAY_FLAGS;
     return [];
   }
   if (topic === "tools") {

@@ -22,6 +22,7 @@ COMMANDS
   devices disconnect <device-id>          Forget a device's local configuration
   devices status <device-id>              Probe one device
   devices list                            List configured devices
+  devices rotate-code <device-id>         Give an anonymous device a new 25-character code
   tools list <device-id>                  List a device's MCP tools
   tools view <device-id>.<tool-id>        Show one tool's schema
   tools call <device-id>.<tool-id> [json] Call one or more tools
@@ -85,6 +86,15 @@ USAGE
   prime devices disconnect <device-id>
   prime devices status <device-id> [--json]
   prime devices list [--no-probe] [--json]
+  prime devices rotate-code <device-id> [--json]
+
+${bold("rotate-code")}
+  A device made when codes were six characters keeps a code that can be guessed
+  online by enough addresses. This asks the gateway for a new 25-character one,
+  by showing the code the device has, and saves it (the device's entry, and each
+  space exposed as the device). The old code keeps working for a day: stop and
+  start those spaces, and restart anything else that holds it, within the day.
+  Update the gateway first - an older one has no such route.
 
 ${bold("connect")}
   Stores <device-id> (and any credentials given) in the config file, then probes
@@ -684,7 +694,8 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "disconnect") return "Usage: prime devices disconnect <device-id>";
     if (sub === "status") return "Usage: prime devices status <device-id>";
     if (sub === "list") return "Usage: prime devices list";
-    return "Usage: prime devices <connect|disconnect|status|list> [args]";
+    if (sub === "rotate-code") return "Usage: prime devices rotate-code <device-id> [--gateway <url>]";
+    return "Usage: prime devices <connect|disconnect|status|list|rotate-code> [args]";
   }
   if (topic === "update" || topic === "upgrade") return "Usage: prime update [--check] [--force] [--to <path>]";
   if (topic === "connect") return "Usage: prime connect [--gateway <url>] [--new] [-- <device flags>]";

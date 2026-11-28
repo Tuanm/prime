@@ -1,4 +1,4 @@
-// `prime devices ...` - connect, disconnect, status, list.
+// `prime devices ...` - connect, disconnect, status, list, rotate-code.
 
 import { bool, num } from "./args.ts";
 import { GatewayClient } from "./client.ts";
@@ -6,6 +6,7 @@ import { type Ctx, overridesFrom, targetFor } from "./context.ts";
 import { saveConfig } from "./config.ts";
 import { UsageError, exitCodeOf } from "./errors.ts";
 import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
+import { formatDuration, rotateAnonymousCode } from "./connect.ts";
 import { assertDeviceId, entryFromOverrides } from "./target.ts";
 
 /** Is this error the device answering (as opposed to a transport failure)? */
@@ -204,4 +205,50 @@ export async function devicesList(ctx: Ctx): Promise<void> {
   });
   ctx.out(table(["DEVICE", "STATUS", "LATENCY", "GATEWAY"], rows));
   if (!noProbe) ctx.note(dim(`${results.filter((r) => r.online).length}/${results.length} online`));
+}
+
+/**
+ * `prime devices rotate-code <device-id>` - give an anonymous device a new 25-character code.
+ *
+ * A device made when codes were six characters keeps one that can be guessed online by enough
+ * addresses. The gateway makes a new one when the device shows the code it has; the old one goes on
+ * working for a day. The new code is saved here (the device's entry, and each space that is exposed
+ * as the device); what is already running holds the old code and must be restarted within the day.
+ */
+export async function devicesRotateCode(ctx: Ctx): Promise<void> {
+  const positionals = ctx.parsed.positionals.slice(2);
+  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: prime devices rotate-code <device-id> [--gateway <url>]");
+  if (positionals.length > 1) throw new UsageError(`unexpected argument "${positionals[1]}"`);
+  const deviceId = assertDeviceId(positionals[0]!);
+  const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
+  if (!target.deviceToken) {
+    throw new UsageError(`no token is saved for "${deviceId}"`, "Only a device this machine holds the code of can be given a new one.");
+  }
+  const entry = ctx.config.devices[deviceId];
+  if (entry && entry.anonymous === false) {
+    throw new UsageError(`"${deviceId}" is a registered device, not an anonymous one`, "Only an anonymous device's code can be made again.");
+  }
+
+  const made = await rotateAnonymousCode(target.gateway, deviceId, target.deviceToken, target.gatewayToken);
+
+  // Saved before anything is printed: the new code exists only here from now on.
+  ctx.config.devices[deviceId] = { ...(entry ?? {}), token: made.token };
+  const spaces: string[] = [];
+  for (const [name, space] of Object.entries(ctx.config.spaces)) {
+    if (space.gateway_device === deviceId) {
+      space.remote_token = made.token;
+      spaces.push(name);
+    }
+  }
+  saveConfig(ctx.configPath, ctx.config);
+
+  const grace = made.previousValidMs !== undefined ? formatDuration(made.previousValidMs) : "a day";
+  if (ctx.json) {
+    printJson({ device: deviceId, rotated: true, previous_valid_ms: made.previousValidMs ?? null, spaces, config_path: ctx.configPath });
+    return;
+  }
+  ctx.out(`${green("✓")} ${bold(deviceId)} has a new 25-character code, saved to ${dim(ctx.configPath)}`);
+  ctx.out(dim(`  the old code keeps working for ${grace}`));
+  if (spaces.length > 0) ctx.out(`  spaces exposed as it: ${spaces.join(", ")} - stop and start each within ${grace}, so that it holds the new code`);
+  ctx.out(`  anything else that holds the old code (a running buddy, 'prime fleets' agent) - restart it within ${grace}`);
 }

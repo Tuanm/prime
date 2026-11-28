@@ -183,6 +183,71 @@ export async function registerAnonymous(
   return parseAnonymousResponse(gateway, response.status, response.headers, await response.text());
 }
 
+/** What the gateway says of a device given a new code. */
+export interface RotatedCode {
+  deviceId: string;
+  token: string;
+  connectUrl: string;
+  /** How long the code the device had keeps working, so that what holds it can be given the new one. */
+  previousValidMs?: number;
+}
+
+/**
+ * Give an anonymous device a new 25-character code (the gateway's POST /api/devices/anonymous/rotate).
+ * The device shows the code it has; the old code keeps working for a day. Pure parsing apart from the call.
+ */
+export async function rotateAnonymousCode(
+  gateway: string,
+  deviceId: string,
+  token: string,
+  gatewayToken: string | undefined,
+): Promise<RotatedCode> {
+  let response: Response;
+  try {
+    response = await fetch(`${gateway}/api/devices/anonymous/rotate`, {
+      method: "POST",
+      headers: { ...authHeaders(gatewayToken), "content-type": "application/json", "x-prime-device": deviceId, "x-device-token": token },
+      body: "{}",
+      signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw transportError(gateway, err);
+  }
+  const text = await response.text();
+  if (response.status !== 200) {
+    const detail = errorField(text).error;
+    if (response.status === 401) {
+      throw new AuthError(
+        "the gateway did not accept the device's code (401)",
+        "Check the device's token, and the gateway token if the gateway asks for one (--gateway-token).",
+      );
+    }
+    if (response.status === 429) {
+      const wait = retryAfterMs(response.headers);
+      throw new CliError("the gateway asks to wait (429)" + (wait !== undefined ? ": try again in " + formatDuration(wait) : ""));
+    }
+    if (response.status === 404 || response.status === 405) {
+      throw new CliError(`${gateway} cannot make a code again (HTTP ${response.status})`, "The gateway is older than this command: it needs to be updated first.");
+    }
+    throw new CliError(`the gateway refused (HTTP ${response.status})` + (detail ? ": " + detail : ""));
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new CliError("the gateway returned a non-JSON answer (HTTP 200)", text.slice(0, 200) || undefined);
+  }
+  if (body.deviceId !== deviceId || typeof body.token !== "string" || body.token.length < 25) {
+    throw new CliError("the gateway's answer does not hold a new code for the device", text.slice(0, 200));
+  }
+  return {
+    deviceId,
+    token: body.token,
+    connectUrl: connectUrlFor(gateway, deviceId, body.token),
+    ...(typeof body.previous_valid_ms === "number" ? { previousValidMs: body.previous_valid_ms } : {}),
+  };
+}
+
 export type ProbeVerdict = "valid" | "online" | "rejected" | "disabled" | "locked" | "unknown";
 
 /**
