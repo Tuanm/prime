@@ -15,7 +15,7 @@ mock.module("cloudflare:workers", () => ({
 mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 
 const { FleetDO } = await import("../src/fleet-do");
-const { default: worker } = await import("../src/index");
+const { default: worker, resetRegistryCache } = await import("../src/index");
 const { verifierFor } = await import("../src/token-hash");
 
 const KEY = "A".repeat(43) + "=";
@@ -289,7 +289,7 @@ describe("through the gateway", () => {
         },
       }),
     };
-    await new Promise((r) => setTimeout(r, 2_100));
+    resetRegistryCache();
     return { env, reached };
   }
   const relay = (env: unknown, as: string, ip: string) =>

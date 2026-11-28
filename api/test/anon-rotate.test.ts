@@ -13,7 +13,7 @@ mock.module("cloudflare:workers", () => ({
 }));
 mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 const { RegistryDO, ROTATE_GRACE_MS } = await import("../src/registry-do");
-const { default: worker } = await import("../src/index");
+const { default: worker, resetRegistryCache } = await import("../src/index");
 const { verifierFor, tokenVerifies } = await import("../src/token-hash");
 
 const PEPPER = "test-pepper-0123456789abcdef0123456789";
@@ -324,7 +324,7 @@ describe("the gateway", () => {
       }),
     };
     // A snapshot an earlier test left in the isolate's cache would answer for this registry.
-    await new Promise((r) => setTimeout(r, 2_100));
+    resetRegistryCache();
     return { env, asked, rotated: () => asked.filter((a) => a.path === "/anon/rotate") };
   }
   const post = (path: string, headers: Record<string, string>, body: unknown = {}) =>
@@ -414,7 +414,7 @@ describe("the gateway", () => {
           return inner(req);
         },
       });
-      await new Promise((r) => setTimeout(r, 2_100));
+      resetRegistryCache();
       const refused = await worker.fetch(post(ROTATE, asDevice(ID, "N".repeat(25), "198.51.100.93"), { proposed: P1 }), env as never);
       expect(refused.status).toBe(429);
       // ...and the operator's is not.
