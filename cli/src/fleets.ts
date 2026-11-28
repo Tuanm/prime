@@ -938,6 +938,16 @@ function readPublished(dir: string): FleetMemberState | undefined {
   }
 }
 
+// Taken away only by a writer that has just written a position at or past the note's, and only under the lock: a writer
+// that read the state before the note was made has an older position, and must leave the note for the next to write.
+function dropPublishedCoveredBy(dir: string, written: FleetMemberState): void {
+  const file = join(dir, PUBLISHED_FILE);
+  if (!existsSync(file)) return;
+  const note = readPublished(dir);
+  if (note !== undefined && note.seq! > (written.seq ?? 0)) return;
+  rmSync(file, { force: true });
+}
+
 /** Whether a position that a publish returned is waiting to be written into the state file. */
 export function hasUnwrittenPosition(configPath: string, fleetId: string, spaceName: string): boolean {
   return existsSync(join(fleetStateDir(configPath, fleetId, spaceName), PUBLISHED_FILE));
@@ -1014,7 +1024,7 @@ export function updateFleetState(
     // A holder that was judged stale while it ran does not write over what another has written since.
     held.assert();
     writeFileAtomic(join(dir, "state.json"), JSON.stringify(next, null, 2), 0o600, { durable: true });
-    rmSync(join(dir, PUBLISHED_FILE), { force: true });
+    dropPublishedCoveredBy(dir, next);
     return next;
   });
 }
@@ -1036,6 +1046,6 @@ export function writeFleetState(configPath: string, fleetId: string, spaceName: 
     delete (next as Record<string, unknown>).manifest;
     held.assert();
     writeFileAtomic(file, JSON.stringify(next, null, 2), 0o600, { durable: true });
-    rmSync(join(dir, PUBLISHED_FILE), { force: true });
+    dropPublishedCoveredBy(dir, next);
   });
 }

@@ -1308,6 +1308,11 @@ export interface SpaceLoop {
   holdMs?: number;
   holdUntil?: number;
   holdTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * What a publish said of this member's position when the state file could not be written: kept here as well as in the
+   * note beside the state (see `recordPublished`), which another writer could still take away.
+   */
+  unrecorded?: Partial<FleetMemberState>;
   lastCheck: number;
   primary: boolean;
   /** When it last took a place in the fleet. */
@@ -1377,10 +1382,25 @@ function nestedOpt(paths: MemberPaths): { nested?: NestedRepoCache } {
  * not be pulled over what has been changed since as if another member had.
  */
 function settlePublished(loop: SpaceLoop): FleetMemberState {
-  const state = readFleetState(loop.configPath, loop.fleet, loop.name);
+  let state = readFleetState(loop.configPath, loop.fleet, loop.name);
+  const kept = loop.unrecorded;
+  if (kept !== undefined) {
+    if ((state.seq ?? 0) >= (kept.seq ?? 0)) {
+      loop.unrecorded = undefined;
+    } else {
+      // The note is gone (another writer took it) and the state file is behind: it is made again.
+      try {
+        recordPublished(loop.configPath, loop.fleet, loop.name, kept);
+        state = readFleetState(loop.configPath, loop.fleet, loop.name);
+      } catch {
+        state = { ...state, ...kept };
+      }
+    }
+  }
   if (!hasUnwrittenPosition(loop.configPath, loop.fleet, loop.name)) return state;
   try {
     writeFleetState(loop.configPath, loop.fleet, loop.name, state);
+    if ((state.seq ?? 0) >= (loop.unrecorded?.seq ?? 0)) loop.unrecorded = undefined;
   } catch {
     // Still busy: it is the next round's to write.
   }
@@ -1531,6 +1551,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     } catch (err) {
       // The snapshot is the fleet's head now, and this member's own: that is kept where the state is read from, and written
       // into the state file by the next round (see `settlePublished`).
+      loop.unrecorded = published;
       try {
         recordPublished(loop.configPath, fleet, loop.name, published);
       } catch {

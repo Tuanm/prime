@@ -2559,8 +2559,10 @@ describe("fetching the manifest and the pack of a step", () => {
 
 describe("a primary whose state could not be written after it published", () => {
   // `restart`: the agent was restarted between the failed write and the next round (a new loop, with no memory of it).
-  for (const restart of [false, true]) {
-    test(`keeps what was written in the work tree meanwhile: its own snapshot is not pulled over it as if it were another member's${restart ? " (after a restart)" : ""}`, async () => {
+  // `lost`: another writer took the note away meanwhile; the agent that is still running has it in memory.
+  for (const how of ["", "restart", "lost"]) {
+    const restart = how === "restart";
+    test(`keeps what was written in the work tree meanwhile: its own snapshot is not pulled over it as if it were another member's${how ? " (" + how + ")" : ""}`, async () => {
       const { fleetStateDir } = await import("../src/fleets");
       const { hostname } = await import("node:os");
       const w = await world();
@@ -2589,6 +2591,7 @@ describe("a primary whose state could not be written after it published", () => 
         rmSync(lock, { recursive: true, force: true });
 
         if (restart) s = await space(w, "r1", { connected: true });
+        if (how === "lost") rmSync(join(fleetStateDir(s.loop.configPath, "x", "r1"), "published.json"), { force: true });
 
         // The person goes on working. The next round must publish that, not replace it with the snapshot it already published.
         writeFileSync(join(s.paths.work, "a.txt"), "three: written after the snapshot\n");
@@ -2606,6 +2609,40 @@ describe("a primary whose state could not be written after it published", () => 
       }
     }, 30_000);
   }
+
+  test("a writer that read the state before the note was made does not take the note away", async () => {
+    const { fleetStateDir, readFleetState, recordPublished, writeFleetState, updateFleetState, hasUnwrittenPosition } = await import("../src/fleets");
+    const root = mkdtempSync(join(tmpdir(), "fleet-state-"));
+    try {
+      const config = join(root, "config.json");
+      fleetStateDir(config, "x", "r1");
+      // The patch is read by the writer after it has read the state, and under its lock: that is when the note is made.
+      const meanwhile = <T extends object>(patch: T): T =>
+        Object.defineProperty(patch, "tree", {
+          enumerable: true,
+          get() {
+            recordPublished(config, "x", "r1", { seq: 2, base: "b".repeat(40), tree: "t2" });
+            return "t1";
+          },
+        });
+      for (const write of [
+        () => updateFleetState(config, "x", "r1", meanwhile({ seq: 1, base: "a".repeat(40) })),
+        () => writeFleetState(config, "x", "r1", meanwhile({ seq: 1, base: "a".repeat(40) }), { replace: true }),
+      ]) {
+        rmSync(join(fleetStateDir(config, "x", "r1"), "state.json"), { force: true });
+        write();
+        // The other writer's older position is on disk, and the note is what says where the member is.
+        expect(hasUnwrittenPosition(config, "x", "r1")).toBe(true);
+        expect(readFleetState(config, "x", "r1").seq).toBe(2);
+        // A later write that is not behind it takes the note into the file and away.
+        writeFleetState(config, "x", "r1", readFleetState(config, "x", "r1"));
+        expect(hasUnwrittenPosition(config, "x", "r1")).toBe(false);
+        expect(readFleetState(config, "x", "r1").seq).toBe(2);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   test("a reader of the state sees the position that was published, and a state file that has caught up is not overlaid by it", async () => {
     const { fleetStateDir, readFleetState, recordPublished, writeFleetState, hasUnwrittenPosition } = await import("../src/fleets");
