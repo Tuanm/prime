@@ -64,6 +64,12 @@ export interface SnapshotOptions {
   withDelta?: boolean;
   /** Build no pack at all: the caller only wants to know the tree. */
   treeOnly?: boolean;
+  /**
+   * The tree the work tree is known to hold right now (the caller has just taken it and has checked
+   * that nothing has changed since): staging and writing the tree again is skipped, and the commit and
+   * the packs are made from it.
+   */
+  tree?: string;
   /** Remembered nested repositories of this work tree, to spare the walk. */
   nested?: NestedRepoCache;
 }
@@ -465,49 +471,55 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   const env = gitEnv(gitDir, work, indexFile);
   await ensureStore(gitDir, work, env);
 
-  // Nested repositories are excluded: the fleet does not mirror them.
-  const stage = async (): Promise<void> => {
-    const excluded = new Set(opts.exclude ?? []);
-    for (const nested of opts.nested ? opts.nested.get() : findNestedRepos(work)) excluded.add(nested);
-    const left = [...excluded];
-    // A path the fleet leaves alone may already be in the index, from before it
-    // became a nested repository (or was excluded): add -A with an exclusion
-    // leaves such entries as they were, and the old contents would be
-    // published for ever.
-    if (left.length > 0) {
-      await gitText(gitDir, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--"].concat(left.map((p) => ":(literal)" + p)), env);
-    }
-    await gitText(gitDir, ["add", "-A", "--", "."].concat(left.map((p) => ":(exclude)" + p)), env);
-  };
-  try {
-    await stage();
-  } catch (err) {
-    // A repository with no commit cannot be added at all, and one that arrived
-    // since the cache last looked is exactly that case: look again, once.
-    if (!opts.nested || !/does not have a commit checked out|unable to index/.test(String(err))) throw err;
-    opts.nested.invalidate();
-    await stage();
-  }
-  if (foldsCase(work)) await reconcileCase(work, gitDir, env);
-
-  // A repository that arrived since the cache last looked, and has a commit,
-  // is added as a gitlink: a pointer to history this fleet does not carry. It
-  // is taken out again here, whatever the cache knew, and the cache is told.
-  if (opts.nested && !opts.nested.walked) {
-    const staged = (await gitRun(gitDir, ["ls-files", "-z", "--stage"], env)).toString("utf8").split("\u0000");
-    const links = staged.filter((e) => e.startsWith("160000 ")).map((e) => e.slice(e.indexOf("\t") + 1));
-    if (links.length > 0) {
-      await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, links.join("\u0000") + "\u0000");
+  let tree: string;
+  if (opts.tree !== undefined) {
+    if (!OBJECT_ID.test(opts.tree)) throw new Error("not a tree: " + opts.tree);
+    tree = opts.tree;
+  } else {
+    // Nested repositories are excluded: the fleet does not mirror them.
+    const stage = async (): Promise<void> => {
+      const excluded = new Set(opts.exclude ?? []);
+      for (const nested of opts.nested ? opts.nested.get() : findNestedRepos(work)) excluded.add(nested);
+      const left = [...excluded];
+      // A path the fleet leaves alone may already be in the index, from before it
+      // became a nested repository (or was excluded): add -A with an exclusion
+      // leaves such entries as they were, and the old contents would be
+      // published for ever.
+      if (left.length > 0) {
+        await gitText(gitDir, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--"].concat(left.map((p) => ":(literal)" + p)), env);
+      }
+      await gitText(gitDir, ["add", "-A", "--", "."].concat(left.map((p) => ":(exclude)" + p)), env);
+    };
+    try {
+      await stage();
+    } catch (err) {
+      // A repository with no commit cannot be added at all, and one that arrived
+      // since the cache last looked is exactly that case: look again, once.
+      if (!opts.nested || !/does not have a commit checked out|unable to index/.test(String(err))) throw err;
       opts.nested.invalidate();
+      await stage();
     }
-  }
+    if (foldsCase(work)) await reconcileCase(work, gitDir, env);
 
-  const tree = await gitText(gitDir, ["write-tree"], env);
-  if (tree === EMPTY_TREE && hasFiles(work)) {
-    // The work tree has files and the tree does not: the add did not take.
-    // An empty tree on its own is fine - a workspace can be empty, and a
-    // fresh fleet has nothing to publish.
-    throw new Error("the snapshot produced an empty tree; nothing was added");
+    // A repository that arrived since the cache last looked, and has a commit,
+    // is added as a gitlink: a pointer to history this fleet does not carry. It
+    // is taken out again here, whatever the cache knew, and the cache is told.
+    if (opts.nested && !opts.nested.walked) {
+      const staged = (await gitRun(gitDir, ["ls-files", "-z", "--stage"], env)).toString("utf8").split("\u0000");
+      const links = staged.filter((e) => e.startsWith("160000 ")).map((e) => e.slice(e.indexOf("\t") + 1));
+      if (links.length > 0) {
+        await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, links.join("\u0000") + "\u0000");
+        opts.nested.invalidate();
+      }
+    }
+
+    tree = await gitText(gitDir, ["write-tree"], env);
+    if (tree === EMPTY_TREE && hasFiles(work)) {
+      // The work tree has files and the tree does not: the add did not take.
+      // An empty tree on its own is fine - a workspace can be empty, and a
+      // fresh fleet has nothing to publish.
+      throw new Error("the snapshot produced an empty tree; nothing was added");
+    }
   }
 
   const parent = opts.base ?? null;
