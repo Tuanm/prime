@@ -610,10 +610,13 @@ checked by the space that runs it against what the signed roster says, not again
 - **A call names the one member that is to run it**: it is signed for `fleet:<id>@<device>`. The client first asks which member answers (a signed
   question that names no member, which no device runs and which calls a tool that does not exist), and the member says its own id; the call is then signed
   for that member. A member that is sent a call for another one does not run it, and a call that names no member (the form older builds sign) is refused
-  with "update prime" (a device that predates this does not answer the question, and the call is signed as it was).
+  with "update prime" (a device that predates this does not answer the question, and the call is signed as it was). A question that is not answered (the
+  network, a 5xx, a 429, a reply that is not JSON) is asked once more and is not remembered as "this device is old". When the fleet's primary has moved
+  since the member was asked, the member that is sent the call refuses it and signs the refusal ("it did not run"); the client then asks again and signs again,
+  once. A refusal that is not signed is not acted on, since the gateway may have made it.
 - **Only the primary runs such a call.** A replica refuses it ("the call did not run"). A call signed before the space became the primary, or within 5
-  seconds after it (the members' clocks are taken to agree to that), is refused (it may have run on the member that was), and so is one signed more than
-  5 seconds ahead of the clock. The agent renews the file every 20 seconds while it runs, and a space stops believing "primary" 2 minutes after it was
+  seconds after it, is refused (it may have run on the member that was), and so is one signed more than a minute ahead of the device's clock (a caller's
+  clock that is off by less is taken for a clock a little off; the message gives the figure). The agent renews the file every 20 seconds while it runs, and a space stops believing "primary" 2 minutes after it was
   written, so an agent that died does not leave a space that takes calls for ever. A roster that cannot be read is believed for an hour, then lists nobody.
   What this does not do: a gateway that tells two members that each holds the place (the lease is the gateway's word) can still have the *question* answered
   by either, but a call is signed for one of them, so it is run by that one and by no other.

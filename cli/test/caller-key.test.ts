@@ -284,9 +284,11 @@ describe("GatewayClient signing", () => {
     expect(verifyCallSignature(parsed, pub, "fleet:acme@member-a", seen[1]!.body)).toBe(true);
     expect(verifyCallSignature(parsed, pub, "fleet:acme", seen[1]!.body)).toBe(false);
     // a member's id that is not an id is not signed for
-    const odd = stubFetch((n) => (n === 1 ? new Response(JSON.stringify({ error: { data: { reason: "fleet-member", member: "a b\nc" } } })) : ok()));
+    // (it is a question that was not answered: asked once more, and then the call goes out as an older prime makes it)
+    const odd = stubFetch((n) => (n <= 2 ? new Response(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, data: { reason: "fleet-member", member: "a b\nc" } } })) : ok()));
     await new GatewayClient({ ...target, fleet: "acme" }, { signer }).callTool("bash", {}, { handshake: "never" });
-    expect(verifyCallSignature(parseCallSig(odd[1]!.headers[CALL_SIG_HEADER])!, pub, "fleet:acme", odd[1]!.body)).toBe(true);
+    expect(odd).toHaveLength(3);
+    expect(verifyCallSignature(parseCallSig(odd[2]!.headers[CALL_SIG_HEADER])!, pub, "fleet:acme", odd[2]!.body)).toBe(true);
   });
 
   test("ping, initialize and tools/list go unsigned, and make no key", async () => {
