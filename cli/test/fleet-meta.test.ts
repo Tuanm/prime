@@ -182,6 +182,18 @@ describe("when every member can read it", () => {
     expect(got.seq).toBe(3);
   });
 
+  test("a member that appears in /keys without the cap keeps the snapshot in the plain form, whatever /role said a moment before", async () => {
+    // /role says every member can read it (the answer from before the new member was admitted); /keys, read for the same publish, lists one that cannot
+    const w = await world([META_CAP]);
+    w.gateway.memberCaps.set("replica-device", []);
+    const one = await w.next("one\n");
+    const m = w.manifest(one.manifestKey);
+    expect(m.tipCommit).toBe(one.commit);
+    expect(m.wrapped.map((e) => e.memberId).sort()).toEqual(["primary-device", "replica-device"]);
+    const got = await w.pullReplica(0);
+    expect(got.seq).toBe(1);
+  });
+
   test("the id a member is listed under depends on the fleet it is in and on the device", () => {
     const a = wrapIdOf("one", "device");
     expect(a).toMatch(/^[A-Za-z0-9_-]{22}$/);

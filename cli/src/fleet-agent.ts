@@ -278,7 +278,7 @@ export async function publish(
   // The manifest's metadata is sealed, and nothing in the clear but what the gateway needs, when every member can
   // read that (the gateway says so in `fleetCaps`). A fleet that has a member that cannot is published as it always was,
   // and a snapshot that is built on one in the other form is a whole tree, which the member that cannot read it needs.
-  const hideMeta = role?.member === true && role.fleetCaps?.includes(META_CAP) === true;
+  const hideMeta = role?.member === true && members.length > 0 && members.every((m) => m.caps?.includes(META_CAP) === true);
   const headUnsealed =
     head !== null && !(noBase || membershipChanged || checkpoint)
       ? await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey)).then(

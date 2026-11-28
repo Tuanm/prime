@@ -375,11 +375,16 @@ export async function releaseLease(creds: FleetCredentials, fleet: string): Prom
 export async function fetchMemberKeys(
   creds: FleetCredentials,
   fleet: string,
-): Promise<Array<{ deviceId: string; pubkey?: string; applied?: number }>> {
+): Promise<Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: string[] }>> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/keys");
   if (!res.ok) throw new FleetTransportError("could not read the members' keys: " + res.status);
-  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number }> };
-  return body.members ?? [];
+  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: unknown }> };
+  // What each member says it can do comes in the same answer as the keys it is sealed for: a format is used only when
+  // every member that is sealed for can read it, and a member admitted between two answers cannot slip between them.
+  return (body.members ?? []).map((m) => {
+    const { caps, ...rest } = m;
+    return Array.isArray(caps) ? { ...rest, caps: caps.filter((c): c is string => typeof c === "string") } : rest;
+  });
 }
 
 /**
