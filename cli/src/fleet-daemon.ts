@@ -1322,6 +1322,21 @@ export function noteHeadInline(fleet: string, event: FleetEvent): void {
   if (event.type === "head" && event.inline) noteInline(fleet, event.inline);
 }
 
+/**
+ * What the fleet's news of a new head does to a space: a small snapshot that came with it is kept (what is asked for next is answered
+ * from it), the head and its manifest are noted, and the next round looks at the fleet. Exported so a test can drive it.
+ */
+export function applyHeadEvent(loop: Pick<SpaceLoop, "fleet" | "knownHeadSeq" | "knownHeadManifest" | "headDirty">, event: FleetEvent): void {
+  if (event.type !== "head") return;
+  noteHeadInline(loop.fleet, event);
+  if (event.seq >= (loop.knownHeadSeq ?? 0)) {
+    loop.knownHeadSeq = event.seq;
+    if (event.manifestKey) loop.knownHeadManifest = event.manifestKey;
+    else delete loop.knownHeadManifest;
+  }
+  loop.headDirty = true;
+}
+
 /** One space as the agent keeps it (exported so a round can be driven in a test). */
 export interface SpaceLoop {
   configPath: string;
@@ -2289,14 +2304,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
         wake(loop.name, true);
         break;
       case "head":
-        // A small snapshot came with the news: what is asked for next is answered from it.
-        noteHeadInline(loop.fleet, event);
-        if (event.seq >= (loop.knownHeadSeq ?? 0)) {
-          loop.knownHeadSeq = event.seq;
-          if (event.manifestKey) loop.knownHeadManifest = event.manifestKey;
-          else delete loop.knownHeadManifest;
-        }
-        loop.headDirty = true;
+        applyHeadEvent(loop, event);
         wake(loop.name, true);
         break;
       case "lease":

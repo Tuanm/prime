@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadOrCreateKeyPair, manifestIdOf, publish, pull, type MemberPaths } from "../src/fleet-agent";
-import { noteHeadInline } from "../src/fleet-daemon";
+import { applyHeadEvent, noteHeadInline } from "../src/fleet-daemon";
 import { INLINE_MANIFEST_MAX, parseFleetEvent } from "../src/fleet-events";
 import { TamperedSnapshotError, forgetIncarnationAnswers } from "../src/fleet-trust";
 import { forgetInline, getPayload, noteInline, type FleetManifest } from "../src/fleet-transport";
@@ -81,6 +81,26 @@ describe("what the socket brought", () => {
     expect(got.fetched.seq).toBe(2);
     expect(f.count("manifests") - manifests).toBe(0);
     expect(f.count("packs") - packs).toBe(0);
+  });
+
+  test("the agent's handling of the head event keeps what came with it, notes the head, and the next fetch asks for nothing", async () => {
+    const f = await fleet();
+    // The part of the agent that hears the news (the socket's `head` case): the loop's own fields are what it changes.
+    const loop = { fleet: "x", knownHeadSeq: f.got.seq, knownHeadManifest: undefined as string | undefined, headDirty: false };
+    applyHeadEvent(loop, { type: "head", seq: f.edit.seq, manifestKey: f.edit.manifestKey, inline: { manifest: f.manifestText.toString("utf8"), pack: f.pack.toString("base64") } });
+    expect(loop.knownHeadSeq).toBe(f.edit.seq);
+    expect(loop.knownHeadManifest).toBe(f.edit.manifestKey);
+    expect(loop.headDirty).toBe(true);
+    const manifests = f.count("manifests");
+    const packs = f.count("packs");
+    const { fetchAhead } = await import("../src/fleet-agent");
+    const got = await fetchAhead(credsFor("replica-device"), "x", f.replica, { seq: f.got.seq, commit: f.got.commit }, undefined, { seq: loop.knownHeadSeq, manifestKey: loop.knownHeadManifest! });
+    expect(got.fetched.seq).toBe(2);
+    expect(f.count("manifests") - manifests).toBe(0);
+    expect(f.count("packs") - packs).toBe(0);
+    // an older head is noted for nothing but the look at the fleet
+    applyHeadEvent(loop, { type: "head", seq: 1 });
+    expect(loop.knownHeadSeq).toBe(f.edit.seq);
   });
 
   test("is asked for twice without it (the control)", async () => {
