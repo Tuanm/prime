@@ -280,7 +280,7 @@ export interface SealFields {
 /**
  * What a snapshot's sealed metadata holds: the facts of the snapshot that the gateway has no need
  * to read (see `FleetManifest.meta`). `tipCommit` and `tree` are what the seal binds; `roster` is who
- * the snapshot is sealed for; `actor` and `kept` are filled by what produces them and opaque here.
+ * the snapshot is sealed for; `actor` (who made it, see fleet-actor.ts) and `kept` (the files left out as secrets, see fleet-secrets.ts) are filled by what produces them and opaque here.
  */
 export interface SnapshotMeta {
   tipCommit: string;
@@ -566,6 +566,35 @@ export function openForMember(
 }
 
 /** Like `openForMember`, and keeps what is needed to check the snapshot's seal. */
+/**
+ * Open only the sealed metadata of a snapshot: the key the snapshot is wrapped under is found for this member and the metadata
+ * is read with it; the pack itself is not needed. For a member that wants to say what a snapshot was (see `prime fleets
+ * snapshots`) without fetching it. Null when there is no entry for this member, the key does not open, or the metadata is not
+ * the one of this manifest.
+ */
+export function openSnapshotMeta(
+  wrapped: WrappedKey[],
+  senderPublicKeyB64: string,
+  memberId: string,
+  memberPrivateKeyPem: string,
+  incarnation: string | undefined,
+  binding: MetaBinding,
+  blob: string,
+): SnapshotMeta | null {
+  const entry = wrappedEntryFor(wrapped, memberId, incarnation);
+  if (!entry) return null;
+  const raw = Buffer.from(entry.wrapped, "base64");
+  if (raw.length < 12 + 16) return null;
+  try {
+    const unwrapper = createDecipheriv("aes-256-gcm", sharedSecret(memberPrivateKeyPem, senderPublicKeyB64), raw.subarray(0, 12));
+    unwrapper.setAuthTag(raw.subarray(raw.length - 16));
+    const snapshotKey = Buffer.concat([unwrapper.update(raw.subarray(12, raw.length - 16)), unwrapper.final()]);
+    return openMetaWith(snapshotKey, binding, blob);
+  } catch {
+    return null;
+  }
+}
+
 export function openPayload(
   ciphertext: Buffer,
   wrapped: WrappedKey[],

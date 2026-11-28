@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write";
 import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
+import type { ActivityPosition } from "./activity-journal";
+import { actorOf, type ActivitySource } from "./fleet-actor";
 import { findSecrets, keptForMeta, keptFrom, keptWasCut, readAllow, removedSecrets, secretGateMode, type SecretHit } from "./fleet-secrets";
 import { applyCommit, findNestedRepos, gitEnv, ingestPack, removedBetween, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
@@ -238,6 +240,8 @@ export interface PublishOptions {
    * left that many times in a row (see `PublishPostponed`). A head that cannot be read is then built on as a whole tree.
    */
   giveUp?: number;
+  /** The tool server's journal: what ran since the last snapshot goes in the snapshot's sealed metadata (see fleet-actor.ts). */
+  activity?: ActivitySource;
 }
 
 const warnedUnrostered = new Set<string>();
@@ -311,6 +315,8 @@ export interface PublishResult {
   members: number;
   /** The gateway listed these devices (a key the signed roster does not name for them), and the snapshot was not sealed for them. */
   unrostered?: string[];
+  /** Where the tool server's journal was read to for this snapshot's actor: what the next publish passes as `activity.after`. */
+  activity?: ActivityPosition;
   /** The files left out of the snapshot because they look like secrets (see fleet-secrets.ts). */
   kept?: string[];
   /** The members this snapshot was sealed for (see `rosterOf`). */
@@ -744,11 +750,13 @@ export async function publish(
   manifest.seal = sealed.seal(sealFieldsOf(manifest, payloadHash(main), delta?.packHash ?? null));
   // What the manifest says of the snapshot, sealed, for a member that reads it from here. The fields beside it stay as
   // they were (a member that predates it reads them) unless every member can read it: then the gateway is shown none.
+  const provenance = actorOf(keys.publicKey, options.activity);
   manifest.meta = sealed.sealMeta(metaBindingOf(manifest, payloadHash(main), delta?.packHash ?? null), {
     tipCommit: manifest.tipCommit,
     tree: manifest.tree,
     roster: manifest.roster,
     ...(kept.length > 0 ? { kept: keptForMeta(kept.map((h) => h.path)), ...(keptWasCut(kept.map((h) => h.path)) ? { keptCut: true } : {}) } : {}),
+    actor: provenance.actor,
   });
   if (hideMeta) {
     manifest.tipCommit = "";
@@ -811,6 +819,7 @@ export async function publish(
     members: sealed.wrapped.length,
     ...(skipped.length > 0 ? { unrostered: skipped } : {}),
     ...(kept.length > 0 ? { kept: kept.map((h) => h.path) } : {}),
+    ...(provenance.position ? { activity: provenance.position } : {}),
     roster,
     manifestKey: moved.manifestKey ?? "",
     full: wantFull,

@@ -740,6 +740,20 @@ before the primary.
 **What it does not do.** The gate stops future snapshots only. A secret that was in a work tree before the gate was on is in the snapshots the
 gateway still holds (the last 64) and in every member's store: rotate it.
 
+## Who made a snapshot
+
+Each snapshot says, in its sealed metadata (which the gateway does not see), who published it - its key, as `prime fleets members` shows it - and the
+software (`prime/<version>`). When the space's tool server keeps a journal of the calls it runs (`code-mcp --activity-log`), the snapshot also names the
+tools that ran since the previous snapshot, how many times each, and for whom (the key id of the machine whose signature let the call in, `unsigned`, or `local`),
+at most 32 of them.
+
+```bash
+prime fleets snapshots acme --space work       # the snapshots the fleet still holds: who, what software, which tools ran
+```
+
+It is read on the member's own machine, with its key, from the manifests alone (no pack is fetched). It is what the publisher said of itself: a member that is
+not honest can write what it likes, and a snapshot made by an older build, or without the journal, has no tools to name. It says what happened; it proves nothing.
+
 ## Use cases
 
 - **A repository that follows you.** A fleet of three spaces on three machines,
