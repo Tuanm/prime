@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write";
 import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
-import { KEPT_MAX, findSecrets, readAllow, secretGateMode, type SecretHit } from "./fleet-secrets";
+import { findSecrets, keptForMeta, readAllow, secretGateMode, type SecretHit } from "./fleet-secrets";
 import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
 import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
@@ -678,7 +678,7 @@ export async function publish(
     tipCommit: manifest.tipCommit,
     tree: manifest.tree,
     roster: manifest.roster,
-    ...(kept.length > 0 ? { kept: kept.slice(0, KEPT_MAX).map((h) => h.path) } : {}),
+    ...(kept.length > 0 ? { kept: keptForMeta(kept.map((h) => h.path)) } : {}),
   });
   if (hideMeta) {
     manifest.tipCommit = "";

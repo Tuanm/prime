@@ -221,6 +221,22 @@ export async function findSecrets(gitDir: string, tree: string, allow: readonly 
   return hits.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
+/** The most the left-out paths may take of a snapshot's sealed metadata (a reader refuses metadata over 64 KiB). */
+const KEPT_BYTES_MAX = 32 * 1024;
+
+/** The paths to put in a snapshot's metadata: as many as fit (`KEPT_MAX`, and `KEPT_BYTES_MAX` of text), in order. */
+export function keptForMeta(paths: string[]): string[] {
+  const out: string[] = [];
+  let bytes = 0;
+  for (const p of paths) {
+    const n = Buffer.byteLength(p, "utf8") + 4;
+    if (out.length >= KEPT_MAX || bytes + n > KEPT_BYTES_MAX || p.length > PATH_MAX) continue;
+    out.push(p);
+    bytes += n;
+  }
+  return out;
+}
+
 /** The paths a snapshot's metadata says were left out; what is not a plain list of paths is ignored. */
 export function keptFrom(kept: unknown): string[] {
   if (!Array.isArray(kept)) return [];
