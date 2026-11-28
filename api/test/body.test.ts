@@ -70,6 +70,25 @@ describe("readBounded", () => {
     expect((refused as Response).status).toBe(413);
   });
 
+  test("a body that overruns what it declared is copied out of the declared buffer, not viewed through it", async () => {
+    const proto = Uint8Array.prototype as { subarray: (...a: number[]) => Uint8Array; slice: (...a: number[]) => Uint8Array };
+    const realSub = proto.subarray;
+    let views = 0;
+    proto.subarray = function (this: Uint8Array, ...a: number[]) {
+      views += 1;
+      return realSub.apply(this, a as [number, number]);
+    };
+    try {
+      const out = (await readBounded(request([bytes(40, 1), bytes(40, 2)], 50), 1000)) as ArrayBuffer;
+      expect(out.byteLength).toBe(80);
+      expect(new Uint8Array(out)[39]).toBe(1);
+      expect(new Uint8Array(out)[40]).toBe(2);
+    } finally {
+      proto.subarray = realSub;
+    }
+    expect(views).toBe(0);
+  });
+
   test("no length, an empty body, and a length over the cap", async () => {
     expect(((await readBounded(request([bytes(5), bytes(6)], null), 100)) as ArrayBuffer).byteLength).toBe(11);
     expect(((await readBounded(new Request("https://gw.example/x", { method: "POST" }), 100)) as ArrayBuffer).byteLength).toBe(0);

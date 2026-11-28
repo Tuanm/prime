@@ -33,8 +33,9 @@ export async function readBounded(request: Request, max: number): Promise<ArrayB
       fixed.set(value, total);
     } else {
       if (fixed) {
-        // Longer than declared: what is in the buffer becomes the first chunk, and it goes on from there.
-        chunks.push(fixed.subarray(0, total));
+        // Longer than declared: what is in the buffer is copied out (a view would keep the whole declared
+        // buffer alive beside the chunks), and the buffer is let go; it goes on from there as chunks.
+        chunks.push(fixed.slice(0, total));
         fixed = null;
       }
       if (total + value.byteLength <= max) chunks.push(value);
