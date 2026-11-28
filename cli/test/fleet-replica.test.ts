@@ -2557,6 +2557,51 @@ describe("fetching the manifest and the pack of a step", () => {
   });
 });
 
+describe("a primary whose state could not be written after it published", () => {
+  test("keeps what was written in the work tree meanwhile: its own snapshot is not pulled over it as if it were another member's", async () => {
+    const { fleetStateDir } = await import("../src/fleets");
+    const { hostname } = await import("node:os");
+    const w = await world();
+    const holder = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      const s = await space(w, "r1", { connected: true });
+      w.gateway.primary = "r1";
+      const primary = (): void => {
+        s.loop.primary = true;
+        s.loop.dirty = true;
+        s.loop.lastBootstrap = Date.now();
+      };
+      primary();
+      writeFileSync(join(s.paths.work, "a.txt"), "one\n");
+      await s.round();
+      expect(s.said).toContain("published 1");
+
+      // The next snapshot is published, and the state file is not written: another process has its lock.
+      const lock = join(fleetStateDir(s.loop.configPath, "x", "r1"), "state.lock");
+      mkdirSync(lock);
+      writeFileSync(join(lock, "owner"), JSON.stringify({ pid: holder.pid, token: "theirs", host: hostname(), at: Date.now() }));
+      primary();
+      writeFileSync(join(s.paths.work, "a.txt"), "two\n");
+      await expect(s.round()).rejects.toThrow(/did not let go/);
+      expect(w.gateway.head?.seq).toBe(2);
+      expect(s.state().seq).toBe(1);
+      rmSync(lock, { recursive: true, force: true });
+
+      // The person goes on working. The next round must publish that, not replace it with the snapshot it already published.
+      writeFileSync(join(s.paths.work, "a.txt"), "three: written after the snapshot\n");
+      writeFileSync(join(s.paths.work, "b.txt"), "new\n");
+      primary();
+      await s.round();
+      expect(readFileSync(join(s.paths.work, "a.txt"), "utf8")).toBe("three: written after the snapshot\n");
+      expect(readFileSync(join(s.paths.work, "b.txt"), "utf8")).toBe("new\n");
+      expect(s.state().seq).toBe(3);
+    } finally {
+      holder.kill();
+      finish(w);
+    }
+  }, 30_000);
+});
+
 describe("a state file from an older build", () => {
   test("loses the pointer to a manifest when it is next written", async () => {
     const { readFleetState, writeFleetState } = await import("../src/fleets");
