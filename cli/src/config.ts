@@ -398,12 +398,21 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
 /**
  * Three ways: what this process read (`base`), what it holds now (`mine`), what the file holds now (`theirs`).
  * What this process left alone is the file's; what it changed is its own; objects are taken field by field, so
- * that it changing one field of a device and another process changing another field of it both stay. A field
- * both changed is this process's (it is the later of the two to be saved).
+ * that it changing one field of a device and another process changing another field of it both stay.
+ *
+ * A field that both changed is this process's, the later of the two to be saved: the merge cannot tell a
+ * stale value from a deliberate one (two commands that both set a device's token to different things, the
+ * later save wins). What it does do about stale values is the two things below: a value this process only
+ * carried (it equals what it read) never overwrites a newer one, and a space made from a device's token that
+ * was read before the device's code was made again is given the new code (see `reconcileMirrors`).
  */
 function merge(base: Json | undefined, mine: Json | undefined, theirs: Json | undefined): Json | undefined {
   if (same(mine, base)) return theirs;
   if (same(theirs, base) || same(mine, theirs)) return mine;
+  // Something that was there when this process read the file and is gone from it now was removed by another
+  // command (a `devices disconnect`, a `spaces delete`): the removal stands, whatever else this process changed
+  // in it. Putting the entry back whole, credential and all, would undo what the removal is for.
+  if (theirs === undefined && isObject(base) && isObject(mine)) return undefined;
   if (isObject(mine) && isObject(theirs)) {
     const b = isObject(base) ? base : {};
     const out: { [key: string]: Json } = {};
@@ -414,6 +423,23 @@ function merge(base: Json | undefined, mine: Json | undefined, theirs: Json | un
     return out;
   }
   return mine;
+}
+
+/**
+ * A space that is published as a device holds the device's code twice: the device's `token` and the space's
+ * `remote_token`. A command that read the device's token, was slow, and then wrote a space with the token it
+ * had read would put a code that has since been replaced into the space. Where the space's `remote_token` is
+ * the code this process read for its device, and the file's device has a different one now, the space is given
+ * the file's: the code it was about to take was only ever a copy of the device's.
+ */
+function reconcileMirrors(base: Config, merged: Config): void {
+  for (const space of Object.values(merged.spaces)) {
+    const id = space.gateway_device;
+    if (!id) continue;
+    const read = base.devices[id]?.token;
+    const now = merged.devices[id]?.token;
+    if (read && now && read !== now && space.remote_token === read) space.remote_token = now;
+  }
 }
 
 /** Make `target` hold what `source` does, keeping the objects that are already in it (callers hold them). */
@@ -455,6 +481,7 @@ export function saveConfig(path: string, config: Config): void {
         // A section nobody has anything in is still a section.
         const m = merged as Partial<Config>;
         merged = { defaults: m.defaults ?? {}, devices: m.devices ?? {}, spaces: m.spaces ?? {}, codeMcp: m.codeMcp ?? {} };
+        reconcileMirrors(base, merged);
         text = serializeConfig(merged);
       } else {
         text = serializeConfig(config);

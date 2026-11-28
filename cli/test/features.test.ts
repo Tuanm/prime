@@ -937,6 +937,67 @@ describe("saving the config: what another command saved meanwhile is kept", () =
     expect(Object.keys(a.devices).sort()).toEqual(["added", "keep"]);
   });
 
+  test("an entry another command removed stays removed, though a slower command changed a field of it", () => {
+    const path = seed();
+    const slow = loadConfig(path);
+    const disconnect = loadConfig(path);
+    delete disconnect.devices.x;
+    delete disconnect.spaces.s;
+    saveConfig(path, disconnect);
+    slow.devices.x!.note = "touched late";
+    slow.spaces.s!.remote_token = "R-late";
+    saveConfig(path, slow);
+    const after = loadConfig(path);
+    expect(after.devices.x).toBeUndefined();
+    expect(after.spaces.s).toBeUndefined();
+    expect(after.devices.keep).toBeDefined();
+    // And the slow command's own view agrees with the file.
+    expect(slow.devices.x).toBeUndefined();
+  });
+
+  test("a command that removes an entry another changed meanwhile removes it", () => {
+    const path = seed();
+    const slow = loadConfig(path);
+    updateConfig(path, (c) => {
+      c.devices.x!.note = "changed by another";
+    });
+    delete slow.devices.x;
+    saveConfig(path, slow);
+    expect(loadConfig(path).devices.x).toBeUndefined();
+  });
+
+  test("a space made from the code a device had, by a command that read it before the code was made again, is given the new code", () => {
+    const path = seed();
+    const slow = loadConfig(path);
+    const oldCode = slow.devices.x!.token!;
+    updateConfig(path, (c) => {
+      c.devices.x!.token = "X1-NEW".padEnd(25, "0");
+      c.spaces.s!.remote_token = "X1-NEW".padEnd(25, "0");
+    });
+    slow.spaces.s2 = { token: "t2", gateway_device: "x", remote_token: oldCode } as never;
+    saveConfig(path, slow);
+    const after = loadConfig(path);
+    expect(after.devices.x!.token).toBe("X1-NEW".padEnd(25, "0"));
+    expect(after.spaces.s!.remote_token).toBe("X1-NEW".padEnd(25, "0"));
+    expect(after.spaces.s2!.remote_token).toBe("X1-NEW".padEnd(25, "0"));
+    expect(slow.spaces.s2!.remote_token).toBe("X1-NEW".padEnd(25, "0"));
+  });
+
+  test("a value this command only carried never beats a newer one, and a value it changed does (the later save wins)", () => {
+    const path = seed();
+    const carried = loadConfig(path); // never touches the token
+    const changed = loadConfig(path);
+    updateConfig(path, (c) => {
+      c.devices.x!.token = "ROTATED".padEnd(25, "0");
+    });
+    carried.devices.x!.note = "carried token, changed note";
+    saveConfig(path, carried);
+    expect(loadConfig(path).devices.x!.token).toBe("ROTATED".padEnd(25, "0"));
+    changed.devices.x!.token = "DELIBERATE";
+    saveConfig(path, changed);
+    expect(loadConfig(path).devices.x!.token).toBe("DELIBERATE");
+  });
+
   test("objects the caller holds stay live across a save: a later change to one is saved too", () => {
     const path = seed();
     const cfg = loadConfig(path);
