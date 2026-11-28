@@ -66,6 +66,12 @@ describe("a snapshot bigger than one request", () => {
     }
   });
 
+  test("is refused when one of the members listed with the keys cannot read pieces, whatever the gateway said a moment before", async () => {
+    const w = await world();
+    w.gateway.memberCaps.set("replica-device", []);
+    await expect(publish(credsFor("primary-device"), "x", w.primary, null, 0, 2)).rejects.toThrow(/too big to publish/);
+  });
+
   test("goes up in pieces and is applied by a replica", async () => {
     const w = await world();
     const first = await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2);

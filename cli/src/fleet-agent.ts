@@ -436,7 +436,7 @@ export async function publish(
   if (limit !== undefined) {
     const biggest = Math.max(...sealed.ciphertexts.map((c) => c.length)) + MANIFEST_ALLOWANCE_BYTES;
     if (biggest > limit) {
-      const canChunk = role?.fleetCaps?.includes(CHUNKS_CAP) === true && role.chunkedLimit !== undefined;
+      const canChunk = members.length > 0 && members.every((m) => m.caps?.includes(CHUNKS_CAP) === true) && role?.chunkedLimit !== undefined;
       if (!canChunk) throw new Error(snapshotTooBigMessage(biggest, limit));
       const chunkedLimit = role!.chunkedLimit!;
       if (biggest - MANIFEST_ALLOWANCE_BYTES > chunkedLimit) throw new Error(snapshotTooBigMessage(biggest - MANIFEST_ALLOWANCE_BYTES, chunkedLimit));

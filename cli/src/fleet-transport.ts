@@ -309,7 +309,7 @@ export async function putChunks(
   const size = Math.max(1, Math.min(chunkBytes, CHUNK_BYTES_MAX));
   const pieces: Buffer[] = [];
   for (let at = 0; at < pack.length; at += size) pieces.push(pack.subarray(at, Math.min(pack.length, at + size)));
-  if (pieces.length === 0 || pieces.length > CHUNKS_MAX) throw new FleetTransportError("a pack of " + pack.length + " bytes is " + pieces.length + " pieces of " + size + ": not one that can be sent in pieces");
+  if (pieces.length === 0 || pieces.length > CHUNKS_MAX) throw new FleetTransportError("a pack of " + pack.length + " bytes is " + pieces.length + " pieces of " + size + ": more than the " + CHUNKS_MAX + " pieces one pack may be (the gateway's piece size is " + size + " bytes)");
   const keys: string[] = new Array(pieces.length);
   let next = 0;
   const worker = async (): Promise<void> => {
