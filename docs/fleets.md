@@ -752,7 +752,7 @@ prime fleets snapshots acme --space work       # the snapshots the fleet still h
 ```
 
 It is read on the member's own machine, with its key, from the manifests alone (no pack is fetched). It is what the publisher said of itself: a member that is
-not honest can write what it likes, and a snapshot made by an older build, or without the journal, has no tools to name. It says what happened; it proves nothing.
+not honest can write what it likes, and a snapshot made by an older build, or without the journal, has no tools to name. It says what happened; it proves nothing. The key that signed each snapshot is checked against the roster the gateway lists (the keys of members, and of those that left, up to where they did): a snapshot whose key is not a member's is marked "not a member's key: unverified", and what it says of itself is not shown. (With the signed roster the gateway's list is not what decides for a member; this listing is for reading, and a snapshot is taken in only after the member's own checks.)
 
 ## Use cases
 
