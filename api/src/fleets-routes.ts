@@ -111,6 +111,7 @@ function uploadTooBig(bytes: number, what: "snapshot" | "change pack"): Response
         "this " + what + " is " + mb(bytes) + " MB, and the gateway takes at most " + MAX_SNAPSHOT_BYTES / (1024 * 1024) +
         " MB for one: the work tree is too big to publish (keep what is not the work's, such as build output, out of it with .gitignore)",
       limit: MAX_SNAPSHOT_BYTES,
+      code: "too-big",
     },
     { status: 413 },
   );
@@ -137,7 +138,7 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   // anything is written: a member that is not the primary must not be able
   // to fill the account's storage.
   const role = await fleetRole({ request: deps.request, env: deps.env, url: deps.url, cfg: deps.cfg, fleetId, action: "role", authorizeDevice: deps.authorizeDevice, unauthorized: deps.unauthorized }, deviceId);
-  if (!role) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+  if (!role) return Response.json({ error: "not a member of this fleet", code: "not-a-member" }, { status: 403 });
   if (!role.primary) return Response.json({ error: "only the primary may publish", code: "not-primary" }, { status: 409 });
 
   const tooBig = (bytes: number): Response => uploadTooBig(bytes, "snapshot");
@@ -408,7 +409,7 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
   if (!deviceId) return deps.unauthorized();
   // Asked before the body is read: a member that is not the primary is refused without its (up to 32 MiB) body being read for nothing.
   const role = await fleetRole(deps, deviceId);
-  if (!role) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+  if (!role) return Response.json({ error: "not a member of this fleet", code: "not-a-member" }, { status: 403 });
 
   const prefix = "fleets/" + deps.fleetId + "/" + parts[0] + "/";
 
@@ -430,7 +431,7 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     const body = await readBounded(deps.request, MAX_SNAPSHOT_BYTES);
     const readMs = Date.now() - readFrom;
     if (body instanceof Response) return uploadTooBig(MAX_SNAPSHOT_BYTES + 1, "change pack");
-    if (body.byteLength === 0) return Response.json({ error: "empty payload" }, { status: 400 });
+    if (body.byteLength === 0) return Response.json({ error: "empty payload", code: "empty-payload" }, { status: 400 });
     const digest = await sha256Hex(body);
     const key = prefix + digest;
     // A pack that no snapshot names yet is one of the pieces of a snapshot that is being uploaded, or an orphan: the object notes it
@@ -495,7 +496,7 @@ async function streamedPack(
   if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again", code: "fleet-unreachable" }, { status: 503, headers: { "retry-after": "5" } });
   if (!noted.primary) return Response.json({ error: "only the primary may publish", code: "not-primary" }, { status: 409 });
   const body = deps.request.body;
-  if (!body) return Response.json({ error: "empty payload" }, { status: 400 });
+  if (!body) return Response.json({ error: "empty payload", code: "empty-payload" }, { status: 400 });
   // Whether it is there already is not guessed at: a bucket that cannot say is not "absent".
   let held: { size: number } | null;
   const notedMs = Date.now() - from;

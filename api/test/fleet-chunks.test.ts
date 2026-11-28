@@ -572,6 +572,15 @@ describe("uploading a piece", () => {
     expect((await w.http("acme", "POST", "/packs", bytesOf(10, 1))).status).toBe(200);
   });
 
+  test("an empty body and one that is too big say so in a code, held and streamed alike", async () => {
+    const w = world();
+    await w.fleet("acme");
+    expect((await w.http("acme", "POST", "/packs", new Uint8Array(0), "dev-a")).json.code).toBe("empty-payload");
+    const big = await w.http("acme", "POST", "/packs", bytesOf(1, 1), "dev-a", { "content-length": String(40 * 1024 * 1024) });
+    expect(big.status).toBe(413);
+    expect(big.json.code).toBe("too-big");
+  });
+
   test("is refused to a member that is not the primary and to a stranger, and stores and notes nothing", async () => {
     const w = world();
     await w.fleet("acme", { "dev-a": ["chunks"], "dev-b": ["chunks"] });
@@ -588,6 +597,7 @@ describe("uploading a piece", () => {
     expect(seen).toEqual(["/role"]);
     const stranger = await w.http("acme", "POST", "/packs", bytesOf(10, 1), "stranger");
     expect(stranger.status).toBe(403);
+    expect(stranger.json.code).toBe("not-a-member");
     expect([...w.bucket.objects.keys()].filter((k) => k.includes("/packs/"))).toEqual([]);
     expect(w.states.get("acme")!.data.get("uploads")).toBeUndefined();
     // The primary is still taken.
