@@ -558,6 +558,34 @@ fingerprint is 26 letters and digits of the owner key's hash. A member pins it a
 accepts a chain whose genesis names another key. The member's own check of the chain and the witness follow in the
 member-side packages; this one covers what the operator does.
 
+## Who did it
+
+The gateway keeps a hash-chained log of what is done to a fleet (who created it, invited, admitted, removed, took the lease,
+published, relayed a call and to which tool, paused or deleted it). Each entry names the SHA-256 of the one before it, so an entry
+that is removed, changed or moved shows at the next one.
+
+```bash
+prime fleets log acme                    # the newest 50, and whether the chain holds
+prime fleets log acme --after 120        # the entries after 120 (--limit n for fewer)
+prime fleets log acme --all              # every entry the gateway holds, page by page
+prime fleets log acme --json
+```
+
+The command recomputes the chain from the entries (the same canonical JSON the gateway hashes) and checks the head the gateway reports. It
+also keeps the head it last verified, beside the config (`fleet-audit/`), and says so when a later read is shorter than that or has a different
+entry at that number: the log was cut back or rewritten. When the page read does not hold the entry it remembers (and the one after it), those two are asked for, so a rewrite of entries older than the page is found too (one more request); the remembered head moves only once that entry has been checked, and when the gateway no longer serves it (it is in its archive) the command says the read was not checked against the last one and keeps the old head until a read with `--all`. A log that does not verify fails the command (exit 1). What it cannot do: a
+gateway that was taken over from the start can write a consistent log of its own; the head is only a reference for later.
+
+An operator can act as a named person instead of with the shared operator token:
+
+```bash
+prime fleets invite acme --sso      # or PRIME_FLEET_SSO=1 for every fleet command
+```
+
+`--sso` asks `cloudflared` for the Access token of the gateway's admin app (`cloudflared access token -app=<gateway>/admin`, after a
+`cloudflared access login` in the browser the first time) and sends it as `cf-access-token`; the operator token is not sent. The gateway records
+the person's email as the actor. The token is not printed or stored by prime.
+
 ## Use cases
 
 - **A repository that follows you.** A fleet of three spaces on three machines,

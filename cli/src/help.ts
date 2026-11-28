@@ -541,6 +541,8 @@ USAGE
   prime fleets agent status|start|stop|reset    The agent that keeps the fleet in step (reset forgets its saved settings)
   prime fleets agent install                    Run the agent as a login service (it starts at login)
   prime fleets status <fleet-id>                 Show this device's standing in the fleet
+  prime fleets log <fleet-id> [--tail <n>|--after <n>|--all]  What was done to the fleet, by whom; checks the log's hash chain
+  (any operator command)  --sso                 Speak as yourself through Cloudflare Access (cloudflared) rather than with the operator token
   prime fleets trust accept <fleet-id> --space <name> --manifest <hash>  Take one snapshot that has no seal (see docs/fleets.md)
   prime fleets trust pin <fleet-id> --space <name> --owner <fingerprint>  The owner key this member believes the roster is signed by
   prime fleets roster init <fleet-id> [--yes --expect <digest>]    Sign the fleet's roster with an owner key made on this machine (shows first)
