@@ -134,7 +134,7 @@ describe("the signing key a member makes", () => {
     if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 
-  test("survives a rotation of the key pair: the roster names it, and the pair is another thing", () => {
+  test("is made anew with a rotation of the key pair: it signs the keys the primary wraps to, and a copy of the old key file must not keep it", () => {
     const root = mkdtempSync(join(tmpdir(), "fleet-sign-"));
     roots.push(root);
     const file = join(root, "m.key");
@@ -142,7 +142,9 @@ describe("the signing key a member makes", () => {
     const before = loadOrCreateSignKey(file);
     const rotated = rotateKeyPair(file);
     expect(loadOrCreateKeyPair(file).publicKey).toBe(rotated.publicKey);
-    expect(loadOrCreateSignKey(file)).toEqual(before);
+    const after = loadOrCreateSignKey(file);
+    expect(after.publicKey).not.toBe(before.publicKey);
+    expect(loadOrCreateSignKey(file)).toEqual(after);
   });
 });
 

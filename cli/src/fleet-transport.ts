@@ -19,13 +19,16 @@ export const META_CAP = "meta2";
 /** What a member says it can read, by name: packs in pieces, for a snapshot bigger than one request. */
 export const CHUNKS_CAP = "chunks";
 
+/** What a member says it can read, by name: a snapshot key wrapped to an epoch key (see fleet-epoch.ts). A build that does not list it is wrapped to as it always was. */
+export const EPOCH_CAP = "epoch";
+
 /**
  * What this build can do beyond the first form of the wire, said to the fleet each time a place is taken (`caps` in
  * the body of a bootstrap). A format that only some members read is used by a publisher only when every member of the
  * fleet lists its name (`role.fleetCaps`; see `fleetHas`). Short lower-case names, added here as the code that
  * reads and writes the form lands, and nowhere else: this build says only what it does.
  */
-export const MEMBER_CAPS: readonly string[] = [META_CAP, INLINE_CAP, CHUNKS_CAP];
+export const MEMBER_CAPS: readonly string[] = [META_CAP, INLINE_CAP, CHUNKS_CAP, EPOCH_CAP];
 
 /** What a capability's name looks like: the pattern the gateway keeps (`^[a-z0-9][a-z0-9-]{0,23}$`), so that both sides read the same names. */
 export const CAP_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/;

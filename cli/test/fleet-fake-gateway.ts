@@ -81,6 +81,11 @@ export class FakeGateway {
   /** Each member's signing key (what the gateway knows of it), and the epoch key it last took. */
   spubs = new Map<string, string>();
   epochKeys = new Map<string, { n: number; pub: string; notAfter: number; sig: string }>();
+  /** When each member's epoch key was taken, and how long the gateway makes the next wait (0: not at all, as the unit tests need). */
+  epochKeyAt = new Map<string, number>();
+  epochMinIntervalMs = 0;
+  /** The next this many posts of an epoch key are taken, and their answer is lost (a timeout). */
+  loseEpochAnswers = 0;
   /** The epoch keys posted, in order (the entry as sent). */
   epochPosts: unknown[][] = [];
   /** Requests of each kind, by route. */
@@ -205,11 +210,23 @@ export class FakeGateway {
         good = false;
       }
       if (!good) return Response.json({ error: "bad signature" }, { status: 401 });
+      // The gateway's own rule (`epochKey` in api/src/fleet-do.ts): the same key again is "taken already" only with the same expiry and signature; another
+      // number at or below the one held is refused with the held number; a key too soon after the last is made to wait.
       const held = this.epochKeys.get(creds.deviceId);
-      if (held && (e[4] as number) < held.n) return Response.json({ error: "stale", n: held.n }, { status: 409 });
-      if (held && e[4] === held.n) return Response.json({ ok: true, again: true });
+      if (held && held.n === e[4] && held.pub === e[5] && held.notAfter === e[6] && held.sig === said.sig) return Response.json({ ok: true, n: held.n, again: true });
+      if (held && (e[4] as number) <= held.n) return Response.json({ error: "an epoch key is newer than the one the fleet holds (n " + held.n + ")", n: held.n }, { status: 409 });
+      const heldAt = this.epochKeyAt.get(creds.deviceId);
+      if (held && heldAt !== undefined && this.epochMinIntervalMs > 0 && Date.now() - heldAt < this.epochMinIntervalMs) {
+        const wait = this.epochMinIntervalMs - (Date.now() - heldAt);
+        return Response.json({ error: "an epoch key was taken a moment ago", retryAfterMs: wait }, { status: 429 });
+      }
+      this.epochKeyAt.set(creds.deviceId, Date.now());
       this.epochPosts.push(e);
       this.epochKeys.set(creds.deviceId, { n: e[4] as number, pub: e[5] as string, notAfter: e[6] as number, sig: said.sig });
+      if (this.loseEpochAnswers > 0) {
+        this.loseEpochAnswers--;
+        return new Response("{}", { status: 503 });
+      }
       return Response.json({ ok: true });
     }
     if (kind === "keys" && method === "GET") {

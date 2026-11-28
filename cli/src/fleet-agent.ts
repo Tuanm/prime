@@ -16,8 +16,8 @@ import { writeFileAtomic } from "./atomic-write";
 import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
 import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
-import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
-import { epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
+import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
+import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
 import { FleetTrust, RosterRefusedError, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
   PayloadGoneError,
@@ -93,8 +93,16 @@ export function rotateKeyPair(keyFile: string): MemberKeyPair {
     const current = loadOrCreateKeyPairLocked(keyFile);
     const previous = current.previous ?? { publicKey: current.publicKey, privateKey: current.privateKey };
     const pair = generateMemberKeyPair();
-    // The signing key is the member's own, not the pair's: the roster names it, and a rotation of the pair does not change it.
-    const next: MemberKeyPair = { ...pair, previous, ...(current.sign ? { sign: current.sign } : {}), ...(current.epochs ? { epochs: current.epochs } : {}) };
+    // The signing key is made anew with the pair: it signs the epoch keys the primary wraps snapshots to, so a copy of the old key file
+    // that kept it could go on reading what is published after the rotation. The fleet is told the new one with the new key (the operator
+    // of a signed roster compares both), and drops the epoch key it held.
+    const { publicKey, privateKeyPem } = generateOwnerKey();
+    // The epoch keys of the old pair are let go of after the usual grace (a snapshot already published may still be wrapped to one), and the next key
+    // is made now: the fleet holds none of this member's until it is posted.
+    const now = Date.now();
+    const old = (current.epochs ?? []).map((e) => (e.supersededAt === undefined ? { ...e, supersededAt: now } : e));
+    const epochs = [...old, ...(epochSettings().enabled ? [generateEpochKey(Math.max(0, ...old.map((e) => e.n)) + 1, now)] : [])];
+    const next: MemberKeyPair = { ...pair, previous, sign: { publicKey, privateKey: privateKeyPem }, ...(epochs.length > 0 ? { epochs } : {}) };
     writeFileAtomic(keyFile, JSON.stringify(next, null, 2), 0o600);
     return pair;
   });
@@ -155,6 +163,18 @@ export function dropPreviousKey(keyFile: string, only?: string): void {
     const { previous: _gone, ...kept } = raw;
     writeFileAtomic(keyFile, JSON.stringify(kept, null, 2), 0o600);
   });
+}
+
+/**
+ * What is kept for later (which epoch keys can go): it is never a reason for a publish that moved the head, or a snapshot that was taken in, to be
+ * reported as failed (a lock that does not come, a file the system will not rename over). The next snapshot taken in does it again.
+ */
+function bookkeeping(fn: () => void): void {
+  try {
+    fn();
+  } catch {
+    // Not being able to write it only leaves an epoch key a little longer than it was to be.
+  }
 }
 
 /** Whether a manifest shows the gateway nothing of the snapshot (see `FleetManifest.meta`). */
@@ -671,7 +691,7 @@ export async function publish(
   const trust = FleetTrust.beside(paths.keyFile);
   trust.noteTakenIn(manifest, creds.deviceId);
   // This member holds the snapshot it made: one wrapped to an epoch key of its own is as good as taken in.
-  noteEpochTakenIn(paths.keyFile, wrappedEntryFor(manifest.wrapped, creds.deviceId, incarnation)?.epoch);
+  bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(manifest.wrapped, creds.deviceId, incarnation)?.epoch));
   trust.pin(incarnation);
   try {
     trust.save();
@@ -1305,7 +1325,7 @@ async function ingestRoute(
     trust.noteTakenIn(m, creds.deviceId);
     trust.save();
     // Taking in a snapshot wrapped to a newer epoch key is what lets go of the older ones (after a short while).
-    noteEpochTakenIn(paths.keyFile, wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation)?.epoch);
+    bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation)?.epoch));
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);
   }

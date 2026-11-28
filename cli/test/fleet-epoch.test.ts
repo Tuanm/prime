@@ -10,7 +10,7 @@ import { generateEpochKey, generateMemberKeyPair, openPayload, sealManyForMember
 import { EPOCH_GRACE_MS, countTakenIn, epochsAfterPrune, epochsAfterTakenIn, ensureEpoch, epochEntry, epochSettings, epochsToWrapTo, noteEpochTakenIn, pruneEpochs, readEpochs, resetEpochThrottle, signEpochEntry, tickEpoch } from "../src/fleet-epoch";
 import { updateKeyFile } from "../src/fleet-keyfile";
 import { forgetIncarnationAnswers } from "../src/fleet-trust";
-import { fetchManifest, getPayload, type FleetManifest } from "../src/fleet-transport";
+import { EPOCH_CAP, fetchManifest, getPayload, type FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
 import { applyTestTimeout } from "./setup";
@@ -51,6 +51,8 @@ describe("epoch keys", () => {
     roots.push(root);
     const gateway = new FakeGateway();
     gateway.epochSupport = opts.epochSupport ?? true;
+    // Every member of this fleet lists the capability (what the members' own bootstrap says).
+    gateway.fleetCaps = [EPOCH_CAP];
     useFakeGateway(gateway);
     const work = join(root, "primary");
     mkdirSync(work, { recursive: true });
@@ -341,7 +343,8 @@ describe("epoch keys", () => {
       w.gateway.epochKeys.set("replica-device", { n: 7, pub, notAfter: Date.now() + 48 * HOUR, sig: signEpochEntry(entry, loadOrCreateSignKey(w.replica.keyFile).privateKey) });
       await tickEpoch(credsFor("replica-device"), "x", w.replica.keyFile, loadOrCreateSignKey(w.replica.keyFile));
       // Refused for being behind; numbered after the one the fleet holds, and posted at the next asking.
-      expect(readEpochs(w.replica.keyFile).map((e) => e.n)).toEqual([8]);
+      // (The key that was refused is kept as it is: snapshots may be wrapped to it.)
+      expect(readEpochs(w.replica.keyFile).map((e) => e.n)).toEqual([1, 8]);
       resetEpochThrottle();
       await tickEpoch(credsFor("replica-device"), "x", w.replica.keyFile, loadOrCreateSignKey(w.replica.keyFile));
       expect(w.gateway.epochKeys.get("replica-device")!.n).toBe(8);
@@ -367,13 +370,95 @@ describe("epoch keys", () => {
       expect(w.gateway.epochKeys.get("replica-device")?.n).toBe(readEpochs(w.replica.keyFile)[0]!.n);
     });
 
-    test("rotating the member's key pair keeps its epoch keys", async () => {
+    test("rotating the member's key pair makes a new signing key and a new epoch key, and lets go of the old epoch keys after the grace", async () => {
       const w = await world();
       await tickEpoch(credsFor("replica-device"), "x", w.replica.keyFile, loadOrCreateSignKey(w.replica.keyFile));
       const before = readEpochs(w.replica.keyFile);
+      const signBefore = loadOrCreateSignKey(w.replica.keyFile).publicKey;
       expect(before.length).toBe(1);
+      const stolen = join(roots[0]!, "stolen.key");
+      copyFileSync(w.replica.keyFile, stolen);
       rotateKeyPair(w.replica.keyFile);
-      expect(readEpochs(w.replica.keyFile)).toEqual(before);
+      // A copy of the old key file no longer holds the member's signing key: what it signs is not what the fleet will have.
+      expect(loadOrCreateSignKey(w.replica.keyFile).publicKey).not.toBe(signBefore);
+      const after = readEpochs(w.replica.keyFile);
+      expect(after.map((e) => e.n)).toEqual([1, 2]);
+      expect(after[0]!.supersededAt).toBeDefined();
+      expect(after[1]!.posted).toBeUndefined();
+      expect(pruneEpochs(w.replica.keyFile, Date.now() + EPOCH_GRACE_MS + 1000)).toBe(1);
+      expect(readEpochs(w.replica.keyFile).map((e) => e.n)).toEqual([2]);
+    });
+
+    test("after a rotation an epoch key signed by a copy of the old key file is not wrapped to", () => {
+      const keyFile = join(mkdtempSync(join(tmpdir(), "fleet-epoch-r-")), "k.key");
+      roots.push(join(keyFile, ".."));
+      loadOrCreateKeyPair(keyFile);
+      const old = loadOrCreateSignKey(keyFile);
+      const stolen = join(keyFile, "..", "stolen.key");
+      copyFileSync(keyFile, stolen);
+      rotateKeyPair(keyFile);
+      const now = loadOrCreateSignKey(keyFile);
+      expect(now.publicKey).not.toBe(old.publicKey);
+      // Whoever holds the copy signs an epoch key of its own with the signing key in it.
+      const mine = generateEpochKey(1000);
+      const notAfter = Date.now() + 48 * HOUR;
+      const sig = signEpochEntry(epochEntry("x", "i", "d", 1000, mine.publicKey, notAfter), loadOrCreateSignKey(stolen).privateKey);
+      const listed = [{ deviceId: "d", epochKey: { n: 1000, pub: mine.publicKey, notAfter, sig }, caps: [EPOCH_CAP] }];
+      // The fleet's signing key for the member is the new one (the rotation reached it): the copy's signature does not hold.
+      expect(epochsToWrapTo(listed, new Map([["d", now.publicKey]]), "x", "i").size).toBe(0);
+      expect(epochsToWrapTo(listed, new Map([["d", old.publicKey]]), "x", "i").get("d")?.n).toBe(1000);
+    });
+
+    test("after a rotation the new epoch key is posted under the new signing key, once the fleet has the key", async () => {
+      const w = await world();
+      await w.next("one\n");
+      await w.pullReplica();
+      const fresh = rotateKeyPair(w.replica.keyFile);
+      // What the gateway does with a member's new key and signing key: takes them, and drops its epoch key.
+      w.gateway.seed("replica-device", fresh.publicKey);
+      w.gateway.spubs.set("replica-device", loadOrCreateSignKey(w.replica.keyFile).publicKey);
+      w.gateway.epochKeys.delete("replica-device");
+      resetEpochThrottle();
+      await tickEpoch(credsFor("replica-device"), "x", w.replica.keyFile, loadOrCreateSignKey(w.replica.keyFile));
+      expect(w.gateway.epochKeys.get("replica-device")?.n).toBe(2);
+    });
+
+    test("a post whose answer was lost is sent again as it was, and the fleet says it has it: the key keeps its number", async () => {
+      const w = await world();
+      w.gateway.loseEpochAnswers = 1;
+      await tickEpoch(credsFor("replica-device"), "x", w.replica.keyFile, loadOrCreateSignKey(w.replica.keyFile));
+      // The fleet took it; the answer never came.
+      expect(w.gateway.epochKeys.get("replica-device")?.n).toBe(1);
+      expect(readEpochs(w.replica.keyFile)[0]!.posted).toBeUndefined();
+      const held = { ...w.gateway.epochKeys.get("replica-device")! };
+      // Asked again a while on (the throttle after a failure is ten minutes): the same entry goes, whatever the time.
+      resetEpochThrottle();
+      await tickEpoch(credsFor("replica-device"), "x", w.replica.keyFile, loadOrCreateSignKey(w.replica.keyFile), Date.now() + 11 * 60_000);
+      expect(w.gateway.epochKeys.get("replica-device")).toEqual(held);
+      expect(readEpochs(w.replica.keyFile).map((e) => [e.n, e.posted !== undefined])).toEqual([[1, true]]);
+      // And the snapshots wrapped to it open.
+      await w.next("one\n");
+      await w.pullReplica();
+      await w.next("two\n");
+      expect((await w.pullReplica()).applied).toBe(true);
+    });
+
+    test("two processes of one member ticking at once send one entry, and the second is told it has it", async () => {
+      const w = await world();
+      const creds = credsFor("replica-device");
+      const sign = loadOrCreateSignKey(w.replica.keyFile);
+      const a = tickEpoch(creds, "x", w.replica.keyFile, sign);
+      // The other process has its own throttle.
+      const t0 = Date.now();
+      const b = (async () => {
+        await new Promise((r) => setTimeout(r, 0));
+        const before = new Map<string, number>();
+        void before;
+        return tickEpoch(creds, "x", w.replica.keyFile, sign, t0 + 61_000);
+      })();
+      await Promise.all([a, b]);
+      expect(readEpochs(w.replica.keyFile).map((e) => e.n)).toEqual([1]);
+      expect(w.gateway.epochKeys.get("replica-device")?.n).toBe(1);
     });
 
     test("a snapshot wrapped to an epoch key that was deleted is one sealed for a key this member let go of, not a tampered one", async () => {
@@ -425,17 +510,20 @@ describe("epoch keys", () => {
       const other = generateKeyPairSync("ed25519") as { publicKey: KeyObject; privateKey: KeyObject };
       const raw = (k: { publicKey: KeyObject }): string => k.publicKey.export({ type: "spki", format: "der" }).subarray(-32).toString("base64url");
       const posted = sign("d", "", real);
-      const members = [{ deviceId: "d", spub: raw(other), epochKey: posted }];
+      const members = [{ deviceId: "d", spub: raw(other), epochKey: posted, caps: [EPOCH_CAP] }];
       // The gateway says d's signing key is `other`; the chain says it is `real`: the chain is believed.
       expect(epochsToWrapTo(members, new Map([["d", raw(real)]]), "x", "i").get("d")?.n).toBe(1);
       // The other way round: the gateway's word for it matches, the chain's does not.
-      expect(epochsToWrapTo([{ deviceId: "d", spub: raw(real), epochKey: posted }], new Map([["d", raw(other)]]), "x", "i").size).toBe(0);
+      expect(epochsToWrapTo([{ deviceId: "d", spub: raw(real), epochKey: posted, caps: [EPOCH_CAP] }], new Map([["d", raw(other)]]), "x", "i").size).toBe(0);
       // A chain that does not name a signing key for the device wraps nothing to it.
       expect(epochsToWrapTo(members, new Map(), "x", "i").size).toBe(0);
       // Another fleet, another incarnation, another device: not this key.
       expect(epochsToWrapTo(members, new Map([["d", raw(real)]]), "y", "i").size).toBe(0);
       expect(epochsToWrapTo(members, new Map([["d", raw(real)]]), "x", "j").size).toBe(0);
-      expect(epochsToWrapTo([{ deviceId: "e", epochKey: posted }], new Map([["e", raw(real)]]), "x", "i").size).toBe(0);
+      expect(epochsToWrapTo([{ deviceId: "e", epochKey: posted, caps: [EPOCH_CAP] }], new Map([["e", raw(real)]]), "x", "i").size).toBe(0);
+      // A member that does not list the capability (an earlier build, rolled back to after it posted a key) is wrapped to as it always was.
+      expect(epochsToWrapTo([{ deviceId: "d", spub: raw(other), epochKey: posted }], new Map([["d", raw(real)]]), "x", "i").size).toBe(0);
+      expect(epochsToWrapTo([{ deviceId: "d", spub: raw(other), epochKey: posted, caps: ["meta2"] }], new Map([["d", raw(real)]]), "x", "i").size).toBe(0);
       // A fleet without an incarnation has no key to sign against.
       expect(epochsToWrapTo(members, null, "x", undefined).size).toBe(0);
     });
