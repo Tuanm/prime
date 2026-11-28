@@ -327,8 +327,11 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({ ok: true });
     }
     if (request.method === "GET" && path === "/usage") {
-      await this.measureStorage();
-      const counts = await this.readUsage(monthKey());
+      // Answered from the last measure of the bucket; the listing that renews it runs in an alarm (see
+      // `measureStorage`), so that what the guard asks for is never held up by it.
+      const measured = await this.readMeasure();
+      await this.armMeasure(measured);
+      const counts = await this.readUsage(monthKey(), measured ?? {});
       const cost = costOf(counts);
       const budget = monthlyBudget(this.env as unknown as Record<string, string | undefined>);
       // Where the month is going, said before the budget stops the fleets and not after.
@@ -339,6 +342,9 @@ export class RegistryDO extends DurableObject<Env> {
         cost,
         budgetUsd: budget,
         spentUsd: cost.total,
+        // How the figure for the bucket was got: when, and whether the listing was cut short (it is then "at least").
+        r2MeasuredAt: measured?.at ?? null,
+        r2StoredTruncated: measured?.truncated === true,
         remainingUsd: Math.round((budget - cost.total) * 100) / 100,
         overBudget: cost.total >= budget,
         projectedUsd: projection ? projection.usd : null,
@@ -1023,12 +1029,12 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   /** This month's counts, kept as one small record, and what the bucket holds as last measured. */
-  private async readUsage(month: string): Promise<UsageCounts> {
+  private async readUsage(month: string, measured?: { bytes?: number }): Promise<UsageCounts> {
     const saved = (await this.storage.get<Partial<UsageCounts> & { doMinutes?: number }>("usage:" + month)) ?? {};
     // Minutes were how busy time was once guessed: a minute with a request in
     // it counted as sixty seconds, many times what is billed. They are dropped.
     const { doMinutes: _minutes, ...counts } = saved;
-    const stored = await this.storage.get<{ bytes?: number }>("r2storage");
+    const stored = measured ?? (await this.storage.get<{ bytes?: number }>("r2storage"));
     return { ...ZERO_USAGE, ...counts, r2StoredBytes: Math.max(0, Number(stored?.bytes) || 0) };
   }
 
@@ -1036,29 +1042,56 @@ export class RegistryDO extends DurableObject<Env> {
    * What the bucket holds, measured now and then rather than at every change: the bytes go up with a
    * publish and down with an eviction, in several places, and a count kept in step with all of them
    * would drift. A listing of the bucket does not, and costs a few Class A calls (counted) a day.
+   *
+   * It runs in this object's alarm, and not in the request that found it due: that request is the
+   * guard's, which every fleet call waits on, and a listing is up to twenty calls to the bucket. The
+   * first ask of the guard that finds the figure missing or old sets the alarm for now; the alarm
+   * lists, and sets the next for six hours on (ten minutes on when the listing failed).
    */
-  private measuringStorage = false;
-  private measureFailedAt = 0;
-  private async measureStorage(): Promise<void> {
-    const bucket = this.env.BUCKET;
-    if (!bucket || this.measuringStorage) return;
+  private measureArmed = false;
+  private async readMeasure(): Promise<{ bytes?: number; at?: number; truncated?: boolean } | undefined> {
+    return this.storage.get<{ bytes?: number; at?: number; truncated?: boolean }>("r2storage");
+  }
+
+  private async armMeasure(measured: { at?: number } | undefined): Promise<void> {
+    if (!this.env.BUCKET || this.measureArmed) return;
     const now = Date.now();
+    if (typeof measured?.at === "number" && now - measured.at < STORAGE_MEASURE_EVERY_MS) return;
     // A listing that failed is tried again in a few minutes, not by every ask of the guard.
     if (now >= this.measureFailedAt && now - this.measureFailedAt < STORAGE_MEASURE_RETRY_MS) return;
-    const last = await this.storage.get<{ at?: number }>("r2storage");
-    if (last && typeof last.at === "number" && now - last.at < STORAGE_MEASURE_EVERY_MS) return;
-    this.measuringStorage = true;
+    await this.setMeasureAlarm(now);
+  }
+
+  private async setMeasureAlarm(at: number): Promise<void> {
+    const s = this.storage as unknown as { setAlarm?: (at: number) => Promise<void> };
     try {
-      const measured = await bucketBytes(bucket);
-      // Written even when the measure is short (a bucket past the cap): the size is at least this.
-      await this.storage.put("r2storage", { bytes: measured.bytes, at: now, truncated: measured.truncated });
-      await this.addUsage({ r2Writes: measured.calls });
+      await s.setAlarm?.(at);
+      this.measureArmed = true;
     } catch {
-      // A bucket that cannot be listed is not measured: the guard keeps the last figure, or none.
-      this.measureFailedAt = now;
-    } finally {
-      this.measuringStorage = false;
+      // Not set: the next ask of the guard tries again.
     }
+  }
+
+  private measureFailedAt = 0;
+  async alarm(): Promise<void> {
+    return this.meter.alarm(async () => {
+      this.measureArmed = false;
+      const bucket = this.env.BUCKET;
+      if (!bucket) return;
+      const now = Date.now();
+      let next = now + STORAGE_MEASURE_EVERY_MS;
+      try {
+        const measured = await bucketBytes(bucket);
+        // Written even when the measure is short (a bucket past the cap): the size is at least this.
+        await this.storage.put("r2storage", { bytes: measured.bytes, at: now, truncated: measured.truncated });
+        await this.addUsage({ r2Writes: measured.calls });
+      } catch {
+        // A bucket that cannot be listed is not measured: the guard keeps the last figure, or none.
+        this.measureFailedAt = now;
+        next = now + STORAGE_MEASURE_RETRY_MS;
+      }
+      await this.setMeasureAlarm(next);
+    });
   }
 
   private async addUsage(add: Partial<UsageCounts>): Promise<void> {

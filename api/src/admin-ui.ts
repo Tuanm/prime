@@ -1634,8 +1634,11 @@ ${UI_CSS}    </style>
                 " rows written · " +
                 Number(j.counts?.doRowsRead || 0).toLocaleString() +
                 " rows read · " +
+                (j.r2StoredTruncated ? "at least " : "") +
                 (Number(j.counts?.r2StoredBytes || 0) / 1e9).toFixed(2) +
-                " GB in the bucket</div>" +
+                " GB in the bucket" +
+                (j.r2MeasuredAt ? " (listed " + new Date(Number(j.r2MeasuredAt)).toLocaleString() + ")" : "") +
+                "</div>" +
                 (j.projectionWarning && !j.overBudget
                   ? '<div class="usage-over">' + esc(String(j.warning || "At this pace the month passes its budget.")) + "</div>"
                   : "") +
