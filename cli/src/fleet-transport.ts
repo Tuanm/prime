@@ -156,7 +156,10 @@ export interface FleetManifest {
   createdAt: number;
 }
 
-export class FleetTransportError extends Error {}
+export class FleetTransportError extends Error {
+  /** Whether asking again may well work: the body broke off on the way (the gateway says so with a 400), or the fleet could not be asked just then (a 503). */
+  retryable = false;
+}
 
 /** A payload the gateway no longer has (a snapshot it let go while it was being fetched). */
 export class PayloadGoneError extends FleetTransportError {
@@ -180,11 +183,13 @@ async function request(
   path: string,
   body?: Buffer | string,
   contentType?: string,
+  /** More request headers (the hash a pack says it has: see `putPayload`). */
+  moreHeaders: Record<string, string> = {},
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), creds.timeoutMs ?? 120_000);
   try {
-    const extra: Record<string, string> = {};
+    const extra: Record<string, string> = { ...moreHeaders };
     if (contentType) extra["content-type"] = contentType;
     return await fetch(creds.gateway + path, {
       method,
@@ -211,7 +216,24 @@ export async function fetchHead(creds: FleetCredentials, fleet: string): Promise
   return body.head;
 }
 
-/** Store a sealed payload. The gateway keeps bytes it cannot open. */
+/**
+ * Whether an upload that was refused is worth sending again: the body did not arrive as it was named (`body-mismatch`), or the fleet could not be asked
+ * just then (`fleet-unreachable`, a 503). The gateway says which with a code; one from before it said only a sentence, and that is read as it was.
+ */
+function uploadMayWork(status: number, code: unknown, said: unknown): boolean {
+  // A 503 the gateway itself answered (it says why, in a code or a sentence) is worth asking again; one with no JSON at all is the platform's verdict (its own error page), and is not.
+  if (status === 503) return code === "fleet-unreachable" || code === "bucket-unavailable" || (typeof code !== "string" && typeof said === "string");
+  if (typeof code === "string") return status === 400 && code === "body-mismatch";
+  return status === 400 && typeof said === "string" && /not the pack whose hash was named|not as long as it said|broke off/i.test(said);
+}
+
+/**
+ * Store a sealed payload. The gateway keeps bytes it cannot open.
+ *
+ * A pack says its own hash (`x-prime-sha256`; the length goes with a Buffer body): a gateway that can then streams it to the bucket and
+ * hashes it on the way, keeps nothing of a body whose hash is another, and does not write again a pack it already holds. One that does
+ * not know the header ignores it and holds the body whole, as it did.
+ */
 export async function putPayload(
   creds: FleetCredentials,
   fleet: string,
@@ -224,9 +246,16 @@ export async function putPayload(
     "/fleets/" + encodeURIComponent(fleet) + "/" + kind,
     bytes,
     "application/octet-stream",
+    kind === "packs" ? { "x-prime-sha256": payloadHash(bytes) } : {},
   );
   if (res.status === 409) throw new FleetTransportError("only the primary may publish");
-  if (!res.ok) throw new FleetTransportError("could not store the payload: " + res.status);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown; code?: unknown };
+    const said = body.error;
+    const err = new FleetTransportError("could not store the payload: " + res.status + (typeof said === "string" ? " (" + said.slice(0, 160) + ")" : ""));
+    err.retryable = uploadMayWork(res.status, body.code, said);
+    throw err;
+  }
   return (await res.json()) as { key: string; hash: string; size: number };
 }
 
@@ -310,6 +339,9 @@ function inlineFor(fleet: string, kind: "packs" | "manifests", id: string, now: 
   return Buffer.from(held.bytes);
 }
 
+/** How many pieces are uploaded at once: the gateway's Worker shares its memory with every other request. */
+export const CHUNK_UPLOADS_AT_ONCE = 2;
+
 /**
  * Store a sealed pack as pieces of at most `chunkBytes`, at most `inFlight` at a time. Each piece is stored under
  * its own hash, and the hash the gateway answers with has to be the one computed here. Nothing is cleaned up on a
@@ -321,7 +353,7 @@ export async function putChunks(
   fleet: string,
   pack: Buffer,
   chunkBytes: number = CHUNK_BYTES,
-  inFlight = 4,
+  inFlight = CHUNK_UPLOADS_AT_ONCE,
 ): Promise<{ chunks: Chunk[]; firstKey: string }> {
   const size = Math.max(1, Math.min(chunkBytes, CHUNK_BYTES_MAX));
   const pieces: Buffer[] = [];
@@ -334,7 +366,7 @@ export async function putChunks(
       const i = next++;
       if (i >= pieces.length) return;
       const piece = pieces[i]!;
-      const stored = await putPayload(creds, fleet, "packs", piece);
+      const stored = await putPieceAgain(creds, fleet, piece);
       if (stored.hash !== payloadHash(piece)) {
         throw new FleetTransportError("the gateway stored piece " + (i + 1) + " under another hash than the one it was sent with (" + stored.hash + ")");
       }
@@ -344,6 +376,21 @@ export async function putChunks(
   await Promise.all(Array.from({ length: Math.min(inFlight, pieces.length) }, worker));
   return { chunks: pieces.map((p) => ({ hash: payloadHash(p), bytes: p.length })), firstKey: keys[0]! };
 }
+
+/** One piece, stored; asked again (twice) when it broke off on the way or the fleet could not be asked, which a piece of 8 MiB over a poor link meets now and then. */
+async function putPieceAgain(creds: FleetCredentials, fleet: string, piece: Buffer): Promise<{ key: string; hash: string; size: number }> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await putPayload(creds, fleet, "packs", piece);
+    } catch (err) {
+      if (!(err instanceof FleetTransportError) || !err.retryable || attempt >= 2) throw err;
+      await new Promise((r) => setTimeout(r, pieceRetry.delayMs));
+    }
+  }
+}
+
+/** How long to wait before a piece is sent again (a test makes it short). */
+export const pieceRetry = { delayMs: 1000 };
 
 /** Whether a manifest's list of pieces is one a member will fetch: it is the gateway's word until the whole pack is checked against the seal. */
 export function chunkListProblem(chunks: unknown): string | undefined {

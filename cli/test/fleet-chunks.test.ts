@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import { loadOrCreateKeyPair, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import { TamperedSnapshotError, forgetIncarnationAnswers } from "../src/fleet-trust";
-import { CHUNK_BYTES, CHUNKS_CAP, CHUNKED_BYTES_MAX, CHUNKS_MAX, chunkListProblem, getChunks, putChunks, type FleetManifest } from "../src/fleet-transport";
+import { CHUNK_BYTES, CHUNKS_CAP, pieceRetry, CHUNKED_BYTES_MAX, CHUNKS_MAX, chunkListProblem, getChunks, putChunks, type FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, fingerprint, sameTree, useFakeGateway } from "./fleet-fake-gateway";
 import { applyTestTimeout } from "./setup";
@@ -34,20 +34,20 @@ interface World {
 
 // A tree of incompressible files (so its pack is about as big as its files), against a gateway that takes
 // 600 KB in one request (a pack, and the room a manifest takes), a piece of 48 KB, and 4 MB in pieces.
-async function world(opts: { caps?: string[]; files?: number; chunkedLimit?: number } = {}): Promise<World> {
+async function world(opts: { caps?: string[]; files?: number; chunkedLimit?: number; snapshotLimit?: number; chunkLimit?: number; fileBytes?: number } = {}): Promise<World> {
   forgetIncarnationAnswers();
   const root = mkdtempSync(join(tmpdir(), "fleet-chunks-"));
   roots.push(root);
   const gateway = new FakeGateway();
-  gateway.snapshotLimit = 600 * KB;
+  gateway.snapshotLimit = opts.snapshotLimit ?? 600 * KB;
   gateway.advertiseLimit = true;
-  gateway.chunkLimit = 48 * KB;
+  gateway.chunkLimit = opts.chunkLimit ?? 48 * KB;
   gateway.chunkedLimit = opts.chunkedLimit ?? 4 * 1024 * KB;
   gateway.fleetCaps = opts.caps ?? [CHUNKS_CAP];
   useFakeGateway(gateway);
   const work = join(root, "primary");
   mkdirSync(work, { recursive: true });
-  for (let i = 0; i < (opts.files ?? 12); i++) writeFileSync(join(work, "big" + i + ".bin"), randomBytes(40 * KB));
+  for (let i = 0; i < (opts.files ?? 12); i++) writeFileSync(join(work, "big" + i + ".bin"), randomBytes(opts.fileBytes ?? 40 * KB));
   const primary: MemberPaths = { work, gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
   const replica: MemberPaths = { work: join(root, "replica"), gitDir: join(root, "r-meta"), keyFile: join(root, "r.key") };
   mkdirSync(replica.work, { recursive: true });
@@ -91,11 +91,85 @@ describe("a snapshot bigger than one request", () => {
     expect(sameTree(fingerprint(w.work), fingerprint(w.replica.work))).toBe(true);
   });
 
-  test("pieces go up four at a time", async () => {
+  test("a pack over 4 MiB goes up as pieces even when one request would take it, once every member can read them, and one under it does not", async () => {
+    // A gateway that takes 32 MiB in one request, pieces of 8 MiB.
+    const big = await world({ snapshotLimit: 32 * 1024 * KB, chunkLimit: 8 * 1024 * KB, chunkedLimit: 512 * 1024 * KB, files: 1, fileBytes: 4 * 1024 * KB + 512 * KB });
+    const first = await publish(credsFor("primary-device"), "x", big.primary, null, 0, 2);
+    const m = manifestOf(big, first.manifestKey);
+    expect(m.chunks, "the manifest lists pieces").toBeDefined();
+    expect(m.chunks!.length).toBe(1);
+    expect(big.gateway.packHashHeaders.length).toBeGreaterThan(0);
+    // Members that cannot read pieces are sent the pack in the one request, as before.
+    const old = await world({ caps: [], snapshotLimit: 32 * 1024 * KB, chunkLimit: 8 * 1024 * KB, chunkedLimit: 512 * 1024 * KB, files: 1, fileBytes: 4 * 1024 * KB + 512 * KB });
+    const plain = await publish(credsFor("primary-device"), "x", old.primary, null, 0, 2);
+    expect(manifestOf(old, plain.manifestKey).chunks).toBeUndefined();
+    // A small pack is not sent in pieces either.
+    const small = await world({ snapshotLimit: 32 * 1024 * KB, chunkLimit: 8 * 1024 * KB, chunkedLimit: 512 * 1024 * KB, files: 2, fileBytes: 40 * KB });
+    const tiny = await publish(credsFor("primary-device"), "x", small.primary, null, 0, 2);
+    expect(manifestOf(small, tiny.manifestKey).chunks).toBeUndefined();
+  }, 60_000);
+
+  test("a piece whose body did not arrive as it was named is sent again, and one refused for another reason is not", async () => {
+    pieceRetry.delayMs = 1;
+    try {
+      const w = await world();
+      w.gateway.breakOffPacks = 2;
+      const first = await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2);
+      expect(manifestOf(w, first.manifestKey).chunks!.length).toBeGreaterThan(8);
+      expect((await pull(credsFor("replica-device"), "x", w.replica, 0)).applied).toBe(true);
+      // A gateway from before the code says only the sentence: read as it was.
+      const old = await world();
+      old.gateway.breakOffCode = false;
+      old.gateway.breakOffPacks = 2;
+      expect((await publish(credsFor("primary-device"), "x", old.primary, null, 0, 2)).seq).toBe(1);
+      // Always broken: given up on after three tries, and said so.
+      const again = await world();
+      again.gateway.breakOffPacks = 100;
+      await expect(publish(credsFor("primary-device"), "x", again.primary, null, 0, 2)).rejects.toThrow(/could not store the payload: 400 \(the body is not the pack whose hash was named/);
+    } finally {
+      pieceRetry.delayMs = 1000;
+    }
+  });
+
+  test("a 503 is asked again only when it is the gateway that answered, and not the platform's own page", async () => {
+    pieceRetry.delayMs = 1;
+    const real = globalThis.fetch;
+    try {
+      const w = await world({ files: 1, snapshotLimit: 600 * KB });
+      const send = async (answers: Response[]): Promise<number> => {
+        let asks = 0;
+        const handler = w.gateway.handle.bind(w.gateway);
+        w.gateway.handle = async (creds, method, path, body, search) => {
+          if (method === "POST" && path.endsWith("/packs") && answers.length > 0) {
+            asks++;
+            return answers.shift()!;
+          }
+          return handler(creds, method, path, body, search);
+        };
+        await putChunks(credsFor("primary-device"), "x", randomBytes(10 * KB), 48 * KB).catch(() => undefined);
+        return asks;
+      };
+      // The gateway's own 503, with its code: tried three times in all, then given up.
+      const own = () => Response.json({ error: "the fleet could not be reached to note the upload: try again", code: "fleet-unreachable" }, { status: 503 });
+      expect(await send([own(), own(), own(), own()])).toBe(3);
+      // The platform's page: once.
+      expect(await send([new Response("<html>error code: 1102</html>", { status: 503 }), own()])).toBe(1);
+    } finally {
+      pieceRetry.delayMs = 1000;
+      globalThis.fetch = real;
+    }
+  });
+
+  test("pieces go up two at a time, each saying its hash, so that a gateway can stream it", async () => {
     const w = await world();
     w.gateway.packDelayMs = 15;
     await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2);
-    expect(w.gateway.maxPackPostsInFlight).toBe(4);
+    expect(w.gateway.maxPackPostsInFlight).toBe(2);
+    expect(w.gateway.packHashHeaders.length).toBeGreaterThan(2);
+    for (const h of w.gateway.packHashHeaders) expect(h).toMatch(/^[0-9a-f]{64}$/);
+    // The hash it says is the hash of what it sent.
+    const stored = [...w.gateway.payloads.keys()].filter((k) => k.includes("/packs/")).map((k) => k.split("/").pop());
+    for (const h of w.gateway.packHashHeaders) expect(stored).toContain(h);
   });
 
   test("a change pack bigger than a request is in pieces too, and a replica that holds the base takes it", async () => {

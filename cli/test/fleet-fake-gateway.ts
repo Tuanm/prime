@@ -90,6 +90,12 @@ export class FakeGateway {
   loseEpochAnswers = 0;
   /** The epoch keys posted, in order (the entry as sent). */
   epochPosts: unknown[][] = [];
+  /** The next this many pack uploads are answered as the gateway does when a body broke off on the way (a 400), and keep nothing. */
+  breakOffPacks = 0;
+  /** Whether that answer carries the code the gateway gives it. */
+  breakOffCode = true;
+  /** What each pack upload said its hash was (`x-prime-sha256`), in order. */
+  packHashHeaders: Array<string | undefined> = [];
   /** Requests of each kind, by route. */
   requests = new Map<string, number>();
   /** Pack downloads, by the pack's key. */
@@ -320,6 +326,11 @@ export class FakeGateway {
     }
     if ((kind === "packs" || kind === "manifests") && method === "POST") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
+      if (kind === "packs" && this.breakOffPacks > 0) {
+        this.breakOffPacks--;
+        // The gateway's own sentence and code (`streamedPack` in api/src/fleets-routes.ts); a gateway from before the code says only the sentence.
+        return Response.json({ error: "the body is not the pack whose hash was named, or not as long as it said: upload it again", ...(this.breakOffCode ? { code: "body-mismatch" } : {}) }, { status: 400 });
+      }
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
       if (kind === "packs" && this.snapshotLimit !== undefined && bytes.length > this.snapshotLimit) {
         return Response.json({ error: "this change pack is bigger than the gateway takes", limit: this.snapshotLimit }, { status: 413 });
@@ -374,6 +385,7 @@ export function useFakeGateway(gateway: FakeGateway): void {
     const parsed = new URL(url);
     const path = parsed.pathname;
     const deviceId = init.headers["x-prime-device"] ?? "";
+    if (init.method === "POST" && path.endsWith("/packs")) gateway.packHashHeaders.push(init.headers["x-prime-sha256"]);
     const answer = gateway.handle(credsFor(deviceId), init.method, path, init.body, parsed.search);
     const signal = init.signal;
     if (!signal) return answer;
