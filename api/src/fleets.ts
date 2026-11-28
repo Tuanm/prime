@@ -277,10 +277,9 @@ export async function onlineNow(
 }
 
 /**
- * A short fingerprint of a member's public key (base64), to tell its keys apart: the first eight bytes
- * of the key's SHA-256, in base64. It is the same as the KEY column of `prime fleets members`, so what
- * the operator sees here can be compared with what a member's own machine prints. "" for a key that is
- * not base64.
+ * A short id of a member's public key (base64), to tell its keys apart: the first eight bytes of the
+ * key's SHA-256, in base64. It is what earlier builds of the CLI print as the KEY column of
+ * `prime fleets members`, and what an approval from one of them names. "" for a key that is not base64.
  */
 export async function keyFingerprint(pubkeyB64: string): Promise<string> {
   try {
@@ -290,4 +289,37 @@ export async function keyFingerprint(pubkeyB64: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * The fingerprint a person compares, as the CLI prints it (`keyFingerprintOf`): the first sixteen bytes
+ * (128 bits) of the key's SHA-256 as two halves of base64, padding left off, joined by a dot. The first
+ * half is the short id above, without its "=", so a member on an earlier build can still be compared with.
+ * "" for a key that is not base64.
+ */
+export async function keyFingerprintLong(pubkeyB64: string): Promise<string> {
+  try {
+    const raw = Uint8Array.from(atob(pubkeyB64), (c) => c.charCodeAt(0));
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
+    const half = (from: number): string => btoa(String.fromCharCode(...digest.subarray(from, from + 8))).replace(/=+$/, "");
+    return half(0) + "." + half(8);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Whether a fingerprint a caller names is of this key: the whole one, or the short one an earlier build
+ * of the CLI names (its first half). Spaces, dots and padding are not part of it, so it can be copied as
+ * printed or as typed in two halves. An approval is matched against the key that was read, so that a
+ * request replaced since is not approved by mistake; the comparison with the member's own machine is the
+ * person's, and is made on the whole one.
+ */
+export async function keyFingerprintMatches(named: string, pubkeyB64: string): Promise<boolean> {
+  const whole = await keyFingerprintLong(pubkeyB64);
+  if (whole === "") return false;
+  const plain = (s: string): string => s.replace(/[\s.=]/g, "");
+  const given = plain(named);
+  const full = plain(whole);
+  return given !== "" && (given === full || given === full.slice(0, 11));
 }

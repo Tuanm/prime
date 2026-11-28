@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { createCipheriv, createDecipheriv, createHash, createHmac, createPrivateKey, createPublicKey, diffieHellman, hkdfSync, randomBytes } from "node:crypto";
 
 import { loadOrCreateKeyPair, manifestIdOf, publish, pull, type MemberPaths } from "../src/fleet-agent";
-import { generateMemberKeyPair, keyIdOf, openForMember, sealManyForMembers } from "../src/fleet-crypto";
+import { generateMemberKeyPair, keyFingerprintOf, openForMember, sealManyForMembers } from "../src/fleet-crypto";
 import { FleetTrust, TamperedSnapshotError, forgetIncarnationAnswers, gatewayHasNoIncarnation, noteIncarnationAnswer, sealFieldsOf } from "../src/fleet-trust";
 import { snapshot } from "../src/fleet-sync";
 import { FleetTransportError, payloadHash, fetchManifest, type FleetManifest } from "../src/fleet-transport";
@@ -410,7 +410,7 @@ describe("a fleet that is upgraded one member at a time", () => {
     const refused = (await w.pullReplica(1).catch((e: unknown) => e)) as Error;
     const made = w.manifest(two.manifestKey);
     expect(refused.message).toContain("The manifest says it was made at " + new Date(made.createdAt).toISOString());
-    expect(refused.message).toContain("with the key " + keyIdOf(made.senderPublicKey));
+    expect(refused.message).toContain("with the key " + keyFingerprintOf(made.senderPublicKey));
     expect(refused.message).toMatch(/nothing proves it/);
     // The same under a gateway that has the gate.
     const g = await world();
@@ -420,7 +420,7 @@ describe("a fleet that is upgraded one member at a time", () => {
     g.gateway.unsealed = true;
     const gated = await g.next("two\n");
     const refusedGated = (await g.pullReplica(1).catch((e: unknown) => e)) as Error;
-    expect(refusedGated.message).toContain("with the key " + keyIdOf(g.manifest(gated.manifestKey).senderPublicKey));
+    expect(refusedGated.message).toContain("with the key " + keyFingerprintOf(g.manifest(gated.manifestKey).senderPublicKey));
   });
 
   test("against a gateway that has the gate, a snapshot without a seal is tampering, and the hash and what accepting means are still printed", async () => {

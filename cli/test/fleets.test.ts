@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LockBusyError } from "../src/dir-lock";
+import { keyFingerprintOf, keyIdOf } from "../src/fleet-crypto";
 import { bootstrap, fleetKeyFile, fleetStateDir, fleetsJoin, memberRows, readFleetState, resolveFleetTarget, updateFleetState, writeFleetState } from "../src/fleets";
 import type { Config } from "../src/config";
 import { applyTestTimeout } from "./setup";
@@ -216,9 +217,38 @@ describe("the roster as printed", () => {
     const at = Date.UTC(2025, 0, 1);
     const a = memberRows([{ deviceId: "d1", role: "owner", addedAt: at, pubkey: Buffer.alloc(32, 1).toString("base64") }]);
     const b = memberRows([{ deviceId: "d1", role: "owner", addedAt: at, pubkey: Buffer.alloc(32, 2).toString("base64") }]);
-    expect(a[0]![2]).toMatch(/^[A-Za-z0-9+/]{11}=$/);
+    // 128 bits: two halves of eleven characters, padding left off, joined by a dot.
+    expect(a[0]![2]).toMatch(/^[A-Za-z0-9+/]{11}\.[A-Za-z0-9+/]{11}$/);
     expect(a[0]![2]).not.toBe(b[0]![2]);
     expect(memberRows([{ deviceId: "d2", role: "member", addedAt: at }])[0]![2]).toBe("-");
+  });
+});
+
+describe("the fingerprint a person compares", () => {
+  const key = (n: number) => Buffer.alloc(32, n).toString("base64");
+
+  test("is 128 bits of the key's hash, and its first half is what builds before it printed", () => {
+    const { createHash } = require("node:crypto") as typeof import("node:crypto");
+    const k = key(7);
+    const digest = createHash("sha256").update(Buffer.from(k, "base64")).digest();
+    const fp = keyFingerprintOf(k);
+    const [head, tail] = fp.split(".") as [string, string];
+    expect(Buffer.from(head + "=", "base64").equals(digest.subarray(0, 8))).toBe(true);
+    expect(Buffer.from(tail + "=", "base64").equals(digest.subarray(8, 16))).toBe(true);
+    // The earlier print, without its padding, is the first half.
+    expect(head).toBe(keyIdOf(k).replace(/=+$/, ""));
+  });
+
+  test("the id a snapshot's wrapped key carries is unchanged, so members of every build still match on it", () => {
+    expect(keyIdOf(key(1))).toMatch(/^[A-Za-z0-9+/]{11}=$/);
+  });
+
+  test("two keys differ in both halves, and the same key prints the same", () => {
+    const a = keyFingerprintOf(key(1)).split(".");
+    const b = keyFingerprintOf(key(2)).split(".");
+    expect(a[0]).not.toBe(b[0]);
+    expect(a[1]).not.toBe(b[1]);
+    expect(keyFingerprintOf(key(1))).toBe(keyFingerprintOf(key(1)));
   });
 });
 

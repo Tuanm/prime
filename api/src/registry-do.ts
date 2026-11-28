@@ -46,7 +46,7 @@ interface DeviceRec {
 
 /**
  * An anonymous device: created by POST /api/devices/anonymous with a generated
- * id and a 6-character device code. Its id and token live in `tokens` like any
+ * id and a 25-character device code (older ones are 6). Its id and token live in `tokens` like any
  * other device, so every auth path treats it the same; this record is what makes
  * it anonymous. `ref` is a separate random handle - the admin UI addresses the
  * device by it, so the admin never sees (or can change) the id or the token.

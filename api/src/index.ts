@@ -12,7 +12,7 @@
 //   POST /messages/{deviceId}     -> SSE client->server leg (202 + stream response)
 //   WS   /ws/{deviceId}           -> device auth + origin check -> DeviceDO upgrade
 //   WS   /ws?deviceId=            -> legacy path -> DeviceDO upgrade
-//   POST /api/devices/anonymous   -> create an anonymous device (generated id + 6-char code)
+//   POST /api/devices/anonymous   -> create an anonymous device (generated id + 25-char code)
 //   /admin/api/anonymous/{ref}... -> admin actions on anonymous devices, by opaque ref
 //
 // All device state (WebSocket + pending requests) lives in a DeviceDO keyed by
@@ -36,7 +36,7 @@ import { SECURITY_HTML } from "./security-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleFleetRoutes, markSeen } from "./fleets-routes";
-import { keyFingerprint, onlineNow, validFleetId } from "./fleets";
+import { keyFingerprintLong, onlineNow, validFleetId } from "./fleets";
 import { sendUsage, takeFleetR2 } from "./usage";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
@@ -649,7 +649,7 @@ async function adminFleets(env: Env): Promise<Response> {
         online: online.has(String(p.deviceId ?? "")),
         // A member that asks to have another key: the fingerprint of the key it offers, to compare with
         // what the member's own machine prints, which the operator approves or declines.
-        ...(p.keyChange === true ? { keyChange: true, ...(typeof p.pubkey === "string" && p.pubkey ? { key: await keyFingerprint(p.pubkey) } : {}) } : {}),
+        ...(p.keyChange === true ? { keyChange: true, ...(typeof p.pubkey === "string" && p.pubkey ? { key: await keyFingerprintLong(p.pubkey) } : {}) } : {}),
       })),
     );
     const members = await Promise.all(
@@ -663,7 +663,7 @@ async function adminFleets(env: Env): Promise<Response> {
         known: known.has(String(m.deviceId ?? "")),
         // The key snapshots are sealed for, as a fingerprint: a gateway that swapped a member's key for
         // its own keeps the device and changes only this, so it is where the operator can see it.
-        ...(typeof m.pubkey === "string" && m.pubkey ? { key: await keyFingerprint(m.pubkey) } : {}),
+        ...(typeof m.pubkey === "string" && m.pubkey ? { key: await keyFingerprintLong(m.pubkey) } : {}),
         // How far the member says it has got. Informational: nothing in the gateway decides on `fetched`.
         ...(typeof m.applied === "number" ? { applied: m.applied } : {}),
         ...(typeof m.fetched === "number" ? { fetched: m.fetched } : {}),
@@ -886,7 +886,7 @@ export default {
 
     // ---- Anonymous device registration ----
     // A client that has no registered device asks for one here: the gateway
-    // picks an unused id and a 6-character code. Limits (per-IP creations, the
+    // picks an unused id and a 25-character code. Limits (per-IP creations, the
     // device cap) are enforced in the RegistryDO, so they hold across isolates.
     if (url.pathname === "/api/devices/anonymous") {
       if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });

@@ -3,7 +3,7 @@
 // A verifier is "h1:" + base64url(HMAC-SHA256(TOKEN_PEPPER, "prime-<kind>:" + token)).
 // The pepper is a Worker secret, kept apart from the Durable Object storage the
 // verifiers live in, so a copy of that storage yields nothing a client could
-// present - even for a 6-character anonymous code, which an unkeyed hash would
+// present - even for a short anonymous code (older ones are 6 characters), which an unkeyed hash would
 // give up in seconds. A check hashes what the client sent and compares.
 
 import { timingSafeEq } from "./config";

@@ -247,7 +247,7 @@ export const LANDING_HTML = String.raw`<!doctype html>
             guide.appendChild(block(lines.join("\n")));
             guide.appendChild(para('<span class="hint">Add <code>~/.local/bin</code> to your PATH to run <code>prime</code> from anywhere.</span>'));
           }
-          guide.appendChild(para("<code>prime connect</code> prints a device id, a 6-character device code and a <b>connect URL</b>. Use the URL from your client, or:"));
+          guide.appendChild(para("<code>prime connect</code> prints a device id, a 25-character device code and a <b>connect URL</b>. Use the URL from your client, or:"));
           guide.appendChild(block("prime tools call <device-id>.bash '{\"cwd\":\"/tmp\",\"command\":\"uname -a\"}'"));
           guide.appendChild(para('<span class="hint">Keep the URL and code private: they give access to this machine\'s files and shell.</span>'));
           guide.classList.add("show");

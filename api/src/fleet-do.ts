@@ -22,7 +22,7 @@ import {
   cleanLabel,
   cleanPubkey,
   keyChangeMessage,
-  keyFingerprint,
+  keyFingerprintMatches,
   KEY_PROOF_INFO,
   KEY_PROOF_WINDOW_MS,
   clampTtl,
@@ -978,7 +978,7 @@ export class FleetDO implements DurableObject {
           );
           return;
         }
-        if (body.key !== (await keyFingerprint(request.pubkey))) {
+        if (!(await keyFingerprintMatches(body.key, request.pubkey))) {
           out = Response.json({ error: "the key waiting is not the one named", hint: "read the list of requests again" }, { status: 409 });
           return;
         }

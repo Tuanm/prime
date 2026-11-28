@@ -59,7 +59,7 @@ Under WSL2 a space needs a user systemd session for its limits, or the fallback 
 
 ## Connect a machine
 
-`prime connect` registers this machine as an anonymous buddy, saves it, prints its id, its six-character code and a connect URL, then runs the buddy in front of you. Ctrl-C stops it, and the command exits with the buddy's status.
+`prime connect` registers this machine as an anonymous buddy, saves it, prints its id, its 25-character code and a connect URL, then runs the buddy in front of you. Ctrl-C stops it, and the command exits with the buddy's status.
 
 ```bash
 prime connect                                    # this machine, managed gateway

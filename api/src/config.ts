@@ -353,7 +353,11 @@ export function ipBlockKey(raw: string): string | null {
 }
 /** The device code: digits and upper-case letters. */
 export const ANON_TOKEN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-export const ANON_TOKEN_LENGTH = 6;
+/**
+ * 25 symbols of 36 are 129 bits: a code is held by a machine, never typed from memory, so there is no
+ * reason for it to be short. Codes made when it was 6 characters are still good; only new ones are long.
+ */
+export const ANON_TOKEN_LENGTH = 25;
 
 // deviceId character allowlist + length cap. Prevents path-traversal-flavored
 // confusion in /mcp/{id} routing and bounds memory for spurious registrations.

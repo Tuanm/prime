@@ -57,7 +57,7 @@ async function startWorker(port: number, vars: string[]): Promise<{ base: string
 }
 
 const ANON_ID = /^anon-[a-f0-9]{16}$/;
-const CODE = /^[0-9A-Z]{6}$/;
+const CODE = /^[0-9A-Z]{25}$/;
 
 async function create(base: string, ip: string): Promise<{ status: number; body: any; headers: Headers }> {
   const r = await fetch(base + "/api/devices/anonymous", { method: "POST", headers: { "cf-connecting-ip": ip } });
@@ -168,7 +168,7 @@ try {
   const id1: string = a1.body.deviceId;
   const tok1: string = a1.body.token;
   check("the id is generated in the anon- namespace", ANON_ID.test(id1), id1);
-  check("the code is 6 digits/upper-case letters", CODE.test(tok1), tok1);
+  check("the code is 25 digits/upper-case letters (129 bits)", CODE.test(tok1), tok1);
   check("connect_url is {gateway}/mcp/{id}?token={code}", a1.body.connect_url === B + "/device/" + id1 + "?token=" + tok1, a1.body.connect_url);
   check("ws_url points at the device tunnel", a1.body.ws_url === "ws://127.0.0.1:8840/device/ws/" + id1, a1.body.ws_url);
   check("it reports its lower rate limit", a1.body.rate_limit?.max === 5 && a1.body.rate_limit?.window_ms === 60000, JSON.stringify(a1.body.rate_limit));

@@ -32,7 +32,7 @@ import { commandOf, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { acquireStarting, claimSuccessor, clearSuccessor, isSuccessorProcess, mayAskAgainToStop, takeHandoverEnv, readSuccessor, registerSuccessor, requestStop, stopSuccessor, stopWaitingSuccessor as stopWaiting, watchForStop } from "./fleet-agent-handover.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
-import { keyIdOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
+import { keyFingerprintOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
 import {
   FETCHED_REPORT_MS,
@@ -1721,7 +1721,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     if (!placed.ok) {
       loop.refusedForMs = placed.retryAfterMs;
       // What the operator compares the request with: the key this machine holds, as the list of requests prints it.
-      throw new PlaceRefused((placed.error ?? "refused") + (placed.keyPending ? " (this member's key is " + keyIdOf(keys.publicKey) + ")" : ""), placed.retryAfterMs);
+      throw new PlaceRefused((placed.error ?? "refused") + (placed.keyPending ? " (this member's key is " + keyFingerprintOf(keys.publicKey) + ")" : ""), placed.retryAfterMs);
     }
     loop.refusedForMs = undefined;
     loop.paused = false;

@@ -33,7 +33,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { keyIdOf, knownSealKind, type OpenedPayload, type SealFields } from "./fleet-crypto";
+import { keyFingerprintOf, knownSealKind, type OpenedPayload, type SealFields } from "./fleet-crypto";
 import { fetchRole, fetchRoster, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
@@ -207,7 +207,7 @@ export class FleetTrust {
         "The manifest says it was made " +
         (Number.isFinite(m.createdAt) && m.createdAt > 0 ? "at " + new Date(m.createdAt).toISOString() : "at an unknown time") +
         " with the key " +
-        (typeof m.senderPublicKey === "string" && m.senderPublicKey !== "" ? keyIdOf(m.senderPublicKey) : "(none)") +
+        (typeof m.senderPublicKey === "string" && m.senderPublicKey !== "" ? keyFingerprintOf(m.senderPublicKey) : "(none)") +
         " (its fingerprint, as 'prime fleets members' prints it; nothing proves it, since the snapshot has no seal). ";
       // What accepting means, for either wording below: it is a decision to trust the gateway.
       const accept =

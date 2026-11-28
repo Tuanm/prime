@@ -31,7 +31,7 @@ machine and the reply comes back the same way.
 ## Run a buddy
 
 `prime connect` is the short path. It registers this machine as an anonymous
-device on the gateway, prints a device ID, a 6-character device code and a
+device on the gateway, prints a device ID, a 25-character device code and a
 connect URL, then runs the buddy in the foreground. Stop it with Ctrl-C.
 
 ```bash

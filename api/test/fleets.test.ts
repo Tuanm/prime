@@ -10,6 +10,8 @@ import {
   keyChangeMessage,
   KEY_PROOF_INFO,
   keyFingerprint,
+  keyFingerprintLong,
+  keyFingerprintMatches,
   FleetCreationAllowance,
   MAX_FLEETS_PER_DEVICE,
   MAX_MEMBERS,
@@ -23,7 +25,7 @@ import {
 } from "../src/fleets";
 import { FleetDO } from "../src/fleet-do";
 // The CLI makes the proofs the object checks: the one test that runs both ends of it together.
-import { proveKeyChange } from "../../cli/src/fleet-crypto";
+import { keyFingerprintOf, keyIdOf, proveKeyChange } from "../../cli/src/fleet-crypto";
 import { handleFleetRoutes } from "../src/fleets-routes";
 
 // ---- helpers -------------------------------------------------------------
@@ -324,6 +326,20 @@ describe("a member that comes back with a new key", () => {
     expect((await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } })).status).toBe(200);
     const left = (await call(doInstance, "/members", { caller: "admin", device: "operator", method: "GET" })).json.left as Array<{ pubkey: string }>;
     expect(left.map((k) => k.pubkey)).toEqual([old.publicKey]);
+  });
+
+  test("the approval of a new key takes the whole fingerprint, the short one an earlier build names, and refuses a half of the other", async () => {
+    for (const named of [await keyFingerprintLong(NEW), await keyFingerprint(NEW), (await keyFingerprintLong(NEW)).replace(".", " ")]) {
+      const { doInstance, keyOf } = await fleetWithKeyedMember();
+      await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+      expect((await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1", key: named } })).status).toBe(200);
+      expect(keyOf()).toBe(NEW);
+    }
+    const { doInstance, old, keyOf } = await fleetWithKeyedMember();
+    await call(doInstance, "/bootstrap", { caller: "device", device: "member-1", body: { pubkey: NEW } });
+    const tail = (await keyFingerprintLong(NEW)).split(".")[1]!;
+    expect((await call(doInstance, "/approve", { caller: "admin", device: "operator", body: { deviceId: "member-1", key: tail } })).status).toBe(409);
+    expect(keyOf()).toBe(old.publicKey);
   });
 
   test("the owner may approve it too, and a member may not", async () => {
@@ -1519,6 +1535,44 @@ describe("what the operator is shown of a member", () => {
     const cli = createHash("sha256").update(Buffer.from(key, "base64")).digest().subarray(0, 8).toString("base64");
     expect(await keyFingerprint(key)).toBe(cli);
     expect(await keyFingerprint("not base64 !!")).toBe("");
+  });
+
+  test("the long fingerprint is the one the CLI prints: 128 bits, whose first half is the short one earlier builds print", async () => {
+    const key = Buffer.from(Array.from({ length: 32 }, (_, i) => i * 7 + 1)).toString("base64");
+    const long = await keyFingerprintLong(key);
+    expect(long).toBe(keyFingerprintOf(key));
+    const [head, tail] = long.split(".");
+    // Sixteen bytes in two halves of eight: eleven characters each, without the padding.
+    expect(head).toHaveLength(11);
+    expect(tail).toHaveLength(11);
+    expect(head).toBe((await keyFingerprint(key)).replace(/=+$/, ""));
+    expect(head).toBe(keyIdOf(key).replace(/=+$/, ""));
+    expect(await keyFingerprintLong("not base64 !!")).toBe("");
+    // A different key differs in both halves.
+    const other = await keyFingerprintLong(Buffer.from(Array.from({ length: 32 }, (_, i) => i * 5 + 2)).toString("base64"));
+    expect(other.split(".")[0]).not.toBe(head);
+    expect(other.split(".")[1]).not.toBe(tail);
+  });
+
+  test("an approval may name the whole fingerprint or the short one an earlier build prints, and nothing else", async () => {
+    const key = Buffer.from(Array.from({ length: 32 }, (_, i) => i * 3 + 9)).toString("base64");
+    const long = await keyFingerprintLong(key);
+    const short = await keyFingerprint(key);
+    expect(await keyFingerprintMatches(long, key)).toBe(true);
+    expect(await keyFingerprintMatches(short, key)).toBe(true);
+    // As copied from a table, or typed in two halves.
+    expect(await keyFingerprintMatches("  " + long + " ", key)).toBe(true);
+    expect(await keyFingerprintMatches(long.replace(".", " "), key)).toBe(true);
+    expect(await keyFingerprintMatches(short.replace(/=+$/, ""), key)).toBe(true);
+    // Not a part of it that is neither, the other half alone, a longer one, a changed character, or nothing.
+    const [head, tail] = long.split(".") as [string, string];
+    expect(await keyFingerprintMatches(head.slice(0, 8), key)).toBe(false);
+    expect(await keyFingerprintMatches(tail, key)).toBe(false);
+    expect(await keyFingerprintMatches(long + "A", key)).toBe(false);
+    expect(await keyFingerprintMatches(head + "." + tail.slice(0, 10) + (tail[10] === "A" ? "B" : "A"), key)).toBe(false);
+    expect(await keyFingerprintMatches("", key)).toBe(false);
+    expect(await keyFingerprintMatches("...", key)).toBe(false);
+    expect(await keyFingerprintMatches(long, "not base64 !!")).toBe(false);
   });
 
   test("the roster for the operator says how far each member has applied and fetched, and carries the key", async () => {

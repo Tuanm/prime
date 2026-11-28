@@ -153,10 +153,31 @@ describe("answers carry no token", () => {
     expect(JSON.parse(removed.text).devices.map((d: { deviceId: string }) => d.deviceId)).toEqual(["dev2"]);
   });
 
+  test("codes are not repeated and use the whole alphabet", async () => {
+    const { call } = await registry();
+    const seen = new Set<string>();
+    const symbols = new Set<string>();
+    for (let i = 0; i < 60; i++) {
+      const token = JSON.parse((await call("POST", "/anon/create", { ip: "10.0." + i + ".1", exempt: true })).text).token as string;
+      seen.add(token);
+      for (const c of token) symbols.add(c);
+    }
+    expect(seen.size).toBe(60);
+    expect(symbols.size).toBeGreaterThan(30);
+  });
+
+  test("a code made when codes were six characters is still accepted", async () => {
+    const legacy = await verifierFor(env, "device", "A1B2C3");
+    expect(await (await import("../src/token-hash")).tokenVerifies(env, "device", "A1B2C3", legacy)).toBe(true);
+    expect(await (await import("../src/token-hash")).tokenVerifies(env, "device", "A1B2C4", legacy)).toBe(false);
+  });
+
   test("an anonymous device's code is answered once, then never again", async () => {
     const { call, storage } = await registry();
     const made = JSON.parse((await call("POST", "/anon/create", { ip: "1.2.3.4" })).text);
-    expect(made.token).toMatch(/^[0-9A-Z]{6}$/);
+    // 25 symbols of 36: 129 bits. (Codes made before were 6; the gateway still accepts those.)
+    expect(made.token).toMatch(/^[0-9A-Z]{25}$/);
+    expect(Math.log2(36) * made.token.length).toBeGreaterThanOrEqual(128);
     expect(JSON.stringify([...storage.data]).includes(made.token)).toBe(false);
     const map = await call("GET", "/map");
     expect(map.text.includes(made.token)).toBe(false);

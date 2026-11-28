@@ -946,7 +946,7 @@ try {
   const anon = JSON.parse(connectNoStart.out || "{}") as { device?: string; token?: string; connect_url?: string; reused?: boolean };
   check(
     "connect registers an anonymous device (POST /api/devices/anonymous)",
-    connectNoStart.code === 0 && /^anon-[0-9a-f]{16}$/.test(anon.device ?? "") && /^[0-9A-Z]{6}$/.test(anon.token ?? "") &&
+    connectNoStart.code === 0 && /^anon-[0-9a-f]{16}$/.test(anon.device ?? "") && /^[0-9A-Z]{25}$/.test(anon.token ?? "") &&
       anon.connect_url === `${BASE}/device/${anon.device}?token=${anon.token}` && anon.reused === false,
     `code=${connectNoStart.code} out=${connectNoStart.out} err=${connectNoStart.err}`,
   );

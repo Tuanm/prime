@@ -122,9 +122,29 @@ export function proveKeyChange(
   return { ts: now, nonce, mac };
 }
 
-/** A short fingerprint of a member's public key (base64), to tell its keys apart. */
+/**
+ * A short id of a member's public key (base64), to tell its keys apart: the first eight bytes of its SHA-256.
+ *
+ * It is what a snapshot's `wrapped[].keyId` says (members match on it, and every build that has published
+ * says it this way), so it does not change. What a person compares is `keyFingerprintOf`.
+ */
 export function keyIdOf(publicKeyB64: string): string {
   return createHash("sha256").update(Buffer.from(publicKeyB64, "base64")).digest().subarray(0, 8).toString("base64");
+}
+
+/**
+ * The fingerprint of a member's public key (base64) that a person compares with what another machine prints:
+ * the first sixteen bytes (128 bits) of its SHA-256, as two halves of base64 with the padding left off,
+ * joined by a dot.
+ *
+ * The first half is exactly the id earlier builds printed (their `keyIdOf`, without its "="), so a member
+ * on an earlier build can still be compared with, by its first half; two machines of this build compare
+ * both. Eight bytes were what a key-grinding gateway needed about 2^64 work to match; sixteen are 2^128.
+ */
+export function keyFingerprintOf(publicKeyB64: string): string {
+  const digest = createHash("sha256").update(Buffer.from(publicKeyB64, "base64")).digest();
+  const half = (from: number): string => digest.subarray(from, from + 8).toString("base64").replace(/=+$/, "");
+  return half(0) + "." + half(8);
 }
 
 export interface SealedForMembers {

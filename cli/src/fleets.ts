@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, type MemberPaths, type Position } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
-import { keyIdOf } from "./fleet-crypto.ts";
+import { keyFingerprintOf } from "./fleet-crypto.ts";
 import { FleetTrust } from "./fleet-trust.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -99,7 +99,7 @@ export interface FleetMember {
  * (`prime fleets members` on that device) by another way than through the gateway.
  */
 export function memberRows(members: FleetMember[]): string[][] {
-  return members.map((m) => [m.deviceId, m.role, m.pubkey ? keyIdOf(m.pubkey) : "-", new Date(m.addedAt).toISOString()]);
+  return members.map((m) => [m.deviceId, m.role, m.pubkey ? keyFingerprintOf(m.pubkey) : "-", new Date(m.addedAt).toISOString()]);
 }
 
 export interface FleetInvite {
@@ -414,10 +414,10 @@ export async function fleetsRotateKey(ctx: Ctx): Promise<void> {
   }
   const pair = rotateKeyPair(keyFile);
   if (ctx.json) {
-    printJson({ fleet: fleetId, space: spaceName, key: keyIdOf(pair.publicKey) });
+    printJson({ fleet: fleetId, space: spaceName, key: keyFingerprintOf(pair.publicKey) });
     return;
   }
-  ctx.out(green("new key for ") + bold(spaceName) + dim("  " + keyIdOf(pair.publicKey)));
+  ctx.out(green("new key for ") + bold(spaceName) + dim("  " + keyFingerprintOf(pair.publicKey)));
   ctx.out(dim("  the agent shows the fleet it is the space's own on its next round; the KEY column of 'prime fleets members' then changes"));
 }
 
@@ -438,7 +438,7 @@ export async function fleetsPending(ctx: Ctx): Promise<void> {
   // The KEY of a request is the fingerprint of the key it offers: for a member that asks to replace its key it is
   // what `prime fleets approve --key` takes, and the one to compare with the member's own machine.
   ctx.out(table(["DEVICE", "LABEL", "REQUESTED", "REQUEST", "KEY"], [
-    ...pending.map((p) => [p.deviceId, p.label ?? "-", new Date(p.requestedAt).toISOString(), p.keyChange ? "new key" : "join", p.pubkey ? keyIdOf(p.pubkey) : "-"]),
+    ...pending.map((p) => [p.deviceId, p.label ?? "-", new Date(p.requestedAt).toISOString(), p.keyChange ? "new key" : "join", p.pubkey ? keyFingerprintOf(p.pubkey) : "-"]),
   ]));
 }
 
