@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { chooseRoute } from "../src/fleet-agent";
 import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -1915,6 +1915,28 @@ describe("what a person sets for the agent", () => {
       cleanup();
     }
   });
+
+  test("the quiet period before a change is taken is a setting like the others: from the environment, remembered, given to the service, and the flag of a call wins", async () => {
+    const { applyAgentSettings, buildAgentEnv, effectiveSettings, persistAgentSettings, readAgentSettings, settingsAsked } = await import("../src/fleet-daemon");
+    try {
+      const configPath = configIn();
+      expect(effectiveSettings({}).settleMs).toBe(50);
+      persistAgentSettings(configPath, { PRIME_FLEET_SETTLE_MS: "250" });
+      expect(readAgentSettings(configPath)).toEqual({ settleMs: 250 });
+      const serviceEnv: Record<string, string | undefined> = { PATH: "/bin" };
+      applyAgentSettings(configPath, serviceEnv);
+      expect(serviceEnv.PRIME_FLEET_SETTLE_MS).toBe("250");
+      expect(buildAgentEnv(configPath, {}, { PATH: "/bin" }).PRIME_FLEET_SETTLE_MS).toBe("250");
+      // Nonsense is ignored; an empty variable takes it away; the option of a call replaces what was saved.
+      persistAgentSettings(configPath, { PRIME_FLEET_SETTLE_MS: "never" });
+      expect(readAgentSettings(configPath).settleMs).toBe(250);
+      expect(settingsAsked({ settleMs: 250 }, {}, { settleMs: 120 }).settleMs).toBe(120);
+      persistAgentSettings(configPath, { PRIME_FLEET_SETTLE_MS: "" });
+      expect(readAgentSettings(configPath).settleMs).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("an agent killed while it writes the work tree", () => {
@@ -2086,6 +2108,117 @@ describe("what the primary writes down after it publishes", () => {
       expect(s.said).toContain("published 1");
       expect(s.state().seq).toBe(1);
       expect(Object.keys(s.state())).not.toContain("manifest");
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+describe("a tree that is written to without a pause", () => {
+  test("is held back longer after each publish that comes in a rush, and not at all after a pause", async () => {
+    const { holdAfterPublish, HOLD_FIRST_MS, HOLD_MAX_MS } = await import("../src/fleet-daemon");
+    let state = { lastPublish: 0, rapid: 0, holdMs: 0 };
+    const at = (now: number): number => {
+      const next = holdAfterPublish(state, now);
+      state = { lastPublish: now, ...next };
+      return next.holdMs;
+    };
+    // The first publish, and one after a pause: not held.
+    expect(at(10_000)).toBe(0);
+    // A train of publishes less than a second apart: a second, two, four, ... up to the longest.
+    const holds = [at(10_300), at(10_900), at(11_700), at(13_000), at(15_500), at(20_000), at(25_100), at(30_200)];
+    expect(holds.slice(0, 4)).toEqual([HOLD_FIRST_MS, 2 * HOLD_FIRST_MS, 4 * HOLD_FIRST_MS, HOLD_MAX_MS]);
+    expect(Math.max(...holds)).toBe(HOLD_MAX_MS);
+    expect(holds[holds.length - 1]).toBe(HOLD_MAX_MS);
+    // Once the writer stops for long enough, the next change goes out at once and the hold is gone.
+    expect(at(60_000)).toBe(0);
+    // A change every two seconds, however long that goes on, is never held.
+    state = { lastPublish: 0, rapid: 0, holdMs: 0 };
+    for (let t = 100_000; t < 120_000; t += 2000) expect(at(t)).toBe(0);
+  });
+
+  test("a change inside the hold is not taken, stays noted, and wakes the loop when the hold is over", async () => {
+    const { loopSleepMs } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.lastBootstrap = Date.now();
+      s.loop.dirty = true;
+      writeFileSync(join(s.paths.work, "a.txt"), "1");
+      await s.round();
+      expect(s.said).toContain("published 1");
+      // Held: a change comes, and the round does nothing about it yet.
+      s.loop.holdUntil = Date.now() + 400;
+      s.loop.dirty = true;
+      writeFileSync(join(s.paths.work, "a.txt"), "2");
+      const asked = total(w);
+      await s.round();
+      expect(total(w)).toBe(asked);
+      expect(s.said.filter((x) => x.startsWith("published"))).toEqual(["published 1"]);
+      expect(s.loop.dirty).toBe(true);
+      // The loop does not go to sleep for as long as an idle primary would.
+      expect(loopSleepMs(s.loop, 1500)).toBeLessThanOrEqual(405);
+      // Once the hold is over the change is published.
+      await Bun.sleep(420);
+      await s.round();
+      expect(s.said).toContain("published 2");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a publish that follows another within moments sets a hold, and a lone change none", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.lastBootstrap = Date.now();
+      const publishOnce = async (body: string): Promise<void> => {
+        writeFileSync(join(s.paths.work, "a.txt"), body);
+        s.loop.dirty = true;
+        s.loop.holdUntil = 0;
+        s.loop.lastBootstrap = Date.now();
+        await s.round();
+      };
+      await publishOnce("1");
+      expect(s.loop.holdUntil ?? 0).toBe(0);
+      await publishOnce("2");
+      expect(s.loop.holdMs).toBe(1000);
+      expect(s.loop.holdUntil).toBeGreaterThan(Date.now() - 50);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a file appended to every 100 ms is published a handful of times in four seconds, not at every round", async () => {
+    const w = await world();
+    try {
+      const s = await space(w, "r1");
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.lastBootstrap = Date.now();
+      writeFileSync(join(s.paths.work, "app.log.txt"), "");
+      s.loop.dirty = true;
+      await s.round();
+      const writer = setInterval(() => appendFileSync(join(s.paths.work, "app.log.txt"), "line " + Date.now() + "\n"), 100);
+      const end = Date.now() + 4000;
+      try {
+        while (Date.now() < end) {
+          s.loop.dirty = true; // what the watcher says at every write
+          s.loop.lastBootstrap = Date.now();
+          await s.round();
+          await Bun.sleep(10);
+        }
+      } finally {
+        clearInterval(writer);
+      }
+      const publishes = s.said.filter((x) => x.startsWith("published")).length;
+      // Round after round it would have been one publish every third of a second or so.
+      expect(publishes).toBeLessThanOrEqual(6);
+      expect(publishes).toBeGreaterThanOrEqual(2);
     } finally {
       finish(w);
     }

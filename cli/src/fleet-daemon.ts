@@ -51,7 +51,7 @@ import {
 import { fleetAgentServiceConfig, fleetAgentServiceRuns, fleetAgentServiceStatus, startFleetAgentTask, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
 import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
-import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
+import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
@@ -154,6 +154,8 @@ export interface AgentSettings {
   pollMs?: number;
   /** How often the primary renews its lease, at most, in milliseconds. */
   heartbeatMs?: number;
+  /** How long the files must have been still before a change is taken, in milliseconds. */
+  settleMs?: number;
 }
 
 /** The settings with what they come to when nothing is set: what an agent runs with. */
@@ -162,6 +164,7 @@ export interface EffectiveSettings {
   cacheMb: number;
   pollMs: number;
   heartbeatMs: number;
+  settleMs: number;
 }
 
 const DEFAULT_POLL_MS = 1500;
@@ -173,6 +176,7 @@ export function effectiveSettings(settings: AgentSettings): EffectiveSettings {
     cacheMb: settings.cacheMb ?? cacheLimitMb({}),
     pollMs: settings.pollMs ?? DEFAULT_POLL_MS,
     heartbeatMs: settings.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
+    settleMs: settings.settleMs ?? SETTLE_QUIET_MS,
   };
 }
 
@@ -182,6 +186,7 @@ const SETTING_ENV = {
   cacheMb: "PRIME_FLEET_CACHE_MB",
   pollMs: "PRIME_FLEET_POLL_MS",
   heartbeatMs: "PRIME_FLEET_HEARTBEAT_MS",
+  settleMs: "PRIME_FLEET_SETTLE_MS",
 } as const satisfies Record<keyof AgentSettings, string>;
 
 const SETTING_KEYS = Object.keys(SETTING_ENV) as Array<keyof AgentSettings>;
@@ -196,11 +201,13 @@ function sanitize(raw: Record<string, unknown>): AgentSettings {
   const cacheMb = positive(raw.cacheMb);
   const pollMs = positive(raw.pollMs);
   const heartbeatMs = positive(raw.heartbeatMs);
+  const settleMs = positive(raw.settleMs);
   return {
     ...(replica ? { replica } : {}),
     ...(cacheMb ? { cacheMb } : {}),
     ...(pollMs ? { pollMs } : {}),
     ...(heartbeatMs ? { heartbeatMs } : {}),
+    ...(settleMs ? { settleMs } : {}),
   };
 }
 
@@ -223,6 +230,7 @@ export function settingsFromEnv(env: Record<string, string | undefined>): AgentS
     cacheMb: env.PRIME_FLEET_CACHE_MB,
     pollMs: env.PRIME_FLEET_POLL_MS,
     heartbeatMs: env.PRIME_FLEET_HEARTBEAT_MS,
+    settleMs: env.PRIME_FLEET_SETTLE_MS,
   });
 }
 
@@ -246,7 +254,7 @@ export function settingsAsked(
   Object.assign(
     merged,
     settingsFromEnv(env),
-    sanitize({ pollMs: options.pollMs, heartbeatMs: options.heartbeatMs }),
+    sanitize({ pollMs: options.pollMs, heartbeatMs: options.heartbeatMs, settleMs: options.settleMs }),
   );
   return merged;
 }
@@ -1156,6 +1164,13 @@ export function cannotWrite(err: unknown): boolean {
  * place has no claim to wait for.
  */
 export function loopSleepMs(loop: SpaceLoop, pollMs: number, now: number = Date.now()): number {
+  const sleepMs = baseSleepMs(loop, pollMs, now);
+  // A primary with a change that is held back wakes when the hold is over, not at the end of a long sleep.
+  if (loop.primary && loop.dirty && (loop.holdUntil ?? 0) > now) return Math.min(sleepMs, Math.max(20, (loop.holdUntil ?? 0) - now + 5));
+  return sleepMs;
+}
+
+function baseSleepMs(loop: SpaceLoop, pollMs: number, now: number): number {
   const idle = loop.primary
     ? { pollMs, idleMs: undefined }
     : replicaSleepMs({ mode: replicaMode(), connected: loop.events.connected, pollMs, ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}) });
@@ -1222,6 +1237,30 @@ export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number =
   return true;
 }
 
+/** A publish that comes within this of the end of the hold it came after is in a rush: the tree is being written without a pause. */
+export const RAPID_PUBLISH_MS = 1000;
+/** The first hold, and the longest, when publishes keep coming in a rush. */
+export const HOLD_FIRST_MS = 1000;
+export const HOLD_MAX_MS = 5000;
+
+/**
+ * How long a change is held back after a publish, so a tree that is written to without a pause (a log
+ * not in .gitignore, a download, a database file) is published a few seconds apart, not once per round.
+ *
+ * A publish that comes within `RAPID_PUBLISH_MS` of the end of the hold the one before it set (so
+ * within a second of the one before, where there was no hold) doubles the hold, from `HOLD_FIRST_MS` (a second) to `HOLD_MAX_MS`; one that comes after a pause takes it away
+ * again. A change on its own is never held: the first publish after a pause, and one in a train that
+ * is slower than a second, go out as soon as the tree is still.
+ */
+export function holdAfterPublish(
+  before: { lastPublish: number; rapid: number; holdMs: number },
+  now: number,
+): { rapid: number; holdMs: number } {
+  const rush = now - before.lastPublish < before.holdMs + RAPID_PUBLISH_MS;
+  const rapid = rush ? Math.min(before.rapid + 1, 16) : 0;
+  return { rapid, holdMs: rapid === 0 ? 0 : Math.min(HOLD_MAX_MS, HOLD_FIRST_MS * 2 ** (rapid - 1)) };
+}
+
 /** One space as the agent keeps it (exported so a round can be driven in a test). */
 export interface SpaceLoop {
   configPath: string;
@@ -1232,6 +1271,12 @@ export interface SpaceLoop {
   paths: MemberPaths;
   dirty: boolean;
   lastPublish: number;
+  /** Publishes in a row that followed the one before within moments (see `holdAfterPublish`). */
+  rapid?: number;
+  /** How long the next change is held back after the last publish, and until when. */
+  holdMs?: number;
+  holdUntil?: number;
+  holdTimer?: ReturnType<typeof setTimeout>;
   lastCheck: number;
   primary: boolean;
   /** When it last took a place in the fleet. */
@@ -1360,13 +1405,15 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     const due = Date.now() - loop.lastCheck > (options.backstopMs ?? 60_000);
     const changed = loop.dirty;
     if (!changed && !due) return;
+    // A tree that has been published in a rush waits out its hold; the change stays noted, and the loop wakes when it is over.
+    if (changed && !due && Date.now() < (loop.holdUntil ?? 0)) return;
     loop.dirty = false;
     loop.lastCheck = Date.now();
 
     // A file that is still being written must not be captured half-written.
     // It only matters when something changed: otherwise there is nothing to
     // capture.
-    if (changed) await settle(paths.work, options.settleMs ?? 250, { gitDir: paths.gitDir, left: paths.nested?.get() ?? [] });
+    if (changed) await settle(paths.work, options.settleMs ?? SETTLE_QUIET_MS, { gitDir: paths.gitDir, left: paths.nested?.get() ?? [] });
     const snapBegan = Date.now();
     const snap = await snapshot({
       work: paths.work,
@@ -1408,7 +1455,12 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       roster: result.roster,
       tree: snap.tree,
     });
-    loop.lastPublish = Date.now();
+    const publishedAt = Date.now();
+    const hold = holdAfterPublish({ lastPublish: loop.lastPublish, rapid: loop.rapid ?? 0, holdMs: loop.holdMs ?? 0 }, publishedAt);
+    loop.rapid = hold.rapid;
+    loop.holdMs = hold.holdMs;
+    loop.holdUntil = hold.holdMs > 0 ? publishedAt + hold.holdMs : 0;
+    loop.lastPublish = publishedAt;
     report("published " + result.seq);
     return;
   }
@@ -1851,7 +1903,8 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   const pollMs = options.pollMs ?? positive(env.PRIME_FLEET_POLL_MS) ?? DEFAULT_POLL_MS;
   // The heartbeat never exceeds this; the fleet's own lease can lower it.
   const heartbeatMs = options.heartbeatMs ?? positive(env.PRIME_FLEET_HEARTBEAT_MS) ?? DEFAULT_HEARTBEAT_MS;
-  options = { ...options, heartbeatMs };
+  const settleMs = options.settleMs ?? positive(env.PRIME_FLEET_SETTLE_MS) ?? SETTLE_QUIET_MS;
+  options = { ...options, heartbeatMs, settleMs };
   const dir = fleetAgentDir(configPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   let stopping = false;
@@ -1894,7 +1947,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       spaces,
       rounds,
       replica: replicaMode(),
-      settings: { ...effectiveSettings(settingsFromEnv(env)), pollMs, heartbeatMs },
+      settings: { ...effectiveSettings(settingsFromEnv(env)), pollMs, heartbeatMs, settleMs },
       ...(lastError ? { last_error: lastError } : {}),
       ...(lastAction ? { last_action: lastAction } : {}),
       ...(timing ? { timing } : {}),
@@ -1990,6 +2043,16 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       // A repository that appeared or went away changes what is left alone.
       loop.paths.nested?.noteChange(eventType, filename);
       loop.dirty = true;
+      // A change held back by a rush of publishes wakes the round once the hold is over, not at every write.
+      const held = (loop.holdUntil ?? 0) - Date.now();
+      if (held > 0) {
+        loop.holdTimer ??= setTimeout(() => {
+          loop.holdTimer = undefined;
+          wake(name);
+        }, held + 5);
+        loop.holdTimer.unref?.();
+        return;
+      }
       wake(name);
     });
     watchers.set(name, watcher);
@@ -2027,6 +2090,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       });
     }
     if (beat) clearTimeout(beat);
+    if (loop.holdTimer) clearTimeout(loop.holdTimer);
     loop.events.stop();
   };
 
