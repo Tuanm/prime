@@ -40,6 +40,7 @@ import { keyFingerprintLong, onlineNow, validFleetId } from "./fleets";
 import { sendUsage, takeFleetR2 } from "./usage";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
+import { forwardCallerSig } from "./call-sig";
 import { ipBlockKey } from "./config";
 import { verifyAccessJwt } from "./access";
 import { sandboxAsset } from "./sandbox-assets";
@@ -360,6 +361,7 @@ async function relayToFleet(
   if (cip && cip !== "unknown") relayHeaders.set("x-client-ip", cip);
   const sid = request.headers.get("mcp-session-id");
   if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) relayHeaders.set("mcp-session-id", sid);
+  forwardCallerSig(request, relayHeaders);
   markAnonymous(relayHeaders, request, cfg, env);
   const relayBody = await readBounded(request, cfg.maxBodyBytes);
   if (relayBody instanceof Response) return relayBody;
@@ -1627,6 +1629,7 @@ export default {
       // The MCP session (issued by the DO on initialize) tells clients apart.
       const sid = request.headers.get("mcp-session-id");
       if (sid && /^[\x21-\x7e]{1,128}$/.test(sid)) headers.set("mcp-session-id", sid);
+      forwardCallerSig(request, headers);
       // Preserve auth params for the DO's own device-auth check.
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
@@ -1686,6 +1689,7 @@ export default {
       if (cip && cip !== "unknown") headers.set("x-client-ip", cip);
       const xdt = request.headers.get("x-device-token");
       if (xdt) headers.set("x-device-token", xdt);
+      forwardCallerSig(request, headers);
       const t = extractToken(request, url, "auth");
       if (t) headers.set("x-auth-token", t);
       markAnonymous(headers, request, cfg, env);

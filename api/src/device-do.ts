@@ -20,6 +20,7 @@ import type { Env } from "./config";
 import { validDeviceId, timingSafeEq, extractToken } from "./config";
 import { HitMeter, meterStorage, sendUsage } from "./usage";
 import type { TunnelRequest, TunnelMessage } from "./protocol";
+import { CALL_RAW_ONLY, REPLY_SIG_HEADER, callerSigOf, decodeBody, replySigOf } from "./call-sig";
 
 // Per-device token lookup (parsed once per DO instance).
 function perDeviceToken(env: Env, deviceId: string): string | undefined {
@@ -91,15 +92,22 @@ export class DeviceDO extends DurableObject<Env> {
     this.perDeviceToken = null;
     // Restore a live WebSocket after hibernation wake: class fields are reset
     // when the object is thawed, so re-attach from ctx.getWebSockets().
-    const sockets = this.ctx.getWebSockets();
-    if (sockets.length > 0) {
-      this.ws = sockets[0];
-      const meta = this.ws.deserializeAttachment?.() as
-        | { deviceId?: string; lastSeen?: number; origin?: unknown }
-        | undefined;
+    // During the grace window after a replacement the replaced socket can still be listed, so the current
+    // tunnel is the one accepted last (`acc` in its attachment), not the first listed.
+    type Attachment = { deviceId?: string; lastSeen?: number; origin?: unknown; caps?: unknown[]; acc?: number };
+    let current: { socket: WebSocket; meta: Attachment | undefined } | undefined;
+    for (const socket of this.ctx.getWebSockets()) {
+      const meta = socket.deserializeAttachment?.() as Attachment | undefined;
+      if (!current || (meta?.acc ?? 0) >= (current.meta?.acc ?? 0)) current = { socket, meta };
+    }
+    if (current) {
+      this.ws = current.socket;
+      const meta = current.meta;
       if (meta?.deviceId) this.deviceId = meta.deviceId;
       if (meta?.origin !== undefined) this.tunnelOrigin = meta.origin;
+      if (Array.isArray(meta?.caps)) this.deviceCaps = new Set(meta.caps.filter((c): c is string => typeof c === "string"));
       if (meta?.lastSeen) this.lastSeen = meta.lastSeen;
+      if (meta?.acc) this.acceptedAt = meta.acc;
     }
   }
 
@@ -341,7 +349,9 @@ export class DeviceDO extends DurableObject<Env> {
     let origin: unknown = null;
     try { origin = JSON.parse(request.headers.get("x-tunnel-origin") || "null"); } catch {}
     this.tunnelOrigin = origin;
-    server.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin });
+    this.deviceCaps = new Set(); // a new connection says again what it can do
+    this.acceptedAt = Date.now();
+    server.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin, acc: this.acceptedAt });
     this.traceTunnel(server, "connected");
 
     // App-layer register ack (client expects {type:"registered"}).
@@ -376,7 +386,7 @@ export class DeviceDO extends DurableObject<Env> {
     if (refresh) this.ctx.waitUntil(refresh);
     try {
       // Rewriting the attachment must not drop the tunnel's origin.
-      ws.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin: this.tunnelOrigin });
+      ws.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin: this.tunnelOrigin, caps: [...this.deviceCaps], acc: this.acceptedAt });
     } catch {}
     this.scheduleKeepaliveCheck();
 
@@ -396,7 +406,7 @@ export class DeviceDO extends DurableObject<Env> {
     // Any well-formed frame proves liveness (HTTP/2-tunnel safe).
     this.lastSeen = Date.now();
 
-    if ("id" in msg && typeof msg.id === "string" && ("response" in msg || "result" in msg || "error" in msg)) {
+    if ("id" in msg && typeof msg.id === "string" && ("response" in msg || "responseText" in msg || "result" in msg || "error" in msg)) {
       // Anti cross-device response: the pending id must belong to THIS device
       // (it always does - the DO owns one device - but verify the entry).
       this.resolveFromDevice(msg.id, msg as TunnelMessage);
@@ -423,6 +433,10 @@ export class DeviceDO extends DurableObject<Env> {
         } catch {}
         return;
       }
+      this.deviceCaps = capabilitiesOf((msg as { capabilities?: unknown }).capabilities);
+      try {
+        ws.serializeAttachment({ deviceId: this.deviceId, lastSeen: this.lastSeen, origin: this.tunnelOrigin, caps: [...this.deviceCaps], acc: this.acceptedAt });
+      } catch {}
       try {
         ws.send(JSON.stringify({ type: "registered", deviceId: this.deviceId }));
       } catch {}
@@ -500,6 +514,9 @@ export class DeviceDO extends DurableObject<Env> {
 
   /** Where the current tunnel came from (IP, geo, UA): kept with the socket. */
   private tunnelOrigin: unknown = null;
+  /** What the device said it can do in its register frame (kept with the socket, so a woken object still knows). */
+  private deviceCaps = new Set<string>();
+  private acceptedAt = 0; // when the current tunnel was accepted
   private issuedSessions = new WeakMap<Request, string>();
   private sessionNames = new Map<string, string>();
 
@@ -641,13 +658,14 @@ export class DeviceDO extends DurableObject<Env> {
       return Response.json({ error: "payload too large" }, { status: 413 });
     }
     let raw: string;
+    let exact: string | null;
     try {
-      raw = await request.text();
+      const bytes = await request.arrayBuffer();
+      // the cap is in bytes, as at the entry (a multi-byte body is not shorter for being fewer characters)
+      if (bytes.byteLength > this.maxBodyBytes) return Response.json({ error: "payload too large" }, { status: 413 });
+      ({ text: raw, exact } = decodeBody(bytes));
     } catch {
       return Response.json({ error: "invalid body" }, { status: 400 });
-    }
-    if (raw.length > this.maxBodyBytes) {
-      return Response.json({ error: "payload too large" }, { status: 413 });
     }
     let body: unknown;
     try {
@@ -665,12 +683,9 @@ export class DeviceDO extends DurableObject<Env> {
       request.headers.get("x-device-token") || new URL(request.url).searchParams.get("token") || undefined;
 
     const id = crypto.randomUUID();
-    const tunnelReq: TunnelRequest = {
-      id,
-      request: body as TunnelRequest["request"],
-      ...(relayToken && { token: relayToken }),
-      client: await this.clientTag(request, body),
-    };
+    const tunnelReq = this.callFrame(id, body, relayToken, await this.clientTag(request, body), request, exact);
+    const frame = JSON.stringify(tunnelReq);
+    if (!frameFits(frame)) return frameTooLarge();
 
     return new Promise<Response>((resolve) => {
       const timer = setTimeout(() => this.expirePending(id), this.timeoutMs);
@@ -684,7 +699,7 @@ export class DeviceDO extends DurableObject<Env> {
           resolve(Response.json({ error: "device offline" }, { status: 503 }));
           return;
         }
-        ws.send(JSON.stringify(tunnelReq));
+        ws.send(frame);
       } catch {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -756,13 +771,14 @@ export class DeviceDO extends DurableObject<Env> {
       return Response.json({ error: "payload too large" }, { status: 413 });
     }
     let raw: string;
+    let exact: string | null;
     try {
-      raw = await request.text();
+      const bytes = await request.arrayBuffer();
+      // the cap is in bytes, as at the entry (a multi-byte body is not shorter for being fewer characters)
+      if (bytes.byteLength > this.maxBodyBytes) return Response.json({ error: "payload too large" }, { status: 413 });
+      ({ text: raw, exact } = decodeBody(bytes));
     } catch {
       return Response.json({ error: "invalid body" }, { status: 400 });
-    }
-    if (raw.length > this.maxBodyBytes) {
-      return Response.json({ error: "payload too large" }, { status: 413 });
     }
     let body: unknown;
     try {
@@ -787,18 +803,15 @@ export class DeviceDO extends DurableObject<Env> {
       request.headers.get("x-device-token") || url.searchParams.get("token") || undefined;
 
     const id = crypto.randomUUID();
-    const tunnelReq: TunnelRequest = {
-      id,
-      request: body as TunnelRequest["request"],
-      ...(relayToken && { token: relayToken }),
-      client: await this.clientTag(request, body),
-    };
+    const tunnelReq = this.callFrame(id, body, relayToken, await this.clientTag(request, body), request, exact);
+    const frame = JSON.stringify(tunnelReq);
+    if (!frameFits(frame)) return frameTooLarge();
     const sess = this.sseSessions.get(sessionId)!;
     this.resetSessionIdle(sess);
     const timer = setTimeout(() => this.expirePending(id), this.timeoutMs);
     this.pending.set(id, { kind: "sse", deviceId: this.deviceId, sessionId, clientId, timer });
     try {
-      this.ws.send(JSON.stringify(tunnelReq));
+      this.ws.send(frame);
     } catch {
       clearTimeout(timer);
       this.pending.delete(id);
@@ -806,6 +819,21 @@ export class DeviceDO extends DurableObject<Env> {
     }
     // Accepted: the JSON-RPC response arrives asynchronously over the SSE stream.
     return new Response(null, { status: 202 });
+  }
+
+  // The frame that carries a call to the device. A signed call carries its body as sent (`raw`) and the
+  // signature; a device that says it reads the call from `raw` alone (`call-raw-only`) is not also sent the parsed
+  // copy, which would double the frame and with escapes triple it. Every other call is sent as it always was.
+  private callFrame(id: string, body: unknown, token: string | undefined, client: TunnelRequest["client"], request: Request, exact: string | null): TunnelRequest {
+    const signed = signedCall(request, exact);
+    const rawOnly = signed.raw !== undefined && this.deviceCaps.has(CALL_RAW_ONLY);
+    return {
+      id,
+      ...(!rawOnly && { request: body as NonNullable<TunnelRequest["request"]> }),
+      ...(token && { token }),
+      client,
+      ...signed,
+    };
   }
 
   private expirePending(id: string): void {
@@ -824,7 +852,12 @@ export class DeviceDO extends DurableObject<Env> {
   private pushSseMessage(sess: SseSession, msg: TunnelMessage): boolean {
     const payload = jsonRpcPayload(msg);
     if (payload === null) return true; // notification acknowledged - no frame
-    return this.pushSseFrame(sess, "message", JSON.stringify(payload));
+    // An unknown field line is ignored by an event-stream client: a reply signature rides in one.
+    const sig = replySigOf((msg as { replySig?: unknown }).replySig);
+    // The text the device signed goes out as it is when one line holds it (JSON.stringify makes one line).
+    const text = (msg as { responseText?: unknown }).responseText;
+    const data = typeof text === "string" && !/[\r\n]/.test(text) && ("response" in msg || parses(text)) ? text : JSON.stringify(payload);
+    return this.pushSseFrame(sess, "message", data, sig === undefined ? undefined : REPLY_SIG_HEADER + ": " + sig);
   }
 
   private pushSseError(sess: SseSession, id: unknown, code: number, message: string): boolean {
@@ -832,9 +865,9 @@ export class DeviceDO extends DurableObject<Env> {
     return this.pushSseFrame(sess, "message", JSON.stringify(payload));
   }
 
-  private pushSseFrame(sess: SseSession, event: string, data: string): boolean {
+  private pushSseFrame(sess: SseSession, event: string, data: string, field?: string): boolean {
     if (!sess.controller) return false;
-    const frame = "event: " + event + "\ndata: " + data + "\n\n";
+    const frame = "event: " + event + "\n" + (field ? field + "\n" : "") + "data: " + data + "\n\n";
     try {
       sess.controller.enqueue(new TextEncoder().encode(frame));
       return true;
@@ -916,15 +949,19 @@ function num(raw: string | undefined, def: number): number {
 // Shared: extract the JSON-RPC payload from a tunnel message. Returns null when
 // the message is a notification acknowledgement (bare {} or response:null) -
 // the client expects no response body, so callers end the exchange silently.
+// A device that signs its answer may send only `responseText`, the text it signed,
+// without the parsed `response` beside it (which would double a large answer in the frame).
 function jsonRpcPayload(msg: TunnelMessage): unknown | null {
-  if ("response" in msg && msg.response !== null && msg.response !== undefined) {
+  const text = (msg as { responseText?: unknown }).responseText;
+  const response = "response" in msg ? msg.response : text === undefined || typeof text !== "string" ? undefined : readText(text);
+  if (response !== null && response !== undefined) {
     // Bare {} = notification acknowledged by a legacy device client (it has no
     // response body for notifications). Real tool responses always carry the
     // full JSON-RPC envelope, so a key-less object is unambiguous.
-    if (typeof msg.response === "object" && Object.keys(msg.response as unknown as Record<string, unknown>).length === 0) {
+    if (typeof response === "object" && Object.keys(response as unknown as Record<string, unknown>).length === 0) {
       return null;
     }
-    return msg.response;
+    return response;
   }
   if ("error" in msg && msg.error) {
     return { jsonrpc: "2.0", id: null, error: { code: -32603, message: String(msg.error) } };
@@ -933,8 +970,68 @@ function jsonRpcPayload(msg: TunnelMessage): unknown | null {
   return null;
 }
 
+function parses(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The text a device sent as its answer, parsed; an unreadable one is an error the caller can be told of.
+function readText(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { jsonrpc: "2.0", id: null, error: { code: -32603, message: "the device sent an answer that is not JSON" } };
+  }
+}
+
+// A signed call's answer: the device's signature goes back as a header, and the text it signed
+// is the body byte for byte. Without `responseText` (a device that does not send it) the body is
+// the response serialised, which is what the device serialised to sign it.
 function toJsonRpcResponse(msg: TunnelMessage): Response {
   const payload = jsonRpcPayload(msg);
   if (payload === null) return new Response(null, { status: 204 });
-  return Response.json(payload);
+  const sig = replySigOf((msg as { replySig?: unknown }).replySig);
+  const text = (msg as { responseText?: unknown }).responseText;
+  // text that is the only answer and is not JSON was turned into an error above: send that, not the text
+  if (typeof text === "string" && !("response" in msg) && !parses(text)) return Response.json(payload);
+  if (sig === undefined && typeof text !== "string") return Response.json(payload);
+  const headers = new Headers({ "content-type": "application/json" });
+  if (sig !== undefined) headers.set(REPLY_SIG_HEADER, sig);
+  return new Response(typeof text === "string" ? text : JSON.stringify(payload), { headers });
+}
+
+// The most one tunnel message may be: the platform closes a WebSocket that is sent a larger one
+// (32 MiB for messages a Durable Object or a Worker receives; the device's library has its own).
+// A signed call carries its body twice (raw and the parsed request), and with escapes that is up to
+// three times its size, so a body the entry accepted can still be too big for a frame.
+export const TUNNEL_FRAME_MAX = 32 * 1024 * 1024 - 64 * 1024;
+export function frameFits(frame: string): boolean {
+  // UTF-16 length is at most the byte length and a character is at most 3 bytes
+  if (frame.length * 3 <= TUNNEL_FRAME_MAX) return true;
+  if (frame.length > TUNNEL_FRAME_MAX) return false;
+  return new TextEncoder().encode(frame).byteLength <= TUNNEL_FRAME_MAX;
+}
+function frameTooLarge(): Response {
+  return Response.json(
+    { error: "payload too large", reason: "frame", hint: "a signed call travels twice, as sent and as parsed: send a smaller call or split it" },
+    { status: 413 },
+  );
+}
+
+/** The capabilities a device lists in its register frame: short strings, a few of them. */
+function capabilitiesOf(v: unknown): Set<string> {
+  const out = new Set<string>();
+  if (Array.isArray(v)) for (const c of v.slice(0, 16)) if (typeof c === "string" && c.length <= 64) out.add(c);
+  return out;
+}
+
+/** What a client's signature adds to a tunnel frame: nothing for an unsigned call. */
+function signedCall(request: Request, exact: string | null): { raw?: string; callerSig?: string } {
+  const callerSig = callerSigOf(request.headers);
+  if (callerSig === undefined) return {};
+  return { callerSig, ...(exact !== null && { raw: exact }) };
 }
