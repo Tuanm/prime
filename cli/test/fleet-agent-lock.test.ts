@@ -6,7 +6,7 @@ import { acquireAgentLock, agentLockPath, isFleetAgentProcess, probeFor, procPro
 import { exePath } from "../src/code-mcp-host";
 import { commandRuns, runsProgram } from "../src/fleet-paths";
 import { bindServiceStatus, fleetAgentServiceStatus, programNamed } from "../src/fleet-service";
-import { launchdAnswered } from "../src/service";
+import { launchdAnswered, systemdQuote } from "../src/service";
 import {
   SettingsPendingError,
   agentCommand,
@@ -829,7 +829,7 @@ describe("switching the replica mode of a running agent", () => {
     const spaced = join(root, "John Doe", "prime");
     mkdirp(join(root, "John Doe"));
     writeFileSync(spaced, "");
-    expect(programNamed('ExecStart="' + spaced + '" "__fleet-agent" "--config" "/c"', spaced)).toBe(true);
+    expect(programNamed("ExecStart=" + systemdQuote(spaced) + ' "__fleet-agent" "--config" "/c"', spaced)).toBe(true);
     expect(programNamed('ExecStart="/Users/John" "Doe/prime" "__fleet-agent"', spaced)).toBe(false);
     const plist = "<plist><dict><key>ProgramArguments</key><array><string>" + spaced + "</string><string>__fleet-agent</string></array></dict></plist>";
     expect(programNamed(plist, spaced)).toBe(true);
