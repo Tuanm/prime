@@ -68,10 +68,19 @@ export interface MemberPaths {
  *
  */
 export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
-  if (existsSync(keyFile)) {
-    const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
-    if (raw && typeof raw.publicKey === "string" && typeof raw.privateKey === "string") return raw;
-  }
+  return readKeyPair(keyFile) ?? withKeyFileLock(keyFile, () => loadOrCreateKeyPairLocked(keyFile));
+}
+
+function readKeyPair(keyFile: string): MemberKeyPair | undefined {
+  if (!existsSync(keyFile)) return undefined;
+  const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
+  return raw && typeof raw.publicKey === "string" && typeof raw.privateKey === "string" ? raw : undefined;
+}
+
+/** For a caller that holds the key file's lock: the key pair, made if it is not there (checked again, since another process may have made it while this one waited). */
+function loadOrCreateKeyPairLocked(keyFile: string): MemberKeyPair {
+  const found = readKeyPair(keyFile);
+  if (found) return found;
   const pair = generateMemberKeyPair();
   mkdirSync(join(keyFile, ".."), { recursive: true });
   writeFileAtomic(keyFile, JSON.stringify(pair, null, 2), 0o600);
@@ -86,7 +95,7 @@ export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
  */
 export function rotateKeyPair(keyFile: string): MemberKeyPair {
   return withKeyFileLock(keyFile, () => {
-    const current = loadOrCreateKeyPair(keyFile);
+    const current = loadOrCreateKeyPairLocked(keyFile);
     const previous = current.previous ?? { publicKey: current.publicKey, privateKey: current.privateKey };
     const pair = generateMemberKeyPair();
     // The signing key is the member's own, not the pair's: the roster names it, and a rotation of the pair does not change it.
@@ -122,7 +131,7 @@ export function loadOrCreateSignKey(keyFile: string): MemberSignKey {
     // Another process may have made it while this one waited for the lock.
     const again = have();
     if (again) return again;
-    const pair = loadOrCreateKeyPair(keyFile);
+    const pair = loadOrCreateKeyPairLocked(keyFile);
     const { publicKey, privateKeyPem } = generateOwnerKey();
     const sign: MemberSignKey = { publicKey, privateKey: privateKeyPem };
     writeFileAtomic(keyFile, JSON.stringify({ ...pair, sign }, null, 2), 0o600);

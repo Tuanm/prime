@@ -66,7 +66,9 @@ export class RosterRefusedError extends Error {
  * that follows it, do not each ask. Keyed by gateway, device and fleet. `forgetRosterAnswers` empties it.
  */
 const ROSTER_TTL_MS = 5_000;
-const rosterAnswers = new Map<string, { at: number; chain: Promise<{ mode: "open" | "signed"; entries: unknown[] }> }>();
+/** An answer that there is no signed roster is kept for minutes, not seconds: a fleet that has none (all of them, before the operator signs one) would be asked on every publish and every pull for nothing. */
+const ROSTER_OPEN_TTL_MS = 5 * 60_000;
+const rosterAnswers = new Map<string, { at: number; open?: boolean; chain: Promise<{ mode: "open" | "signed"; entries: unknown[] }> }>();
 export function forgetRosterAnswers(): void {
   rosterAnswers.clear();
 }
@@ -380,6 +382,22 @@ export class FleetTrust {
     return before !== undefined ? { replaced: before } : {};
   }
 
+  /**
+   * Forget the pinned owner key and the roster head seen under it: for a pin made before the fleet's roster was signed (which would make this
+   * member refuse a roster that is still open) or for a key the operator did not mean. Returns what was pinned. After it the member
+   * takes the first signed chain it sees on trust again, so it is the operator's command, and says so.
+   */
+  static unpinOwner(keyFile: string): string | undefined {
+    const trust = FleetTrust.beside(keyFile);
+    const before = trust.ownerFp;
+    trust.ownerFp = undefined;
+    trust.rosterHead = undefined;
+    trust.ownerSetHere = true;
+    trust.dirty = true;
+    trust.save();
+    return before;
+  }
+
   /** Pin this owner key. A roster head that was seen under another owner key is of no use under this one, and is dropped. */
   setOwner(fingerprint: string): void {
     const fp = normalizeFingerprint(fingerprint);
@@ -492,17 +510,24 @@ export class FleetTrust {
   async verifiedRoster(creds: FleetCredentials, fleet: string): Promise<VerifiedRoster | null> {
     const cacheKey = creds.gateway + "\n" + creds.deviceId + "\n" + fleet;
     let cached = rosterAnswers.get(cacheKey);
-    if (!cached || Date.now() - cached.at > ROSTER_TTL_MS) {
+    if (!cached || Date.now() - cached.at > (cached.open === true ? ROSTER_OPEN_TTL_MS : ROSTER_TTL_MS)) {
       const chain = fetchRosterChain(creds, fleet);
-      cached = { at: Date.now(), chain };
-      rosterAnswers.set(cacheKey, cached);
-      chain.catch(() => rosterAnswers.delete(cacheKey));
+      const entry: { at: number; open?: boolean; chain: typeof chain } = { at: Date.now(), chain };
+      cached = entry;
+      rosterAnswers.set(cacheKey, entry);
+      chain.then(
+        (c) => {
+          entry.open = c.mode !== "signed" || c.entries.length === 0;
+        },
+        () => rosterAnswers.delete(cacheKey),
+      );
     }
     const { mode, entries } = await cached.chain;
     if (mode !== "signed" || entries.length === 0) {
       if (this.ownerFp !== undefined || this.rosterHead !== undefined) {
         throw new RosterRefusedError(
-          "this member pinned the owner key " + (this.ownerFp ?? "") + " (or saw a signed roster), and the gateway now says the roster is not signed. Only the operator can take a roster out of signed mode, and no gateway can say it for them",
+          "this member pinned the owner key " + (this.ownerFp ?? "") + " (or saw a signed roster), and the gateway now says the roster is not signed. Only the operator can take a roster out of signed mode, and no gateway can say it for them. " +
+            (this.rosterHead === undefined ? "If the operator has not run 'prime fleets roster init' yet, the pin was made too early: 'prime fleets trust pin <fleet> --space <name> --clear' takes it back, and the pin is made again once the roster is signed" : "This member has seen the signed roster before, so this is a gateway that went back"),
         );
       }
       return null;

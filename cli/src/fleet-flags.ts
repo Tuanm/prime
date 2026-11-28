@@ -18,6 +18,7 @@ const OWNER_KEY_FLAG = flag("owner-key", "string", "The file holding the fleet's
 const FLEET_ROSTER_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
   OWNER_KEY_FLAG,
+  flag("clear", "boolean", "With `trust pin`: forget the pinned owner key (a pin made before the roster was signed)"),
   flag("owner", "string", "The fingerprint of the owner key to pin", { placeholder: "<fingerprint>" }),
   flag("yes", "boolean", "Sign and send; without it `roster init` only shows what it would do"),
   flag("expect", "string", "With --yes: the digest `roster init` printed for the rows you compared", { placeholder: "<digest>" }),
