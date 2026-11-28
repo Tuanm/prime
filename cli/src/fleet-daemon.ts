@@ -55,7 +55,7 @@ import { IgnoreFilter } from "./fleet-ignore.ts";
 import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
-import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
+import { fleetKeyFile, fleetStateDir, hasUnwrittenPosition, readFleetState, recordedPosition, recordPublished, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
 export interface FleetAgentState {
   pid: number;
@@ -1329,12 +1329,6 @@ export interface SpaceLoop {
   events: FleetEvents;
   /** Rounds in a row that failed; the agent waits longer after each. */
   failures?: number;
-  /**
-   * What a publish that went through said of this member's position, when the state file could not be written (its lock was
-   * busy). The snapshot is the fleet's head and this member's own: the next round starts from it and writes it down, and does
-   * not take its own snapshot for another member's and write it over what was changed since.
-   */
-  unrecorded?: Partial<FleetMemberState>;
   /** A replica should try to become the primary once `claimAt` has passed. */
   claim: boolean;
   /** What the fleet said the last time the member asked for its place. */
@@ -1378,32 +1372,25 @@ function nestedOpt(paths: MemberPaths): { nested?: NestedRepoCache } {
 }
 
 /**
- * The state of the member as it is, with what a publish said and could not write down. It is written now if it can be;
- * if not it is what the round goes on from all the same: the member published that snapshot, and it must not be pulled
- * over what has been changed since as if another member had.
+ * The state of the member as it is, with what a publish said and could not write down (see `recordPublished`): it is written
+ * now if it can be; if not it is what the round goes on from all the same. The member published that snapshot, and it must
+ * not be pulled over what has been changed since as if another member had.
  */
-function settleUnrecorded(loop: SpaceLoop, state: FleetMemberState): FleetMemberState {
-  const pending = loop.unrecorded;
-  if (!pending) return state;
-  // Written down by somebody else meanwhile (or by a later publish): nothing is left to say.
-  if ((state.seq ?? 0) >= (pending.seq ?? 0)) {
-    loop.unrecorded = undefined;
-    return state;
-  }
-  const settled = { ...state, ...pending };
+function settlePublished(loop: SpaceLoop): FleetMemberState {
+  const state = readFleetState(loop.configPath, loop.fleet, loop.name);
+  if (!hasUnwrittenPosition(loop.configPath, loop.fleet, loop.name)) return state;
   try {
-    writeFleetState(loop.configPath, loop.fleet, loop.name, settled);
-    loop.unrecorded = undefined;
+    writeFleetState(loop.configPath, loop.fleet, loop.name, state);
   } catch {
     // Still busy: it is the next round's to write.
   }
-  return settled;
+  return state;
 }
 
 /** One round for one space: take a place, then publish or pull. */
 export async function round(loop: SpaceLoop, options: FleetAgentOptions, report: (what: string) => void): Promise<void> {
   const { creds, fleet, paths } = loop;
-  const state = settleUnrecorded(loop, readFleetState(loop.configPath, fleet, loop.name));
+  const state = settlePublished(loop);
 
   // A space that is not running must not hold the fleet. If it did, the
   // lease would keep a primary that nobody can reach, and no other member
@@ -1533,19 +1520,24 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       roster: result.roster,
       tree: snap.tree,
     };
-    try {
-      writeFleetState(loop.configPath, fleet, loop.name, { ...state, ...published });
-    } catch (err) {
-      // The snapshot is the fleet's head now: that is remembered, and written down by the next round (see `settleUnrecorded`).
-      loop.unrecorded = published;
-      throw err;
-    }
     const publishedAt = Date.now();
     const hold = holdAfterPublish({ lastPublish: loop.lastPublish, rapid: loop.rapid ?? 0, holdMs: loop.holdMs ?? 0 }, publishedAt);
     loop.rapid = hold.rapid;
     loop.holdMs = hold.holdMs;
     loop.holdUntil = hold.holdMs > 0 ? publishedAt + hold.holdMs : 0;
     loop.lastPublish = publishedAt;
+    try {
+      writeFleetState(loop.configPath, fleet, loop.name, { ...state, ...published });
+    } catch (err) {
+      // The snapshot is the fleet's head now, and this member's own: that is kept where the state is read from, and written
+      // into the state file by the next round (see `settlePublished`).
+      try {
+        recordPublished(loop.configPath, fleet, loop.name, published);
+      } catch {
+        // Nothing more can be done about it: the error that is raised is the one that matters.
+      }
+      throw err;
+    }
     report("published " + result.seq);
     return;
   }
