@@ -532,6 +532,7 @@ USAGE
   prime fleets remove <fleet-id> --member <id> [--key-change]  Remove a member (or decline its request for a new key)
   prime fleets leave <fleet-id>                  Leave the fleet
   prime fleets revoke <fleet-id>                 Invalidate every outstanding invite
+  prime fleets set <fleet-id> --lease <time>      How long a place in the fleet lasts (30s to 180s; "default" for the gateway's)
   prime fleets delete <fleet-id>                  Remove the fleet and everything in it
   prime fleets sync <fleet-id> --space <name>     One round: publish if primary; if replica, fetch and apply what is missing
   prime fleets sync ... --watch [--interval <s>]  Keep going, so the space stays in step on its own
@@ -756,7 +757,7 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id> [--key <fingerprint>]";
     if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --member <id> [--key-change]";
     if (sub === "rotate-key") return "Usage: prime fleets rotate-key <fleet-id> --space <name>";
-    return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|rotate-key|status> [args]";
+    return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|rotate-key|set|status> [args]";
   }
   if (topic === "devices") {
     if (sub === "connect") return "Usage: prime devices connect <device-id> [--token <t>] [--gateway <url>]";

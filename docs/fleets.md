@@ -71,6 +71,14 @@ fleet without one for too long to be a failover. **An agent that is not yet a bu
 renews every fifteen seconds** (at most), so a longer lease saves its cost only once members are on that build.
 A paused or quiet fleet costs nothing either way.
 
+**A member of this build follows the lease.** The length of the lease is the fleet's, not the agent's: every member takes it from what the fleet says - the hello
+of its socket (each time the socket opens), a `lease` frame when the operator or the owner changes it, and the answer
+to every ask for a place - and the newest word counts. The primary renews at a third of it, up to a minute (the
+longest lease the gateway allows, 180 seconds, is renewed every 60), so that a longer lease costs fewer renewals; a
+replica without a socket looks at the same pace. `PRIME_FLEET_HEARTBEAT_MS` can only lower that, and not below 15 seconds while the member's socket is up. The owner or the operator sets
+it with `prime fleets set <fleet-id> --lease 90s` (`2m`, or `default` for the gateway's own; the gateway holds it between 30
+seconds and 3 minutes and says so when a value is outside).
+
 **What each member can do** is said in its bootstrap (`caps`, a short list of lowercase names, sorted and without
 repeats), kept in the roster and written only when it changes, handed to the primary with the members' keys, and
 answered as `fleetCaps` (what every member can do) by `/role`. `fleetCaps` is advisory: it is what the members *say*, and the gateway does not check it, so it may only choose between formats
@@ -578,7 +586,7 @@ prime fleets agent status       # rounds, the last thing it did, and whether it 
 The lease and the heartbeat are two numbers that have to agree. The heartbeat is
 a third of the lease the fleet reports, a renewal that is lost is tried again after two
 seconds, and one the gateway refused after the time it named (never more than a third of the
-lease later), so more than one can fail before the place is gone - and a fleet keeps
+lease later), and a request for the place is given up after a sixth of the lease (ten seconds at most), counting each interval from the start of the one before, so more than one can fail before the place is gone - and a fleet keeps
 answering its clients meanwhile. The beat does not wait for the rounds: it renews even when
 the rounds are failing.
 
@@ -747,12 +755,12 @@ says; it now means twenty dollars.
 |---|---|
 | members per fleet | 32 |
 | invite lifetime | ten minutes by default, one hour at most |
-| lease | forty-five seconds, renewed every fifteen (two storage rows a renewal) |
+| lease | forty-five seconds unless the fleet has its own (`prime fleets set <fleet-id> --lease 90s`), renewed every third of it (two storage rows a renewal) |
 | snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change; one upload is at most 32 MiB, whole snapshot or change pack (the Worker holds a body about three times over while it hashes and stores it, in 128 MB; the member is told the limit and says so before it uploads anything, and the gateway answers 413 with the size too). A work tree whose whole tree is bigger than that stops the fleet at its next whole tree - every 32nd snapshot, and whenever the members change - and nothing more is published until the tree is smaller, so keep what is not the work's out of it with `.gitignore`; the members keep what they have |
 | snapshots kept | the last 64 |
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
-| `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (15000 ms; the fleet's own lease can lower it); saved like the others |
+| `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (60000 ms, a third of the longest lease; a third of the fleet's own lease sets the pace under that, and the variable can only lower it, to 15 s at the least while the socket is up); saved like the others |
 | `PRIME_FLEET_SETTLE_MS` | how long the files must have been still before the primary takes a change (50 ms; `250` is what it was before); saved like the others |
 | asks from one address, without a device the gateway knows | 30 invite-code checks (made when a device is asked for with a fleet and a code) and 60 requests naming an unknown device a minute for each address (`FLEET_INVITE_RATE_MAX`, `FLEET_UNKNOWN_RATE_MAX`; 0 turns one off); beyond that the gateway answers 429 with `Retry-After`, before any fleet object is woken. Kept in the isolate and, with the `[[ratelimits]]` bindings, across the location. A gateway with no registered device is open and every id is unknown there, so the unknown-device count does not apply to it. |
 | a request body on a fleet route | 64 KB (`FLEET_BODY_MAX_BYTES`), 4 KB for the body that asks for a device with a code; the snapshot and change-pack uploads have their own limit above. The gateway answers 413 |

@@ -53,7 +53,7 @@ import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { IgnoreFilter } from "./fleet-ignore.ts";
 import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
-import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, hasUnwrittenPosition, readFleetState, recordedPosition, recordPublished, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
@@ -169,7 +169,32 @@ export interface EffectiveSettings {
 }
 
 const DEFAULT_POLL_MS = 1500;
-const DEFAULT_HEARTBEAT_MS = 15_000;
+/**
+ * The most a primary waits between renewals when nothing is set: a third of the longest lease the gateway allows
+ * (180 s), so that the lease the fleet reports is what sets the pace (a third of it) at any length. It was 15 s,
+ * a third of the default lease, which made a fleet with a longer lease renew more often than it needed to.
+ */
+const DEFAULT_HEARTBEAT_MS = 60_000;
+
+/** The shortest and longest lease this agent believes, whatever it is told (the gateway keeps 30 to 180 s). */
+const LEASE_BELIEVED_MIN_MS = 1_000;
+const LEASE_BELIEVED_MAX_MS = 600_000;
+
+/** A lease the fleet reported, or undefined if it is not one worth building a pace on. */
+export function acceptedLeaseMs(told: unknown): number | undefined {
+  return typeof told === "number" && Number.isFinite(told) && told > 0 ? Math.min(LEASE_BELIEVED_MAX_MS, Math.max(LEASE_BELIEVED_MIN_MS, Math.round(told))) : undefined;
+}
+
+/**
+ * Take the lease the fleet told (in a hello, a lease frame or the answer to a place): the newest word is the one that
+ * counts, because the operator may change it at any time. A change sets the heartbeat's timer again.
+ */
+export function adoptLease(loop: { leaseMs?: number; rebeat?: () => void }, told: unknown): void {
+  const lease = acceptedLeaseMs(told);
+  if (lease === undefined || lease === loop.leaseMs) return;
+  loop.leaseMs = lease;
+  loop.rebeat?.();
+}
 
 export function effectiveSettings(settings: AgentSettings): EffectiveSettings {
   return {
@@ -1319,6 +1344,8 @@ export interface SpaceLoop {
   lastBootstrap: number;
   /** How long the fleet says a place lasts, from the last bootstrap. */
   leaseMs?: number;
+  /** Sets the heartbeat's timer again, for a lease that changed (set by the agent that runs the loop). */
+  rebeat?: () => void;
   /** A placement in flight, so the timer and the round cannot both ask. */
   placing?: boolean;
   timing: RoundTiming;
@@ -1453,7 +1480,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       primary: loop.primary,
       now: Date.now(),
       lastBootstrap: loop.lastBootstrap,
-      heartbeatMs: heartbeatCeiling(loop, options.heartbeatMs!),
+      heartbeatMs: heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs!)),
       // A replica is only told to look when there is a reason: it asks for the
       // place when the lease is freed or when the first look said it could have it.
       wanted: loop.claim && Date.now() >= loop.claimAt,
@@ -1709,7 +1736,7 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     // was renamed - or an identity another space took over - reads correctly
     // in the operator's list.
     // A key other than the one the fleet holds is taken only on the old key's proof, or the operator's say-so.
-    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(keyProof ? { keyProof } : {}), ...(label ? { label } : {}), seals: true }),
+    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(keyProof ? { keyProof } : {}), ...(label ? { label } : {}), seals: true, ...capsBody() }),
     // Asking for the place is how the lease is renewed: a request that hangs for
     // a minute would outlast the lease, so it is cut short (and asked again).
     signal: AbortSignal.timeout(Math.min(creds.timeoutMs ?? PLACE_TIMEOUT_MS, PLACE_TIMEOUT_MS)),
@@ -1771,8 +1798,10 @@ export const PLACE_TIMEOUT_MS = 10_000;
 export const BEAT_RETRY_MS = 2_000;
 
 /** When the next beat is due: an interval after one that went through, soon after one that did not. */
-export function nextBeatDelayMs(ok: boolean, intervalMs: number, retryMs: number = BEAT_RETRY_MS): number {
-  return ok ? intervalMs : Math.min(intervalMs, retryMs);
+export function nextBeatDelayMs(ok: boolean, intervalMs: number, retryMs: number = BEAT_RETRY_MS, tookMs = 0): number {
+  // The interval counts from the start of the beat that came before: a renewal that took five seconds is followed by one
+  // five seconds sooner, so that the place is renewed at the pace the lease needs however long a renewal takes.
+  return ok ? Math.max(0, intervalMs - tookMs) : Math.min(intervalMs, retryMs);
 }
 
 /**
@@ -1795,6 +1824,15 @@ export function renewalRetryMs(err: unknown, leaseMs: number = 45_000): number {
  */
 export function heartbeatIntervalMs(leaseMs: number | undefined, ceilingMs: number): number {
   return Math.max(500, Math.min(ceilingMs, Math.floor((leaseMs ?? 45_000) / 3)));
+}
+
+/**
+ * How long a request for the place may take before it is given up: a sixth of the lease, and never more than ten seconds
+ * (the request takes one beat of the three the lease holds for, and the retry that follows another: two that hang in a row
+ * must not use up the lease, even at its shortest, 30 s). Asked of the lease the fleet reported, or the default one.
+ */
+export function placeTimeoutMs(leaseMs: number | undefined): number {
+  return Math.max(500, Math.min(10_000, Math.floor((leaseMs ?? 45_000) / 6)));
 }
 
 function heartbeatFor(loop: SpaceLoop, ceilingMs: number): number {
@@ -1833,6 +1871,9 @@ async function dropPreviousWhenSpent(loop: SpaceLoop, previousPublicKey: string)
  * arriving.
  */
 async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
+  // Every request of the renewal is cut at `placeTimeoutMs`: one that hangs holds the place's own ask (see `placing`) and
+  // would hold the next beat behind it for the default two minutes.
+  const creds = { ...loop.creds, timeoutMs: Math.min(loop.creds.timeoutMs ?? Infinity, placeTimeoutMs(loop.leaseMs)) };
   // Asked while another ask is in flight (the heartbeat and the round meet): not
   // a "no" from the fleet, and not to be taken for one.
   if (loop.placing) return { primary: loop.primary, busy: true };
@@ -1846,12 +1887,12 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     let asked = false;
     if (before) {
       const fetchedAt = Date.now();
-      const role = await fetchRole(loop.creds, loop.fleet).catch(() => undefined);
+      const role = await fetchRole(creds, loop.fleet).catch(() => undefined);
       asked = role?.keyProofKey !== undefined;
       // On the gateway's clock when it says what it is (a proof is good for ten minutes), else on this machine's.
       if (role?.keyProofKey) proof = proveKeyChange(before.privateKey, role.keyProofKey, keys.publicKey, loop.fleet, loop.creds.deviceId, role.serverTimeMs !== undefined ? role.serverTimeMs + (Date.now() - fetchedAt) : Date.now());
     }
-    const placed = await bootstrapHere(loop.creds, loop.fleet, keys.publicKey, loop.name, proof).catch((err: unknown) => {
+    const placed = await bootstrapHere(creds, loop.fleet, keys.publicKey, loop.name, proof).catch((err: unknown) => {
       // The request did not get an answer: what an earlier refusal asked for is history.
       loop.refusedForMs = undefined;
       throw err;
@@ -1878,7 +1919,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     loop.primary = placed.primary;
     // What the fleet says a place lasts. An agent that renews at its own pace
     // against a lease it never asked about is how a live primary loses it.
-    if (placed.ttlMs) loop.leaseMs = placed.ttlMs;
+    adoptLease(loop, placed.ttlMs);
     // The answer says where the head is: that is how a replica without a socket
     // learns that there is something to fetch, without asking again.
     if (placed.head && !placed.primary) {
@@ -2126,16 +2167,26 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
     // lapse while it works, and another member would take the fleet.
     let beat: ReturnType<typeof setTimeout> | undefined;
     let beatOk = true;
-    const beatTick = (): void => {
+    let beating = false;
+    const beatTick = (startedAt?: number): void => {
+      beating = false;
       const interval = heartbeatFor(loop, heartbeatCeiling(loop, options.heartbeatMs ?? heartbeatMs));
       beat = setTimeout(() => {
+        beating = true;
+        const began = Date.now();
         void heartbeat(loop, () => wake(name, true))
           .then((ok) => void (beatOk = ok))
           .catch(() => void (beatOk = false))
-          .finally(beatTick);
-      }, nextBeatDelayMs(beatOk, interval, loop.beatRetryMs));
+          .finally(() => beatTick(began));
+      }, nextBeatDelayMs(beatOk, interval, loop.beatRetryMs, startedAt === undefined ? 0 : Date.now() - startedAt));
     };
     beatTick();
+    // A lease that changed sets the pace again at once, unless a beat is on its way (it sets the next when it ends).
+    loop.rebeat = (): void => {
+      if (stopping || beating) return;
+      if (beat) clearTimeout(beat);
+      beatTick();
+    };
     loop.events.start();
     const watcher = watchTree(
       work,
@@ -2211,9 +2262,9 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
     switch (event.type) {
       case "hello":
         loop.paused = event.paused;
-        // The lease length is what the heartbeat is derived from; take it if
-        // no place has been taken yet to tell it.
-        if (event.leaseMs > 0 && !loop.leaseMs) loop.leaseMs = event.leaseMs;
+        // The lease length is what the heartbeat is derived from: every hello says it, and it is the newest word
+        // (the operator may have changed it while the socket was down).
+        adoptLease(loop, event.leaseMs);
         // Nobody holds the place: a replica may as well try for it.
         if (event.leaseHolder === null && !loop.primary) claimNow(loop);
         loop.headDirty = true;
@@ -2236,6 +2287,11 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
         }
         loop.headDirty = true;
         wake(loop.name, true);
+        break;
+      case "lease":
+        // The operator or the owner changed how long a place lasts: the pace of the heartbeat follows at once, and a
+        // timer that was set for the old one is set again.
+        adoptLease(loop, event.leaseMs);
         break;
       case "lease-free":
         // Whoever held the place has let go: ask for it - after a wait that

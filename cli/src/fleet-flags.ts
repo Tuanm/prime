@@ -43,6 +43,11 @@ const FLEET_SYNC_FLAGS: FlagSpec[] = [
   flag("force", "boolean", "Publish even when the workspace has not changed"),
 ];
 
+const FLEET_SET_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("lease", "string", "How long a place in the fleet lasts without being renewed: 30s to 180s (90s, 2m, or seconds), or \"default\" for the gateway's own", { placeholder: "<time>" }),
+];
+
 /** `prime fleets agent ...`: the common flags, and `--force` for `uninstall`. */
 const FLEET_AGENT_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
@@ -57,5 +62,6 @@ export function fleetFlagsFor(sub: string | undefined): FlagSpec[] {
   if (sub === "remove") return FLEET_REMOVE_FLAGS;
   if (sub === "sync") return FLEET_SYNC_FLAGS;
   if (sub === "agent") return FLEET_AGENT_FLAGS;
+  if (sub === "set") return FLEET_SET_FLAGS;
   return FLEET_FLAGS;
 }
