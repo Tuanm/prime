@@ -293,6 +293,8 @@ describe("tool namespacing", () => {
 
 interface FakeDevice {
   token: string;
+  /** The code this one replaced (good for a day, but only to repeat a call). */
+  previous?: string;
   online: boolean;
   tools: { name: string; description?: string; inputSchema?: unknown }[];
 }
@@ -305,6 +307,10 @@ const fake = {
   /** Forced status for POST /api/devices/anonymous/rotate (0 = normal). */
   rotateStatus: 0,
   rotated: 0,
+  /** The next rotation is applied but its answer is lost. */
+  loseAnswer: false,
+  operatorToken: "operator-secret",
+  rotateCalls: [] as Array<{ id: string; proposed: string; presented: string; operator: boolean }>,
   calls: [] as string[],
 };
 
@@ -339,14 +345,34 @@ function startFakeGateway() {
           { status: 201 },
         );
       }
-      if (url.pathname === "/api/devices/anonymous/rotate" && request.method === "POST") {
-        const id = request.headers.get("x-prime-device") ?? "";
+      const opRotate = /^\/api\/devices\/anonymous\/([^/]+)\/rotate$/.exec(url.pathname);
+      if ((url.pathname === "/api/devices/anonymous/rotate" || opRotate) && request.method === "POST") {
+        // What the registry decides: only the current code asks, the replaced one may only repeat a call
+        // that is done, the operator needs no code.
+        const operator = opRotate !== null;
+        const id = operator ? decodeURIComponent(opRotate![1]!) : (request.headers.get("x-prime-device") ?? "");
         const device = fake.devices.get(id);
+        const proposed = ((await request.json().catch(() => ({}))) as { proposed?: string }).proposed ?? "";
+        fake.rotateCalls.push({ id, proposed, presented: request.headers.get("x-device-token") ?? "", operator });
         if (fake.rotateStatus) return Response.json({ error: "no" }, { status: fake.rotateStatus, headers: { "retry-after": "90" } });
-        if (!device || request.headers.get("x-device-token") !== device.token) return Response.json({ error: "unauthorized" }, { status: 401 });
+        if (operator && request.headers.get("authorization") !== "Bearer " + fake.operatorToken) return Response.json({ error: "no" }, { status: 403 });
+        if (!device) return Response.json({ error: "unauthorized" }, { status: 401 });
+        const presented = request.headers.get("x-device-token") ?? "";
+        if (!/^[0-9A-Z]{25}$/.test(proposed)) return Response.json({ error: "bad code" }, { status: 400 });
+        const answer = (repeated: boolean) =>
+          Response.json({ deviceId: id, token: proposed, previous_valid_ms: 86_400_000, anonymous: true, ...(repeated ? { repeated: true } : {}) });
+        const isCurrent = presented === device.token;
+        const isBefore = device.previous !== undefined && presented === device.previous;
+        if (proposed === device.token && (operator || isCurrent || isBefore)) return answer(true);
+        if (!operator && !isCurrent) return isBefore ? Response.json({ error: "replaced" }, { status: 409 }) : Response.json({ error: "unauthorized" }, { status: 401 });
         fake.rotated++;
-        device.token = `ROTATED${String(fake.rotated).padStart(18, "0")}`;
-        return Response.json({ deviceId: id, token: device.token, previous_valid_ms: 86_400_000, anonymous: true });
+        device.previous = device.token;
+        device.token = proposed;
+        if (fake.loseAnswer) {
+          fake.loseAnswer = false;
+          return new Response("gateway timeout", { status: 504 }); // applied, and the caller never learns it
+        }
+        return answer(false);
       }
       const m = /^\/device\/([^/]+)$/.exec(url.pathname);
       if (m && request.method === "POST") {
@@ -391,6 +417,8 @@ afterAll(() => {
 beforeEach(() => {
   fake.anonStatus = 0;
   fake.rotateStatus = 0;
+  fake.loseAnswer = false;
+  fake.rotateCalls.length = 0;
 });
 
 function freshConfig(): string {
@@ -630,55 +658,201 @@ describe("prime serve over HTTP", () => {
 // ---- prime devices rotate-code ---------------------------------------------------------------
 
 describe("prime devices rotate-code (fake gateway)", () => {
-  test("a device is given a 25-character code, which is saved for the device and for the spaces exposed as it", async () => {
+  /** A device made through the fake gateway, and its config. */
+  async function made(): Promise<{ config: string; device: string; token: string }> {
     const config = freshConfig();
-    const made = JSON.parse((await cli(["connect", "--gateway", GATEWAY, "--no-start", "--json"], config)).out) as { device: string; token: string };
-    // A space that is published as the device holds its code too.
+    const j = JSON.parse((await cli(["connect", "--gateway", GATEWAY, "--no-start", "--json"], config)).out) as { device: string; token: string };
+    return { config, device: j.device, token: j.token };
+  }
+  const rotate = (config: string, device: string, ...more: string[]) => cli(["devices", "rotate-code", device, "--gateway", GATEWAY, ...more], config);
+
+  test("the code is made here, the gateway is shown the old one, and the new one becomes the device's, and the spaces' exposed as it", async () => {
+    const { config, device, token } = await made();
     const doc = loadConfig(config);
-    doc.spaces.dev = { token: "local", gateway: GATEWAY, gateway_device: made.device, remote_token: made.token } as never;
+    doc.spaces.dev = { token: "local", gateway: GATEWAY, gateway_device: device, remote_token: token } as never;
     doc.spaces.other = { token: "local2", gateway_device: "someone-else", remote_token: "keep-me" } as never;
     saveConfig(config, doc);
 
-    const run = await cli(["devices", "rotate-code", made.device, "--gateway", GATEWAY, "--json"], config);
+    const run = await rotate(config, device, "--json");
     expect(run.code).toBe(0);
-    const out = JSON.parse(run.out) as { rotated: boolean; spaces: string[]; previous_valid_ms: number };
-    expect(out).toMatchObject({ rotated: true, spaces: ["dev"], previous_valid_ms: 86_400_000 });
+    expect(JSON.parse(run.out)).toMatchObject({ rotated: true, repeated: false, saved: true, spaces: ["dev"], previous_valid_ms: 86_400_000 });
     const after = loadConfig(config);
-    expect(after.devices[made.device]!.token).toMatch(/^ROTATED\d{18}$/);
-    expect(after.devices[made.device]!.token).not.toBe(made.token);
-    expect(after.devices[made.device]!.token!.length).toBeGreaterThanOrEqual(25);
-    expect(after.devices[made.device]!.anonymous).toBe(true);
-    expect(after.spaces.dev!.remote_token).toBe(after.devices[made.device]!.token!);
+    const entry = after.devices[device]!;
+    expect(entry.token).toMatch(/^[0-9A-Z]{25}$/);
+    expect(entry.token).not.toBe(token);
+    expect(entry.pending_token).toBeUndefined();
+    expect(entry.anonymous).toBe(true);
+    expect(after.spaces.dev!.remote_token).toBe(entry.token!);
     expect(after.spaces.other!.remote_token).toBe("keep-me");
-    // The new code is the one the gateway holds: a call with it is let in (offline is past the credential).
-    const ping = await cli(["devices", "status", made.device, "--gateway", GATEWAY, "--json"], config);
-    expect(JSON.parse(ping.out)).toMatchObject({ token_configured: true });
-    expect(fake.devices.get(made.device)!.token).toBe(after.devices[made.device]!.token!);
+    // What was sent: the gateway was shown the old code and was told the new one, which it now holds.
+    expect(fake.rotateCalls).toEqual([{ id: device, proposed: entry.token!, presented: token, operator: false }]);
+    expect(fake.devices.get(device)!.token).toBe(entry.token!);
+    expect(fake.devices.get(device)!.previous).toBe(token);
   });
 
   test("the human answer says the old code keeps working and what to restart", async () => {
-    const config = freshConfig();
-    const made = JSON.parse((await cli(["connect", "--gateway", GATEWAY, "--no-start", "--json"], config)).out) as { device: string };
-    const run = await cli(["devices", "rotate-code", made.device, "--gateway", GATEWAY], config);
+    const { config, device } = await made();
+    const run = await rotate(config, device);
     expect(run.code).toBe(0);
     expect(run.out).toContain("new 25-character code");
     expect(run.out).toContain("the old code keeps working for 24 h");
     expect(run.out).toContain("restart it within 24 h");
   });
 
-  test("nothing is saved when the gateway refuses, and a device with no saved code is a usage error", async () => {
+  test("a call whose answer was lost: running it again sends the same code, and the old code's day is not started a second time", async () => {
+    const { config, device, token } = await made();
+    const before = fake.rotated;
+    fake.loseAnswer = true;
+    const first = await rotate(config, device);
+    expect(first.code).not.toBe(0);
+    // The gateway applied it; this machine was not told. Its config holds the proposal, and still the old code.
+    const mid = loadConfig(config).devices[device]!;
+    expect(mid.token).toBe(token);
+    expect(mid.pending_token).toMatch(/^[0-9A-Z]{25}$/);
+    expect(fake.devices.get(device)!.token).toBe(mid.pending_token!);
+    const proposal = mid.pending_token!;
+
+    const again = await rotate(config, device, "--json");
+    expect(again.code).toBe(0);
+    expect(JSON.parse(again.out)).toMatchObject({ rotated: true, repeated: true });
+    // The same code twice; no second code was made, and the gateway still holds the ORIGINAL as the one before.
+    expect(fake.rotateCalls.map((c) => c.proposed)).toEqual([proposal, proposal]);
+    expect(fake.rotated).toBe(before + 1);
+    expect(fake.devices.get(device)!.previous).toBe(token);
+    const after = loadConfig(config).devices[device]!;
+    expect(after.token).toBe(proposal);
+    expect(after.pending_token).toBeUndefined();
+  });
+
+  test("a crash between saving the proposal and the call: the next run sends what was saved", async () => {
+    const { config, device, token } = await made();
+    // What a process that died right after step one leaves behind.
+    const saved = "SAVEDBEFORECRASH000000A".padEnd(25, "Z");
+    const doc = loadConfig(config);
+    doc.devices[device] = { ...doc.devices[device]!, pending_token: saved };
+    saveConfig(config, doc);
+    const run = await rotate(config, device);
+    expect(run.code).toBe(0);
+    expect(fake.rotateCalls).toEqual([{ id: device, proposed: saved, presented: token, operator: false }]);
+    expect(loadConfig(config).devices[device]!.token).toBe(saved);
+  });
+
+  test("a crash after the gateway had applied it but before the config was promoted is finished by the next run", async () => {
+    const { config, device, token } = await made();
+    const proposal = "CRASHAFTERCALL".padEnd(25, "7");
+    const before = fake.rotated;
+    // The gateway holds the proposal; the config holds the old code and the proposal.
+    const g = fake.devices.get(device)!;
+    g.previous = g.token;
+    g.token = proposal;
+    const doc = loadConfig(config);
+    doc.devices[device] = { ...doc.devices[device]!, pending_token: proposal };
+    saveConfig(config, doc);
+    const run = await rotate(config, device, "--json");
+    expect(run.code).toBe(0);
+    expect(JSON.parse(run.out)).toMatchObject({ repeated: true });
+    expect(fake.rotated).toBe(before);
+    expect(loadConfig(config).devices[device]!.token).toBe(proposal);
+    expect(token).not.toBe(proposal);
+  });
+
+  test("the code that was replaced cannot rotate: the thief is refused, and the owner's code is left alone", async () => {
+    const owner = await made();
+    expect((await rotate(owner.config, owner.device)).code).toBe(0);
+    const ownerCode = loadConfig(owner.config).devices[owner.device]!.token!;
+    // Someone who kept the old six-character code (here: the code the device was made with).
+    const thief = freshConfig();
+    const doc = loadConfig(thief);
+    doc.devices[owner.device] = { gateway: GATEWAY, token: owner.token, anonymous: true };
+    saveConfig(thief, doc);
+    const run = await rotate(thief, owner.device);
+    expect(run.code).not.toBe(0);
+    expect(run.err).toContain("replaced");
+    expect(run.err).toContain("--operator");
+    expect(fake.devices.get(owner.device)!.token).toBe(ownerCode);
+    // The proposal stays in the thief's config as pending, and was never the gateway's.
+    expect(loadConfig(thief).devices[owner.device]!.token).toBe(owner.token);
+  });
+
+  test("a config that lost the promotion (an older write put the old code back) finds its way home: the proposal is presented as the code", async () => {
+    const { config, device, token } = await made();
+    const proposal = "LOSTPROMOTION".padEnd(25, "3");
+    const g = fake.devices.get(device)!;
+    g.previous = g.token;
+    g.token = proposal;
+    // The day is over: the old code is not even remembered as the one before.
+    g.previous = undefined;
+    const doc = loadConfig(config);
+    doc.devices[device] = { ...doc.devices[device]!, pending_token: proposal };
+    saveConfig(config, doc);
+    const run = await rotate(config, device);
+    expect(run.code).toBe(0);
+    expect(fake.rotateCalls.map((c) => c.presented)).toEqual([token, proposal]);
+    expect(loadConfig(config).devices[device]!.token).toBe(proposal);
+  });
+
+  test("the operator needs no code of the device, and the config keeps what the command did not touch", async () => {
+    const { config, device, token } = await made();
+    const doc = loadConfig(config);
+    doc.defaults.fleet_operator_token = "operator-secret";
+    doc.defaults.gateway = GATEWAY;
+    saveConfig(config, doc);
+    const run = await cli(["devices", "rotate-code", device, "--operator", "--json"], config);
+    expect(run.code).toBe(0);
+    expect(JSON.parse(run.out)).toMatchObject({ rotated: true, saved: true });
+    expect(fake.rotateCalls[0]).toMatchObject({ id: device, operator: true, presented: "" });
+    const after = loadConfig(config);
+    expect(after.devices[device]!.token).toBe(fake.devices.get(device)!.token);
+    expect(after.devices[device]!.token).not.toBe(token);
+    expect(after.defaults.gateway).toBe(GATEWAY);
+  });
+
+  test("the operator who does not hold the device is shown the code once, and nothing is saved", async () => {
+    const { device } = await made();
     const config = freshConfig();
-    const made = JSON.parse((await cli(["connect", "--gateway", GATEWAY, "--no-start", "--json"], config)).out) as { device: string; token: string };
+    const run = await cli(["devices", "rotate-code", device, "--operator", "--operator-token", "operator-secret", "--gateway", GATEWAY, "--json"], config);
+    expect(run.code).toBe(0);
+    const j = JSON.parse(run.out) as { saved: boolean; token: string };
+    expect(j.saved).toBe(false);
+    expect(j.token).toBe(fake.devices.get(device)!.token);
+    expect(loadConfig(config).devices[device]).toBeUndefined();
+  });
+
+  test("--operator without a credential is a usage error, and a wrong one is refused", async () => {
+    const { config, device, token } = await made();
+    const none = await rotate(config, device, "--operator");
+    expect(none.code).not.toBe(0);
+    expect(none.err).toContain("operator credential");
+    const wrong = await rotate(config, device, "--operator", "--operator-token", "nope");
+    expect(wrong.code).not.toBe(0);
+    expect(wrong.err).toContain("operator");
+    expect(fake.devices.get(device)!.token).toBe(token);
+  });
+
+  test("a change another command made to the config after this one began is not lost", async () => {
+    // updateConfig reads the file again under the lock: a space added after the command's start survives the promotion.
+    const { config, device } = await made();
+    const { updateConfig } = await import("../src/config.ts");
+    updateConfig(config, (c) => {
+      c.spaces.late = { token: "t", gateway_device: device, remote_token: "old" } as never;
+    });
+    expect((await rotate(config, device)).code).toBe(0);
+    const after = loadConfig(config);
+    expect(after.spaces.late!.remote_token).toBe(after.devices[device]!.token!);
+  });
+
+  test("nothing is saved as the device's code when the gateway refuses, and a device with no saved code is a usage error", async () => {
+    const { config, device, token } = await made();
     fake.rotateStatus = 429;
-    const limited = await cli(["devices", "rotate-code", made.device, "--gateway", GATEWAY], config);
+    const limited = await rotate(config, device);
     expect(limited.code).not.toBe(0);
     expect(limited.err).toContain("try again in");
     fake.rotateStatus = 404;
-    const old = await cli(["devices", "rotate-code", made.device, "--gateway", GATEWAY], config);
+    const old = await rotate(config, device);
     expect(old.code).not.toBe(0);
     expect(old.err).toContain("gateway is older");
-    expect(loadConfig(config).devices[made.device]!.token).toBe(made.token);
-    const none = await cli(["devices", "rotate-code", "nobody-here", "--gateway", GATEWAY], config);
+    expect(loadConfig(config).devices[device]!.token).toBe(token);
+    const none = await rotate(config, "nobody-here");
     expect(none.code).not.toBe(0);
     expect(none.err).toContain("no token is saved");
     const missing = await cli(["devices", "rotate-code"], config);

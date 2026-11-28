@@ -1,13 +1,13 @@
 // `prime devices ...` - connect, disconnect, status, list, rotate-code.
 
-import { bool, num } from "./args.ts";
+import { bool, num, str } from "./args.ts";
 import { GatewayClient } from "./client.ts";
 import { type Ctx, overridesFrom, targetFor } from "./context.ts";
-import { saveConfig } from "./config.ts";
+import { saveConfig, updateConfig } from "./config.ts";
 import { UsageError, exitCodeOf } from "./errors.ts";
 import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
-import { formatDuration, rotateAnonymousCode } from "./connect.ts";
-import { assertDeviceId, entryFromOverrides } from "./target.ts";
+import { RotateRefusedError, formatDuration, newDeviceCode, rotateAnonymousCode, type RotatedCode } from "./connect.ts";
+import { DEFAULT_GATEWAY, ENV, assertDeviceId, entryFromOverrides, normalizeGateway } from "./target.ts";
 
 /** Is this error the device answering (as opposed to a transport failure)? */
 function isDeviceAnswer(err: unknown): boolean {
@@ -211,43 +211,123 @@ export async function devicesList(ctx: Ctx): Promise<void> {
  * `prime devices rotate-code <device-id>` - give an anonymous device a new 25-character code.
  *
  * A device made when codes were six characters keeps one that can be guessed online by enough
- * addresses. The gateway makes a new one when the device shows the code it has; the old one goes on
- * working for a day. The new code is saved here (the device's entry, and each space that is exposed
- * as the device); what is already running holds the old code and must be restarted within the day.
+ * addresses. The new code is made HERE and saved as `pending_token` (durably, under the config's lock)
+ * before the gateway is asked, and the gateway is shown the code the device has now. The gateway takes
+ * it as the device's code and keeps the old one for a day. When it confirms, `pending_token` becomes
+ * `token` (and the `remote_token` of each space published as the device). If the call is cut off, or
+ * this process dies between the save and the answer, running the command again sends the SAME code
+ * and the gateway says it is done: no second code is made, and the old one's day is not shortened.
+ *
+ * Only the device's current code may ask. The code it replaced works for the day, but cannot ask:
+ * a machine that finds this out has been left behind, and the operator makes the code again for it
+ * (`--operator`: no code of the device is needed, and a lock on the device does not stop it).
  */
 export async function devicesRotateCode(ctx: Ctx): Promise<void> {
   const positionals = ctx.parsed.positionals.slice(2);
-  if (positionals.length === 0) throw new UsageError("missing <device-id>", "Usage: prime devices rotate-code <device-id> [--gateway <url>]");
+  if (positionals.length === 0) {
+    throw new UsageError("missing <device-id>", "Usage: prime devices rotate-code <device-id> [--operator] [--gateway <url>]");
+  }
   if (positionals.length > 1) throw new UsageError(`unexpected argument "${positionals[1]}"`);
   const deviceId = assertDeviceId(positionals[0]!);
+  const operator = bool(ctx.parsed, "operator");
   const target = targetFor(ctx, deviceId, overridesFrom(ctx.parsed));
-  if (!target.deviceToken) {
-    throw new UsageError(`no token is saved for "${deviceId}"`, "Only a device this machine holds the code of can be given a new one.");
-  }
-  const entry = ctx.config.devices[deviceId];
-  if (entry && entry.anonymous === false) {
-    throw new UsageError(`"${deviceId}" is a registered device, not an anonymous one`, "Only an anonymous device's code can be made again.");
-  }
 
-  const made = await rotateAnonymousCode(target.gateway, deviceId, target.deviceToken, target.gatewayToken);
-
-  // Saved before anything is printed: the new code exists only here from now on.
-  ctx.config.devices[deviceId] = { ...(entry ?? {}), token: made.token };
-  const spaces: string[] = [];
-  for (const [name, space] of Object.entries(ctx.config.spaces)) {
-    if (space.gateway_device === deviceId) {
-      space.remote_token = made.token;
-      spaces.push(name);
+  let operatorToken: string | undefined;
+  if (operator) {
+    // The same rule as the fleet commands: the operator's credential from the environment or the config goes to
+    // this machine's own gateway and to no other; one named on the command line goes where the command goes.
+    const own = normalizeGateway(ctx.config.defaults.gateway || process.env[ENV.gateway] || DEFAULT_GATEWAY);
+    operatorToken =
+      str(ctx.parsed, "operator-token") ??
+      (target.gateway === own ? (process.env[ENV.fleetOperatorToken] ?? ctx.config.defaults.fleet_operator_token) : undefined);
+    if (!operatorToken) {
+      throw new UsageError(
+        "--operator needs the gateway's operator credential",
+        "Pass --operator-token <token>, or set PRIME_FLEET_OPERATOR_TOKEN (the gateway's FLEET_OPERATOR_TOKEN).",
+      );
     }
   }
-  saveConfig(ctx.configPath, ctx.config);
 
-  const grace = made.previousValidMs !== undefined ? formatDuration(made.previousValidMs) : "a day";
+  // 1. The proposal, saved before anything is asked. What is read here is the file as it is now.
+  const first = updateConfig(ctx.configPath, (config) => {
+    const entry = config.devices[deviceId];
+    if (entry && entry.anonymous === false) {
+      throw new UsageError(`"${deviceId}" is a registered device, not an anonymous one`, "Only an anonymous device's code can be made again.");
+    }
+    const held = Object.values(config.spaces).find((s) => s.gateway_device === deviceId);
+    const current = target.deviceToken ?? entry?.token ?? held?.remote_token;
+    if (!operator && !current) {
+      throw new UsageError(`no token is saved for "${deviceId}"`, "Only a device this machine holds the code of can be given a new one; the operator can: --operator.");
+    }
+    // An operator that does not hold the device does not keep what it makes: it prints it.
+    const keep = !operator || entry !== undefined || held !== undefined;
+    const earlier = keep ? entry?.pending_token : undefined;
+    const proposed = earlier ?? newDeviceCode();
+    if (keep) {
+      config.devices[deviceId] = { ...(entry ?? { gateway: target.gateway, anonymous: true }), pending_token: proposed };
+    }
+    return { current, proposed, retry: earlier !== undefined, keep };
+  });
+
+  // 2. The call.
+  let made: RotatedCode;
+  try {
+    made = await rotateAnonymousCode(target.gateway, deviceId, {
+      token: first.current,
+      proposed: first.proposed,
+      gatewayToken: target.gatewayToken,
+      ...(operatorToken !== undefined ? { operatorToken } : {}),
+    });
+  } catch (err) {
+    // A repeat of a call that did succeed, made after the old code's day was over (or from a config that was
+    // promoted and then lost): the gateway no longer knows the old code, but the code proposed is its own.
+    if (!operator && first.retry && err instanceof RotateRefusedError && first.current !== first.proposed) {
+      made = await rotateAnonymousCode(target.gateway, deviceId, {
+        token: first.proposed,
+        proposed: first.proposed,
+        gatewayToken: target.gatewayToken,
+      });
+    } else {
+      throw err;
+    }
+  }
+
+  // 3. The gateway holds it: it is the device's code here too. The file is read again, so that what another
+  // command wrote in the meantime stays.
+  const spaces: string[] = [];
+  if (first.keep) {
+    updateConfig(ctx.configPath, (config) => {
+      const entry = config.devices[deviceId] ?? { gateway: target.gateway, anonymous: true };
+      const { pending_token: _done, ...rest } = entry;
+      config.devices[deviceId] = { ...rest, token: made.token };
+      for (const [name, space] of Object.entries(config.spaces)) {
+        if (space.gateway_device === deviceId) {
+          space.remote_token = made.token;
+          spaces.push(name);
+        }
+      }
+    });
+  }
+
+  const grace = made.previousValidMs !== undefined && made.previousValidMs > 0 ? formatDuration(made.previousValidMs) : "a day";
   if (ctx.json) {
-    printJson({ device: deviceId, rotated: true, previous_valid_ms: made.previousValidMs ?? null, spaces, config_path: ctx.configPath });
+    printJson({
+      device: deviceId,
+      rotated: true,
+      repeated: made.repeated,
+      saved: first.keep,
+      ...(first.keep ? {} : { token: made.token }),
+      previous_valid_ms: made.previousValidMs ?? null,
+      spaces,
+      config_path: ctx.configPath,
+    });
     return;
   }
-  ctx.out(`${green("✓")} ${bold(deviceId)} has a new 25-character code, saved to ${dim(ctx.configPath)}`);
+  if (first.keep) ctx.out(`${green("✓")} ${bold(deviceId)} has a new 25-character code, saved to ${dim(ctx.configPath)}${made.repeated ? dim(" (the gateway had it already)") : ""}`);
+  else {
+    ctx.out(`${green("✓")} ${bold(deviceId)} has a new 25-character code: ${bold(made.token)}`);
+    ctx.out(yellow("  this machine does not hold the device, so the code is not saved: this is the only time it is shown"));
+  }
   ctx.out(dim(`  the old code keeps working for ${grace}`));
   if (spaces.length > 0) ctx.out(`  spaces exposed as it: ${spaces.join(", ")} - stop and start each within ${grace}, so that it holds the new code`);
   ctx.out(`  anything else that holds the old code (a running buddy, 'prime fleets' agent) - restart it within ${grace}`);

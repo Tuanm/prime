@@ -9,6 +9,7 @@
 //   4. print the device id, code and connect URL
 //   5. run the bundled code-mcp in the foreground as that device
 
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { bool, num, str } from "./args.ts";
 import { GATEWAY_TOKEN_ENV, PARENT_PID_ENV, RAW_ENV, selfCommand } from "./code-mcp-host.ts";
@@ -190,24 +191,68 @@ export interface RotatedCode {
   connectUrl: string;
   /** How long the code the device had keeps working, so that what holds it can be given the new one. */
   previousValidMs?: number;
+  /** The gateway had already made this code current: the call was a repeat. */
+  repeated: boolean;
+}
+
+/** The gateway answered, and the answer is no. `status` says which: 401 not the device's code, 409 that code has been replaced. */
+export class RotateRefusedError extends CliError {
+  constructor(
+    message: string,
+    readonly status: number,
+    hint?: string,
+  ) {
+    super(message, hint);
+    this.name = "RotateRefusedError";
+  }
+}
+
+const CODE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const CODE_LENGTH = 25;
+
+/** A new device code: 25 characters of 0-9 and A-Z, drawn without bias (129 bits). */
+export function newDeviceCode(): string {
+  const limit = 256 - (256 % CODE_ALPHABET.length);
+  let out = "";
+  while (out.length < CODE_LENGTH) {
+    for (const b of randomBytes(32)) {
+      if (b < limit && out.length < CODE_LENGTH) out += CODE_ALPHABET[b % CODE_ALPHABET.length];
+    }
+  }
+  return out;
+}
+
+export interface RotateRequest {
+  /** The code the device holds now: shown to the gateway. Not needed by the operator. */
+  token?: string;
+  /** The new code, made by the caller, so that a repeat of the call can be told apart from a second one. */
+  proposed: string;
+  gatewayToken?: string;
+  /** The gateway's FLEET_OPERATOR_TOKEN: asks as the operator, which needs no code of the device. */
+  operatorToken?: string;
 }
 
 /**
- * Give an anonymous device a new 25-character code (the gateway's POST /api/devices/anonymous/rotate).
- * The device shows the code it has; the old code keeps working for a day. Pure parsing apart from the call.
+ * Give an anonymous device a new 25-character code (the gateway's POST /api/devices/anonymous/rotate, or
+ * the operator's route). The caller proposes the code; asked again with the same proposal after a call
+ * whose answer was lost, the gateway says it is done. The code the device had keeps working for a day.
  */
-export async function rotateAnonymousCode(
-  gateway: string,
-  deviceId: string,
-  token: string,
-  gatewayToken: string | undefined,
-): Promise<RotatedCode> {
+export async function rotateAnonymousCode(gateway: string, deviceId: string, request: RotateRequest): Promise<RotatedCode> {
+  const operator = request.operatorToken !== undefined;
+  const url = operator
+    ? `${gateway}/api/devices/anonymous/${encodeURIComponent(deviceId)}/rotate`
+    : `${gateway}/api/devices/anonymous/rotate`;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (operator) headers.authorization = `Bearer ${request.operatorToken}`;
+  else {
+    Object.assign(headers, authHeaders(request.gatewayToken), { "x-prime-device": deviceId, "x-device-token": request.token ?? "" });
+  }
   let response: Response;
   try {
-    response = await fetch(`${gateway}/api/devices/anonymous/rotate`, {
+    response = await fetch(url, {
       method: "POST",
-      headers: { ...authHeaders(gatewayToken), "content-type": "application/json", "x-prime-device": deviceId, "x-device-token": token },
-      body: "{}",
+      headers,
+      body: JSON.stringify({ proposed: request.proposed }),
       signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
     });
   } catch (err) {
@@ -216,10 +261,21 @@ export async function rotateAnonymousCode(
   const text = await response.text();
   if (response.status !== 200) {
     const detail = errorField(text).error;
-    if (response.status === 401) {
-      throw new AuthError(
+    if (response.status === 401 && !operator) {
+      throw new RotateRefusedError(
         "the gateway did not accept the device's code (401)",
+        401,
         "Check the device's token, and the gateway token if the gateway asks for one (--gateway-token).",
+      );
+    }
+    if (response.status === 403 && operator) {
+      throw new AuthError("the gateway did not accept the operator's credential (403)", "Pass --operator-token, or set PRIME_FLEET_OPERATOR_TOKEN.");
+    }
+    if (response.status === 409) {
+      throw new RotateRefusedError(
+        "the gateway says this code has been replaced (409)" + (detail ? ": " + detail : ""),
+        409,
+        "A newer code was made for the device; the code this machine holds works for a day after that, and only to repeat a call. Ask the operator for a new one: prime devices rotate-code <device-id> --operator.",
       );
     }
     if (response.status === 429) {
@@ -237,14 +293,16 @@ export async function rotateAnonymousCode(
   } catch {
     throw new CliError("the gateway returned a non-JSON answer (HTTP 200)", text.slice(0, 200) || undefined);
   }
-  if (body.deviceId !== deviceId || typeof body.token !== "string" || body.token.length < 25) {
-    throw new CliError("the gateway's answer does not hold a new code for the device", text.slice(0, 200));
+  // The answer must be for this device and this code: what is saved is what the gateway holds.
+  if (body.deviceId !== deviceId || body.token !== request.proposed) {
+    throw new CliError("the gateway's answer is not for the code that was asked for", text.slice(0, 200));
   }
   return {
     deviceId,
-    token: body.token,
-    connectUrl: connectUrlFor(gateway, deviceId, body.token),
+    token: request.proposed,
+    connectUrl: connectUrlFor(gateway, deviceId, request.proposed),
     ...(typeof body.previous_valid_ms === "number" ? { previousValidMs: body.previous_valid_ms } : {}),
+    repeated: body.repeated === true,
   };
 }
 

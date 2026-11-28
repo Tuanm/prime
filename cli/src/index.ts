@@ -64,6 +64,12 @@ const GATEWAY_FLAGS: FlagSpec[] = [
   flag("timeout", "number", "Per-request timeout in milliseconds", { placeholder: "<ms>" }),
 ];
 
+const ROTATE_FLAGS: FlagSpec[] = [
+  ...GATEWAY_FLAGS,
+  flag("operator", "boolean", "Ask as the gateway's operator: no code of the device is needed, and a lock on it does not stop this"),
+  flag("operator-token", "string", "The gateway's fleet operator credential (FLEET_OPERATOR_TOKEN), for --operator", { placeholder: "<token>" }),
+];
+
 const CONNECT_FLAGS: FlagSpec[] = [
   ...GATEWAY_FLAGS,
   flag("no-verify", "boolean", "Skip the reachability probe after saving"),
@@ -489,7 +495,8 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
   if (topic === "devices") {
     if (sub === "connect") return CONNECT_FLAGS;
     if (sub === "list") return LIST_FLAGS;
-    if (sub === "status" || sub === "disconnect" || sub === "rotate-code") return GATEWAY_FLAGS;
+    if (sub === "status" || sub === "disconnect") return GATEWAY_FLAGS;
+    if (sub === "rotate-code") return ROTATE_FLAGS;
     return [];
   }
   if (topic === "tools") {

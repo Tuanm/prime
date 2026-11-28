@@ -30,6 +30,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { writeFileAtomic } from "./atomic-write.ts";
+import { withDirLockSync } from "./dir-lock.ts";
 import { CliError } from "./errors.ts";
 
 export interface DeviceEntry {
@@ -46,6 +48,12 @@ export interface DeviceEntry {
   space?: string;
   /** The fleet this device is a member of, when it is a fleet's identity. */
   fleet?: string;
+  /**
+   * A new code the device has proposed to the gateway (`prime devices rotate-code`) and not yet been told
+   * it has. Kept so that a call that was cut off can be repeated with the same code; it becomes `token`
+   * when the gateway confirms.
+   */
+  pending_token?: string;
 }
 
 export interface Defaults {
@@ -179,6 +187,7 @@ export function parseConfig(text: string, source: string): Config {
       ...(asString(entry.local_url) ? { local_url: asString(entry.local_url) } : {}),
       ...(asString(entry.space) ? { space: asString(entry.space) } : {}),
       ...(asString(entry.fleet) ? { fleet: asString(entry.fleet) } : {}),
+      ...(asString(entry.pending_token) ? { pending_token: asString(entry.pending_token) } : {}),
     };
   }
 
@@ -301,6 +310,7 @@ export function serializeConfig(config: Config): string {
         ["local_url", entry.local_url],
         ["space", entry.space],
         ["fleet", entry.fleet],
+        ["pending_token", entry.pending_token],
       ] as const) {
         if (value !== undefined) out += `    ${key}: ${yamlScalar(value)}\n`;
       }
@@ -389,4 +399,38 @@ export function saveConfig(path: string, config: Config): void {
   try {
     chmodSync(path, 0o600);
   } catch {}
+}
+
+/**
+ * Change the config as it is on disk right now, and keep the change.
+ *
+ * The file is read again under a lock of its own (a directory next to it), changed by `change`, and
+ * written so that it is on disk before the name moves (fsync), for what is not to be lost: a code
+ * that exists nowhere else. Commands that read the config at their start and write all of it back
+ * later (most of them) do not take this lock; what this guards is the change itself, against
+ * another that makes it at the same moment, and against a change made in the time since this process
+ * began.
+ */
+export function updateConfig<T>(path: string, change: (config: Config) => T): T {
+  const dir = dirname(path);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    throw new CliError(`cannot create ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return withDirLockSync(
+    path + ".lock",
+    () => {
+      const config = loadConfig(path);
+      const result = change(config);
+      try {
+        writeFileAtomic(path, serializeConfig(config), 0o600, { durable: true });
+        chmodSync(path, 0o600);
+      } catch (err) {
+        throw new CliError(`cannot write ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return result;
+    },
+    { waitMs: 5000, staleMs: 30_000 },
+  );
 }
