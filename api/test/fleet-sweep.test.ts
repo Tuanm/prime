@@ -325,6 +325,68 @@ describe("the sweep of a fleet that exists", () => {
   });
 });
 
+describe("the sweep on a gateway with many fleets", () => {
+  async function many(names: string[]) {
+    const w = world();
+    for (const id of names) {
+      await w.fleet(id);
+      w.bucket.seed("fleets/" + id + "/packs/" + hex("1"), 5 * HOUR);
+    }
+    return w;
+  }
+  const orphansLeft = (w: ReturnType<typeof world>, names: string[]) => names.filter((id) => w.bucket.objects.has("fleets/" + id + "/packs/" + hex("1")));
+
+  test("stops at its budget of calls, and the next run begins where it stopped, so that no fleet is starved", async () => {
+    const names = ["a", "b", "c", "d", "e", "f"];
+    const w = await many(names);
+    const first = await sweepFleets(w.env, { now: T0, subrequests: 14 });
+    expect(first.capped).toBe(true);
+    expect(first.next).toBe("c");
+    expect(first.fleets).toBe(2);
+    expect(orphansLeft(w, names)).toEqual(["c", "d", "e", "f"]);
+    expect(await w.bucket.get("sweep/cursor").then((o) => o?.json())).toEqual({ next: "c" });
+    const second = await sweepFleets(w.env, { now: T0, subrequests: 14 });
+    expect(second.next).toBe("e");
+    expect(orphansLeft(w, names)).toEqual(["e", "f"]);
+    const third = await sweepFleets(w.env, { now: T0, subrequests: 14 });
+    expect(third.next).toBeUndefined();
+    expect(third.capped).toBe(false);
+    expect(orphansLeft(w, names)).toEqual([]);
+    // The end of the list clears the place: the next day begins from the start.
+    expect(w.bucket.objects.has("sweep/cursor")).toBe(false);
+  });
+
+  test("a run that begins in the middle goes to the end of the list and ends the round there", async () => {
+    const names = ["a", "b", "c", "d"];
+    const w = await many(names);
+    w.bucket.seed("sweep/cursor", 0, JSON.stringify({ next: "c" }));
+    const report = await sweepFleets(w.env, { now: T0, subrequests: 14 });
+    expect(report.next).toBeUndefined();
+    expect(report.fleets).toBe(2);
+    expect(orphansLeft(w, names)).toEqual(["a", "b"]);
+    expect(w.bucket.objects.has("sweep/cursor")).toBe(false);
+  });
+
+  test("a dry run names a sample of the keys, and neither deletes nor moves the place", async () => {
+    const names = ["a", "b", "c", "d", "e", "f"];
+    const w = await many(names);
+    const dry = await sweepFleets(w.env, { now: T0, dryRun: true, subrequests: 14 });
+    expect(dry.sample.slice(0, 2)).toEqual(["fleets/a/packs/" + hex("1"), "fleets/b/packs/" + hex("1")]);
+    expect(w.bucket.deleted).toEqual([]);
+    expect(w.bucket.objects.has("sweep/cursor")).toBe(false);
+    const big = await many(["g"]);
+    for (let i = 0; i < 50; i++) big.bucket.seed("fleets/g/packs/" + i.toString(16).padStart(64, "0"), 5 * HOUR);
+    expect((await sweepFleets(big.env, { now: T0, dryRun: true })).sample.length).toBe(20);
+  });
+
+  test("a fleet that is not reached because the budget ran out is not reported as skipped", async () => {
+    const w = await many(["a", "b", "c"]);
+    const report = await sweepFleets(w.env, { now: T0, subrequests: 8 });
+    expect(report.skipped).toEqual([]);
+    expect(report.capped).toBe(true);
+  });
+});
+
 describe("the sweep of a fleet that is gone", () => {
   test("clears what is left under its name once it is a day old, and leaves a fleet that exists though the registry does not list it", async () => {
     const w = world();

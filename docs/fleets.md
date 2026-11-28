@@ -878,7 +878,9 @@ It never touches a fleet's head, anything that is not a pack or a manifest, or t
 `fleets/`). A run deletes at most 1,000 objects of one fleet and 10,000 in all; the rest waits for the next day.
 Anything it cannot read (the registry, a fleet, the bucket) leaves that fleet alone and is reported. The result is
 in the Worker's log (`fleet sweep {...}`); `POST /admin/api/fleet-sweep` runs it on request, and with `?dry=1` only
-counts. It costs a few bucket listings per fleet a day (Class A, about $0.01 a month for a hundred fleets).
+counts, and names up to 20 of the keys it would delete, so that a dry run can be read before the real one is trusted. It costs a few bucket listings per fleet a day (Class A, about $0.01 a month for a hundred fleets).
+
+A run makes at most 600 calls to the bucket and to the fleets' objects (a Worker may make 1,000 to one invocation); a fifth of them is kept for the names of fleets that are gone. When it runs out it stops, keeps where it stopped (`sweep/cursor` in the bucket), and the next day's run begins at that fleet, so on a gateway with many fleets the ones late in the registry's order are not left out every day; reaching the end of the list ends the round. The fleet's own audit log gets a `bucket-swept` entry, as the gateway's doing, with the number of objects cleared from it.
 
 ## Codes made before the longer ones
 

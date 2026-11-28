@@ -22,10 +22,6 @@ compatibility_flags = ["nodejs_compat"]
 # Durable Objects are required: each deviceId maps to one DeviceDO instance that
 # owns both the WebSocket and the pending-request registry. Without them a
 # Worker's per-isolate memory could not route /mcp to the right tunnel.
-# Once a day, at a quiet hour, the gateway clears away what fleets left in the bucket (src/fleet-sweep.ts).
-[triggers]
-crons = ["17 3 * * *"]
-
 [durable_objects]
 bindings = [
   { name = "DEVICES", class_name = "DeviceDO" },
@@ -34,6 +30,10 @@ bindings = [
   { name = "FILES", class_name = "FilesDO" },
   { name = "FLEET", class_name = "FleetDO" },
 ]
+
+# Once a day, at a quiet hour, the gateway clears away what fleets left in the bucket (src/fleet-sweep.ts).
+[triggers]
+crons = ["17 3 * * *"]
 
 # Temporary file contents (see src/files-do.ts + src/files-routes.ts). Uploads
 # stream straight into this bucket, so a 200 MiB file never sits in memory.
