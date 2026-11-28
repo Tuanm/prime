@@ -1376,7 +1376,7 @@ export class FleetDO implements DurableObject {
       const request = pending[deviceId];
       if (!request && body.role !== undefined && (await this.members())[deviceId]) {
         // A member that is already in, with a role: what changes is the role (member or viewer), in place.
-        const changed = await this.changeRole(caller, deviceId, body.role);
+        const changed = await this.changeRole(caller, deviceId, body.role, fleetId);
         out = changed.out;
         freedLease = changed.freedLease;
         return;
@@ -1469,8 +1469,13 @@ export class FleetDO implements DurableObject {
    * Make a member a viewer, or a viewer a member, where it stands: it keeps its place in the order the fleet is handed on in.
    * The owner is not changed here (it is removed, and the fleet is handed on). A member that is made a viewer lets go of the lease
    * it holds, and the others are told it is free.
+   *
+   * `fleetId` is given where the roster is the gateway's own (the owner-signed chain keeps each key's tenure itself, and does not need it):
+   * a member made a viewer is no longer one of the keys snapshots are taken from, so its key is recorded as left, up to the head, as for a
+   * member that is removed. What it published before is still taken from it by a replica that is behind, or by a member that joins and
+   * catches up through it. A viewer made a member again is one of the keys once more, and is no longer in that list.
    */
-  private async changeRole(caller: Caller, deviceId: string, asked: unknown): Promise<{ out: Response; freedLease: boolean }> {
+  private async changeRole(caller: Caller, deviceId: string, asked: unknown, fleetId?: string): Promise<{ out: Response; freedLease: boolean }> {
     if (asked !== "member" && asked !== "viewer") return { out: Response.json({ error: "role is member or viewer" }, { status: 400 }), freedLease: false };
     const members = await this.members();
     const member = members[deviceId]!;
@@ -1482,6 +1487,10 @@ export class FleetDO implements DurableObject {
     const owns = asked === "member" && !Object.values(members).some((m) => m.role === "owner");
     members[deviceId] = { ...member, role: owns ? "owner" : asked };
     await this.storage.put("members", members);
+    if (fleetId !== undefined && member.pubkey) {
+      if (asked === "viewer") await this.recordLeft(member.pubkey, fleetId, deviceId);
+      else await this.forgetLeft(member.pubkey);
+    }
     let freedLease = false;
     if (asked === "viewer") {
       const held = await this.lease();
@@ -2181,7 +2190,8 @@ export class FleetDO implements DurableObject {
       // key is recorded as left up to the head as that request saw it, which does not have this snapshot;
       // it is a member's up to this one, which the member made while it was one.
       const rostered = await this.members();
-      if (!rostered[caller.deviceId]) {
+      // (Or made a viewer: its key is recorded as left too, and a publish that began before that is the member's, up to here.)
+      if (!rostered[caller.deviceId] || rostered[caller.deviceId]!.role === "viewer") {
         const left = (await this.storage.get<LeftKey[]>("left")) ?? [];
         let raised = false;
         for (const k of left) {
@@ -2442,6 +2452,13 @@ export class FleetDO implements DurableObject {
     const left = ((await this.storage.get<LeftKey[]>("left")) ?? []).filter((k) => k.pubkey !== pubkey && k.until >= tip - 2 * RECENT_SNAPSHOTS);
     left.push({ pubkey, until: tip, device });
     await this.storage.put("left", left.slice(-LEFT_KEYS_KEPT));
+  }
+
+  /** A key that is a member's again is not one that has left. */
+  private async forgetLeft(pubkey: string): Promise<void> {
+    const left = (await this.storage.get<LeftKey[]>("left")) ?? [];
+    const kept = left.filter((k) => k.pubkey !== pubkey);
+    if (kept.length !== left.length) await this.storage.put("left", kept);
   }
 
   private async leftKeys(): Promise<{ pubkey: string; until: number }[]> {
