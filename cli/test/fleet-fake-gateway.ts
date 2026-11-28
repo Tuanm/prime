@@ -90,6 +90,8 @@ export class FakeGateway {
   loseEpochAnswers = 0;
   /** The epoch keys posted, in order (the entry as sent). */
   epochPosts: unknown[][] = [];
+  /** The next this many pack uploads are answered as the gateway does when a body broke off on the way (a 400), and keep nothing. */
+  breakOffPacks = 0;
   /** What each pack upload said its hash was (`x-prime-sha256`), in order. */
   packHashHeaders: Array<string | undefined> = [];
   /** Requests of each kind, by route. */
@@ -322,6 +324,10 @@ export class FakeGateway {
     }
     if ((kind === "packs" || kind === "manifests") && method === "POST") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
+      if (kind === "packs" && this.breakOffPacks > 0) {
+        this.breakOffPacks--;
+        return Response.json({ error: "the body broke off before its length" }, { status: 400 });
+      }
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
       if (kind === "packs" && this.snapshotLimit !== undefined && bytes.length > this.snapshotLimit) {
         return Response.json({ error: "this change pack is bigger than the gateway takes", limit: this.snapshotLimit }, { status: 413 });
