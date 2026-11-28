@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write";
 import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
-import { findSecrets, keptForMeta, keptFrom, readAllow, secretGateMode, secretPathReason, type SecretHit } from "./fleet-secrets";
+import { findSecrets, keptForMeta, keptFrom, keptWasCut, readAllow, removedSecrets, secretGateMode, type SecretHit } from "./fleet-secrets";
 import { applyCommit, findNestedRepos, gitEnv, ingestPack, removedBetween, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
 import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
@@ -678,7 +678,7 @@ export async function publish(
     tipCommit: manifest.tipCommit,
     tree: manifest.tree,
     roster: manifest.roster,
-    ...(kept.length > 0 ? { kept: keptForMeta(kept.map((h) => h.path)) } : {}),
+    ...(kept.length > 0 ? { kept: keptForMeta(kept.map((h) => h.path)), ...(keptWasCut(kept.map((h) => h.path)) ? { keptCut: true } : {}) } : {}),
   });
   if (hideMeta) {
     manifest.tipCommit = "";
@@ -1362,7 +1362,7 @@ async function ingestRoute(
     trust.save();
     // Taking in a snapshot wrapped to a newer epoch key is what lets go of the older ones (after a short while).
     bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation)?.epoch));
-    if (i === plan.chain.length - 1) writeKeptNote(paths.gitDir, m.tipCommit, m.kept ?? []);
+    if (i === plan.chain.length - 1) writeKeptNote(paths.gitDir, m.tipCommit, m.kept ?? [], m.keptCut === true);
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);
   }
@@ -1416,38 +1416,45 @@ export async function applyFetched(paths: MemberPaths, applied: Position, fetche
 /** Where the paths that the newest fetched snapshot leaves out are kept, beside the store, so that an apply after a restart still knows them. */
 const KEPT_NOTE = "apply.kept";
 
-function writeKeptNote(gitDir: string, commit: string, kept: string[]): void {
+function writeKeptNote(gitDir: string, commit: string, kept: string[], cut: boolean): void {
   try {
     mkdirSync(gitDir, { recursive: true });
-    writeFileSync(join(gitDir, KEPT_NOTE), JSON.stringify({ commit, kept }));
+    writeFileSync(join(gitDir, KEPT_NOTE), JSON.stringify({ commit, kept, ...(cut ? { cut: true } : {}) }));
   } catch {
     // A note that cannot be written leaves the path rules (`keptOnApply`) as the guard.
   }
 }
 
-function readKeptNote(gitDir: string, commit: string): string[] {
+function readKeptNote(gitDir: string, commit: string): { kept: string[]; cut: boolean } {
   try {
-    const note = JSON.parse(readFileSync(join(gitDir, KEPT_NOTE), "utf8")) as { commit?: unknown; kept?: unknown };
-    return note.commit === commit ? keptFrom(note.kept) : [];
+    const note = JSON.parse(readFileSync(join(gitDir, KEPT_NOTE), "utf8")) as { commit?: unknown; kept?: unknown; cut?: unknown };
+    return note.commit === commit ? { kept: keptFrom(note.kept), cut: note.cut === true } : { kept: [], cut: false };
   } catch {
-    return [];
+    return { kept: [], cut: false };
   }
 }
 
 /**
  * The paths an apply must leave alone for what the publisher left out: the ones its sealed metadata lists, and - whatever
- * the metadata says, since it can be absent, cut short, or from a publisher that has no gate - any path the secret rules
- * name that this apply would otherwise remove. A file of that kind that the fleet really deleted stays on a replica, which is the
- * side to be wrong on.
+ * the metadata says, since it can be absent, cut short, or from a publisher that has no gate - any file this apply would remove that
+ * the secret rules name or whose content they match (read from this member's own store). When the list was cut, or what the rules
+ * need could not be read, every removal is kept: a file the fleet really deleted then stays on a replica until someone removes it,
+ * which is the side to be wrong on.
  */
-async function keptOnApply(paths: MemberPaths, applied: Position, commit: string, listed: string[]): Promise<string[]> {
-  const out = new Set(listed);
+async function keptOnApply(paths: MemberPaths, applied: Position, commit: string, note: { kept: string[]; cut: boolean }): Promise<string[]> {
+  const out = new Set(note.kept);
   if (applied.commit) {
+    const env = gitEnv(paths.gitDir, paths.work, join(paths.gitDir, "apply.index"));
+    const removed = async (): Promise<string[]> => removedBetween(paths.gitDir, env, applied.commit!, commit);
     try {
-      const env = gitEnv(paths.gitDir, paths.work, join(paths.gitDir, "apply.index"));
-      for (const rel of await removedBetween(paths.gitDir, env, applied.commit, commit)) if (secretPathReason(rel) !== null) out.add(rel);
+      if (note.cut) for (const rel of await removed()) out.add(rel);
+      else for (const rel of await removedSecrets(paths.gitDir, applied.commit, commit)) out.add(rel);
     } catch {
-      // No record to compare with: nothing is removed by this apply either.
+      try {
+        for (const rel of await removed()) out.add(rel);
+      } catch {
+        // No record to compare with: nothing is removed by this apply either.
+      }
     }
   }
   return [...out];
