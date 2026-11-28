@@ -116,6 +116,25 @@ describe("publishing with the tool server's journal", () => {
     expect(actorFrom(metaOf(w, third.manifestKey).meta.actor)!.tools).toBeUndefined();
   });
 
+  test("a journal that is a link is not read, and the snapshot is published all the same", async () => {
+    const { symlinkSync } = await import("node:fs");
+    const w = world();
+    const real = join(w.root, "real.jsonl");
+    const journal = new ActivityJournal(real);
+    journal.record("write", "keyA");
+    await journal.flush();
+    const link = join(w.root, "link.jsonl");
+    try {
+      symlinkSync(real, link);
+    } catch {
+      return; // a machine that does not let this account make links has nothing to test
+    }
+    const pair = loadOrCreateKeyPair(join(w.root, "k"));
+    const { actor, position } = actorOf(pair.publicKey, { file: link, after: { seq: 2, fid: "abc" } }, "26.1.1");
+    expect(actor).toEqual({ key: keyIdOf(pair.publicKey), agent: "prime/26.1.1" });
+    expect(position).toEqual({ seq: 2, fid: "abc" });
+  });
+
   test("a publish with no journal still says who published", async () => {
     const w = world();
     const first = await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2);

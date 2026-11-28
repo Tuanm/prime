@@ -5,6 +5,7 @@
 // snapshot has been opened and checked. It is the publisher's own statement: a member that is not honest can write what it
 // likes, and a snapshot that was not made through code-mcp has none of it. It says what happened; it proves nothing.
 
+import { lstatSync } from "node:fs";
 import { readActivity, type ActivityPosition } from "./activity-journal.ts";
 import { keyIdOf } from "./fleet-crypto.ts";
 
@@ -49,6 +50,8 @@ export function actorOf(publicKey: string, activity: ActivitySource | undefined,
   const base: SnapshotActor = { key: keyIdOf(publicKey), agent: "prime/" + version };
   if (!activity) return { actor: base };
   try {
+    // Where `O_NOFOLLOW` is not there (Windows) the open follows a link: a journal that is one is not read, whatever the open does.
+    if (lstatSync(activity.file).isSymbolicLink()) throw new Error("the activity journal is a link, and is not read");
     const read = readActivity(activity.file, activity.after ?? { seq: 0 });
     const tools = toolCounts(read.entries);
     return {
