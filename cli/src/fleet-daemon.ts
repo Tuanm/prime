@@ -25,6 +25,7 @@ import { mkdirSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs"
 import { dirname, join, resolve } from "node:path";
 
 import { selfCommand } from "./code-mcp-host.ts";
+import { type FleetCallersWriter, startFleetCallers } from "./fleet-callers-agent.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -1423,6 +1424,8 @@ export interface SpaceLoop {
   unrecorded?: Partial<FleetMemberState>;
   lastCheck: number;
   primary: boolean;
+  /** What the space's tool server is told of its place and of who may call it as the fleet (see fleet-callers.ts). */
+  callersWriter?: FleetCallersWriter;
   /** When it last took a place in the fleet. */
   lastBootstrap: number;
   /** How long the fleet says a place lasts, from the last bootstrap. */
@@ -2350,6 +2353,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
       beatTick();
     };
     loop.events.start();
+    const stopCallers = startFleetCallers(loop, (text) => process.stderr.write("prime: fleet " + fleet + ": " + name + ": " + text + "\n"));
     const watcher = watchTree(
       work,
       (eventType, filename) => {
@@ -2408,6 +2412,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
     }
     if (beat) clearTimeout(beat);
     if (loop.holdTimer) clearTimeout(loop.holdTimer);
+    stopCallers();
     loop.events.stop();
   };
 
@@ -2456,6 +2461,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
         // is shorter for the members that are further ahead, so they do not
         // all write their work tree for the same lease.
         loop.primary = false;
+        loop.callersWriter?.update(false);
         claimNow(loop);
         wake(loop.name, true);
         break;

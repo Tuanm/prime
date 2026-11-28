@@ -163,6 +163,10 @@ ${bold("allow-caller, callers, revoke-caller")}
   error, never "no callers".
   A fleet reached with its fleet token is addressed by 'prime devices connect <id>
   --fleet' (or --fleet on 'prime tools'), so its calls are signed for the fleet.
+  Such a call is checked against the fleet's signed roster, not against the callers
+  file: the signing keys of the fleet's members that are not viewers, and the keys its
+  owner added with 'prime fleets roster add-caller' (fleet-callers.json, written by the
+  fleet's agent beside the callers file of the space). Only the fleet's primary runs it.
 `;
 
 const TOOLS = `prime tools - list, inspect and call device tools
@@ -549,6 +553,8 @@ USAGE
   prime fleets roster show <fleet-id> [--space <name>]  Check the signed roster and print who is in it
   prime fleets roster pin <fleet-id> --space <name> --owner <fingerprint>  The same as 'trust pin'
   prime fleets roster witness <fleet-id> --witness <url>  Tell the witness of the removals in the chain
+  prime fleets roster add-caller <fleet-id> --key <public-key> | --self [--label <text>]  Let a machine's caller key call the fleet's primary (the owner key signs it)
+  prime fleets roster remove-caller <fleet-id> --key <public-key> | --self  Take it out again
 
 The agent holds the fleet's lease while it runs, so it belongs in a service:
 'prime fleets agent install' is what keeps a member a member across a reboot.

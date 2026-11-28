@@ -597,6 +597,22 @@ accepts a chain whose genesis names another key.
 `prime fleets members --space <name>` and `status` print this machine's own key and signing key fingerprints from its key file, which an
 operator compares with what the gateway lists before signing them into the roster.
 
+**Who may call the primary's tools.** A tool call made for a fleet (`prime tools call --fleet`, signed for `fleet:<id>`) is
+checked by the space that runs it against what the signed roster says, not against what the gateway lists:
+
+- The fleet's agent verifies the roster as above and writes `fleet-callers.json` next to the space's callers file (the space reads
+  it and cannot write it): the signing keys of the live members that are not viewers, the keys the owner signed in with
+  `prime fleets roster add-caller <fleet> --key <public-key> [--label <text>]` (a machine's own key: `--self`; taken out again with
+  `remove-caller`), and whether this space is the primary, from the lease the agent holds.
+- Only the primary runs such a call. A replica refuses it ("the call did not run"), so a signed fleet call that the gateway kept
+  cannot be played to another member. A call signed before the space became the primary is refused as well (it may have run on the
+  member that was). The agent renews the file every 20 seconds while it runs, and a space stops believing "primary" 2 minutes after
+  it was written, so an agent that died does not leave a space that takes calls for ever.
+- A fleet whose roster the gateway keeps lists nobody: a call for the fleet is refused until the owner has signed the roster. A key
+  the roster lists is a caller of the fleet only; it does not run calls for the device itself, whose callers file is the machine's own.
+- A member's signing key is listed because it is a member's. Nothing signs tool calls with it today; a key that is a member's and that
+  was added with `add-caller` is listed once.
+
 The witness (a second place a member's newest snapshot is recorded) follows in its own package.
 
 ## Who did it
