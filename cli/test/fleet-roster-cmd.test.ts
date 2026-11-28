@@ -216,6 +216,18 @@ describe("the commands that sign a fleet's roster", () => {
     gw.head = 7;
   });
 
+  test("approve for a new member is signed again when the gateway says it was asked to join at a later snapshot", async () => {
+    const fresh = member("dev-35");
+    gw.pending = [fresh];
+    gw.head = 40;
+    gw.refuse = [{ status: 409, error: "the device asked to join at snapshot 41; seqAt 40 was snapshot 40" }];
+    const before = gw.entries.length;
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-35", key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }));
+    expect(gw.entries.length).toBe(before + 1);
+    expect(gw.refuse.length).toBe(0);
+    gw.head = 7;
+  });
+
   test("the genesis from a device is refused by the gateway, and the operator is told what to do", async () => {
     const was = { entries: gw.entries, signed: gw.signed };
     gw.entries = [];

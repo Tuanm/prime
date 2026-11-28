@@ -1352,7 +1352,7 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
       ...(live ? {} : { role }),
       seqAt,
     });
-    if (sent.res.status === 409 && /head is at/i.test(String(sent.res.json?.error ?? "")) && attempt < 3) continue;
+    if (sent.res.status === 409 && /head is at|was snapshot \d+/i.test(String(sent.res.json?.error ?? "")) && attempt < 3) continue;
     failOn(sent.res.status, sent.res.json, "the gateway did not take the roster entry " + sent.entry[3] + " (" + sent.entry[6] + ")");
     done = { n: sent.entry[3], hash: entryHash(sent.signed), signed: sent.signed };
   }
