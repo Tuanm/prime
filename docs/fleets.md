@@ -288,7 +288,11 @@ author snapshots (for the members that read that roster) **and read what the fle
 the primary seals every snapshot for every key on the roster it is served, so a key the gateway adds is given
 the snapshot key of each later snapshot, and opens it. That is visible only to someone who compares:
 `prime fleets members` prints a fingerprint of each member's key (the KEY column), and a swapped key
-keeps the device and changes only that. The fingerprint has to be checked outside the gateway
+keeps the device and changes only that. The fingerprint is 128 bits, in two halves joined by a dot
+(`xxxxxxxxxxx.yyyyyyyyyyy`); its first half is exactly what builds before it printed (without the final
+`=`), so a member on an earlier build is compared with by that half, and two machines of this build
+compare both. A gateway that grinds for a key matching a fingerprint needs about 2^128 work, where it needed
+2^64 for the eight bytes that were printed. The fingerprint has to be checked outside the gateway
 (against what the member's own `prime fleets members` shows) to mean anything; the admin page
 shows it too, in the tooltip of each space (with how far the member says it has applied and fetched:
 informational, the gateway decides nothing from `fetched`), and it is the gateway's own page, so
@@ -298,7 +302,7 @@ helps can still read what it was sent before it was removed, as it always could.
 What a credential on its own can no longer do, and what the gateway still can.
 
 - **A member's device token cannot replace the key of that member.** The token of a space is a short code (an
-  anonymous device's is six characters), which the space also keeps in its environment. The fleet takes a
+  anonymous device's is 25 characters, 129 bits; one made before that is six, and is still accepted), which the space also keeps in its environment. The fleet takes a
   member's new key only on a proof made with the member's old private key (checked by the fleet object, which
   has an X25519 key pair of its own), or when the operator or the owner approves it. A request for a new key
   shows its fingerprint (`prime fleets pending`, the admin page), to compare with what the member's own machine
@@ -636,14 +640,34 @@ replica that follows every one):
 | a member 39 snapshots behind catches up, down | 1.92 MB, 4 requests | 62 KB, 81 requests |
 
 The gateway counts what it does - requests, how long each object was busy
-serving them, the objects stored and read - and prices them at Cloudflare's list prices with
+serving them, the objects stored and read, the rows its objects write to and read from their
+storage, and what the bucket holds - and prices them at Cloudflare's list prices with
 the free allowances taken off. `/admin` shows the month, the cost and what it is
-made of.
+made of. The bucket is measured by listing it, at most every six hours (a few Class A
+calls, which are counted), and is priced at the size it was last found at.
+
+The rows are what a running fleet writes most of. A primary that renews its lease every
+fifteen seconds writes two rows a time (the lease, and the alarm that tells the members when
+it lapses; it was five before the activity stamp, the epoch and a claim that was not there
+stopped being written again), and a row written is a millionth of a dollar beyond the first
+fifty million a month.
 
 The ceiling is `FLEET_MONTHLY_BUDGET_USD`, twenty dollars by default. At the
 ceiling the fleet routes answer **402** and say so. The admin page keeps working,
 because the operator has to be able to see the number that stopped it and raise
 it, and so does everything that is not a fleet.
+
+Why twenty: the figure is the whole bill, so it includes the five dollars of the Workers Paid
+plan, and leaves fifteen for what the fleets cost. By the cost model (an estimate, to be checked
+against a real month's counts in `/admin`) a fleet of four members that works eight hours a day
+costs about $0.4 beyond the plan, ten members always on and publishing every ten seconds about
+$2, and a hundred fleets of three always on about $65 - about $17 once a renewal writes two
+rows, and about $9 with a ninety-second lease. So twenty is several times what one team's fleet
+costs, which is what a guard that exists to stop a runaway or an attack should be; and it is
+too low for a gateway that hosts many fleets, which should set its own figure, about one and a
+half times what `/admin` projects for a normal month. Before the rows and the bucket were counted
+the guard saw only a part of the bill, so the same twenty dollars stopped a gateway later than it
+says; it now means twenty dollars.
 
 ## Limits
 
@@ -651,12 +675,14 @@ it, and so does everything that is not a fleet.
 |---|---|
 | members per fleet | 32 |
 | invite lifetime | ten minutes by default, one hour at most |
-| lease | forty-five seconds, renewed every fifteen |
+| lease | forty-five seconds, renewed every fifteen (two storage rows a renewal) |
 | snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change; one upload is at most 32 MiB, whole snapshot or change pack (the Worker holds a body about three times over while it hashes and stores it, in 128 MB; the member is told the limit and says so before it uploads anything, and the gateway answers 413 with the size too). A work tree whose whole tree is bigger than that stops the fleet at its next whole tree - every 32nd snapshot, and whenever the members change - and nothing more is published until the tree is smaller, so keep what is not the work's out of it with `.gitignore`; the members keep what they have |
 | snapshots kept | the last 64 |
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
 | `PRIME_FLEET_POLL_MS`, `PRIME_FLEET_HEARTBEAT_MS` | how often a replica looks at the head (1500 ms) and how long the primary waits between renewals at most (15000 ms; the fleet's own lease can lower it); saved like the others |
+| asks from one address, without a device the gateway knows | 30 code checks and 60 requests naming an unknown device a minute for each address (`FLEET_INVITE_RATE_MAX`, `FLEET_UNKNOWN_RATE_MAX`; 0 turns one off); beyond that the gateway answers 429 with `Retry-After`, before any fleet object is woken. Kept in the isolate and, with the `[[ratelimits]]` bindings, across the location. A gateway with no registered device is open and every id is unknown there, so the unknown-device count does not apply to it. |
+| a request body on a fleet route | 64 KB (`FLEET_BODY_MAX_BYTES`), 4 KB for a code check; the snapshot and change-pack uploads have their own limit above. The gateway answers 413 |
 | a fleet nobody touches | kept: only the operator or the owner deletes it (`reap` also takes one whose members the gateway has all forgotten, after a week) |
 
 ## Known limitations
@@ -676,7 +702,7 @@ What is deliberately not done, so that nobody has to find it out:
   has one request waiting for the operator, and a later request from the same device replaces it. An operator
   that approves without comparing the fingerprint with the one the member's own machine prints (`prime fleets
   rotate-key` prints it, and so does the refusal the agent reports for a member whose key waits) approves whoever wrote last. `prime fleets approve --key
-  <fingerprint>` approves exactly the key that was read, and the gateway requires it: an approval of a new key without it, or with another, is refused, and the device that asked cannot approve its own request, the owner's included, so a request made with a stolen owner token still waits for the operator. What a stolen owner token can do is what the owner can: invite and admit devices of its own, remove members, delete the fleet, and read what the fleet's members are sent from then on (a device it admits gets the next snapshots). It cannot replace the owner's own key without the operator, and it cannot read what was sealed before.
+  <fingerprint>` approves exactly the key that was read (the whole fingerprint, or the short one an earlier build prints), and the gateway requires it: an approval of a new key without it, or with another, is refused, and the device that asked cannot approve its own request, the owner's included, so a request made with a stolen owner token still waits for the operator. What a stolen owner token can do is what the owner can: invite and admit devices of its own, remove members, delete the fleet, and read what the fleet's members are sent from then on (a device it admits gets the next snapshots). It cannot replace the owner's own key without the operator, and it cannot read what was sealed before.
 - **A member that lost its key needs the operator.** Its new key waits, and until it is approved the member
   takes no place in the fleet.
 - **Rollback and split views are not detected.** A member cannot know about a newer head it was never

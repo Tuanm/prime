@@ -264,4 +264,6 @@ npx wrangler deploy                        # publish the gateway
 | `FILES_MAX_TOTAL_BYTES` | 500 MiB | Bytes one buddy may store, expired files included until they are reaped. |
 | `R2_BUDGET_USD_MONTH` | `5` | The monthly ceiling on file storage spend. An upload that would pass it answers 507. |
 | `R2_FREE_STORAGE_GB` | `10` | The free storage the budget assumes before it charges for any bytes. |
-| `FLEET_MONTHLY_BUDGET_USD` | `20` | The monthly ceiling on running fleets. Past it, fleet calls answer 402. |
+| `FLEET_MONTHLY_BUDGET_USD` | `20` | The monthly ceiling on running fleets, counted as the whole bill (plan, requests, busy time, storage rows, R2 operations and stored bytes). Past it, fleet calls answer 402. |
+| `FLEET_INVITE_RATE_MAX`, `FLEET_UNKNOWN_RATE_MAX` | `30`, `60` | Code checks, and requests naming a device the gateway does not know, per client address per minute; beyond them, 429 with `Retry-After`. `0` turns one off. The `[[ratelimits]]` bindings in `wrangler.toml` keep the same two limits across a location. |
+| `FLEET_BODY_MAX_BYTES` | `65536` | The largest body a fleet route forwards (4 KB for a code check); beyond it, 413. |
