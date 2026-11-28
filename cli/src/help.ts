@@ -89,7 +89,7 @@ USAGE
   prime devices list [--no-probe] [--json]
   prime devices rotate-code <device-id> [--operator [--revoke-previous]] [--json]
   prime devices allow-caller <public-key> | --self [--label <text>] [--tools a,b | --all-tools] [--callers <path>]
-  prime devices callers [--json] [--callers <path>]
+  prime devices callers [--json] [--callers <path>] [--device <id> [--forget]]
   prime devices revoke-caller <key-id | public-key> [--callers <path>]
 
 ${bold("rotate-code")}
@@ -151,7 +151,12 @@ ${bold("allow-caller, callers, revoke-caller")}
                                 this machine's own key. --label names it. --tools a,b
                                 limits it to those tools and is kept when the key is
                                 allowed again; --all-tools lifts the limit.
-    callers                     List the allowed keys.
+    callers                     List the allowed keys, and the key this device signs its
+                                replies with (compare it with what another machine
+                                pinned: callers --device <id>; --forget drops a pin).
+                                A device that has signed a reply is pinned by its key,
+                                and a later reply of it that is unsigned, signed wrongly
+                                or by another key is refused.
     revoke-caller <key-id>      Stop trusting a key (its id, or its public key).
   The file is {"version": 1, "callers": [...]}. A file that is empty or damaged is an
   error, never "no callers".
@@ -328,8 +333,9 @@ OPTIONS FROM THE CONFIG
   the machine that makes them ('prime devices allow-caller'). --caller-auth
   warn (the default) runs a call that is not signed by a key in the callers file
   and writes it to caller-auth/caller-auth.log beside the file; enforce refuses
-  it (JSON-RPC error -32001); off checks nothing. Listing tools, ping and
-  initialize never need a signature.
+  it (JSON-RPC error -32001); off checks nothing. A callers file that cannot be
+  read refuses every signed call under enforce (under warn they run and are logged).
+  Listing tools, ping and initialize never need a signature.
 
   Refuses to start while the service is running ('prime service').
 `;
