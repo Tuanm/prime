@@ -14,6 +14,7 @@ import { createHash, sign as cryptoSign, verify as cryptoVerify } from "node:cry
 import { mkdirSync, renameSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { FLEET_CALLERS_FRESH_MS, type FleetCallersFile, fleetCallersPathFor, readFleetCallers } from "./fleet-callers.ts";
 import {
   callTarget,
   CALLER_REFUSED_CODE,
@@ -64,6 +65,8 @@ export type CallerFailure =
   | "callers-unreadable"
   | "bad-signature"
   | "replay"
+  | "not-primary"
+  | "before-primary"
   | "tool-not-allowed";
 
 /** The frame the gateway tunnels in. `raw` and `callerSig` are absent on an unsigned call and from an older gateway. */
@@ -114,6 +117,11 @@ export interface CallerAuthOptions {
   /** The id the device is registered as: the target a signature must name. */
   deviceId: string;
   callersFile: string;
+  /**
+   * The keys a fleet's signed roster lets call this space while it is the fleet's primary (see fleet-callers.ts);
+   * fleet-callers.json beside the callers file by default. A call signed for `fleet:<id>` is checked against it.
+   */
+  fleetCallersFile?: string;
   /** Holds the device reply key and the log of calls that were not signed by a trusted key. */
   stateDir?: string;
   /** Parses `raw` (code-mcp's depth-limited parser); JSON.parse by default. */
@@ -133,6 +141,12 @@ export function printable(text: string, max = 100): string {
 interface Spent {
   /** The signature's own time: the entry is good for as long as the call could still verify as fresh. */
   ts: number;
+}
+
+interface FleetCache {
+  stamp: string;
+  file?: FleetCallersFile;
+  error?: string;
 }
 
 interface CallersCache {
@@ -167,6 +181,7 @@ export class CallerAuth {
   private logFailureSaid = false;
   private replyFailureSaid = false;
   private cache: CallersCache | undefined;
+  private fleetCache: FleetCache | undefined;
   private replyKey: CallerKey | undefined;
   private readonly said = new Set<string>();
   private readonly stateDir: string;
@@ -200,6 +215,23 @@ export class CallerAuth {
       }
     }
     return this.cache.entries ? { entries: this.cache.entries } : { error: this.cache.error ?? "unreadable" };
+  }
+
+  /** The fleet callers file, re-read when the agent writes it. A missing file lists nobody. */
+  private fleetCallers(): { file?: FleetCallersFile; error?: string } {
+    const path = this.opts.fleetCallersFile ?? fleetCallersPathFor(this.opts.callersFile);
+    let stamp: string;
+    try {
+      const st = statSync(path);
+      stamp = `${st.ino}:${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
+    } catch (err) {
+      stamp = (err as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : `error:${(err as NodeJS.ErrnoException).code}`;
+    }
+    if (!this.fleetCache || this.fleetCache.stamp !== stamp) {
+      const read = stamp.startsWith("error:") ? { error: `${path} cannot be read (${stamp.slice(6)})` } : readFleetCallers(path);
+      this.fleetCache = { stamp, ...read };
+    }
+    return this.fleetCache;
   }
 
   /** Does the callers file hold any caller? (Used to decide a default; an unreadable file counts as yes.) */
@@ -301,10 +333,26 @@ export class CallerAuth {
     const callers = this.callers();
     if (!callers.entries) return { ok: false, failure: "callers-unreadable" };
     const entry = callers.entries.find((e) => e.keyId === parsed.keyId);
-    if (!entry) return { ok: false, failure: "unknown-key" };
-    const publicKey = Buffer.from(entry.pub, "base64");
-    if (!verifyCallSignature(parsed, publicKey, callTarget("device", this.opts.deviceId), frame.raw)) {
-      return { ok: false, failure: "bad-signature" };
+    // A key of the fleet's roster may call this space only for the fleet (see fleet-callers.ts): its signature names
+    // `fleet:<id>`, and what a device's own key signed for the device is never taken for it.
+    const fleet = this.fleetCallers();
+    const fleetEntry = fleet.file?.callers.find((e) => e.keyId === parsed.keyId);
+    if (!entry && !fleetEntry) return { ok: false, failure: "unknown-key" };
+    let signer: CallerEntry | undefined;
+    let forFleet = false;
+    if (entry && verifyCallSignature(parsed, Buffer.from(entry.pub, "base64"), callTarget("device", this.opts.deviceId), frame.raw)) {
+      signer = entry;
+    } else if (fleetEntry && fleet.file && verifyCallSignature(parsed, Buffer.from(fleetEntry.pub, "base64"), callTarget("fleet", fleet.file.fleet), frame.raw)) {
+      signer = fleetEntry;
+      forFleet = true;
+    }
+    if (!signer) return { ok: false, failure: "bad-signature" };
+    if (forFleet) {
+      const f = fleet.file!;
+      // The agent's word that this space is the primary is good for a while after it was written, and no longer.
+      if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary" };
+      // A call signed before this space became the primary may have run on the member that was.
+      if (parsed.ts <= f.primarySince) return { ok: false, failure: "before-primary" };
     }
     // Signed before this process started, or before a nonce that was forgotten: it may be a call that was run.
     if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay" };
@@ -319,7 +367,7 @@ export class CallerAuth {
     const nonceKey = `${parsed.keyId}.${parsed.nonce}`;
     this.forgetOldNonces(now);
     if (this.seen.has(nonceKey)) return { ok: false, failure: "replay" };
-    if (entry.tools && isToolCall(request) && !entry.tools.includes(toolName(request))) {
+    if (signer.tools && isToolCall(request) && !signer.tools.includes(toolName(request))) {
       return { ok: false, failure: "tool-not-allowed" };
     }
     this.seen.set(nonceKey, { ts: parsed.ts });
@@ -477,6 +525,10 @@ export function refusalMessage(failure: CallerFailure): string {
       return `${base} (the signature's time is more than 5 minutes from this device's clock: check both clocks)`;
     case "replay":
       return "this call was already received, or was signed before this device last started; send it again";
+    case "not-primary":
+      return "this space is not the fleet's primary now (or its agent has not said so lately), so it runs no call made for the fleet: the call did not run; the fleet's primary takes it, send it again";
+    case "before-primary":
+      return "this space became the fleet's primary after this call was signed, and the call may have run on the member that was: it did not run here; look at the work tree before you send it again";
     case "tool-not-allowed":
       return "the key that signed this call is not allowed to run this tool on this device";
     case "callers-unreadable":

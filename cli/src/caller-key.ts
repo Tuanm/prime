@@ -329,7 +329,7 @@ export function callerRefusedHint(signer: CallSigner | undefined, options: { fle
     return `This device only runs signed calls, and this machine has no usable caller key to sign with${signer.problem() ? ` (${signer.problem()})` : ""}.`;
   }
   if (options.fleet) {
-    return `This fleet does not trust this machine's caller key (${key.keyId}). Ask the fleet's owner to allow this key: ${key.publicKeyB64}\nIf it is already allowed, the signature may have been altered on the way: run the call again.`;
+    return `This fleet does not trust this machine's caller key (${key.keyId}). Ask the fleet's owner to allow this key, on the machine that holds the owner key: prime fleets roster add-caller <fleet-id> --key ${key.publicKeyB64}\nIf it is already allowed, the signature may have been altered on the way: run the call again.`;
   }
   return (
     `This device does not trust this machine's caller key (${key.keyId}). Run on the device's machine: ${allowCallerCommand(key)}\n` +

@@ -51,6 +51,7 @@ import {
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
 import { capsBody, fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
+import { keyIdOf, loadOrCreateCallerKey, parsePublicKey } from "./caller-key.ts";
 import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgentManaged, uninstallFleetAgent } from "./fleet-daemon.ts";
@@ -1510,7 +1511,9 @@ const ROSTER_USAGE =
   "Usage: prime fleets roster init <fleet-id> [--owner-key <file>] [--yes --expect <digest>]\n" +
   "       prime fleets roster show <fleet-id> [--space <name>]\n" +
   "       prime fleets roster pin <fleet-id> --space <name> --owner <fingerprint> | --clear\n" +
-  "       prime fleets roster witness <fleet-id> --witness <url>";
+  "       prime fleets roster witness <fleet-id> --witness <url>\n" +
+  "       prime fleets roster add-caller <fleet-id> --key <public-key> | --self [--label <text>]\n" +
+  "       prime fleets roster remove-caller <fleet-id> --key <public-key> | --self";
 
 /** `prime fleets roster init|show|pin` */
 export async function fleetsRoster(ctx: Ctx): Promise<void> {
@@ -1525,6 +1528,10 @@ export async function fleetsRoster(ctx: Ctx): Promise<void> {
       return fleetsTrustPin(ctx, rawFleet);
     case "witness":
       return rosterWitness(ctx, requireFleetId(rawFleet));
+    case "add-caller":
+      return rosterCaller(ctx, requireFleetId(rawFleet), "caller");
+    case "remove-caller":
+      return rosterCaller(ctx, requireFleetId(rawFleet), "caller-remove");
     default:
       throw new UsageError("unknown roster command \"" + what + "\"", ROSTER_USAGE);
   }
@@ -1691,6 +1698,45 @@ async function rosterShow(ctx: Ctx, fleetId: string): Promise<void> {
   ctx.out("owner key " + bold(ownerFingerprint(v.owner)) + (pinned ? green("  (the one this member pinned)") : dim("  (not pinned on this machine: compare it with the operator's)")));
   ctx.out(table(["DEVICE", "ROLE", "KEY", "SINCE SNAPSHOT"], live.map((m) => [m.device, m.role, m.xpub ? keyFingerprintOf(m.xpub) : "-", String(m.from)])));
   if (v.callers.length > 0) ctx.out(dim("caller keys: " + v.callers.map((c) => c.label || shortKey(c.spub)).join(", ")));
+}
+
+/**
+ * `prime fleets roster add-caller|remove-caller <fleet> --key <public key>`: the owner key signs a caller key into the roster, so that the
+ * fleet's primary accepts tool calls signed by it for the fleet (`prime tools call --fleet`). A key id is not enough: the roster holds the
+ * key, and 'prime devices callers' (or a refused call) prints it in full.
+ */
+async function rosterCaller(ctx: Ctx, fleetId: string, op: "caller" | "caller-remove"): Promise<void> {
+  const self = bool(ctx.parsed, "self");
+  const given = str(ctx.parsed, "key");
+  if (self === (given !== undefined)) throw new UsageError("name the key with --key <public-key> or --self", ROSTER_USAGE);
+  let raw: Buffer;
+  if (self) {
+    raw = loadOrCreateCallerKey().publicKey;
+  } else {
+    const parsed = parsePublicKey(given!);
+    if (!parsed) throw new UsageError("that is not a public key", "Give the caller's public key: 43-44 characters of base64, as 'prime devices callers' or a refused call prints it. A key id alone is not enough.");
+    raw = parsed;
+  }
+  const spub = raw.toString("base64url");
+  const label = str(ctx.parsed, "label") ?? "";
+  if (label.length > 100) throw new UsageError("--label is longer than 100 characters");
+  const t = target(ctx, spaceArg(ctx));
+  const owner = requireOwnerKey(ctx, fleetId, t.gateway);
+  const state = await getRosterState(t, fleetId);
+  if (state.mode !== "signed" || state.entries.length === 0) throw new CliError("the roster of " + fleetId + " is not signed", "Run 'prime fleets roster init " + fleetId + "' first: only a signed roster lists callers.");
+  const v = verifiedForOwner(state.entries, fleetId, owner, state.incarnation);
+  const listed = v.callers.find((c) => c.spub === spub);
+  if (op === "caller" && listed && listed.label === label) {
+    ctx.out(dim(keyIdOf(raw) + " is a caller of " + fleetId + " already" + (label ? " (" + label + ")" : "")));
+    return;
+  }
+  if (op === "caller-remove" && !listed) throw new CliError(keyIdOf(raw) + " is not a caller in the signed roster of " + fleetId, "'prime fleets roster show " + fleetId + "' lists them.");
+  const done = await appendEntry(t, fleetId, owner, v.head, v.incarnation, { op, spub, ...(op === "caller" ? { extra: label } : {}) });
+  if (ctx.json) {
+    printJson({ fleet: fleetId, [op === "caller" ? "added" : "removed"]: keyIdOf(raw), entry: done.n });
+    return;
+  }
+  ctx.out(green(op === "caller" ? "allowed" : "removed") + " " + bold(keyIdOf(raw)) + (op === "caller" ? " to call the primary of " + fleetId + (label ? " (" + label + ")" : "") : " from the callers of " + fleetId) + dim("  entry " + done.n + " of the roster"));
 }
 
 /** `prime fleets roster witness <fleet> --witness <url>`: tell the witness of every removal in the chain (they are public; again is harmless). */
