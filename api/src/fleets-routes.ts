@@ -14,7 +14,7 @@
 
 import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
 import { actorOf, emailAllowed, verifyOperatorToken, forwardableHeaders } from "./access";
-import { MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
+import { INLINE_PACK_BYTES, MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
 import { countFleetR2 } from "./usage";
 import { readBounded, readBoundedText } from "./body";
 import { fleetBodyMax } from "./fleet-limits";
@@ -211,6 +211,11 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
       manifestHash,
       packKey,
       extraKeys,
+      // A small edit goes to the members that listen in the event that announces it: the object checks it is what the key
+      // says, and does not store it.
+      ...(manifest.full !== true && pack.length <= INLINE_PACK_BYTES
+        ? { inline: { manifest: finalManifest.toString("utf8"), pack: pack.toString("base64") } }
+        : {}),
       // What a member needs to choose its route without opening every manifest.
       meta: {
         full: manifest.full === true,

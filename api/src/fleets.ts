@@ -400,3 +400,45 @@ export async function keyFingerprintMatches(named: string, pubkeyB64: string): P
   const full = plain(whole);
   return given !== "" && (given === full || given === full.slice(0, 11));
 }
+
+/** The most a pack may be and still ride in the socket message that announces its snapshot. */
+export const INLINE_PACK_BYTES = 64 * 1024;
+/** The most of a manifest that rides there (its text, in characters). */
+export const INLINE_MANIFEST_CHARS = 128 * 1024;
+
+const hex = (digest: ArrayBuffer): string => Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+
+/**
+ * The manifest and pack of a small snapshot, as they go in the `head` event: only when they are what the manifest key
+ * says they are, so that no listener is handed bytes that the key it GETs them by would not give.
+ *
+ * `manifest` must be the text whose SHA-256 is `manifestHash` (the id in `manifestKey`), and the pack (`pack`, standard
+ * base64) the one whose SHA-256 the manifest names as `packHash`; the pack is at most 64 KiB, the snapshot is not a whole tree
+ * (`full`), and it is not one that comes in chunks. Anything else is undefined, and the event carries no `inline`: the
+ * member GETs as it always did. The members check what they take from here again (an id is a hash of its bytes).
+ */
+export async function checkedInline(
+  asked: unknown,
+  manifestKey: string,
+  manifestHash: string,
+  fleetId: string,
+  full: boolean,
+): Promise<{ manifest: string; pack: string } | undefined> {
+  if (full || asked === null || typeof asked !== "object") return undefined;
+  const { manifest, pack } = asked as { manifest?: unknown; pack?: unknown };
+  if (typeof manifest !== "string" || typeof pack !== "string") return undefined;
+  if (manifest.length === 0 || manifest.length > INLINE_MANIFEST_CHARS) return undefined;
+  if (pack.length === 0 || pack.length > Math.ceil(INLINE_PACK_BYTES / 3) * 4) return undefined;
+  if (manifestKey !== "fleets/" + fleetId + "/manifests/" + manifestHash) return undefined;
+  try {
+    if (hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(manifest))) !== manifestHash) return undefined;
+    const parsed = JSON.parse(manifest) as { packHash?: unknown; chunks?: unknown; full?: unknown };
+    if (parsed.full === true || parsed.chunks !== undefined || typeof parsed.packHash !== "string") return undefined;
+    const bytes = Uint8Array.from(atob(pack), (c) => c.charCodeAt(0));
+    if (bytes.length === 0 || bytes.length > INLINE_PACK_BYTES) return undefined;
+    if (hex(await crypto.subtle.digest("SHA-256", bytes)) !== parsed.packHash) return undefined;
+    return { manifest, pack };
+  } catch {
+    return undefined;
+  }
+}

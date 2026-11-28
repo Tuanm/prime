@@ -185,6 +185,24 @@ try {
   await Bun.sleep(500);
   check("the one that published is not told", a.of("head").length === 0);
 
+  // ---- a small snapshot rides in the event ------------------------------------------------
+  // Through the Worker, as a member publishes: the manifest and a small pack in one request. The other member is
+  // handed both in the event that announces it, and they are what the manifest key says.
+  const pack = new TextEncoder().encode("a small sealed pack");
+  const manifestBytes = new TextEncoder().encode(JSON.stringify({ seq: 2, full: false, seal: "tag", packBytes: pack.length }));
+  const frame = new Uint8Array(4 + manifestBytes.length + pack.length);
+  new DataView(frame.buffer).setUint32(0, manifestBytes.length);
+  frame.set(manifestBytes, 4);
+  frame.set(pack, 4 + manifestBytes.length);
+  const published = await fetch(BASE + "/fleets/e2e/snapshot", { method: "POST", headers: asDevice("dev-a", "token-a-1234"), body: frame });
+  check("a small snapshot is published through the Worker", published.status === 200, await published.clone().text());
+  check("the other member is told of it", await b.waitFor(() => b.of("head").length === 2));
+  const heard = b.of("head")[1] as { manifestKey?: string; inline?: { manifest: string; pack: string } };
+  const sha = async (d: Uint8Array): Promise<string> => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", d)), (x) => x.toString(16).padStart(2, "0")).join("");
+  check("and is handed the manifest and the pack with it", !!heard.inline, JSON.stringify(heard).slice(0, 200));
+  check("the manifest is what its key says", !!heard.inline && heard.manifestKey!.endsWith(await sha(new TextEncoder().encode(heard.inline.manifest))));
+  check("the pack is what the manifest names", !!heard.inline && JSON.parse(heard.inline.manifest).packHash === (await sha(Uint8Array.from(atob(heard.inline.pack), (c) => c.charCodeAt(0)))));
+
   // ---- pausing ---------------------------------------------------------------------
   const paused = await admin("/admin/api/fleets/e2e/meta", { disabled: true });
   check("the operator pauses the fleet", paused.status === 200, JSON.stringify(paused.json));
