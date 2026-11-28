@@ -8,7 +8,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, createPrivate
 
 import { loadOrCreateKeyPair, manifestIdOf, publish, pull, type MemberPaths } from "../src/fleet-agent";
 import { generateMemberKeyPair, keyFingerprintOf, openForMember, sealManyForMembers } from "../src/fleet-crypto";
-import { FleetTrust, TamperedSnapshotError, forgetIncarnationAnswers, gatewayHasNoIncarnation, noteIncarnationAnswer, sealFieldsOf } from "../src/fleet-trust";
+import { FleetTrust, TamperedSnapshotError, forgetIncarnationAnswers, gatewayHasNoIncarnation, metaBindingOf, noteIncarnationAnswer, sealFieldsOf } from "../src/fleet-trust";
 import { snapshot } from "../src/fleet-sync";
 import { FleetTransportError, payloadHash, fetchManifest, type FleetManifest } from "../src/fleet-transport";
 
@@ -255,6 +255,8 @@ describe("a snapshot the gateway made up", () => {
     const pack = sealed.ciphertexts[0]!;
     const forged: FleetManifest = { ...m1, packKey: "fleets/x/packs/" + payloadHash(pack), packHash: payloadHash(pack), senderPublicKey: gw.publicKey, wrapped: sealed.wrapped };
     forged.seal = sealed.seal(sealFieldsOf(forged, payloadHash(pack), null));
+    // Its own metadata too, under its own snapshot key: the one beside it is sealed under the member's.
+    forged.meta = sealed.sealMeta(metaBindingOf(forged, payloadHash(pack), null), { tipCommit: forged.tipCommit, tree: forged.tree, ...(forged.roster !== undefined ? { roster: forged.roster } : {}) });
     w.gateway.payloads.set(forged.packKey, pack);
     w.forge(forged);
     expect(primaryKeys.publicKey).not.toBe(gw.publicKey);

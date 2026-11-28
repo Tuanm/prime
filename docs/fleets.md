@@ -349,6 +349,20 @@ checked, as it is opened, in three ways (`cli/src/fleet-trust.ts`):
    replica plans its route again from the next whole tree, and a publisher that finds an
    unsealed head publishes a whole tree for that reason.
 
+What the gateway is shown in a manifest is the least it needs. The commit, the tree and who the
+snapshot is sealed for (the roster, which names devices) are also in a sealed metadata (`meta`: AES-GCM
+under a key derived from the snapshot key, bound to the manifest's sequence, parent, packs, sender and
+fleet, so it opens for no other manifest), and a member reads them from there. While a member that
+predates it is in the fleet the manifest also shows them in the clear, as it always did, and a member
+that sees the two disagree refuses the snapshot. Once every member says it can read the metadata
+(`meta2` in the capabilities its members tell the gateway, and the gateway's `fleetCaps`), the
+commit and the tree are left empty, the roster is left out, and each member's entry of `wrapped` is
+listed under a hash of the fleet's incarnation and its device id rather than the device id. The seal still
+binds the real commit, tree and roster, so nothing about what a member checks is weaker. The gateway
+still knows who the members are (it keeps the roster), the size of each pack, and when a snapshot was
+made; it no longer sees in storage which commit or tree a snapshot is. If a member that cannot read the
+metadata joins, the next snapshot goes back to the plain form and is a whole tree.
+
 Whose word this rests on: **the roster**. The operator admits the members, and the
 roster says which key each has. The checks hold against anyone who can read and write what
 the gateway stores - a bucket, a backup, a replay of old storage, a bug - against a gateway

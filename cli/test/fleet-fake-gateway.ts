@@ -36,10 +36,14 @@ export class FakeGateway {
   sealGate = false;
   /** Which fleet of the name this is (what /role says); undefined for a gateway that predates it. */
   incarnation: string | undefined = "incarnation-1";
+  /** What every member can read, as /role says (`fleetCaps`); undefined for a gateway that predates it. */
+  fleetCaps: string[] | undefined = undefined;
   /** A refused publish deletes the change pack its manifest names (the gateway's cleanup). */
   dropChangePackOnRefusal = false;
   /** The next snapshots come from a publisher that seals but does not tag each entry (an earlier build). */
   noMacs = false;
+  /** Publishers that predate the sealed metadata of a manifest. */
+  stripMeta = false;
   /** Publishers that predate the key fingerprint in wrapped keys. */
   stripKeyIds = false;
   /** How many of the next /applied reports fail with a 503. */
@@ -156,7 +160,7 @@ export class FakeGateway {
     }
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);
-      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) }, this.serverDate ? { headers: { date: this.serverDate } } : undefined);
+      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(this.fleetCaps !== undefined ? { fleetCaps: this.fleetCaps } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) }, this.serverDate ? { headers: { date: this.serverDate } } : undefined);
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });
@@ -191,6 +195,8 @@ export class FakeGateway {
       // Each of these is a publisher that predates something the manifest is sealed over,
       // so what it published has no seal either.
       if (this.legacyManifests || this.stripRoster || this.unsealed) delete manifest.seal;
+      // ...and none of them has the sealed metadata, which was made after all of those.
+      if (this.legacyManifests || this.stripRoster || this.unsealed || this.noMacs || this.stripKeyIds || this.stripMeta) delete manifest.meta;
       // A publisher that predates the per-member tags does not put them on its entries.
       if ((this.legacyManifests || this.stripRoster || this.unsealed || this.noMacs) && Array.isArray(manifest.wrapped)) {
         for (const w of manifest.wrapped as Array<{ mac?: string }>) delete w.mac;
