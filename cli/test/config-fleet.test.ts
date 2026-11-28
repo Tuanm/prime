@@ -20,6 +20,15 @@ describe("what `prime update` needs of a space survives a save", () => {
       };
       saveConfig(path, config);
       expect(loadConfig(path).spaces.work).toMatchObject({ entrypoint: 2, allow_rootful: true, allow_no_limits: true });
+      // taken back by a start that is given no flag: gone from the file, not kept by the merge with what was there
+      const again = loadConfig(path);
+      again.spaces.work!.allow_rootful = undefined;
+      again.spaces.work!.allow_no_limits = undefined;
+      saveConfig(path, again);
+      const last = loadConfig(path).spaces.work!;
+      expect(last.allow_rootful).toBeUndefined();
+      expect(last.allow_no_limits).toBeUndefined();
+      expect(last.entrypoint).toBe(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

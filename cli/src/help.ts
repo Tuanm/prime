@@ -623,6 +623,7 @@ USAGE
   prime spaces delete <name>
   prime spaces logs <name>
   prime spaces enter <name> [--shell <path>] [-- <command...>]
+  prime spaces show <name> [--json]
   prime spaces top <name> [--once] [--json]
   prime spaces doctor [--json]
 
