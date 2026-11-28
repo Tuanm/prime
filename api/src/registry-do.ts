@@ -55,7 +55,19 @@ interface AnonRec {
   ref: string;
   createdAt: number;
   lastSeenAt: number | null; // null until it first connects
+  /** Made with a 25-character code. Absent on a device made when codes were six (see LEGACY_PENDING_TTL_MS). */
+  long?: true;
 }
+
+/**
+ * How long a device made with a six-character code may wait for its first connection. A code of that
+ * length is no longer issued; one that is still waiting to be used is refused (the device is
+ * collected) after this, whatever ANON_UNUSED_TTL_MS says. An hour is what an invite lives at most, and
+ * the default for a device that is never used, so a deployment on the defaults sees no change: it only
+ * keeps a raised ANON_UNUSED_TTL_MS from keeping a short code waiting for days. A device that has
+ * connected (a member of a fleet, or a machine in use) keeps its code until it is made again.
+ */
+export const LEGACY_PENDING_TTL_MS = 60 * 60_000;
 
 /** How often the bucket is listed to learn how much it holds. */
 const STORAGE_MEASURE_EVERY_MS = 6 * 60 * 60_000;
@@ -487,7 +499,7 @@ export class RegistryDO extends DurableObject<Env> {
       // The code is answered once, here; what is kept is its verifier.
       const token = randomDeviceCode();
       this.tokens.set(id, await verifierFor(this.env, "device", token));
-      this.anon.set(id, { ref: randomHex(12), createdAt: now, lastSeenAt: null });
+      this.anon.set(id, { ref: randomHex(12), createdAt: now, lastSeenAt: null, long: true });
       recent.push(now);
       this.anonCreates.set(ip, recent);
       this.pruneCreates(now, policy.createWindowMs);
@@ -817,7 +829,7 @@ export class RegistryDO extends DurableObject<Env> {
     for (const [id, rec] of this.anon) {
       if (this.online.has(id)) continue;
       const age = rec.lastSeenAt === null ? now - rec.createdAt : now - rec.lastSeenAt;
-      const ttl = rec.lastSeenAt === null ? policy.unusedTtlMs : policy.idleTtlMs;
+      const ttl = rec.lastSeenAt === null ? (rec.long ? policy.unusedTtlMs : Math.min(policy.unusedTtlMs, LEGACY_PENDING_TTL_MS)) : policy.idleTtlMs;
       if (age > ttl) doomed.push(id);
     }
     for (const id of doomed) {
