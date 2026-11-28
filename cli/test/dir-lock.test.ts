@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync as renameFor, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { LockBusyError, LockLostError, withDirLock, withDirLockSync, type DirLockOptions } from "../src/dir-lock";
 import { applyTestTimeout } from "./setup";
@@ -251,6 +251,43 @@ describe("a refusal from the file system", () => {
     expect(caught).toBeInstanceOf(LockBusyError);
     expect((caught as LockBusyError).message).toContain("EACCES");
     expect(readdirSync(root)).toEqual([]);
+  });
+
+  // Windows answers "not permitted", not "exists", to moving a directory onto a name that another process has taken
+  // since the look at it. This is that: the move is refused and the name has a lock of another live process at it.
+  const takenWhileMoving = (lock: string, note: Record<string, unknown>): void => {
+    mkdirSync(lock);
+    writeFileSync(join(lock, "owner"), JSON.stringify(note));
+    throw errno("EPERM");
+  };
+  test("on Windows, a move refused because another process took the name is a lock that is held, and is not blamed on the file system", () => {
+    const root = scratch();
+    const lock = join(root, "the.lock");
+    const other = otherLivePid();
+    const note = { pid: other, token: "theirs", host: hostname(), at: Date.now() };
+    let caught: unknown;
+    try {
+      withDirLockSync(lock, () => "no", { waitMs: 150, hooks: { platform: "win32", rename: () => takenWhileMoving(lock, note) } });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(LockBusyError);
+    expect((caught as LockBusyError).message).toContain("held by process " + other);
+    expect((caught as LockBusyError).message).not.toContain("EPERM");
+    // What the wait made is not left beside the lock.
+    expect(readdirSync(root)).toEqual(["the.lock"]);
+  });
+
+  test("on Windows, a move that is refused while the name is free is still waited for, and the file system is blamed", () => {
+    const root = scratch();
+    let caught: unknown;
+    try {
+      withDirLockSync(join(root, "the.lock"), () => "no", { waitMs: 100, hooks: { platform: "win32", rename: () => { throw errno("EPERM"); } } });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(LockBusyError);
+    expect((caught as LockBusyError).message).toContain("EPERM");
   });
 
   test("elsewhere, a refusal of permission is an error at once, not a lock that is held", () => {

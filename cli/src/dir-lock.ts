@@ -354,6 +354,10 @@ function publish(lock: string, token: string, opts: DirLockOptions, last: Attemp
     removeQuietly(mine, opts);
     const code = (err as NodeJS.ErrnoException).code ?? "";
     if (TAKEN_CODES.has(code)) return "taken";
+    // Windows does not say "exists" to moving a directory onto a name another process took a moment ago (between the
+    // look above and the move): it says it is not permitted. When the name is taken that is what it means, and the lock
+    // is looked at, not waited on as a refusal (which is slower, and what the error would then blame).
+    if (busy(opts, err) && exists(lock)) return "taken";
     // The directory this attempt made is gone: a publisher that was stopped for longer than a minute, and
     // whose leftover another process swept. The lock is not made; the next try makes it again.
     if (code === "ENOENT" && swept) return "taken";

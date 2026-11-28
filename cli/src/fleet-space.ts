@@ -25,7 +25,7 @@ import { CliError } from "./errors.ts";
 import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
 import { FleetTrust } from "./fleet-trust.ts";
 import { fetchRole, type FleetCredentials } from "./fleet-transport.ts";
-import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, writeFleetState } from "./fleets.ts";
+import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, resetFleetState, writeFleetState } from "./fleets.ts";
 
 export interface FleetSpaceSetup {
   /** The device identity the space uses with the gateway. */
@@ -120,6 +120,9 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     // A new membership starts knowing nothing of the fleet: what an earlier one under this name left
     // beside the key is not this fleet's. Only once it has been made: a join that failed changes nothing.
     FleetTrust.forget(paths.keyFile);
+    // The same goes for where the member was in it: a position from the fleet that had this name before would be taken
+    // for a place in this one (a head far ahead of the new fleet's, or a publish that was never written down).
+    resetFleetState(ctx.configPath, opts.fleet, opts.spaceName);
   }
 
   // The operator admits the member. The space waits for that: a space that

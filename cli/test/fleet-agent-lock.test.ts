@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, probeFor, procProbeWith, type ProcessProbe } from "../src/fleet-agent-lock";
@@ -158,6 +158,39 @@ describe("one fleet agent per configuration", () => {
     expect(readFileSync(agentLockPath(dir), "utf8").trim()).toBe("1111");
     expect(readdirSync(dir).filter((n) => n !== "agent.lock")).toEqual([]);
     if (a?.held) a.release();
+  });
+
+  test("on Windows, a dead lock that cannot be moved for a moment (a racer is reading it) is tried again, not an error", async () => {
+    const dir = scratch();
+    writeFileSync(agentLockPath(dir), "999999\n");
+    let refused = 0;
+    const lock = await acquireAgentLock(dir, {
+      pid: 2222,
+      isAgent: (pid) => pid !== 999999,
+      platform: "win32",
+      waitMs: 5000,
+      rename: (from, to) => {
+        if (refused++ < 3) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        renameSync(from, to);
+      },
+    });
+    expect(lock.held).toBe(true);
+    expect(refused).toBe(4);
+    if (lock.held) lock.release();
+  });
+
+  test("on Windows, a lock that keeps being refused is reported as held by nobody once the wait is over, and elsewhere a refusal is an error at once", async () => {
+    const dir = scratch();
+    writeFileSync(agentLockPath(dir), "999999\n");
+    const refuse = () => {
+      throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    };
+    const began = Date.now();
+    const lock = await acquireAgentLock(dir, { pid: 2222, isAgent: (pid) => pid !== 999999, platform: "win32", waitMs: 200, rename: refuse });
+    expect(lock.held).toBe(false);
+    expect(Date.now() - began).toBeGreaterThanOrEqual(190);
+    expect(Date.now() - began).toBeLessThan(3000);
+    await expect(acquireAgentLock(dir, { pid: 2222, isAgent: (pid) => pid !== 999999, platform: "linux", waitMs: 5000, rename: refuse })).rejects.toThrow(/EACCES/);
   });
 
   test("a holder whose lock names another agent stops: two holders last one touch, not for ever", async () => {

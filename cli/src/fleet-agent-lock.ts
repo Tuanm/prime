@@ -146,6 +146,10 @@ export interface AgentLockOptions {
   beforeTakeover?: () => Promise<void> | void;
   /** How the lock is put in place (a hard link); replaced in tests. */
   link?: (from: string, to: string) => void;
+  /** How a dead lock is moved out of the way; replaced in tests. */
+  rename?: (from: string, to: string) => void;
+  /** Replaced in tests. */
+  platform?: string;
   /**
    * Called (once) when the holder finds that the lock is no longer its own: it names another
    * pid, or the file has been gone for two touches. Two agents may then be running (a rival took
@@ -223,9 +227,17 @@ export async function acquireAgentLock(agentDir: string, opts: AgentLockOptions 
         await opts.beforeTakeover?.();
         const stale = `${file}.stale.${randomBytes(4).toString("hex")}`;
         try {
-          renameSync(file, stale);
+          (opts.rename ?? renameSync)(file, stale);
         } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === "ENOENT") continue;
+          // Windows refuses to move a file that another process has open (a racer reading the lock to see whose it is):
+          // for a moment. It is looked at again, until the time to wait is over.
+          if ((opts.platform ?? process.platform) === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY")) {
+            if (Date.now() >= until) return { held: false, holder: holder ?? 0 };
+            await new Promise((r) => setTimeout(r, 10 + Math.floor(Math.random() * 20)));
+            continue;
+          }
           throw err;
         }
         if (readHolder(stale) !== holder) {

@@ -196,7 +196,12 @@ describe("the member's state, written by the agent and by `prime fleets sync`", 
       const script =
         // The module is named by a JSON string, so that a Windows path's backslashes are not read as escapes.
         "import { updateFleetState } from " + JSON.stringify(join(import.meta.dir, "../src/fleets.ts")) + ";" +
-        "const i = Number(process.argv[1]); for (let k = 0; k < 15; k++) updateFleetState(process.argv[2], 'f', 's', { fetchedSeq: i * 100 + k, fetchedCommit: 'c' + (i * 100 + k) });";
+        "import { LockBusyError } from " + JSON.stringify(join(import.meta.dir, "../src/dir-lock.ts")) + ";" +
+        // A writer that cannot get the lock in the time it is given is tried again at the next round (see `withStateLock`):
+        // here the next try is the same write again. Six processes that do nothing else take turns at a lock that
+        // each hand-over costs tens of milliseconds on a slow file system, and one of them can be kept waiting for a
+        // couple of seconds. Anything that is not a busy lock (a refusal that reached the caller) is a failure.
+        "const i = Number(process.argv[1]); for (let k = 0; k < 15; k++) { for (let tries = 0; ; tries++) { try { updateFleetState(process.argv[2], 'f', 's', { fetchedSeq: i * 100 + k, fetchedCommit: 'c' + (i * 100 + k) }); break; } catch (e) { if (!(e instanceof LockBusyError) || tries >= 10) throw e; } } }";
       const children = [1, 2, 3, 4, 5, 6].map((i) => Bun.spawn([process.execPath, "-e", script, String(i), config], { env: process.env, stdout: "ignore", stderr: "pipe" }));
       // A writer that fails says why: what it printed is shown with its exit code.
       for (const c of children) {
@@ -389,6 +394,7 @@ describe("writing a file so that nobody sees half of it", () => {
       let refused = 0;
       writeFileAtomic(file, "one", 0o600, {
         durable: true,
+        platform: "win32",
         rename: (from, to) => {
           if (refused++ < 2) throw busy("EPERM");
           renameSync(from, to);
@@ -396,6 +402,29 @@ describe("writing a file so that nobody sees half of it", () => {
       });
       expect(refused).toBe(3);
       expect(readFileSync(file, "utf8")).toBe("one");
+      expect(readdirSync(dir)).toEqual(["state.json"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a rename that is refused for longer than a few tries (eight writers on a slow disk) still goes through", async () => {
+    const { writeFileAtomic } = await import("../src/atomic-write");
+    const { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "atomic-"));
+    try {
+      const file = join(dir, "state.json");
+      const began = performance.now();
+      writeFileAtomic(file, "late", 0o600, {
+        platform: "win32",
+        rename: (from, to) => {
+          if (performance.now() - began < 600) throw busy("EPERM");
+          renameSync(from, to);
+        },
+      });
+      expect(readFileSync(file, "utf8")).toBe("late");
       expect(readdirSync(dir)).toEqual(["state.json"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -410,16 +439,26 @@ describe("writing a file so that nobody sees half of it", () => {
     const dir = mkdtempSync(join(tmpdir(), "atomic-"));
     try {
       let tries = 0;
+      const began = performance.now();
       expect(() =>
         writeFileAtomic(join(dir, "a"), "x", 0o600, {
+          platform: "win32",
+          budgetMs: 200,
           rename: () => {
             tries++;
             throw busy("EBUSY");
           },
         }),
       ).toThrow();
-      expect(tries).toBe(7); // the first and six more
-      expect(() => writeFileAtomic(join(dir, "b"), "x", 0o600, { rename: () => { throw busy("ENOSPC"); } })).toThrow();
+      // Tried again for the time it is given, and not for much longer.
+      expect(performance.now() - began).toBeGreaterThanOrEqual(190);
+      expect(performance.now() - began).toBeLessThan(1500);
+      expect(tries).toBeGreaterThan(3);
+      expect(() => writeFileAtomic(join(dir, "b"), "x", 0o600, { platform: "win32", rename: () => { throw busy("ENOSPC"); } })).toThrow();
+      // Elsewhere a refusal of permission is an error at once.
+      tries = 0;
+      expect(() => writeFileAtomic(join(dir, "c"), "x", 0o600, { platform: "linux", rename: () => { tries++; throw busy("EACCES"); } })).toThrow();
+      expect(tries).toBe(1);
       expect(readdirSync(dir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });

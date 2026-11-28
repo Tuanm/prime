@@ -20,7 +20,7 @@ import type { Config, SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadOrCreateKeyPair, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, type MemberPaths, type Position } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
@@ -913,15 +913,59 @@ export function recordedPosition(configPath: string, fleetId: string, spaceName:
   return () => positions(readFleetState(configPath, fleetId, spaceName)).applied;
 }
 
+// What a publish that went through said of this member's position, when the state file could not be written (its lock
+// was busy), in a file of its own that needs no lock: it is made by writing a new file and moving it into place, and
+// it is read as part of the state until the state file says as much (see `readFleetState`). Without it a restart in
+// between would find the fleet's head ahead of the state, take its own snapshot for another member's and pull it over
+// what the person has changed since.
+const PUBLISHED_FILE = "published.json";
+const POSITION_KEYS = ["seq", "base", "tree", "roster", "memberCount"] as const;
+
+/** Keep the position a publish returned, where a reader of the state finds it (no lock needed). */
+export function recordPublished(configPath: string, fleetId: string, spaceName: string, position: FleetMemberState): void {
+  const picked: FleetMemberState = {};
+  for (const key of POSITION_KEYS) if (position[key] !== undefined) (picked as Record<string, unknown>)[key] = position[key];
+  const dir = fleetStateDir(configPath, fleetId, spaceName);
+  writeFileAtomic(join(dir, PUBLISHED_FILE), JSON.stringify(picked), 0o600, { durable: true });
+}
+
+function readPublished(dir: string): FleetMemberState | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(join(dir, PUBLISHED_FILE), "utf8")) as FleetMemberState;
+    return typeof raw.seq === "number" ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Taken away only by a writer that has just written a position at or past the note's, and only under the lock: a writer
+// that read the state before the note was made has an older position, and must leave the note for the next to write.
+function dropPublishedCoveredBy(dir: string, written: FleetMemberState): void {
+  const file = join(dir, PUBLISHED_FILE);
+  if (!existsSync(file)) return;
+  const note = readPublished(dir);
+  if (note !== undefined && note.seq! > (written.seq ?? 0)) return;
+  rmSync(file, { force: true });
+}
+
+/** Whether a position that a publish returned is waiting to be written into the state file. */
+export function hasUnwrittenPosition(configPath: string, fleetId: string, spaceName: string): boolean {
+  return existsSync(join(fleetStateDir(configPath, fleetId, spaceName), PUBLISHED_FILE));
+}
+
 /** The member's own record of how far it has got. */
 export function readFleetState(configPath: string, fleetId: string, spaceName: string): FleetMemberState {
-  const file = join(fleetStateDir(configPath, fleetId, spaceName), "state.json");
-  if (!existsSync(file)) return {};
+  const dir = fleetStateDir(configPath, fleetId, spaceName);
+  const file = join(dir, "state.json");
+  let state: FleetMemberState = {};
   try {
-    return JSON.parse(readFileSync(file, "utf8")) as FleetMemberState;
+    if (existsSync(file)) state = JSON.parse(readFileSync(file, "utf8")) as FleetMemberState;
   } catch {
-    return {};
+    state = {};
   }
+  // A publish that was not written down yet is where the member is, when it is ahead of what the file says.
+  const published = readPublished(dir);
+  return published && published.seq! > (state.seq ?? 0) ? { ...state, ...published } : state;
 }
 
 /**
@@ -980,7 +1024,22 @@ export function updateFleetState(
     // A holder that was judged stale while it ran does not write over what another has written since.
     held.assert();
     writeFileAtomic(join(dir, "state.json"), JSON.stringify(next, null, 2), 0o600, { durable: true });
+    dropPublishedCoveredBy(dir, next);
     return next;
+  });
+}
+
+/**
+ * Forget where a member was in a fleet: a member that joins a fleet starts from nothing, whatever an earlier membership
+ * under the same name (of a fleet that was deleted and made again) left of its position, and of a publish that was never
+ * written down. The work tree and the key are not touched.
+ */
+export function resetFleetState(configPath: string, fleetId: string, spaceName: string): void {
+  const dir = fleetStateDir(configPath, fleetId, spaceName);
+  withStateLock(dir, (held) => {
+    held.assert();
+    rmSync(join(dir, "state.json"), { force: true });
+    rmSync(join(dir, PUBLISHED_FILE), { force: true });
   });
 }
 
@@ -1001,5 +1060,6 @@ export function writeFleetState(configPath: string, fleetId: string, spaceName: 
     delete (next as Record<string, unknown>).manifest;
     held.assert();
     writeFileAtomic(file, JSON.stringify(next, null, 2), 0o600, { durable: true });
+    dropPublishedCoveredBy(dir, next);
   });
 }
