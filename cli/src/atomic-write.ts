@@ -15,11 +15,17 @@ export interface AtomicWriteOptions {
   durable?: boolean;
   /** Replaced in tests. */
   rename?: (from: string, to: string) => void;
+  /** How long a refused rename is tried again for (default two seconds). */
+  budgetMs?: number;
+  /** Replaced in tests. */
+  platform?: string;
 }
 
-// A rename over a file that another process has open is refused on Windows (EPERM, EACCES, EBUSY) for
-// as long as it is open, which is a moment: it is tried again a few times before it is an error.
-const RENAME_RETRIES = 6;
+// A rename over a file that another process has open (or is scanning) is refused on Windows (EPERM, EACCES, EBUSY) for
+// as long as it is open, which is a moment: it is tried again, with growing pauses, for a couple of seconds before it
+// is an error. Eight writers renaming onto one name on a slow disk can take turns for longer than a few tries allow.
+// (Elsewhere the same codes are real refusals, and are reported at once.)
+const RENAME_BUDGET_MS = 2000;
 const BUSY = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 export function writeFileAtomic(file: string, content: string, mode = 0o600, options: AtomicWriteOptions = {}): void {
@@ -33,13 +39,16 @@ export function writeFileAtomic(file: string, content: string, mode = 0o600, opt
     } finally {
       closeSync(fd);
     }
+    const until = performance.now() + (options.budgetMs ?? RENAME_BUDGET_MS);
+    const windows = (options.platform ?? process.platform) === "win32";
     for (let attempt = 0; ; attempt++) {
       try {
         rename(scratch, file);
         return;
       } catch (err) {
-        if (attempt >= RENAME_RETRIES || !BUSY.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
-        Bun.sleepSync(10 * (attempt + 1));
+        const left = until - performance.now();
+        if (!windows || left <= 0 || !BUSY.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
+        Bun.sleepSync(Math.min(Math.max(1, left), 5 * 2 ** Math.min(attempt, 6), 100) + Math.floor(Math.random() * 5));
       }
     }
   } catch (err) {
