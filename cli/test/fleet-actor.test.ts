@@ -9,7 +9,8 @@ import { ActivityJournal } from "../src/activity-journal";
 import { ACTOR_TOOLS_MAX, actorFrom, actorOf, toolCounts } from "../src/fleet-actor";
 import { loadOrCreateKeyPair, publish, type MemberPaths } from "../src/fleet-agent";
 import { keyIdOf, openPayload } from "../src/fleet-crypto";
-import { forgetIncarnationAnswers, metaBindingOf } from "../src/fleet-trust";
+import { entryHash, generateOwnerKey, makeEntry, signEntry, type OwnerKey, type RosterEntry, type SignedEntry } from "../src/fleet-roster";
+import { forgetIncarnationAnswers, forgetRosterAnswers, metaBindingOf } from "../src/fleet-trust";
 import { payloadHash, type FleetManifest } from "../src/fleet-transport";
 
 import { FakeGateway, credsFor, useFakeGateway } from "./fleet-fake-gateway";
@@ -183,5 +184,67 @@ describe("publishing with the tool server's journal", () => {
     expect(out.join("\n")).not.toContain("write×1");
     expect(out.join("\n")).not.toContain("prime/");
     expect(w.gateway.packReads.length).toBe(packReadsBefore);
+  });
+  /** A chain that names these devices (device -> xpub) as members, signed by `owner`. */
+  function chainOf(owner: OwnerKey, members: Record<string, string>): SignedEntry[] {
+    const entries: SignedEntry[] = [];
+    const push = (f: { op: RosterEntry[6]; device?: string; xpub?: string; spub?: string; role?: string; seqAt?: number | null; extra?: string }): void => {
+      const prev = entries[entries.length - 1];
+      const entry = makeEntry({ fleet: "x", incarnation: "incarnation-1", n: entries.length, prevHash: prev ? entryHash(prev) : null, at: 1000 + entries.length, ...f });
+      entries.push({ entry, sig: signEntry(entry, owner.privateKeyPem) });
+    };
+    push({ op: "genesis", seqAt: 0, extra: owner.publicKey });
+    for (const [device, xpub] of Object.entries(members)) push({ op: "add", device, xpub, spub: generateOwnerKey().publicKey, role: "member", seqAt: 0 });
+    return entries;
+  }
+
+  async function listSnapshots(w: ReturnType<typeof world>, entries: SignedEntry[]): Promise<string> {
+    const { fleetsSnapshots, fleetKeyFile } = await import("../src/fleets");
+    const { copyFileSync } = await import("node:fs");
+    const configPath = join(w.root, "config.yaml");
+    const keyFile = fleetKeyFile(configPath, "x", "r1");
+    mkdirSync(join(keyFile, ".."), { recursive: true });
+    copyFileSync(w.replica.keyFile, keyFile);
+    forgetRosterAnswers();
+    w.gateway.roster = { mode: "signed", entries };
+    const out: string[] = [];
+    await fleetsSnapshots({
+      config: { defaults: {}, devices: {}, spaces: { r1: { fleet: "x", gateway: "https://gw.example", gateway_device: "replica-device", remote_token: "t" } }, codeMcp: {} },
+      configPath,
+      json: false,
+      out: (l: string) => out.push(l),
+      parsed: { positionals: ["fleets", "snapshots", "x"], flags: new Map([["space", "r1"]]), help: false },
+    } as never);
+    return out.join("\n");
+  }
+
+  test("`fleets snapshots` takes who the members are from the signed roster when there is one, not from what the gateway lists", async () => {
+    const w = world();
+    const journal = new ActivityJournal(join(w.root, "activity.jsonl"));
+    journal.record("write", "keyA");
+    await journal.flush();
+    await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2, undefined, { activity: { file: join(w.root, "activity.jsonl") } });
+    const owner = generateOwnerKey();
+    const pk = loadOrCreateKeyPair(w.primary.keyFile).publicKey;
+    const rk = loadOrCreateKeyPair(w.replica.keyFile).publicKey;
+    // The chain names the publisher: shown as its, even though the gateway no longer lists it.
+    w.gateway.members.delete("primary-device");
+    const named = await listSnapshots(w, chainOf(owner, { "primary-device": pk, "replica-device": rk }));
+    expect(named).toContain("write×1");
+    expect(named).not.toContain("unverified");
+  });
+
+  test("`fleets snapshots` marks the publisher's key as not a member's when the signed roster does not name it, though the gateway lists it", async () => {
+    const w = world();
+    const journal = new ActivityJournal(join(w.root, "activity.jsonl"));
+    journal.record("write", "keyA");
+    await journal.flush();
+    await publish(credsFor("primary-device"), "x", w.primary, null, 0, 2, undefined, { activity: { file: join(w.root, "activity.jsonl") } });
+    const owner = generateOwnerKey();
+    const rk = loadOrCreateKeyPair(w.replica.keyFile).publicKey;
+    // The gateway lists the publisher (/members says it is one); the owner's chain does not.
+    const text = await listSnapshots(w, chainOf(owner, { "replica-device": rk }));
+    expect(text).toContain("unverified");
+    expect(text).not.toContain("write×1");
   });
 });
