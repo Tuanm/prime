@@ -36,7 +36,7 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { isSpaceCommand, refreshFleetSpaceImages, spacesCreate, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
+import { isSpaceCommand, spacesCreate, spacesRefreshFleet, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
 import {
   fleetsAgent,
   fleetsApprove,
@@ -58,7 +58,7 @@ import {
   fleetsRoster,
   fleetsTrust,
 } from "./fleets.ts";
-import { removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
+import { refreshCommandAfterUpdate, removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
 import type { AgentRestart } from "./fleet-daemon.ts";
 import { agentRestartJson } from "./fleet-agent-handover.ts";
 
@@ -463,6 +463,8 @@ async function main(argv: string[]): Promise<void> {
           return spacesDoctor(ctx);
         case "top":
           return spacesTop(ctx);
+        case "refresh-fleet":
+          return spacesRefreshFleet(ctx, VERSION);
         default:
           throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, logs, enter, doctor, top. ${usageLine("spaces")}`);
       }
@@ -531,7 +533,19 @@ async function main(argv: string[]): Promise<void> {
       // existed, or by a binary that predates it. So the spaces converge on
       // every run, not only on the run that installed something.
       if (!bool(ctx.parsed, "check") && !bool(ctx.parsed, "no-spaces")) {
-        await refreshFleetSpaceImages(ctx, outcome.installed_version ?? outcome.latest);
+        // The build that has just been installed does this, not this process: the containers are made with the entrypoint
+        // of the build that makes them, and this one is the old one.
+        if (outcome.updated) {
+          const argv = refreshCommandAfterUpdate(outcome, ctx.configPath, process.execPath);
+          if (!argv) ctx.note("the fleet's spaces were not moved: run 'prime spaces refresh-fleet' with the new build");
+          else {
+            const done = Bun.spawnSync(argv, { stdin: "ignore", stdout: ctx.json ? "pipe" : "inherit", stderr: "inherit", timeout: 30 * 60_000 });
+            if (ctx.json && done.stdout && done.stdout.length > 0) process.stderr.write(done.stdout);
+            if (done.exitCode !== 0) ctx.note("the new build could not move the fleet's spaces (exit " + String(done.exitCode) + "): run 'prime spaces refresh-fleet'; the next 'prime update' also does it");
+          }
+        } else {
+          await spacesRefreshFleet(ctx, outcome.latest);
+        }
       }
       return;
     }
@@ -562,7 +576,7 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "list") return SPACE_LIST_FLAGS;
     if (sub === "top") return SPACE_TOP_FLAGS;
     if (sub === "enter") return SPACE_ENTER_FLAGS;
-    if (isSpaceCommand(sub)) return SPACE_LIFECYCLE_FLAGS;
+    if (isSpaceCommand(sub) || sub === "refresh-fleet") return SPACE_LIFECYCLE_FLAGS;
     return [];
   }
   if (topic === "files") {

@@ -463,6 +463,22 @@ describe("readActivity of a file that someone else controls", () => {
     }
   });
 
+  test.skipIf(process.platform === "win32")("a named pipe that nobody writes to is refused at once, it does not wait for a writer", () => {
+    const dir = scratch();
+    try {
+      const fifo = join(dir, "activity.jsonl");
+      expect(Bun.spawnSync(["mkfifo", fifo], { timeout: 10_000 }).exitCode).toBe(0);
+      // in another process, so that a wait for a writer is a failure of this test and not a hang of the run
+      const script = `import { readActivity } from ${JSON.stringify(join(ROOT, "src", "activity-journal.ts"))};
+        try { readActivity(${JSON.stringify(fifo)}); console.log("read"); } catch (e) { console.log(String(e)); }`;
+      const r = Bun.spawnSync(["bun", "-e", script], { timeout: 8_000, stdout: "pipe", stderr: "pipe" });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.toString()).toContain("not a regular file");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test.skipIf(process.platform === "win32")("reads a regular file only", () => {
     const dir = scratch();
     try {

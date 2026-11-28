@@ -302,8 +302,9 @@ export const READ_LIMIT_BYTES = 2 * 1024 * 1024;
 function readJournalText(path: string): string | undefined {
   let fd: number;
   try {
-    // O_NOFOLLOW is not there on Windows; the check of the file's kind below is.
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    // O_NOFOLLOW is not there on Windows; the check of the file's kind below is. O_NONBLOCK: opening a named pipe that nobody
+    // writes to would wait for a writer, and the space may put one there; it is opened at once and then refused as not a file.
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return undefined;

@@ -534,6 +534,13 @@ function networkDelete(runtime: RuntimeInfo, name: string | undefined): void {
   runtimeExec(runtime, ["network", "rm", name], 60_000);
 }
 
+/**
+ * Which entrypoint a container was made with. It is raised whenever `entrypointScript` or `containerArgs` changes what a space
+ * is started with (the flags of its tool server, its mounts), so that a fleet space made by an older build is recreated by
+ * `prime update` even when the image has not changed. It is recorded in the space's entry and on the container as a label.
+ */
+export const ENTRYPOINT_VERSION = 2;
+
 function shellArg(value: string): string {
   return "'" + value.replace(/'/g, "'\\''") + "'";
 }
@@ -769,7 +776,7 @@ async function activateBroker(ctx: Ctx, pending: PendingBroker | undefined): Pro
 }
 
 export function containerArgs(runtime: RuntimeInfo, space: SpaceEntry, image: string, secretDir: string, limits = true): string[] {
-  const args: string[] = ["run", "-d", "--name", space.container, "--label", "prime.space=" + space.id];
+  const args: string[] = ["run", "-d", "--name", space.container, "--label", "prime.space=" + space.id, "--label", "prime.entrypoint=" + ENTRYPOINT_VERSION];
   args.push("--entrypoint", "/bin/sh");
   args.push("-v", secretDir + ":/run/prime:ro");
   args.push("-v", spaceStateDir(secretDir) + ":" + SPACE_STATE_DIR);
@@ -1386,7 +1393,7 @@ export async function refreshSpaceImage(
   image: string,
 ): Promise<{ changed: boolean; from?: string }> {
   const space = requireSpace(ctx.config, name);
-  if (space.image === image) return { changed: false, from: space.image };
+  if (!spaceNeedsRefresh(space, image)) return { changed: false, from: space.image };
   const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
   const from = space.image;
   try {
@@ -1415,6 +1422,11 @@ export async function refreshSpaceImage(
  * space outside a fleet is left alone - its image is the person's choice, and
  * nothing in it goes stale.
  */
+/** Is this space on another image than `image`, or was its container made with an older entrypoint than this build's? */
+export function spaceNeedsRefresh(space: SpaceEntry, image: string): boolean {
+  return space.image !== image || space.entrypoint !== ENTRYPOINT_VERSION;
+}
+
 export function fleetSpaceNames(config: Config): string[] {
   return Object.keys(config.spaces).filter((name) => Boolean(config.spaces[name]!.fleet));
 }
@@ -1427,7 +1439,7 @@ export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promis
   let moved = 0;
   for (const name of names) {
     const space = ctx.config.spaces[name]!;
-    if (space.image === image) {
+    if (!spaceNeedsRefresh(space, image)) {
       ctx.out(dim("  " + name + " " + green("already on " + imageLabel(image))));
       continue;
     }
@@ -1436,7 +1448,7 @@ export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promis
       const result = await refreshSpaceImage(ctx, name, image);
       if (result.changed) {
         moved++;
-        ctx.out(green("  " + name + " moved from ") + dim(from) + green(" to ") + imageLabel(image));
+        ctx.out(from === imageLabel(image) ? green("  " + name + " started again with this build's settings (" + imageLabel(image) + ")") : green("  " + name + " moved from ") + dim(from) + green(" to ") + imageLabel(image));
       } else {
         ctx.out(yellow("  " + name + " left on " + from));
       }
@@ -1497,6 +1509,7 @@ async function startSpace(ctx: Ctx, name: string): Promise<void> {
       removeSecret(space.secret_dir);
       fail("this runtime cannot enforce the cpu/memory limits", "Enable systemd cgroups (run 'prime spaces doctor') and retry, or pass --allow-no-limits to accept a space without resource limits.");
     }
+    if (run.code === 0) space.entrypoint = ENTRYPOINT_VERSION;
     if (run.code !== 0) fail("cannot start the space container", ((run.err || run.out).slice(0, 400) + (runtime.kind === "podman" ? "\n" + (podmanFailureHint() ?? "") : "")).trim() || undefined);
   } else if (existing.state === "stopped") {
     const globalFlags = runtime.kind === "podman" && !hasUserSystemd() ? ["--cgroup-manager=cgroupfs"] : [];
@@ -2219,6 +2232,11 @@ export async function spacesTop(ctx: Ctx): Promise<void> {
   }
 }
 export const SPACE_COMMANDS = ["create", "start", "stop", "delete", "list", "logs", "enter", "doctor", "top"] as const;
+
+/** `prime spaces refresh-fleet`: what `prime update` runs in the build it has just installed (not listed in the help). */
+export async function spacesRefreshFleet(ctx: Ctx, version: string): Promise<void> {
+  await refreshFleetSpaceImages(ctx, version);
+}
 export type SpaceCommand = (typeof SPACE_COMMANDS)[number];
 
 export function isSpaceCommand(value: string | undefined): value is SpaceCommand {

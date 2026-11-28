@@ -90,6 +90,8 @@ export interface SpaceEntry {
   cgroup_mode?: "systemd" | "cgroupfs" | "disabled";
   /** Host directory (0700) holding the token file mounted read-only. */
   secret_dir?: string;
+  /** The entrypoint version the container was made with (see ENTRYPOINT_VERSION in spaces.ts). */
+  entrypoint?: number;
   /** Companies whose values/secrets/codes this space may use. */
   vaults?: string[];
   /** Optional subset of categories: value, secret, code (default: all). */

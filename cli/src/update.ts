@@ -483,6 +483,23 @@ export async function runUpdate(current: string, options: UpdateOptions): Promis
   return outcome;
 }
 
+/**
+ * The command that makes the new build move the fleet's spaces, or undefined when there is no installed build to ask
+ * (an install from source is not replaced by an update). A compiled binary is run itself; a bundle is run by the runtime
+ * that runs this process.
+ */
+export function refreshCommandAfterUpdate(
+  outcome: Pick<UpdateOutcome, "kind" | "target" | "updated">,
+  configPath: string,
+  runtime: string,
+): string[] | undefined {
+  if (!outcome.updated) return undefined;
+  const tail = ["spaces", "refresh-fleet", "--config", configPath];
+  if (outcome.kind === "binary") return [outcome.target, ...tail];
+  if (outcome.kind === "bundle") return [runtime, outcome.target, ...tail];
+  return undefined;
+}
+
 /** Human-readable report for the update command. */
 export function renderUpdate(outcome: UpdateOutcome): string {
   const lines: string[] = [];

@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,8 +12,9 @@ import { callTarget, loadOrCreateCallerKey, readCallers, removeCaller, signCall 
 import { CallerAuth } from "../src/caller-auth.ts";
 import type { Ctx } from "../src/context.ts";
 import type { SpaceEntry } from "../src/config.ts";
+import { refreshCommandAfterUpdate } from "../src/update.ts";
 import { devicesAllowCaller, devicesCallers, devicesRevokeCaller } from "../src/devices.ts";
-import { containerArgs, ensureSpaceAuth, entrypointScript, spaceActivityFile, spaceCallersFile, spaceStateDir } from "../src/spaces.ts";
+import { ENTRYPOINT_VERSION, containerArgs, ensureSpaceAuth, entrypointScript, spaceNeedsRefresh, spaceActivityFile, spaceCallersFile, spaceStateDir } from "../src/spaces.ts";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -193,5 +195,34 @@ describe("prime devices allow-caller | callers | revoke-caller --space", () => {
   test("a space that is not there, or has no callers file, or --space with --callers, is a usage error", async () => {
     await expect(devicesCallers(cmd("callers", { space: "nope" }))).rejects.toThrow('no space named "nope"');
     await expect(devicesCallers(cmd("callers", { space: "work", callers: "/x/callers.json" }))).rejects.toThrow("both name a callers file");
+  });
+});
+
+describe("prime update moves a fleet's spaces with the build it has installed", () => {
+  test("the container is made with the entrypoint's version, and a space made with another is moved though its image is the same", () => {
+    const args = containerArgs({ kind: "podman" } as never, space({ port: 7777 }), "img", join(dir, "secret"));
+    expect(args).toContain("prime.entrypoint=" + ENTRYPOINT_VERSION);
+    expect(spaceNeedsRefresh(space({ image: "img" }), "img")).toBe(true); // made by a build that did not record one
+    expect(spaceNeedsRefresh(space({ image: "img", entrypoint: ENTRYPOINT_VERSION - 1 }), "img")).toBe(true);
+    expect(spaceNeedsRefresh(space({ image: "img", entrypoint: ENTRYPOINT_VERSION }), "img")).toBe(false);
+    expect(spaceNeedsRefresh(space({ image: "old", entrypoint: ENTRYPOINT_VERSION }), "img")).toBe(true);
+  });
+
+  test("the command is the installed build's, never this process's own", () => {
+    const base = { target: "/usr/local/bin/prime", updated: true };
+    expect(refreshCommandAfterUpdate({ ...base, kind: "binary" }, "/c/config.yaml", "/bin/bun")).toEqual(["/usr/local/bin/prime", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
+    expect(refreshCommandAfterUpdate({ ...base, kind: "bundle", target: "/i/prime.js" }, "/c/config.yaml", "/bin/bun")).toEqual(["/bin/bun", "/i/prime.js", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
+    expect(refreshCommandAfterUpdate({ ...base, kind: "source" }, "/c/config.yaml", "/bin/bun")).toBeUndefined();
+    expect(refreshCommandAfterUpdate({ ...base, kind: "binary", updated: false }, "/c/config.yaml", "/bin/bun")).toBeUndefined();
+  });
+
+  test("'prime spaces refresh-fleet' is a command of the build, and with no fleet space it has nothing to do", () => {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, "spaces: {}\n");
+    const r = Bun.spawnSync(["bun", fileURLToPath(new URL("../src/index.ts", import.meta.url)), "spaces", "refresh-fleet", "--config", cfg], { cwd: dir, env: { ...process.env, HOME: home, USERPROFILE: home }, timeout: 30_000, stdout: "pipe", stderr: "pipe" });
+    expect(r.stderr.toString()).not.toContain("unknown");
+    expect(r.exitCode).toBe(0);
   });
 });
