@@ -1066,15 +1066,46 @@ describe("saving the config: what another command saved meanwhile is kept", () =
     expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 
+  // The names a file's text gives the config's path (`configPath`, and what is set equal to it), and whether it writes to one
+  // of them, or to a path that names config.yaml. A path that is only built from the config's directory is not the config.
+  function writesTheConfig(text: string): boolean {
+    const names = new Set(["configPath"]);
+    for (const m of text.matchAll(/\b(?:const|let|var)\s+(\w+)\s*(?::[^=;]+)?=\s*configPath\s*[;\n]/g)) names.add(m[1]!);
+    const any = [...names].join("|");
+    const writes = "writeFileSync|writeFileAtomic|appendFileSync|openSync|rmSync|unlinkSync";
+    const first = new RegExp("\\b(?:" + writes + ")\\((?:\\s*(?:" + any + ")\\s*[,)]|[^;\\n]*config\\.yaml)");
+    const moved = new RegExp("\\b(?:renameSync|copyFileSync)\\([^;\\n]*,\\s*(?:(?:" + any + ")\\s*[,)]|[^;\\n]*config\\.yaml)");
+    return first.test(text) || moved.test(text);
+  }
+
   test("no command writes the config file by any road but saveConfig and updateConfig", () => {
     const src = fileURLToPath(new URL("../src/", import.meta.url));
     const offenders: string[] = [];
     for (const file of readdirSync(src).filter((f) => f.endsWith(".ts") && f !== "config.ts")) {
       const text = readFileSync(join(src, file), "utf8");
       if (/serializeConfig\(/.test(text)) offenders.push(file + ": serializeConfig");
-      if (/(writeFileSync|writeFileAtomic|renameSync)\([^)]*(configPath|config\.yaml)/.test(text)) offenders.push(file + ": writes the config path");
+      if (writesTheConfig(text)) offenders.push(file + ": writes the config path");
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("the guard on the config's writers: it finds a write to the config by any name, and not one beside it", () => {
+    const flagged = [
+      "writeFileSync(configPath, text);",
+      "writeFileAtomic(configPath, text, 0o600);",
+      "renameSync(tmp, configPath);",
+      'writeFileSync(join(dir, "config.yaml"), text);',
+      "const file = configPath;\nwriteFileSync(file, text);",
+      "let target: string = configPath\nrenameSync(tmp, target);",
+    ];
+    const clean = [
+      'writeFileAtomic(join(fleetStateDir(configPath, f, s), "published.json"), x);',
+      'writeFileSync(join(dirname(configPath), "fleets", "x"), x);',
+      "const file = other;\nwriteFileSync(file, text);",
+      "const cfg = readFileSync(configPath, 'utf8');",
+    ];
+    for (const text of flagged) expect([text, writesTheConfig(text)]).toEqual([text, true]);
+    for (const text of clean) expect([text, writesTheConfig(text)]).toEqual([text, false]);
   });
 
   test("commands that race as processes: every device connected, the one disconnected gone, the code made again kept", async () => {
