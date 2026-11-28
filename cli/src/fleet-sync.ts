@@ -797,6 +797,7 @@ async function alignApplyIndex(
   env: Record<string, string>,
   previous: string | null | undefined,
   keep: string[],
+  fold = false,
 ): Promise<boolean> {
   const indexFile = join(gitDir, "apply.index");
   const sidecar = join(gitDir, "apply.commit");
@@ -828,7 +829,7 @@ async function alignApplyIndex(
   if (keep.length > 0) {
     const listed = await gitRun(
       gitDir,
-      ["ls-files", "-z", "--cached", "--"].concat(keep.map((p) => ":(literal)" + p)),
+      ["ls-files", "-z", "--cached", "--"].concat(keepSpecs(keep, fold)),
       env,
     );
     if (listed.length > 0) await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, listed);
@@ -910,11 +911,16 @@ export async function changesBetween(gitDir: string, env: Record<string, string>
   return found;
 }
 
+/** The folders left alone as pathspecs: literal, and not caring about case where the file system does not (as `isLeftAlone`). */
+function keepSpecs(keep: string[], fold: boolean): string[] {
+  return keep.map((p) => (fold ? ":(literal,icase)" : ":(literal)") + p);
+}
+
 /**
  * The tree an apply leaves the work tree and the apply index holding: the snapshot's own, less the directories the fleet leaves
  * alone. Built in an index of its own (nothing is written to the work tree, nor to the apply index), only when there are any.
  */
-export async function targetTree(gitDir: string, env: Record<string, string>, commit: string, keep: string[]): Promise<string> {
+export async function targetTree(gitDir: string, env: Record<string, string>, commit: string, keep: string[], fold = false): Promise<string> {
   const tree = await gitText(gitDir, ["rev-parse", commit + "^{tree}"], env);
   if (keep.length === 0) return tree;
   const scratch = join(gitDir, "apply.keep.index");
@@ -922,7 +928,7 @@ export async function targetTree(gitDir: string, env: Record<string, string>, co
   rmSync(scratch, { force: true });
   try {
     await gitRun(gitDir, ["read-tree", tree], own);
-    const listed = await gitRun(gitDir, ["ls-files", "-z", "--cached", "--"].concat(keep.map((p) => ":(literal)" + p)), own);
+    const listed = await gitRun(gitDir, ["ls-files", "-z", "--cached", "--"].concat(keepSpecs(keep, fold)), own);
     if (listed.length > 0) await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], own, listed);
     return await gitText(gitDir, ["write-tree"], own);
   } finally {
@@ -946,7 +952,6 @@ async function writeChanged(
   work: string,
   gitDir: string,
   env: Record<string, string>,
-  _commit: string,
   changed: TreeChange[],
   /** Names that are in the index as they should be, and not in the work tree as they were written. */
   putBack: string[],
@@ -1019,18 +1024,20 @@ export async function applyCommit(
   // that is killed half way leaves files of both snapshots in the work tree, and the
   // next look needs to know that those are the fleet's: see `localChanges`.
   writeFileSync(join(gitDir, "apply.target"), JSON.stringify({ from: previous ?? null, to: commit }));
-  const aligned = await alignApplyIndex(gitDir, env, previous, keep);
+  // On a file system that folds case a folder left alone is named as the work tree spells it, and the index may spell it otherwise:
+  // the same rule as `isLeftAlone` decides what is left alone, here and below.
+  const fold = foldsCase(work);
+  const aligned = await alignApplyIndex(gitDir, env, previous, keep, fold);
   // The sidecar says the index is what an apply wrote, and the first change this apply makes to the index makes that untrue: it
   // goes before any of them, and comes back when the apply is whole. An apply that dies in between (the index changed, the
   // work tree not yet) is then not trusted by the next, which writes the whole tree with read-tree.
   rmSync(join(gitDir, "apply.commit"), { force: true });
   // What the work tree and the index are to be left with: the snapshot's tree without the directories the fleet leaves alone
   // (a file of the fleet's inside a nested repository is not written there, whichever way the apply goes).
-  const target = await targetTree(gitDir, env, commit, keep);
+  const target = await targetTree(gitDir, env, commit, keep, fold);
   // What the fleet changed since `previous` is the whole of what is written: the index is that tree, so the names that
   // differ are all there is to look at (see `changesBetween`). Without a tree to compare against, or when the change is
   // too big to be worth naming, or when anything of it fails, git's own read-tree writes the lot, as it always did.
-  const fold = foldsCase(work);
   const changes = aligned && previous && treeApplyOn() ? (previous === commit ? [] : await changesBetween(gitDir, env, previous, commit).catch(() => null)) : null;
   const wanted = changes === null ? null : changes.filter((c) => !isLeftAlone(c.path, keep, fold));
   // What goes is worked out from the two trees, and goes first: git's own
@@ -1051,7 +1058,7 @@ export async function applyCommit(
   try {
     const goneSet = new Set(gone);
     const putBack = restore.filter((rel) => !goneSet.has(rel) && !isLeftAlone(rel, keep, fold));
-    const written = wanted !== null && (await writeChanged(work, gitDir, env, commit, wanted.filter((c) => c.status !== "D"), putBack, target, noteGit));
+    const written = wanted !== null && (await writeChanged(work, gitDir, env, wanted.filter((c) => c.status !== "D"), putBack, target, noteGit));
     if (!written) await gitText(gitDir, ["read-tree", "--reset", "-u", target], env, noteGit);
   } finally {
     rmSync(pidFile, { force: true });

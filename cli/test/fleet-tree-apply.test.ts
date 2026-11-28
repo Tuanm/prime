@@ -403,6 +403,26 @@ describe("a folder the fleet leaves alone, then does not", () => {
     expect(indexTree(m.gitDir, m.work)).toBe(second.tree);
   });
 
+  test("on a file system that folds case, a folder left alone is left alone however the snapshot spells it", async () => {
+    const f = await fleetOf({ "a.txt": "1", "proj/x.txt": "x", "dir/c.txt": "c" }, 0);
+    const root = scratch();
+    const rw = join(root, "r");
+    const rg = join(root, "rg");
+    // The work tree spells the folder `Proj` (a repository of the member's), the snapshot `proj`.
+    mkdirSync(join(rw, "Proj"), { recursive: true });
+    if (!foldsCase(rw)) return;
+    await ingestPack(rw, rg, f.first.commit, f.first.pack);
+    await applyCommit(rw, rg, f.first.commit, ["Proj"], null);
+    expect(existsSync(join(rw, "Proj/x.txt"))).toBe(false);
+    put(f.work, "dir/c.txt", "c2");
+    const second = await snapshot({ work: f.work, gitDir: f.gitDir, base: f.first.commit, wantFull: false });
+    await ingestPack(rw, rg, second.commit, second.delta!, { tree: second.tree });
+    await applyCommit(rw, rg, second.commit, ["Proj"], f.first.commit);
+    expect(readFileSync(join(rw, "dir/c.txt"), "utf8")).toBe("c2");
+    expect(existsSync(join(rw, "Proj/x.txt"))).toBe(false);
+    expect(gitSync(["--git-dir=" + rg, "ls-files"], gitEnv(rg, rw, join(rg, "apply.index"))).trim().split("\n")).toEqual(["a.txt", "dir/c.txt"]);
+  });
+
   test("with a folder left alone the result is still checked, and the index is the snapshot without it", async () => {
     const f = await fleetOf({ "a.txt": "1", "proj/x.txt": "x", "dir/c.txt": "c" });
     const m = f.members[0]!;
