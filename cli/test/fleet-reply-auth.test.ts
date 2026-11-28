@@ -204,22 +204,46 @@ describe("what the agent writes and the space adds", () => {
     expect(replyCertOf(other.sig!)).toBeUndefined();
   });
 
-  test("a member that is not the primary signs its refusal only for a call that is not signed ahead of the clock (a restart could let that one run)", () => {
+  test("a call that a member refused, signed, is not run by it after a restart, when it is the primary then (a call signed 50 s ahead)", () => {
     const caller = new CallSigner({ path: join(scratch(), "c.pem") });
     const key = caller.callerKey()!;
     const m = memberSpace("space-1", { publicKeyB64: key.publicKeyB64 }, { primary: false });
-    const at = (ahead: number, n: number) => {
+    const raw = unsignedBody.replace('"id":1', '"id":9');
+    const sig = signCall(key, fleetMemberTarget("acme", "space-1"), raw, { now: Date.now() + 50_000 });
+    const first = m.auth.admit({ raw, callerSig: sig });
+    expect(first.action).toBe("refuse");
+    expect(first.reply).toBeDefined(); // signed: "it did not run"
+    // the tool server restarts (a new process, the same state directory), and the member becomes the primary
+    const restarted = new CallerAuth({ mode: "enforce", deviceId: "space-1", callersFile: join(m.secretDir, "callers.json"), stateDir: m.stateDir });
+    const file = join(m.secretDir, "fleet-callers.json");
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), primary: true, primarySince: Date.now() - 600_000, writtenAt: Date.now() }));
+    const again = restarted.admit({ raw, callerSig: sig });
+    expect(again.action).toBe("refuse");
+    if (again.action === "refuse") expect(again.response.error.data.reason).toBe("replay");
+    // without the restart's memory it would have run: another state directory knows nothing of it
+    const forgetful = new CallerAuth({ mode: "enforce", deviceId: "space-1", callersFile: join(m.secretDir, "callers.json"), stateDir: scratch() });
+    expect(forgetful.admit({ raw, callerSig: sig }).action).toBe("run");
+  });
+
+  test("the nonces that are kept over a restart are bounded and run out with their calls; one that cannot be kept makes the refusal unsigned", () => {
+    const caller = new CallSigner({ path: join(scratch(), "c.pem") });
+    const key = caller.callerKey()!;
+    const m = memberSpace("space-1", { publicKeyB64: key.publicKeyB64 }, { primary: false });
+    const file = join(m.stateDir, "retired-nonces.jsonl");
+    const refuse = (n: number, auth = m.auth) => {
       const raw = unsignedBody.replace('"id":1', `"id":${n}`);
-      return m.auth.admit({ raw, callerSig: signCall(key, fleetMemberTarget("acme", "space-1"), raw, { now: Date.now() + ahead }) });
+      return auth.admit({ raw, callerSig: signCall(key, fleetMemberTarget("acme", "space-1"), raw) });
     };
-    const now = at(0, 2);
-    expect(now.action).toBe("refuse");
-    expect(now.reply).toBeDefined(); // signed: it did not run, and cannot afterwards
-    const soon = at(3_000, 3);
-    expect(soon.reply).toBeDefined();
-    const ahead = at(30_000, 4);
-    expect(ahead.action).toBe("refuse");
-    expect(ahead.reply).toBeUndefined(); // unsigned: the caller is told it may or may not have run
+    expect(refuse(1).reply).toBeDefined();
+    expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
+    // lines of calls that have run out are dropped when the file is read at the start
+    const old = JSON.stringify({ n: "old", t: Date.now() - 20 * 60_000 });
+    writeFileSync(file, readFileSync(file, "utf8") + old + "\n" + "not json\n");
+    new CallerAuth({ mode: "enforce", deviceId: "space-1", callersFile: join(m.secretDir, "callers.json"), stateDir: m.stateDir });
+    expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
+    // a state directory that cannot be written: the refusal goes unsigned (the caller is told it may or may not have run)
+    const blocked = new CallerAuth({ mode: "enforce", deviceId: "space-1", callersFile: join(m.secretDir, "callers.json"), stateDir: join(file, "under-a-file") });
+    expect(refuse(2, blocked).reply).toBeUndefined();
   });
 
   test("a reply to a call made for the fleet carries the certificate, one to a call for the device does not", () => {

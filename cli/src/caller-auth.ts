@@ -11,8 +11,9 @@
 //   enforce  such a call is refused with JSON-RPC error -32001
 
 import { createHash, sign as cryptoSign, verify as cryptoVerify } from "node:crypto";
-import { mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { dirname, join } from "node:path";
 import { FLEET_CALLERS_FRESH_MS, FLEET_CALL_SKEW_MS, FLEET_FUTURE_MS, type FleetCallersFile, fleetCallersPathFor, readFleetCallers } from "./fleet-callers.ts";
 import {
@@ -38,6 +39,9 @@ export const MAX_SKEW_MS = 5 * 60_000;
 const NONCE_LIMIT = 10_000;
 /** How many nonces of signed refusals are kept (see `retired`); when they are all in use, refusals go unsigned. */
 const RETIRED_LIMIT = 10_000;
+/** The file in the state directory that keeps them over a restart, and how long past the end of their calls' life they are kept. */
+const RETIRED_FILE = "retired-nonces.jsonl";
+const RETIRED_MARGIN_MS = 60_000;
 const LOG_LIMIT_BYTES = 1024 * 1024;
 
 export const REPLY_SIG_HEADER = "x-prime-reply-sig";
@@ -186,6 +190,8 @@ export class CallerAuth {
   private flushing: Promise<void> | undefined;
   private logFailureSaid = false;
   private replyFailureSaid = false;
+  private retiredFailureSaid = false;
+  private retiredLines = 0;
   private cache: CallersCache | undefined;
   private fleetCache: FleetCache | undefined;
   private replyKey: CallerKey | undefined;
@@ -197,6 +203,7 @@ export class CallerAuth {
     this.mode = opts.mode;
     this.stateDir = opts.stateDir ?? join(dirname(opts.callersFile), "caller-auth");
     this.floorTs = (opts.now ?? Date.now)() - 1;
+    if (opts.mode !== "off") this.loadRetired();
   }
 
   private now(): number {
@@ -299,9 +306,6 @@ export class CallerAuth {
       failure !== "replay" &&
       failure !== "stale" &&
       sig.ts > this.floorTs &&
-      // A call signed ahead of the clock is one a restart of this process could let run after all (its time is above what the restart left as the floor),
-      // so a refusal that says "did not run" is not signed for it, up to the skew of the members' clocks.
-      sig.ts <= this.now() + FLEET_CALL_SKEW_MS &&
       !this.ranNonces.has(sig.nonce) &&
       this.retire(sig.nonce, sig.ts);
     return {
@@ -328,8 +332,75 @@ export class CallerAuth {
     }
     if (this.retired.has(nonce)) return false;
     if (this.retired.size >= RETIRED_LIMIT) return false;
+    // Kept across a restart too: a call signed after the moment this process started is not refused as older than it, so without this a refusal that
+    // said "did not run" could be followed by the call running. If it cannot be kept, the refusal is not signed.
+    if (!this.persistRetired(nonce, ts)) return false;
     this.retired.set(nonce, ts);
     return true;
+  }
+
+  private retiredFile(): string {
+    return join(this.stateDir, RETIRED_FILE);
+  }
+
+  /** The nonces that were retired before this process started and have not run out (a call stops verifying MAX_SKEW_MS after its time, and RETIRED_MARGIN_MS more is kept). */
+  private loadRetired(): void {
+    let text: string;
+    try {
+      text = readFileSync(this.retiredFile(), "utf8");
+    } catch {
+      return;
+    }
+    const now = this.now();
+    const live: Array<[string, number]> = [];
+    let lines = 0;
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      lines++;
+      try {
+        const v = JSON.parse(line) as { n?: unknown; t?: unknown };
+        if (typeof v.n === "string" && v.n.length > 0 && v.n.length <= 128 && typeof v.t === "number" && Number.isFinite(v.t) && v.t + MAX_SKEW_MS + RETIRED_MARGIN_MS >= now) live.push([v.n, v.t]);
+      } catch {
+        // a line that is not one is no nonce
+      }
+    }
+    live.sort((a, b) => a[1] - b[1]);
+    for (const [n, t] of live.slice(-RETIRED_LIMIT)) this.retired.set(n, t);
+    this.retiredLines = live.length;
+    if (lines > live.length) this.rewriteRetired();
+  }
+
+  private rewriteRetired(): boolean {
+    try {
+      mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      const body = [...this.retired].map(([n, t]) => JSON.stringify({ n, t })).join("\n");
+      writeFileAtomic(this.retiredFile(), body ? body + "\n" : "", 0o600);
+      this.retiredLines = this.retired.size;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private persistRetired(nonce: string, ts: number): boolean {
+    try {
+      // Entries that have run out are dropped when the file has grown to twice what can be held (and when it is read at the start).
+      if (this.retiredLines >= RETIRED_LIMIT * 2) {
+        const now = this.now();
+        for (const [key, at] of this.retired) if (at + MAX_SKEW_MS + RETIRED_MARGIN_MS < now) this.retired.delete(key);
+        if (!this.rewriteRetired()) return false;
+      }
+      mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      appendFileSync(this.retiredFile(), JSON.stringify({ n: nonce, t: ts }) + "\n", { mode: 0o600 });
+      this.retiredLines++;
+      return true;
+    } catch (err) {
+      if (!this.retiredFailureSaid) {
+        this.retiredFailureSaid = true;
+        this.opts.log?.(`caller-auth: refusals are not signed: cannot keep the nonces of the calls refused (${err instanceof Error ? err.message : String(err)})`);
+      }
+      return false;
+    }
   }
 
   /** Neither a request nor a body that can be read: there is nothing to run, whatever the mode. */
