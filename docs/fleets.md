@@ -535,7 +535,7 @@ prime fleets trust pin acme --space work --clear                # take a pin bac
 
 **The order.** A member that pinned an owner key refuses a roster that is not signed (it would be the way back to a roster the gateway writes). So:
 upgrade every member and the gateway; then `roster init`; then `invite` (only now does the code carry the owner key) or `trust pin` on each machine.
-`invite` leaves the key off the code, and `trust pin` refuses, while the gateway says the roster is not signed. A pin made too early (the code was handed out before `init`,
+After `roster init`, give the members five minutes, or restart their agents: a member that was told the roster is open keeps that answer for five minutes. `invite` leaves the key off the code, and `trust pin` refuses, while the gateway says the roster is not signed. A pin made too early (the code was handed out before `init`,
 or by an older build) makes the member refuse every pull and publish, and says so, with the way out: `trust pin ... --clear`, then pin again after `init`.
 A member that pinned nothing takes the first signed chain it sees on trust (the one printed on its stderr): a gateway that shows a chain of its own before `init`
 would be believed, which is why every machine should be pinned by hand, with the fingerprint the operator prints, as the last step.
