@@ -452,6 +452,7 @@ describe("a piece that says its hash is streamed to the bucket, which checks it"
     const other = sha(bytesOf(4000, 4));
     const res = await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes, other));
     expect(res.status).toBe(400);
+    expect(res.json.code).toBe("body-mismatch");
     expect(w.bucket.objects.has("fleets/acme/packs/" + other)).toBe(false);
     expect(w.bucket.deleted).toEqual([]);
   });
@@ -483,6 +484,7 @@ describe("a piece that says its hash is streamed to the bucket, which checks it"
     w.bucket.failSize = true;
     const res = await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes));
     expect(res.status).toBe(503);
+    expect(res.json.code).toBe("bucket-unavailable");
     w.bucket.failSize = false;
     expect(w.bucket.putKinds).toEqual([]);
     expect(w.bucket.deleted).toEqual([]);
@@ -530,7 +532,9 @@ describe("a piece that says its hash is streamed to the bucket, which checks it"
     const w = world();
     await w.fleet("acme", { "dev-a": ["chunks"], "dev-b": ["chunks"] });
     const bytes = bytesOf(100, 1);
-    expect((await w.http("acme", "POST", "/packs", bytes, "dev-b", withHash(bytes))).status).toBe(409);
+    const refused = await w.http("acme", "POST", "/packs", bytes, "dev-b", withHash(bytes));
+    expect(refused.status).toBe(409);
+    expect(refused.json.code).toBe("not-primary");
     expect(w.bucket.putKinds).toEqual([]);
   });
 });
@@ -562,6 +566,7 @@ describe("uploading a piece", () => {
     };
     const res = await w.http("acme", "POST", "/packs", bytesOf(10, 1));
     expect(res.status).toBe(503);
+    expect(res.json.code).toBe("fleet-unreachable");
     expect([...w.bucket.objects.keys()].filter((k) => k.includes("/packs/"))).toEqual([]);
     fleet.get = get;
     expect((await w.http("acme", "POST", "/packs", bytesOf(10, 1))).status).toBe(200);

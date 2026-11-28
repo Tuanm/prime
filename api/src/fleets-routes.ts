@@ -138,7 +138,7 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   // to fill the account's storage.
   const role = await fleetRole({ request: deps.request, env: deps.env, url: deps.url, cfg: deps.cfg, fleetId, action: "role", authorizeDevice: deps.authorizeDevice, unauthorized: deps.unauthorized }, deviceId);
   if (!role) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
-  if (!role.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
+  if (!role.primary) return Response.json({ error: "only the primary may publish", code: "not-primary" }, { status: 409 });
 
   const tooBig = (bytes: number): Response => uploadTooBig(bytes, "snapshot");
   // Said before the body is read, when the sender says how long it is.
@@ -415,7 +415,7 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
   // Upload a payload. Only the primary may publish.
   if (deps.request.method === "POST") {
     if (!role.primary) {
-      return Response.json({ error: "only the primary may publish" }, { status: 409 });
+      return Response.json({ error: "only the primary may publish", code: "not-primary" }, { status: 409 });
     }
     // Said before the body is read, when the sender says how long it is, and again after.
     const declared = Number(deps.request.headers.get("content-length") ?? 0);
@@ -437,8 +437,8 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     if (parts[0] === "packs") {
       const noted = await noteUpload(deps, deviceId, digest);
       // The object could not say (not the same as not being the primary): try again, nothing was stored.
-      if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again" }, { status: 503, headers: { "retry-after": "5" } });
-      if (!noted.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
+      if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again", code: "fleet-unreachable" }, { status: 503, headers: { "retry-after": "5" } });
+      if (!noted.primary) return Response.json({ error: "only the primary may publish", code: "not-primary" }, { status: 409 });
     }
     // Content addressed: writing the same bytes twice is free and idempotent.
     countFleetR2("write");
@@ -487,8 +487,8 @@ async function streamedPack(
 ): Promise<Response> {
   const key = prefix + hash;
   const noted = await noteUpload(deps, deviceId, hash);
-  if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again" }, { status: 503, headers: { "retry-after": "5" } });
-  if (!noted.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
+  if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again", code: "fleet-unreachable" }, { status: 503, headers: { "retry-after": "5" } });
+  if (!noted.primary) return Response.json({ error: "only the primary may publish", code: "not-primary" }, { status: 409 });
   const body = deps.request.body;
   if (!body) return Response.json({ error: "empty payload" }, { status: 400 });
   // Whether it is there already is not guessed at: a bucket that cannot say is not "absent".
@@ -498,7 +498,7 @@ async function streamedPack(
     held = await bucket.head(key);
   } catch {
     await body.cancel().catch(() => {});
-    return Response.json({ error: "the bucket could not be asked: try again" }, { status: 503, headers: { "retry-after": "5" } });
+    return Response.json({ error: "the bucket could not be asked: try again", code: "bucket-unavailable" }, { status: 503, headers: { "retry-after": "5" } });
   }
   if (held && held.size === length) {
     await body.cancel().catch(() => {});
@@ -513,9 +513,9 @@ async function streamedPack(
     // A body that is not the pack it names, or not as long as it said, or that broke off: the bucket kept nothing of it (and left what
     // was under the key as it was). Anything else the bucket says is its own trouble, to be tried again.
     if (/checksum|sha-?256|too many bytes|fewer bytes|FixedLengthStream/i.test(String(error))) {
-      return Response.json({ error: "the body is not the pack whose hash was named, or not as long as it said: upload it again" }, { status: 400 });
+      return Response.json({ error: "the body is not the pack whose hash was named, or not as long as it said: upload it again", code: "body-mismatch" }, { status: 400 });
     }
-    return Response.json({ error: "the bucket could not take the pack: try again" }, { status: 503, headers: { "retry-after": "5" } });
+    return Response.json({ error: "the bucket could not take the pack: try again", code: "bucket-unavailable" }, { status: 503, headers: { "retry-after": "5" } });
   }
   return Response.json({ ok: true, key, hash, size: length, epoch: role.epoch });
 }
