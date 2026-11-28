@@ -1700,6 +1700,9 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
         const was = loop.postponed;
         loop.postponed = { count: (was?.count ?? 0) + 1, since: was?.since ?? Date.now() };
         if (was === undefined) logAgent("space " + loop.name + ": " + err.message);
+      } else {
+        // A publish that failed for another reason says nothing of the wait that was going on: it does not count towards the limit.
+        loop.postponed = undefined;
       }
       throw err;
     });
@@ -2109,6 +2112,8 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     // The index of the snapshots is not what it was when the member was last primary: a replica writes the work tree.
     if (placed.primary !== loop.primary) loop.indexTrusted = false;
     loop.primary = placed.primary;
+    // A member that is not the primary has no publish that is being left for the next round.
+    if (!placed.primary) loop.postponed = undefined;
     // What the fleet says a place lasts. An agent that renews at its own pace
     // against a lease it never asked about is how a live primary loses it.
     adoptLease(loop, placed.ttlMs);
