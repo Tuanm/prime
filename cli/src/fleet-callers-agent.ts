@@ -179,7 +179,7 @@ export function issueReplyCert(loop: CallersLoop & { creds: { deviceId: string }
     const sign = loadOrCreateSignKey(loop.paths.keyFile);
     // A certificate made with a signing key that is not the member's now (the member rotated its keys) is one the roster no longer vouches for.
     const heldBy = held ? parseReplyCert(held.cert)?.spub : undefined;
-    if (held && held.key === replyKey && heldBy === sign.publicKey && held.until - now > REPLY_CERT_RENEW_MS) return;
+    if (held && held.key === replyKey && heldBy === publicKeyOfPem(sign.privateKey) && held.until - now > REPLY_CERT_RENEW_MS) return;
     const until = now + REPLY_CERT_TTL_MS;
     writer.setReplyCert({ key: replyKey, until, cert: signReplyCert(sign.privateKey, { fleet: loop.fleet, device: loop.creds.deviceId, replyKey }, until) });
   } catch (err) {
