@@ -54,6 +54,7 @@ import {
 } from "./fleets";
 import { AUDIT_PAGE_MAX, AuditLog, type AuditDetail, actorOf, auditLimits } from "./fleet-audit";
 import { HitMeter, meterStorage, sendUsage } from "./usage";
+import { EPOCH_KEY_MAX_AHEAD_MS, EPOCH_KEY_MIN_INTERVAL_MS, epochKeySigned, parseEpochKey } from "./fleet-epoch";
 import { ROSTER_MAX_ENTRIES, RosterRefusal, type SignedEntry, begin, entryHash, extend, foldTrusted, fleetKeyOf, parseSigned } from "./fleet-roster";
 import type { Env } from "./config";
 
@@ -741,6 +742,11 @@ export class FleetDO implements DurableObject {
         ...(m.caps && m.caps.length > 0 ? { caps: m.caps } : {}),
         // A viewer is sealed for like the others and never writes.
         ...(m.role === "viewer" ? { role: "viewer" } : {}),
+        // The signing key the fleet holds for it, and the epoch key it signed with that key, while the epoch key is valid.
+        ...(m.spub ? { spub: m.spub } : {}),
+        ...(m.epochKey && m.epochKey.notAfter > Date.now() && m.spub
+          ? { epochKey: { n: m.epochKey.n, pub: m.epochKey.pub, notAfter: m.epochKey.notAfter, sig: m.epochKey.sig } }
+          : {}),
         // How far this member has got. The admin page shows it; the publisher
         // does not decide anything from it (a member that fell behind catches
         // up from the newest checkpoint).
@@ -749,6 +755,71 @@ export class FleetDO implements DurableObject {
         ...(fetched[m.deviceId] !== undefined ? { fetched: fetched[m.deviceId] } : {}),
       })),
     });
+  }
+
+  /**
+   * A member publishes its newest epoch key: `{entry: [prime-epoch-v1, fleet, incarnation, device, n, pub, notAfter], sig}`, signed
+   * by the signing key the fleet holds for it. Only the newest is kept (n only goes up), at most one in five minutes, and `GET /keys`
+   * serves it to the primary. The gateway checks the form and the signature as a spam filter: what makes a member trust it is that it
+   * checks the signature against the signing key of the roster itself.
+   */
+  private async epochKey(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    let parsed: ReturnType<typeof parseEpochKey>;
+    try {
+      parsed = parseEpochKey(body);
+    } catch (error) {
+      return Response.json({ error: error instanceof RosterRefusal ? error.message : "malformed epoch key" }, { status: 400 });
+    }
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
+    let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
+    await this.state.blockConcurrencyWhile(async () => {
+      const members = await this.members();
+      const member = members[caller.deviceId];
+      if (!member) {
+        out = this.deny();
+        return;
+      }
+      if (parsed.device !== caller.deviceId) {
+        out = Response.json({ error: "an epoch key is the caller's own: the device in it is another" }, { status: 400 });
+        return;
+      }
+      if (parsed.fleet !== fleetId || parsed.incarnation !== (await this.incarnation())) {
+        out = Response.json({ error: "the epoch key is for another fleet, or for an earlier fleet of the name" }, { status: 409 });
+        return;
+      }
+      if (!member.spub) {
+        out = Response.json({ error: "the fleet holds no signing key for this member, so an epoch key of it cannot be checked" }, { status: 409 });
+        return;
+      }
+      const now = Date.now();
+      if (parsed.notAfter <= now || parsed.notAfter > now + EPOCH_KEY_MAX_AHEAD_MS) {
+        out = Response.json({ error: "notAfter is in the past, or more than 31 days ahead" }, { status: 400 });
+        return;
+      }
+      if (!(await epochKeySigned(parsed.signed, member.spub))) {
+        out = Response.json({ error: "the signature is not the member's signing key's" }, { status: 401 });
+        return;
+      }
+      const have = member.epochKey;
+      if (have && have.n === parsed.n && have.pub === parsed.pub && have.notAfter === parsed.notAfter && have.sig === parsed.signed.sig) {
+        out = Response.json({ ok: true, n: parsed.n, again: true });
+        return;
+      }
+      if (have && parsed.n <= have.n) {
+        out = Response.json({ error: "an epoch key is newer than the one the fleet holds (n " + have.n + ")", n: have.n }, { status: 409 });
+        return;
+      }
+      if (have && now - have.at < EPOCH_KEY_MIN_INTERVAL_MS) {
+        const wait = EPOCH_KEY_MIN_INTERVAL_MS - (now - have.at);
+        out = Response.json({ error: "an epoch key was taken a moment ago", retryAfterMs: wait }, { status: 429, headers: { "retry-after": String(Math.ceil(wait / 1000)) } });
+        return;
+      }
+      member.epochKey = { n: parsed.n, pub: parsed.pub, notAfter: parsed.notAfter, sig: parsed.signed.sig, at: now };
+      await this.storage.put("members", members);
+      out = Response.json({ ok: true, n: parsed.n });
+    });
+    return out;
   }
 
   // How far this member has got. The Durable Object uses it to fence a
@@ -1028,6 +1099,10 @@ export class FleetDO implements DurableObject {
     if (path === "/audit" && request.method === "GET") return this.readAudit(caller, url);
     if (path === "/note" && request.method === "POST") return this.note(caller, body);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
+    if (path === "/epoch-key" && request.method === "POST") {
+      await this.touch();
+      return this.epochKey(caller, body, request);
+    }
     if (path === "/roster" && request.method === "GET") return this.rosterGet(caller, url);
     if (path === "/roster" && request.method === "POST") return this.rosterPost(caller, body, request);
     if (path === "/remove-fence" && request.method === "POST") return this.removeFence(caller, body, request);
@@ -2402,6 +2477,7 @@ export class FleetDO implements DurableObject {
     if (!spub || !member || member.spub === spub) return false;
     if (await this.rosterSigned()) return false;
     member.spub = spub;
+    delete member.epochKey;
     return true;
   }
 
@@ -2594,6 +2670,8 @@ export class FleetDO implements DurableObject {
     if (e[8] !== null && e[8] !== member.pubkey) throw new RosterRefusal("a rotate-self does not change the key snapshots are sealed for", 409);
     if (member.spub === e[9]) return;
     member.spub = e[9] as string;
+    // The epoch key was signed by the signing key that was: no member can check it against the roster now.
+    delete member.epochKey;
     await this.storage.put("members", members);
   }
 
@@ -2776,7 +2854,10 @@ export class FleetDO implements DurableObject {
     const was = member.pubkey;
     if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId, opts.until);
     member.pubkey = pubkey;
-    if (opts.spub) member.spub = opts.spub;
+    if (opts.spub) {
+      if (opts.spub !== member.spub) delete member.epochKey;
+      member.spub = opts.spub;
+    }
     await this.storage.put("members", members);
     await this.audit(caller, "key-replaced", deviceId, { via, key: await keyFingerprintLong(pubkey), ...(was ? { was: await keyFingerprintLong(was) } : {}) });
   }

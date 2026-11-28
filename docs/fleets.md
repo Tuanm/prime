@@ -1055,6 +1055,30 @@ member ignores the chain, and is exposed as it was until it is upgraded; a 26.11
 mode (it is told so). Losing the owner key means a new genesis (a new incarnation), and every member pins the new key
 again.
 
+## A member's epoch key
+
+A member that reads the newer format keeps, beside its long-term sealing key, short-lived keys of its own ("epoch keys"), and
+asks that the snapshot key be wrapped to the newest of them. Whoever later steals its key file then opens only the snapshots
+wrapped to the epoch keys it still holds, not every snapshot the fleet kept. The gateway only keeps and serves the public half.
+
+`POST /fleets/{fleet}/epoch-key {entry, sig}`, from the member itself. The entry is
+`["prime-epoch-v1", fleet, incarnation, device, n, pub, notAfter]` (`pub` an X25519 public key, base64; `notAfter` a time in
+milliseconds), signed with Ed25519 by **the member's signing key** (the one the fleet holds for it: `spub` in the roster), so that a
+gateway cannot make an epoch key up for a member. The gateway checks the form, that the fleet, incarnation and device are this
+fleet's and the caller's, that `notAfter` is in the future and no more than 31 days ahead, and the signature (as a filter: a member
+checks it against the signing key of the roster, not against the gateway's word).
+
+- Only the newest is kept, and `n` only goes up (a lower or equal one is `409`; the same key sent again is answered as it was).
+- At most one in five minutes from a member (`429`, with `retry-after`), since each is a row written.
+- `GET /fleets/{fleet}/keys` (the primary) gives each member's `spub` and, while it is valid, `epochKey: {n, pub, notAfter, sig}`.
+  A member with no valid epoch key has none there, and a publisher wraps to its long-term key as before.
+- A change of the member's signing key (a `rotate-self`, a `rotate`, or the key of the open roster) drops its epoch key: it was signed
+  by the key that was.
+- It is not written to the audit log (one a day per member would be most of it); the member's own record is what it keeps.
+
+A member of an earlier build does not send one and is wrapped for as before. Forward secrecy holds only once every publisher
+reads epoch keys.
+
 ## Codes made before the longer ones
 
 An anonymous device's code was six characters until the gateway began issuing 25. Nothing issues a short one
