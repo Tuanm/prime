@@ -1030,6 +1030,20 @@ export function updateFleetState(
 }
 
 /**
+ * Forget where a member was in a fleet: a member that joins a fleet starts from nothing, whatever an earlier membership
+ * under the same name (of a fleet that was deleted and made again) left of its position, and of a publish that was never
+ * written down. The work tree and the key are not touched.
+ */
+export function resetFleetState(configPath: string, fleetId: string, spaceName: string): void {
+  const dir = fleetStateDir(configPath, fleetId, spaceName);
+  withStateLock(dir, (held) => {
+    held.assert();
+    rmSync(join(dir, "state.json"), { force: true });
+    rmSync(join(dir, PUBLISHED_FILE), { force: true });
+  });
+}
+
+/**
  * Record a member's state. What is written never puts a position behind the one on disk
  * (see `mergeFleetState`), unless `replace` says the state is a new start (a space that
  * has just joined).
