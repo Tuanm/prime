@@ -123,6 +123,37 @@ describe("CallerAuth: a signed call", () => {
     expect(refusedWith(a)).toBe("invalid");
   });
 
+  test("a signed body that starts with a byte-order mark runs: the mark is hashed, and not parsed", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const raw = "\ufeff" + BASH;
+    const a = t.auth.admit({ request: JSON.parse(BASH), raw, callerSig: t.sign(raw) });
+    expect(a.action).toBe("run");
+    expect((a as { request: { method: string } }).request.method).toBe("tools/call");
+    // The signature covers the mark: the same body signed without it does not pass for the one with it.
+    const b = t.auth.admit({ request: JSON.parse(BASH), raw, callerSig: t.sign(BASH) });
+    expect(refusedWith(b)).toBe("invalid");
+  });
+
+  test("a frame with `raw` and no `request` runs from `raw`; one with neither is refused, in every mode", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const a = t.auth.admit({ raw: BASH, callerSig: t.sign(BASH) });
+    expect(a.action).toBe("run");
+    expect((a as { request: { id: number } }).request.id).toBe(JSON.parse(BASH).id);
+    // a wrong signature on such a frame is refused like any other (the id comes from the body)
+    const bad = t.auth.admit({ raw: BASH, callerSig: t.sign(BASH.replace("id", "ls")) });
+    expect(refusedWith(bad)).toBe("invalid");
+    for (const mode of ["warn", "enforce"] as const) {
+      const u = setup(mode);
+      expect(u.auth.admit({ raw: "not json" }).action).toBe("refuse");
+      expect(u.auth.admit({}).action).toBe("refuse");
+    }
+    // warn: an unsigned raw-only frame of a call that needs a signature still runs (and is logged), as a framed one does
+    const w = setup("warn");
+    expect(w.auth.admit({ raw: BASH }).action).toBe("run");
+  });
+
   // [what is wrong, the call, what the other end is told, what this device writes down]
   const refusals: [string, (t: ReturnType<typeof setup>) => ReturnType<CallerAuth["admit"]>, string, string][] = [
     ["a body changed after signing", (t) => t.auth.admit(t.frame(BASH.replace("id", "ls"), t.sign(BASH))), "invalid", "bad-signature"],
@@ -486,6 +517,8 @@ describe("code-mcp behind a gateway that sends frames", () => {
 
   interface Run {
     send(frame: Record<string, unknown>): Promise<Record<string, any>>;
+    /** What the device said when it registered. */
+    registered?: Record<string, any>;
     /** The gateway's address: a POST to it is turned into a frame the way the gateway does it (raw body, the signature header). */
     url: string;
     stop(): void;
@@ -496,6 +529,7 @@ describe("code-mcp behind a gateway that sends frames", () => {
     const pending = new Map<string, (m: Record<string, any>) => void>();
     let ready!: () => void;
     const connected = new Promise<void>((r) => (ready = r));
+    let registeredFrame: Record<string, any> | undefined;
     let sendFrame!: (frame: Record<string, unknown>) => Promise<Record<string, any>>;
     const gw = Bun.serve({
       port: 0,
@@ -517,7 +551,10 @@ describe("code-mcp behind a gateway that sends frames", () => {
         },
         message(_ws, data) {
           const m = JSON.parse(String(data)) as Record<string, any>;
-          if (m.type === "register") ready();
+          if (m.type === "register") {
+            registeredFrame = m;
+            ready();
+          }
           else if (m.id && pending.has(m.id)) pending.get(m.id)!(m);
         },
       },
@@ -550,6 +587,9 @@ describe("code-mcp behind a gateway that sends frames", () => {
       });
     };
     return {
+      get registered() {
+        return registeredFrame;
+      },
       url: `http://127.0.0.1:${gw.port}`,
       send: sendFrame,
       stop() {
@@ -647,6 +687,34 @@ describe("code-mcp behind a gateway that sends frames", () => {
     } finally {
       globalThis.fetch = realFetch;
       delete process.env.PRIME_DEVICE_KEYS;
+      r.stop();
+    }
+  });
+
+  test("a device that says it takes raw frames gets `raw` alone and answers with `responseText` alone", async () => {
+    const dir = scratch();
+    const callers = join(dir, "callers.json");
+    const key = loadOrCreateCallerKey(join(dir, "me.pem"));
+    addCaller(callers, { pub: key.publicKey });
+    const r = await run("enforce", callers);
+    try {
+      expect(r.registered?.capabilities).toContain("call-raw-only");
+      const raw = "\ufeff" + JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "write", arguments: { cwd: dir, path: join(dir, "c.txt"), content: "c" } } });
+      const sig = signCall(key, "device:laptop", raw);
+      const frame = await r.send({ raw, callerSig: sig });
+      expect(frame).not.toHaveProperty("response");
+      expect(JSON.parse(frame.responseText).id).toBe(9);
+      expect(JSON.parse(frame.responseText).error).toBeUndefined();
+      expect(existsSync(join(dir, "c.txt"))).toBe(true);
+      expect(verifyReplySig(frame.replySig, parseCallSig(sig)!.nonce, frame.responseText)).toBeDefined();
+      // a refusal comes the same way
+      const refused = await r.send({ raw: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "write", arguments: {} } }) });
+      expect(refused).not.toHaveProperty("response");
+      expect(JSON.parse(refused.responseText).error.code).toBe(-32001);
+      // a frame with `request` is answered as before
+      const old = await r.send({ request: { jsonrpc: "2.0", id: 11, method: "ping" } });
+      expect(old.response.id).toBe(11);
+    } finally {
       r.stop();
     }
   });
