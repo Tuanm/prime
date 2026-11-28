@@ -9,7 +9,18 @@ import { port } from "./ports";
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
 const PORT = port(8847);
-const BASE = "http://127.0.0.1:" + PORT;
+// FLEET_E2E_BASE points the test at a deployed gateway instead of a local worker (FLEET_E2E_TOKEN is its operator token), where a
+// Worker held to its real memory limit is the thing under test: FLEET_CHUNKS_LANES (default 4) pieces are uploaded at once, and a 1102
+// ("exceeded memory") or any refusal fails the run. Nothing is measured there, since there is no process to look at.
+const EXTERNAL = (process.env.FLEET_E2E_BASE ?? "").replace(/\/+$/, "");
+const EXTERNAL_TOKEN = process.env.FLEET_E2E_TOKEN ?? "";
+const LANES = Math.max(1, Math.min(32, Number(process.env.FLEET_CHUNKS_LANES) || 4));
+const BASE = EXTERNAL || "http://127.0.0.1:" + PORT;
+// A deployed gateway is shared: the fleet and the device made here have names of their own, and are removed at the end.
+const RUN = Date.now().toString(36);
+const DEV = EXTERNAL ? "chunks-" + RUN : "dev-a";
+const TOKEN = "tok-" + RUN + "-0123456789";
+const FLEET = EXTERNAL ? "pieces-" + Date.now().toString(36) : "pieces";
 const MIB = 1024 * 1024;
 const PIECE = 8 * MIB;
 const PUBKEY = "A".repeat(43) + "=";
@@ -65,6 +76,7 @@ function treeRss(root: number): { all: number; workerd: number } {
 let wrangler: ReturnType<typeof spawn> | undefined;
 const log: string[] = [];
 async function startWorker(): Promise<void> {
+  if (EXTERNAL) return;
   rmSync(ROOT + "/.wrangler/state-" + PORT, { recursive: true, force: true });
   wrangler = spawn(
     "node",
@@ -88,7 +100,7 @@ async function startWorker(): Promise<void> {
   throw new Error("wrangler did not become ready\n" + log.join("").slice(-1200));
 }
 
-const OP = { "content-type": "application/json", authorization: "Bearer chunks-operator-token-0123456789" };
+const OP = { "content-type": "application/json", authorization: "Bearer " + (EXTERNAL ? EXTERNAL_TOKEN : "chunks-operator-token-0123456789") };
 const dev = (id: string, token: string) => ({ "content-type": "application/json", "x-prime-device": id, "x-device-token": token });
 const admin = async (path: string, body: unknown = {}) => {
   const r = await fetch(BASE + path, { method: "POST", headers: OP, body: JSON.stringify(body) });
@@ -102,76 +114,101 @@ const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 
 try {
   await startWorker();
-  const root = wrangler!.pid!;
-  await admin("/admin/api/devices", { deviceId: "dev-a", token: "token-a-1234" });
-  check("the fleet is made", (await admin("/admin/api/fleets/pieces")).status === 200);
-  const inv = await admin("/admin/api/fleets/pieces/invite");
-  await member("/fleets/pieces/join", "dev-a", "token-a-1234", { code: inv.json.code, label: "dev-a", pubkey: PUBKEY });
-  await admin("/admin/api/fleets/pieces/approve", { deviceId: "dev-a" });
-  const boot = await member("/fleets/pieces/bootstrap", "dev-a", "token-a-1234", { caps: ["chunks"] });
+  const root = wrangler?.pid ?? 0;
+  await admin("/admin/api/devices", { deviceId: DEV, token: TOKEN });
+  check("the fleet is made", (await admin("/admin/api/fleets/" + FLEET + "")).status === 200);
+  const inv = await admin("/admin/api/fleets/" + FLEET + "/invite");
+  await member("/fleets/" + FLEET + "/join", DEV, TOKEN, { code: inv.json.code, label: DEV, pubkey: PUBKEY });
+  await admin("/admin/api/fleets/" + FLEET + "/approve", { deviceId: DEV });
+  const boot = await member("/fleets/" + FLEET + "/bootstrap", DEV, TOKEN, { caps: ["chunks"] });
   check("the member takes the lease", boot.json.role === "primary", JSON.stringify(boot.json));
-  const role = await member("/fleets/pieces/role", "dev-a", "token-a-1234", {}, "GET");
+  const role = await member("/fleets/" + FLEET + "/role", DEV, TOKEN, {}, "GET");
   check("the limits are told", role.json.chunkLimit === PIECE && role.json.chunkedLimit === 512 * MIB, JSON.stringify(role.json));
 
-  // Eight pieces, four at a time, as a member uploads them; the process is watched while they go.
-  const pieces = Array.from({ length: 8 }, (_, i) => {
+  // Eight pieces, four at a time, as a member uploads them; the process is watched while they go. Once with the hash of each piece
+  // (the Worker streams it) and once without (it is held whole), so that the two can be told apart in the same run.
+  // Made as each lane needs it, so that a run with many lanes does not hold every piece in the test's own memory.
+  const PIECES = Math.max(8, 2 * LANES);
+  const pieceOf = (salt: number, i: number): Uint8Array => {
     const b = new Uint8Array(PIECE);
     crypto.getRandomValues(b.subarray(0, 65536));
-    b.fill(i + 1, 65536);
+    b.fill(((i + salt) % 250) + 1, 65536);
     return b;
-  });
-  const before = treeRss(root);
-  let peak = before.all;
-  let peakWorkerd = before.workerd;
-  const watch = setInterval(() => {
-    const now = treeRss(root);
-    if (!Number.isNaN(now.all)) {
-      peak = Math.max(peak, now.all);
-      peakWorkerd = Math.max(peakWorkerd, now.workerd);
-    }
-  }, 50);
-  const started = Date.now();
-  const uploaded: Array<{ hash: string; bytes: number }> = new Array(pieces.length);
-  let next = 0;
-  const lane = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= pieces.length) return;
-      const r = await fetch(BASE + "/fleets/pieces/packs", { method: "POST", headers: { ...dev("dev-a", "token-a-1234"), "content-type": "application/octet-stream" }, body: pieces[i]! });
-      const j = (await r.json().catch(() => ({}))) as any;
-      if (r.status !== 200 || j.hash !== sha(pieces[i]!)) throw new Error("piece " + i + ": " + r.status + " " + JSON.stringify(j));
-      uploaded[i] = { hash: j.hash, bytes: pieces[i]!.length };
-    }
   };
-  await Promise.all([lane(), lane(), lane(), lane()]);
-  clearInterval(watch);
-  const measured = !Number.isNaN(before.all);
-  const seconds = ((Date.now() - started) / 1000).toFixed(1);
-  if (measured) {
-    // What it cost is told, not asserted: the local runtime is not held to 128 MB, and the processes around the Worker (wrangler's
-    // proxy, the simulated bucket) hold copies of a body that the deployed one does not.
-    console.log(
-      "MEMORY whole tree " + before.all + " MiB before, peak " + peak + " MiB (" + (peak - before.all) + " over); workerd alone " + before.workerd + " before, peak " + peakWorkerd + " (" + (peakWorkerd - before.workerd) + " over); 4 x 8 MiB in flight, 64 MiB in " + seconds + " s",
-    );
-  } else {
-    console.log("MEMORY not measured here (no ps); 64 MiB uploaded in " + seconds + " s");
+  async function round(label: string, salt: number, withHash: boolean) {
+    const before = treeRss(root);
+    let peak = before.all;
+    let peakWorkerd = before.workerd;
+    const watch = setInterval(() => {
+      const now = treeRss(root);
+      if (!Number.isNaN(now.all)) {
+        peak = Math.max(peak, now.all);
+        peakWorkerd = Math.max(peakWorkerd, now.workerd);
+      }
+    }, 50);
+    const started = Date.now();
+    const uploaded: Array<{ hash: string; bytes: number }> = new Array(PIECES);
+    let next = 0;
+    const lane = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= PIECES) return;
+        const piece = pieceOf(salt, i);
+        const hash = sha(piece);
+        const headers: Record<string, string> = { ...dev(DEV, TOKEN), "content-type": "application/octet-stream" };
+        if (withHash) headers["x-prime-sha256"] = hash;
+        const r = await fetch(BASE + "/fleets/" + FLEET + "/packs", { method: "POST", headers, body: piece });
+        const j = (await r.json().catch(() => ({}))) as any;
+        if (r.status !== 200 || j.hash !== hash) throw new Error(label + " piece " + i + ": " + r.status + " " + JSON.stringify(j));
+        uploaded[i] = { hash, bytes: piece.length };
+      }
+    };
+    await Promise.all(Array.from({ length: LANES }, () => lane()));
+    clearInterval(watch);
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    if (!Number.isNaN(before.all)) {
+      console.log(
+        "MEMORY " + label + ": whole tree " + before.all + " MiB before, peak " + peak + " (" + (peak - before.all) + " over); workerd alone " + before.workerd + " before, peak " + peakWorkerd + " (" + (peakWorkerd - before.workerd) + " over); " + LANES + " x 8 MiB in flight, " + PIECES * 8 + " MiB in " + seconds + " s",
+      );
+    } else {
+      console.log("MEMORY " + label + ": not measured here (no ps); " + PIECES * 8 + " MiB uploaded in " + seconds + " s");
+    }
+    return uploaded;
   }
+  // What this measures is the local runtime, which is not the deployed one: workerd here also runs the simulated bucket, which reads a
+  // body whole, so the figures are told and compared with each other, not held to a number.
+  const uploaded = await round("streamed (hash sent)", 0, true);
+  await round("held (no hash)", 100, false);
   check("eight pieces are stored, each under its own hash", uploaded.every((u) => u && u.hash.length === 64));
+
+  // A piece that is not the one whose hash was named is not kept, and one sent without a hash still goes the held way.
+  const wrong = await fetch(BASE + "/fleets/" + FLEET + "/packs", { method: "POST", headers: { ...dev(DEV, TOKEN), "x-prime-sha256": "a".repeat(64) }, body: new Uint8Array(1000).fill(42) });
+  check("a pack that is not the one whose hash was named is refused", wrong.status === 400, String(wrong.status));
+  const gone = await fetch(BASE + "/fleets/" + FLEET + "/packs/" + "a".repeat(64), { headers: dev(DEV, TOKEN) });
+  check("and nothing of it is kept", gone.status === 404, String(gone.status));
+  // A wrong body, of another length, under the hash of a pack that is there: refused, and the pack is still there and whole.
+  const clobber = await fetch(BASE + "/fleets/" + FLEET + "/packs", { method: "POST", headers: { ...dev(DEV, TOKEN), "x-prime-sha256": uploaded[0]!.hash }, body: new Uint8Array(1000).fill(44) });
+  check("a body of another length under a stored pack's hash is refused", clobber.status === 400, String(clobber.status));
+  const still = await fetch(BASE + "/fleets/" + FLEET + "/packs/" + uploaded[0]!.hash, { headers: dev(DEV, TOKEN) });
+  const stillBytes = new Uint8Array(await still.arrayBuffer());
+  check("and the pack that was there is whole and the same", still.status === 200 && stillBytes.length === PIECE && sha(stillBytes) === uploaded[0]!.hash, String(still.status) + " " + stillBytes.length);
+  const held = await fetch(BASE + "/fleets/" + FLEET + "/packs", { method: "POST", headers: dev(DEV, TOKEN), body: new Uint8Array(1000).fill(43) });
+  check("a pack sent without a hash is stored as before", held.status === 200 && ((await held.json()) as any).hash === sha(new Uint8Array(1000).fill(43)));
 
   // The manifest alone names them.
   const manifest = {
-    seq: 1, full: true, seal: "tag", chunks: uploaded, packBytes: 8 * PIECE, packHash: "9".repeat(64),
+    seq: 1, full: true, seal: "tag", chunks: uploaded, packBytes: PIECES * PIECE, packHash: "9".repeat(64),
   };
   const text = new TextEncoder().encode(JSON.stringify(manifest));
   const frame = new Uint8Array(4 + text.length);
   new DataView(frame.buffer).setUint32(0, text.length);
   frame.set(text, 4);
-  const done = await fetch(BASE + "/fleets/pieces/snapshot", { method: "POST", headers: { ...dev("dev-a", "token-a-1234"), "content-type": "application/octet-stream" }, body: frame });
+  const done = await fetch(BASE + "/fleets/" + FLEET + "/snapshot", { method: "POST", headers: { ...dev(DEV, TOKEN), "content-type": "application/octet-stream" }, body: frame });
   const doneJson = (await done.json().catch(() => ({}))) as any;
   check("the manifest alone is published and the head moves", done.status === 200 && doneJson.head?.seq === 1, JSON.stringify(doneJson));
-  const head = await member("/fleets/pieces/head", "dev-a", "token-a-1234", {}, "GET");
+  const head = await member("/fleets/" + FLEET + "/head", DEV, TOKEN, {}, "GET");
   check("the head is the snapshot", head.json.head?.seq === 1, JSON.stringify(head.json));
-  const piece = await fetch(BASE + "/fleets/pieces/packs/" + uploaded[3]!.hash, { headers: dev("dev-a", "token-a-1234") });
+  const piece = await fetch(BASE + "/fleets/" + FLEET + "/packs/" + uploaded[3]!.hash, { headers: dev(DEV, TOKEN) });
   const got = new Uint8Array(await piece.arrayBuffer());
   check("a piece is read back as it was stored", piece.status === 200 && sha(got) === uploaded[3]!.hash);
 
@@ -181,7 +218,7 @@ try {
   const f2 = new Uint8Array(4 + t2.length);
   new DataView(f2.buffer).setUint32(0, t2.length);
   f2.set(t2, 4);
-  const refused = await fetch(BASE + "/fleets/pieces/snapshot", { method: "POST", headers: { ...dev("dev-a", "token-a-1234"), "content-type": "application/octet-stream" }, body: f2 });
+  const refused = await fetch(BASE + "/fleets/" + FLEET + "/snapshot", { method: "POST", headers: { ...dev(DEV, TOKEN), "content-type": "application/octet-stream" }, body: f2 });
   const refusedJson = (await refused.json().catch(() => ({}))) as any;
   check("a piece that is not in the bucket is named and nothing moves", refused.status === 409 && refusedJson.missing?.[0] === "e".repeat(64), JSON.stringify(refusedJson));
 } catch (error) {
@@ -191,6 +228,11 @@ try {
   console.log(log.join("").slice(-2500));
 } finally {
   wrangler?.kill();
+  if (EXTERNAL) {
+    // The deployed gateway is left as it was found: the fleet (and with it every piece it holds) and the device go.
+    await fetch(BASE + "/admin/api/fleets/" + FLEET, { method: "DELETE", headers: OP }).catch(() => {});
+    await fetch(BASE + "/admin/api/devices/" + encodeURIComponent(DEV), { method: "DELETE", headers: OP }).catch(() => {});
+  }
 }
 console.log("\n" + pass + " passed, " + fail + " failed");
 if (fail > 0) {
