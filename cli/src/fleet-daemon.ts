@@ -1463,6 +1463,7 @@ export interface SpaceLoop {
   witnessing?: Promise<unknown>;
   /** A nudge that is set for when the next post is allowed. */
   witnessTimer?: ReturnType<typeof setTimeout>;
+  witnessTimerAt?: number;
   /** What the agent says about a round (the log or the status line), kept for what happens between rounds. */
   witnessReport?: (what: string) => void;
   /** Whether the last look at the witness found something, so that the log says it once. */
@@ -2027,9 +2028,13 @@ export function watchWitness(loop: SpaceLoop, report: (what: string) => void): v
   if (!doPost && !doRead) {
     // Nothing is allowed yet: wake up when the earlier of the two is.
     const wait = Math.min(postDue ? postWait : Infinity, readWait);
-    if (loop.witnessTimer === undefined && Number.isFinite(wait)) {
+    // A timer that is set for later than this wait is set again: a snapshot that came meanwhile is not left for the next round.
+    if (Number.isFinite(wait) && (loop.witnessTimer === undefined || now + wait + 5 < (loop.witnessTimerAt ?? Infinity))) {
+      if (loop.witnessTimer !== undefined) clearTimeout(loop.witnessTimer);
+      loop.witnessTimerAt = now + wait + 5;
       loop.witnessTimer = setTimeout(() => {
         loop.witnessTimer = undefined;
+        loop.witnessTimerAt = undefined;
         watchWitness(loop, loop.witnessReport ?? report);
       }, wait + 5);
       loop.witnessTimer.unref?.();
@@ -2094,7 +2099,7 @@ export function watchWitness(loop: SpaceLoop, report: (what: string) => void): v
 
 /** This member published or took in snapshot `seq` (whose manifest has the hash `manifestHash`): its checkpoint is posted, as the pace allows. */
 export function noteHeld(loop: SpaceLoop, seq: number, manifestHash: string): void {
-  if (loop.held !== undefined && loop.held.seq > seq) return;
+  // The newest call is the newest snapshot even when its sequence is lower: a fleet that was started again (a new incarnation) begins at 1.
   loop.held = { seq, manifestHash };
   if (loop.witnessReport !== undefined) watchWitness(loop, loop.witnessReport);
 }

@@ -662,6 +662,31 @@ describe("the witness, from the agent's loop", () => {
     expect(Date.now() - loop.witnessAt!).toBeLessThan(5_000);
   });
 
+  test("a snapshot that comes while a later wake-up is set sets it sooner, and a lower sequence (a fleet begun again) replaces the one held", async () => {
+    const w = world();
+    throughToWitness(w);
+    updateWitnessState(w.a.paths.keyFile, (s) => void (s.url = w.witness.url));
+    forgetRosterAnswers();
+    await w.publishA("one");
+    const loop = loopOf(w.a);
+    watchWitness(loop, () => undefined);
+    await settle(loop);
+    noteHeld(loop, 5, H(5));
+    await settle(loop);
+    // Posted a moment ago, and read a moment ago: the next of either is a long way off.
+    noteHeld(loop, 6, H(6));
+    const first = loop.witnessTimerAt!;
+    expect(first).toBeGreaterThan(Date.now() + 5_000);
+    // Made 10 s after the post, it is not later than the read's wake-up; shorten the wait of the post, and the timer follows.
+    loop.witnessPostedAt = Date.now() - 6_000;
+    noteHeld(loop, 7, H(7));
+    expect(loop.witnessTimerAt!).toBeLessThan(first);
+    expect(loop.witnessTimerAt!).toBeLessThan(Date.now() + 5_000);
+    noteHeld(loop, 1, H(1));
+    expect(loop.held).toEqual({ seq: 1, manifestHash: H(1) });
+    await settle(loop);
+  });
+
   test("a witness that refuses the member for a reason a person has to see is reported, and one that is only out of reach is not", async () => {
     const w = world();
     throughToWitness(w);
