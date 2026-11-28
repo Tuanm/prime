@@ -96,6 +96,13 @@ const CALLERS_FLAGS: FlagSpec[] = [
   flag("callers", "string", "The callers file to use (default: callers.json beside the config)", { placeholder: "<path>" }),
 ];
 
+const CALLERS_LIST_FLAGS: FlagSpec[] = [
+  ...CALLERS_FLAGS,
+  flag("device", "string", "Show the key pinned for this device's replies (compare it with the one the device shows)", { placeholder: "<id>" }),
+  flag("forget", "boolean", "With --device: forget the pinned key; the next signed reply pins again"),
+  flag("gateway", "string", "Gateway origin of that device", { placeholder: "<url>" }),
+];
+
 const ALLOW_CALLER_FLAGS: FlagSpec[] = [
   ...CALLERS_FLAGS,
   flag("label", "string", "A name for the key, to tell it apart in 'prime devices callers'", { placeholder: "<text>" }),
@@ -533,7 +540,8 @@ function flagsFor(topic: string, sub: string | undefined): FlagSpec[] {
     if (sub === "status" || sub === "disconnect") return GATEWAY_FLAGS;
     if (sub === "rotate-code") return ROTATE_FLAGS;
     if (sub === "allow-caller") return ALLOW_CALLER_FLAGS;
-    if (sub === "callers" || sub === "revoke-caller") return CALLERS_FLAGS;
+    if (sub === "callers") return CALLERS_LIST_FLAGS;
+    if (sub === "revoke-caller") return CALLERS_FLAGS;
     return [];
   }
   if (topic === "tools") {
