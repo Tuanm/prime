@@ -689,3 +689,17 @@ describe("a buddy's token in the admin interface", () => {
     expect(JSON.stringify(page.calls).includes("x-device-token")).toBe(false);
   });
 });
+
+describe("the page's script is in the file once", () => {
+  test("no function of it is declared twice, and the page is set up (its buttons and polls) once", () => {
+    const script = ADMIN_HTML.slice(ADMIN_HTML.indexOf("<script>") + 8, ADMIN_HTML.indexOf("</script>"));
+    // The page's own functions: declared at the one indent the script's body has.
+    const declared = [...script.matchAll(/^ {8}function (\w+)\(/gm)].map((m) => m[1]!);
+    const twice = declared.filter((name, i) => declared.indexOf(name) !== i);
+    expect(twice).toEqual([]);
+    // A copy of the setup would run it twice: each click would do what it does two times.
+    for (const once of ['document.getElementById("fleetList")', "setInterval(loadUsage", "setInterval(loadFleets", "addBtn.addEventListener("]) {
+      expect(script.split(once).length - 1).toBe(1);
+    }
+  });
+});
