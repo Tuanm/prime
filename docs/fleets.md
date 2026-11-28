@@ -761,13 +761,23 @@ back would stop it at its next reconnect.
   admin page's route `POST /admin/api/anonymous/<ref>/rotate`, behind Access, does the same and answers the code
   once. Neither needs a code of the device, a lock on the device does not stop them, and they clear the device's
   locks, so the new code works at once. An operator whose machine does not hold the device is shown the code and
-  nothing is saved.
+  nothing is saved. **`--revoke-previous`** (a checkbox on the admin page, `revoke_previous` in the body) makes the code the
+  device had stop at once instead of in a day: for a code that has leaked or been taken, where a day of grace is a day for
+  whoever holds it. What holds the code legitimately is refused until it is given the new one. A device cannot ask for it.
+- **A code that could not be stored is not said to be made.** If the gateway cannot write the new code to its storage the
+  answer is 503 and nothing is changed (the same code can be sent again); otherwise the caller would hold a code the
+  gateway forgets at its next eviction.
 - **The config.** Every command that saves `config.yaml` does it the same way (`saveConfig`, and `updateConfig` for a
   change made in a moment): under a lock next to the file, the file is read again, what **this command** changed
   since it read the config is applied to it (field by field: another command changing one field of a device and this
   one another both stay; one both changed is the later save's), and the result is written to disk before the name
-  moves (fsync, then rename). So a `prime spaces start` that takes a minute does not put back a code that
-  `rotate-code` saved during it, and two commands racing lose neither change. The pending code is also in the
+  moves (fsync, then rename). An entry (a device, a space) that another command removed stays removed, whatever else
+  this command changed in it. So a `prime spaces start` that takes a minute does not put back a code that
+  `rotate-code` saved during it, and two commands racing lose neither change. A field both commands changed is the later save's:
+  the merge cannot tell a deliberate value from a stale one, so two commands that both set a device's token to
+  different things leave the later one's. What it does about stale values: a value a command only carried (it equals
+  what it read) never replaces a newer one, and a space made from the device token a command read before the code was
+  made again is given the new code. The pending code is also in the
   file as `pending_token`, and an operator's rotate recovers if all else is lost.
 
 Deploy the gateway before the CLI: an older gateway has no such route, and the command says so. The members that
