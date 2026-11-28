@@ -1391,6 +1391,14 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
     if (there) return changeRoleSigned(ctx, t, fleetId, owner, v, there, asked);
   }
   if (!request) throw new CliError("no request from " + deviceId + " is waiting", "'prime fleets pending " + fleetId + "' lists them.");
+  // A member's request for a new key is an entry of its own (a rotate), and a role is another: one command does not sign both,
+  // because what the operator compared is the key, and a role signed along with it would be one nobody looked at.
+  if (request.keyChange === true && asked !== undefined) {
+    throw new CliError(
+      deviceId + " has a request for a new key waiting, and a role is not changed together with a key",
+      "Approve the key first ('prime fleets approve " + fleetId + " --member " + deviceId + " --key <fingerprint> --signing-key <fingerprint> --rotate'), then change the role ('prime fleets approve " + fleetId + " --member " + deviceId + " --role " + asked + "').",
+    );
+  }
   if (!request.pubkey) throw new CliError("the request of " + deviceId + " offers no key to seal snapshots for");
   if (!request.spub) {
     throw new CliError(
