@@ -18,7 +18,7 @@
 //   --mcp <path>       aggregate tools from external MCP servers defined in the given JSON config (Claude Desktop format).
 
 import { loadRunVault, runCodeInChild } from "./run-tool.ts";
-import { CALL_RAW_ONLY, CallerAuth, parseCallerAuthMode } from "./caller-auth.ts";
+import { CALL_RAW_ONLY, CallerAuth, type ReplyBinding, parseCallerAuthMode } from "./caller-auth.ts";
 import { callersPath } from "./caller-key.ts";
 import { spawn, spawnSync, file, write } from "bun";
 import { chmodSync, mkdtempSync, readdirSync, statSync, mkdirSync, rmdirSync, rmSync, realpathSync, lstatSync, constants as fsConstants } from "node:fs";
@@ -6279,16 +6279,22 @@ if (gatewayDomain) {
         // reply is `responseText` alone as well: the one text the reply signature covers, not written twice.
         const rawOnly = !Object.hasOwn(msg, "request");
         if (msg.id == null || (rawOnly && typeof msg.raw !== "string")) return;
-        const reply = (response: unknown, signature?: string): void => {
+        // A reply carries `response` and, when it is signed or the frame had no `request`, `responseText`: the exact text
+        // the signature covers, which the gateway sends as the body as it is.
+        const reply = (response: unknown, binding?: ReplyBinding): void => {
           const text = JSON.stringify(response);
+          const signature = binding ? callerAuth.replySig(binding, text) : undefined;
+          if (!rawOnly && !signature) {
+            ws.send(JSON.stringify({ id: msg.id, response }));
+            return;
+          }
           ws.send(JSON.stringify({ id: msg.id, ...(rawOnly ? {} : { response }), responseText: text, ...(signature ? { replySig: signature } : {}) }));
         };
         // A call runs only if a key this device trusts signed it (a signed call runs from the body
         // that was signed, not from `request`), unless the mode lets it through.
         const admission = callerAuth.admit(msg);
         if (admission.action === "refuse") {
-          if (rawOnly) reply(admission.response);
-          else ws.send(JSON.stringify({ id: msg.id, response: admission.response }));
+          reply(admission.response, admission.reply);
           return;
         }
         // In-process dispatch: handle() mirrors the /mcp HTTP handler exactly
@@ -6302,12 +6308,7 @@ if (gatewayDomain) {
           ws.send(JSON.stringify({ id: msg.id, response: null }));
           return;
         }
-        // The reply to a signed call is signed too, so its sender can tell this device answered.
-        // `responseText` is the exact text that was signed: the gateway sends it as the body as it is, so what the
-        // caller receives is what the signature covers, however the gateway would have written `response`.
-        const replySig = admission.nonce !== undefined ? callerAuth.replySig(admission.nonce, JSON.stringify(resp)) : undefined;
-        if (rawOnly || replySig) reply(resp, replySig);
-        else ws.send(JSON.stringify({ id: msg.id, response: resp }));
+        reply(resp, admission.reply);
       } catch (err) {
         console.error(`[${deviceId}] handle error:`, err);
         // A frame rejected before parsing has no trustworthy correlation ID.
