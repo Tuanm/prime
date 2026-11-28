@@ -26,7 +26,7 @@ interface Fake {
   headAfterFence: number | undefined;
   witness: Array<{ path: string; body: any }>;
   /** What POST /roster answers instead of taking the entry, once each (a gateway that wants another seqAt, or no device's genesis). */
-  refuse: Array<{ status: number; error: string }>;
+  refuse: Array<{ status: number; error: string; code?: string }>;
   members: Array<Record<string, unknown>>;
   pending: Array<Record<string, unknown>>;
   stop(): void;
@@ -49,7 +49,7 @@ function fakeGateway(): Fake {
       if (p === "/fleets/acme/roster" && req.method === "GET") return Response.json({ mode: state.signed ? "signed" : "open", incarnation: "inc-1", entries: state.entries });
       if (p === "/fleets/acme/roster" && req.method === "POST") {
         const refused = state.refuse.shift();
-        if (refused) return Response.json({ error: refused.error }, { status: refused.status });
+        if (refused) return Response.json({ error: refused.error, ...(refused.code ? { code: refused.code } : {}) }, { status: refused.status });
         try {
           const chain = [...state.entries, body as SignedEntry];
           verifyChain(chain, { fleet: "acme", incarnation: "inc-1" });
@@ -214,6 +214,28 @@ describe("the commands that sign a fleet's roster", () => {
     expect(gw.entries.length).toBe(before + 1);
     expect(gw.refuse.length).toBe(0);
     gw.head = 7;
+  });
+
+  test("approve for a new member is signed again when the gateway says it was asked to join at a later snapshot", async () => {
+    const fresh = member("dev-35");
+    gw.pending = [fresh];
+    gw.head = 40;
+    gw.refuse = [{ status: 409, error: "the add's seqAt 40 is before the head (41) the device asked to join at", code: "head-moved" }];
+    const before = gw.entries.length;
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-35", key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }));
+    expect(gw.entries.length).toBe(before + 1);
+    expect(gw.refuse.length).toBe(0);
+    gw.head = 7;
+  });
+
+  test("a 409 with another code is not read as the head having moved, whatever its words say", async () => {
+    const fresh = member("dev-36");
+    gw.pending = [fresh];
+    gw.refuse = [{ status: 409, error: "head is at 41: sign it again", code: "ahead-of-head" }];
+    const before = gw.entries.length;
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-36", key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }))).rejects.toThrow();
+    expect(gw.entries.length).toBe(before);
+    gw.pending = [];
   });
 
   test("the genesis from a device is refused by the gateway, and the operator is told what to do", async () => {
