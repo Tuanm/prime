@@ -71,11 +71,14 @@ export function spawnBuilt<
   return Bun.spawn(cmd, options);
 }
 
+/** A command of a built CLI that does not end in this long is a hung one; a call blocks its thread, and so any time limit kept by it. */
+const SYNC_LIMIT_MS = 180_000;
+
 export function spawnBuiltSync<
   const In extends Bun.SpawnOptions.Writable = "ignore",
   const Out extends Bun.SpawnOptions.Readable = "pipe",
   const Err extends Bun.SpawnOptions.Readable = "pipe",
 >(cmd: string[], options: Bun.SpawnOptions.SpawnSyncOptions<In, Out, Err> & Env, built: BuiltOptions = {}): Bun.SyncSubprocess<Out, Err> {
   requireIsolated(options.env, built);
-  return Bun.spawnSync(cmd, options);
+  return Bun.spawnSync(cmd, { timeout: SYNC_LIMIT_MS, ...options });
 }

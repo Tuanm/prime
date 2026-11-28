@@ -7,7 +7,9 @@
 // stays where it is; PRIME_TEST_TIMEOUT_MS sets it for any platform.
 //
 // Asked for by each file, not by a preload: a preload did not take effect on the Windows runner.
+// The same call starts the guard against a run that is stuck in a synchronous call (stall-guard.ts).
 import { setDefaultTimeout } from "bun:test";
+import { callerFile, guardAgainstStalls } from "./stall-guard";
 
 const WINDOWS_MS = 60_000;
 
@@ -21,4 +23,8 @@ export function testTimeoutMs(env: Record<string, string | undefined> = process.
 export function applyTestTimeout(): void {
   const ms = testTimeoutMs();
   if (ms !== undefined) setDefaultTimeout(ms);
+  // A test that blocks the runner's thread is beyond a time limit; see stall-guard.ts.
+  guardAgainstStalls(callerFile());
 }
+
+export { SYNC_CHILD_MS } from "./sync-limit";

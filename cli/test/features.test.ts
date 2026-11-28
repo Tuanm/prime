@@ -25,6 +25,7 @@ import { codeMcpLaunch } from "../src/connect.ts";
 import { GatewayClient } from "../src/client.ts";
 import { fileURLToPath } from "node:url";
 import { applyTestTimeout } from "./setup";
+import { SYNC_CHILD_MS } from "./sync-limit";
 
 applyTestTimeout();
 
@@ -53,10 +54,10 @@ describe("bundled code-mcp", () => {
   });
 
   test("'prime code-mcp --help' runs code-mcp; normal commands never start it", () => {
-    const help = Bun.spawnSync(["bun", ENTRY, "code-mcp", "--help"], { stdout: "pipe", stderr: "pipe" });
+    const help = Bun.spawnSync(["bun", ENTRY, "code-mcp", "--help"], { stdout: "pipe", stderr: "pipe", timeout: SYNC_CHILD_MS });
     expect(help.exitCode).toBe(0);
     expect(help.stdout.toString()).toContain("--gateway-token");
-    const version = Bun.spawnSync(["bun", ENTRY, "--version"], { stdout: "pipe", stderr: "pipe" });
+    const version = Bun.spawnSync(["bun", ENTRY, "--version"], { stdout: "pipe", stderr: "pipe", timeout: SYNC_CHILD_MS });
     expect(version.stdout.toString()).toMatch(/^prime /);
     expect(version.stderr.toString()).not.toContain("MCP server");
     // Two bun subprocesses on a cold Windows runner can take longer than the
@@ -122,7 +123,9 @@ describe("bundled code-mcp", () => {
       env: { ...process.env, [GATEWAY_TOKEN_ENV]: "SECR3T", [RAW_ENV]: "1" },
       stdout: "pipe",
       stderr: "pipe",
+      timeout: SYNC_CHILD_MS,
     });
+    expect(proc.exitedDueToTimeout).toBeFalsy();
     const seen = JSON.parse(proc.stdout.toString().trim()) as { argv: string[]; env: string | null };
     expect(seen.argv).toEqual(["--gateway", "g", "--id", "d", "--gateway-token", "SECR3T"]);
     expect(seen.env).toBeNull();
@@ -134,7 +137,9 @@ describe("bundled code-mcp", () => {
       env: { ...process.env, PRIME_CONFIG: config },
       stdout: "pipe",
       stderr: "pipe",
+      timeout: SYNC_CHILD_MS,
     });
+    expect(own.exitedDueToTimeout).toBeFalsy();
     // On a machine where the code-mcp service is running, refusing is the
     // specified behaviour (one code-mcp per machine) - that is the outcome then.
     if (own.stdout.toString().trim() === "" && own.stderr.toString().includes("service is running")) {

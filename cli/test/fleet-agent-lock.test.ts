@@ -29,6 +29,7 @@ import {
   writeAgentState,
 } from "../src/fleet-daemon";
 import { applyTestTimeout } from "./setup";
+import { SYNC_CHILD_MS } from "./sync-limit";
 
 /** A path as it is written in a systemd line outside quotes that undo nothing: a backslash is an escape there. */
 const esc = (path: string): string => path.replace(/\\/g, "\\\\");
@@ -1275,7 +1276,7 @@ describe("two spellings of one configuration", () => {
     const base = process.platform === "win32" ? join(tmpdir(), name) : "/tmp/" + name;
     cleanups.push(() => rmSync(base, { recursive: true, force: true }));
     const dir = join(base, "CaseDir");
-    Bun.spawnSync([process.execPath, "-e", 'const fs = require("node:fs"); fs.mkdirSync(process.argv[1], { recursive: true }); fs.writeFileSync(process.argv[1] + require("node:path").sep + "Config.yaml", "");', dir]);
+    Bun.spawnSync([process.execPath, "-e", 'const fs = require("node:fs"); fs.mkdirSync(process.argv[1], { recursive: true }); fs.writeFileSync(process.argv[1] + require("node:path").sep + "Config.yaml", "");', dir], { timeout: SYNC_CHILD_MS });
     const swapped = join(base.toLowerCase(), "casedir", "config.yaml");
     if (!existsSync(swapped)) return; // a case-sensitive file system: these are two files, and not the same
     // In a process of its own: realpath remembers the spellings it has been given. The module is named by a
@@ -1284,6 +1285,7 @@ describe("two spellings of one configuration", () => {
     const ask = (a: string, b: string): string =>
       Bun.spawnSync([process.execPath, "-e", "import { sameConfig } from " + service + "; console.log(sameConfig(process.argv[1], process.argv[2]));", a, b], {
         env: process.env,
+        timeout: SYNC_CHILD_MS,
       }).stdout.toString().trim();
     expect(ask(swapped, join(dir, "Config.yaml"))).toBe("true");
     expect(ask(join(base.toLowerCase(), "casedir", "other.yaml"), join(dir, "Config.yaml"))).toBe("false");
