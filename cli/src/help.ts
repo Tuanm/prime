@@ -326,6 +326,7 @@ OPTIONS FROM THE CONFIG
       enable-memory: true
       caller-auth: "warn"        # off | warn | enforce, see below
       callers: "/path/callers.json"
+      caller-state: "/path/caller-auth"
       activity-log: "/path/activity.jsonl"
 
   Values from the config never appear on a command line (ps).

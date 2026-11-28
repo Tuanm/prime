@@ -155,6 +155,8 @@ Options:
                          key runs and is logged) or enforce (refused)
   --callers <file>       Keys trusted to sign calls (default: callers.json beside
                          the config); edit it with 'prime devices allow-caller'
+  --caller-state <dir>   Where the device keeps its reply key and the log of calls that
+                         were not signed (default: caller-auth/ beside the callers file)
   --activity-log <file>  Keep a journal of the tool calls (time, tool, and the key
                          that signed it or "unsigned"; never the arguments),
                          at most 1 MiB, oldest lines dropped first
@@ -188,6 +190,7 @@ try {
       "gateway-token": { type: "string" },
       "caller-auth": { type: "string" },
       callers: { type: "string" },
+      "caller-state": { type: "string" },
       "activity-log": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
@@ -6208,6 +6211,7 @@ if (gatewayDomain) {
     mode: callerAuthMode,
     deviceId,
     callersFile: typeof args.callers === "string" ? resolve(args.callers) : callersPath(),
+    ...(typeof args["caller-state"] === "string" && args["caller-state"] ? { stateDir: resolve(args["caller-state"]) } : {}),
     parse: (text) => parseMcpJson(text),
     log: (text) => console.error(`[${deviceId}] ${text}`),
   });
