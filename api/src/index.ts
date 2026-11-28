@@ -916,8 +916,7 @@ export default {
         const fleet = typeof wanted.fleet === "string" ? wanted.fleet : "";
         const code = typeof wanted.code === "string" ? wanted.code : "";
         if (fleet && code && env.FLEET && /^[a-z0-9][a-z0-9-]{0,31}$/.test(fleet)) {
-          // This asks a fleet whether a code is good, which is what invite-check does, so it is held to the
-          // same few a minute for an address.
+          // This asks a fleet whether a code is good, so it is held to a few a minute for an address.
           const probeLimited = await limitAsk(env, "invite-check", request);
           if (probeLimited) return probeLimited;
           const stub = env.FLEET.get(env.FLEET.idFromName(fleet));

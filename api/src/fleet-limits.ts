@@ -2,8 +2,9 @@
 //
 // Two things on the fleet path cost the gateway something for a caller that has proved nothing:
 //
-//   invite-check     wakes a fleet's Durable Object for any name it is given, and answers whether a code is
-//                    worth having;
+//   a code check     asking for an anonymous device with a fleet and an invite code wakes that fleet's
+//                    Durable Object for any name it is given, and says whether the code is good (the
+//                    gateway uses the answer to let a joining space past the cap on new devices);
 //   an unknown       a request that names a device the gateway has not got cannot be answered from the cache,
 //   device           so it reads the one registry object to be sure - and then it is refused.
 //

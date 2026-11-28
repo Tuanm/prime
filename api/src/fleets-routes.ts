@@ -16,7 +16,7 @@ import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
 import { MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
 import { countFleetR2 } from "./usage";
 import { readBounded, readBoundedText } from "./body";
-import { fleetBodyMax, INVITE_CHECK_BODY_MAX, limitAsk } from "./fleet-limits";
+import { fleetBodyMax } from "./fleet-limits";
 import type { Env } from "./config";
 
 // Captured as a general action segment and then checked against an allowlist,
@@ -41,7 +41,6 @@ const ALLOWED_ACTIONS = new Set([
   "role",
   "applied",
   "snapshot",
-  "invite-check",
   "primary",
   "reap",
   "delete",
@@ -603,24 +602,6 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     headers.set("x-prime-device", caller);
     headers.set("x-prime-fleet", fleetId);
     return await stub.fetch("https://fleet/primary", { method: "GET", headers });
-  }
-
-  // Whether an invite is worth having. It needs no credential: the code is
-  // the proof, and a caller that holds a valid code learns the same thing by
-  // joining.
-  if (action === "invite-check" && request.method === "POST") {
-    const namespace = deps.env.FLEET;
-    if (!namespace) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
-    // Held to a few a minute for any one address, and to a body the size of a code, before the object is
-    // woken: this is the route a caller with nothing to show can make cost something.
-    const limited = await limitAsk(env, "invite-check", request);
-    if (limited) return limited;
-    const body = await readBoundedText(request, INVITE_CHECK_BODY_MAX);
-    if (body instanceof Response) return body;
-    const stub = namespace.get(namespace.idFromName(fleetId));
-    const headers = new Headers({ "content-type": "application/json" });
-    headers.set("x-prime-caller", "admin");
-    return await stub.fetch("https://fleet/invite-check", { method: "POST", headers, body });
   }
 
   // A snapshot is the pack and its manifest, stored together and the head

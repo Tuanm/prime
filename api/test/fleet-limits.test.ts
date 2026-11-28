@@ -167,6 +167,22 @@ describe("invite checks", () => {
     expect((await worker.fetch(make("198.51.100.26"), yes.env as never)).status).not.toBe(429);
   });
 
+  test("/fleets/:id/invite-check is not a route: it answers 404 however it is asked, and wakes no fleet", async () => {
+    const { env, fleetAsked } = await gateway();
+    for (const headers of [member("198.51.100.35"), { "cf-connecting-ip": "198.51.100.36" }]) {
+      const res = await worker.fetch(post("/fleets/acme/invite-check", headers, JSON.stringify({ code: "ABCD-EFGH" })), env as never);
+      expect(res.status).toBe(404);
+    }
+    const operator = await gateway({ FLEET_OPERATOR_TOKEN: "operator-secret-0123456789" });
+    const asked = await worker.fetch(
+      post("/api/fleets/acme/invite-check", { authorization: "Bearer operator-secret-0123456789", "x-prime-device": "limits-dev", "cf-connecting-ip": "198.51.100.37" }),
+      operator.env as never,
+    );
+    expect(asked.status).toBe(404);
+    expect(fleetAsked).toEqual([]);
+    expect(operator.fleetAsked).toEqual([]);
+  });
+
   test("a body that carries no code is not an invite check and costs no count", async () => {
     const { env, fleetAsked } = await gateway({ FLEET_INVITE_RATE_MAX: "1" });
     for (let i = 0; i < 3; i++) await worker.fetch(post("/api/devices/anonymous", { "cf-connecting-ip": "198.51.100.34" }, "{}"), env as never);
