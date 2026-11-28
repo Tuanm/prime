@@ -258,7 +258,11 @@ an anchor - the tree's own files, not the history before it, so its size follows
 tree: when the changes since the last one have cost as much as that tree (each counted
 with a fixed cost for the step, 24 KB, and only once at least 8 have followed it), and
 in any case after 56 snapshots. A big tree of small edits gets one every 57th snapshot; a
-burst of large changes brings the next one early. A replica that was away starts from
+burst of large changes brings the next one early. A small tree gets them sooner than it used to
+(every 32nd snapshot): a 200 KB tree after about 8 snapshots, a 500 KB tree after about 20, in general
+after (the tree's size / 24 KB) snapshots and at least 9, which costs little to upload and saves the replica a long walk.
+The count is the member's own where it can be: the fleet's list of snapshots (which is the gateway's word) cannot
+put the next whole tree off beyond what this member recorded itself, only bring it forward. A replica that was away starts from
 the newest whole tree and applies the changes after it, at most 57 snapshots, however far
 behind it is. How far behind one replica is changes nothing for the others: the space in
 charge goes on publishing small changes. The gateway keeps the last 64 snapshots, so the

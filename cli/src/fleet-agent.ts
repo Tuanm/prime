@@ -532,7 +532,16 @@ async function chainBefore(creds: FleetCredentials, fleet: string, head: FleetHe
   if (known !== undefined && known.seq === head.seq) return known;
   const entries = await fetchIndex(creds, fleet, 0).catch(() => null);
   if (entries === null || entries.length === 0 || entries[entries.length - 1]!.seq !== head.seq) return null;
-  return sinceWholeOf(entries);
+  const listed = sinceWholeOf(entries);
+  // The index is the gateway's word. A gateway that lists a whole tree it was not (a recent one, with a big size) would make the
+  // chain look short and put the checkpoint off: what this member itself recorded bounds that. Every snapshot since its own
+  // record is counted as a change (more snapshots than there are, if another member published a whole tree in between: a
+  // checkpoint a little early, never late).
+  if (listed !== null && known !== undefined && known.seq < head.seq) {
+    const own = known.count + (head.seq - known.seq);
+    if (own > listed.count) return { ...listed, count: own };
+  }
+  return listed;
 }
 
 export interface PullResult {
