@@ -532,7 +532,7 @@ USAGE
   prime fleets invite <fleet-id> [options]      Mint a single-use invite code
   prime fleets join <fleet-id> --code <code>     Join with an invite code
   prime fleets pending <fleet-id>                List the requests waiting for approval
-  prime fleets approve <fleet-id> --member <id> [--key <fp> --signing-key <fp>]   Admit a waiting device, or a member's new key
+  prime fleets approve <fleet-id> --member <id> [--viewer|--role <member|viewer>] [--key <fp> --signing-key <fp>]   Admit a waiting device (as a viewer that only reads, or not), change a member's role, or take a new key
   prime fleets rotate-key <fleet-id> --space <name>   New key pair for a space; the agent proves it is the space's own
   prime fleets members <fleet-id>                Show the roster
   prime fleets remove <fleet-id> --member <id> [--key-change]  Remove a member (or decline its request for a new key)
@@ -773,7 +773,7 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "create") return "Usage: prime fleets create <fleet-id>";
     if (sub === "invite") return "Usage: prime fleets invite <fleet-id> [--ttl <s>]";
     if (sub === "join") return "Usage: prime fleets join <fleet-id> --code <code> [--label <label>]";
-    if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id> [--key <fingerprint>] [--signing-key <fingerprint>]";
+    if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id> [--viewer | --role <member|viewer>] [--key <fingerprint>] [--signing-key <fingerprint>]";
     if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --member <id> [--key-change]";
     if (sub === "rotate-key") return "Usage: prime fleets rotate-key <fleet-id> --space <name>";
     return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|rotate-key|set|status> [args]";

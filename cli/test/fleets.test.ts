@@ -144,6 +144,49 @@ describe("choosing which gateway a fleet command talks to", () => {
     }
   });
 
+  test("approving as a viewer (or changing a member's role) names the role, and says what the member became", async () => {
+    const { fleetsApprove, fleetsPending, askedRole } = await import("../src/fleets");
+    const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const real = globalThis.fetch;
+    let answer: Record<string, unknown> = { ok: true, member: { deviceId: "dev-2", role: "viewer" } };
+    (globalThis as { fetch: unknown }).fetch = async (url: string, init: { body?: string }) => {
+      sent.push({ path: new URL(url).pathname, body: init.body ? JSON.parse(init.body) : {} });
+      return Response.json(answer);
+    };
+    const out: string[] = [];
+    try {
+      const ctx = (sub: string, flags: Record<string, string | boolean>) =>
+        ({ config: config({ defaults: { gateway: "https://g.example", fleet_operator_token: "op" } }), configPath: "/nowhere", json: false, out: (l: string) => out.push(l), parsed: { positionals: ["fleets", sub, "acme"], flags: new Map<string, string | boolean>(Object.entries(flags)) } }) as never;
+      await fleetsApprove(ctx("approve", { member: "dev-2", viewer: true }));
+      expect(sent[0]).toEqual({ path: "/fleets/acme/approve", body: { deviceId: "dev-2", role: "viewer" } });
+      expect(out.join("\n")).toContain("as a viewer");
+      await fleetsApprove(ctx("approve", { member: "dev-2", role: "member" }));
+      expect(sent[1]!.body).toEqual({ deviceId: "dev-2", role: "member" });
+      // Nothing asked: the fleet's own word, as it was.
+      await fleetsApprove(ctx("approve", { member: "dev-2" }));
+      expect(sent[2]!.body).toEqual({ deviceId: "dev-2" });
+      // A role the fleet already holds is said so.
+      out.length = 0;
+      answer = { ok: true, unchanged: true, member: { deviceId: "dev-2", role: "viewer" } };
+      await fleetsApprove(ctx("approve", { member: "dev-2", role: "viewer" }));
+      expect(out.join("\n")).toContain("already");
+      // The role of a request is shown.
+      out.length = 0;
+      answer = { ok: true, pending: [{ deviceId: "dev-3", requestedAt: 1, role: "viewer" }, { deviceId: "dev-4", requestedAt: 2 }] };
+      await fleetsPending(ctx("pending", {}));
+      expect(out.join("\n")).toContain("join as viewer");
+      expect(out.join("\n")).toContain("join ");
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+    const parsed = (flags: Record<string, string | boolean>) => ({ positionals: [], flags: new Map(Object.entries(flags)) }) as never;
+    expect(askedRole(parsed({}))).toBeUndefined();
+    expect(askedRole(parsed({ viewer: true }))).toBe("viewer");
+    expect(askedRole(parsed({ role: "member" }))).toBe("member");
+    expect(() => askedRole(parsed({ role: "owner" }))).toThrow(/member or viewer/);
+    expect(() => askedRole(parsed({ role: "member", viewer: true }))).toThrow(/different things/);
+  });
+
   test("the gateway origin never keeps a trailing slash", () => {
     const t = resolveFleetTarget(config(), { gateway: "https://slash.example/" });
     expect(t.gateway).toBe("https://slash.example");
