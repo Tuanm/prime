@@ -1508,6 +1508,7 @@ export function spaceEnterArgs(container: string, tty: boolean, shell: string, c
 
 function runtimeInteractive(runtime: RuntimeInfo, args: string[]): number {
   const env = runtime.kind === "podman" ? { ...process.env, ...(podmanEnv() ?? {}) } : process.env;
+  // no time limit: this is the person's own shell or command in the container, which lasts as long as they stay in it.
   const result = spawnSync(runtime.bin, args, { stdio: "inherit", env });
   if (result.error) fail("cannot start the container runtime", String(result.error));
   return result.status ?? 1;

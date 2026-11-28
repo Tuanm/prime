@@ -745,14 +745,19 @@ interface RunResult {
   err: string;
 }
 
+/** How long a command of the service manager (launchctl, systemctl, schtasks) may take before it is given up on. */
+export const SERVICE_CALL_MS = 60_000;
+/** The same for the PowerShell script that sets a Scheduled Task up (Windows: a loaded runner is slow). */
+export const SERVICE_POWERSHELL_MS = 120_000;
+
 function run(cmd: string[], opts: { timeoutMs?: number } = {}): RunResult {
-  const result = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: opts.timeoutMs ?? 60_000, env: process.env });
+  const result = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore", timeout: opts.timeoutMs ?? SERVICE_CALL_MS, env: process.env });
   return { code: result.exitCode ?? 1, out: result.stdout.toString(), err: result.stderr.toString() };
 }
 
 function powershell(script: string): RunResult {
   const ps = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  return run([ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { timeoutMs: 120_000 });
+  return run([ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { timeoutMs: SERVICE_POWERSHELL_MS });
 }
 
 function must(result: RunResult, what: string, hint?: string): RunResult {

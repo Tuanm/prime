@@ -46,11 +46,14 @@ function localUrl(options: OptionMap): string {
   return "http://" + host + ":" + port + "/mcp";
 }
 
+/** How long a look at the system (the journal, the user's linger setting) may take: it is only to explain, never worth waiting for. */
+const LOOK_MS = 10_000;
+
 /** The last lines the service wrote, to explain a failed start. */
 function recentLog(platform: Platform, logPath: string): string {
   try {
     if (platform === "linux") {
-      const r = Bun.spawnSync(["journalctl", "--user", "-u", "code-mcp.service", "-n", "25", "--no-pager", "-o", "cat"], { stdout: "pipe", stderr: "pipe" });
+      const r = Bun.spawnSync(["journalctl", "--user", "-u", "code-mcp.service", "-n", "25", "--no-pager", "-o", "cat"], { stdout: "pipe", stderr: "pipe", timeout: LOOK_MS });
       return r.stdout.toString().trim();
     }
     if (existsSync(logPath)) return readFileSync(logPath, "utf8").split(/\r?\n/).slice(-25).join("\n").trim();
@@ -163,7 +166,7 @@ export async function serviceInstall(args: string[], opts: ServiceCommandOptions
   opts.out(dim("  Options come from " + configPath + " (code-mcp section), overridden by the ones given here (" + overridesPath(configPath) + ")."));
   opts.out(dim("  They are read at every start: after editing the config, re-run 'prime service install' to restart it."));
   if (platform === "linux") {
-    const linger = Bun.spawnSync(["loginctl", "show-user", process.env.USER ?? "", "-p", "Linger", "--value"], { stdout: "pipe", stderr: "pipe" }).stdout.toString().trim();
+    const linger = Bun.spawnSync(["loginctl", "show-user", process.env.USER ?? "", "-p", "Linger", "--value"], { stdout: "pipe", stderr: "pipe", timeout: LOOK_MS }).stdout.toString().trim();
     if (linger === "no") opts.out(dim("  It runs while you are logged in. To keep it running after logout: loginctl enable-linger " + (process.env.USER ?? "$USER")));
   }
 }

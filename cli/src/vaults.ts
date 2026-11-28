@@ -78,6 +78,8 @@ function keyFilePath(configPath: string): string {
 
 function run(bin: string, args: string[], stdin?: string): { code: number; out: string; err: string } {
   try {
+    // no time limit: the keychain and the secret service may be waiting for the person to unlock them or to allow
+    // this program, and giving up would store the key somewhere else behind their back.
     const proc = Bun.spawnSync({
       cmd: [bin, ...args],
       stdin: stdin === undefined ? "ignore" : "pipe",

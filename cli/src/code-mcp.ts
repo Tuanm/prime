@@ -83,6 +83,9 @@ function pwshCmd(command: string): string[] {
 }
 
 // Detect running shell at startup.
+// A probe for a program on the path answers at once; one that has not answered in this long (a shell that waits on
+// something, a slow disk) is taken to have found nothing, rather than holding the start of code-mcp for ever.
+const PROBE_MS = process.platform === "win32" ? 15_000 : 5_000;
 type ShellType = "bash" | "sh" | "cmd" | "powershell";
 const IS_WINDOWS = process.platform === "win32";
 
@@ -97,6 +100,7 @@ function detectPowerShellBinary(): string | null {
           : ["sh", "-c", `command -v ${bin}`],
         stdout: "ignore",
         stderr: "ignore",
+        timeout: PROBE_MS,
       }).exitCode === 0;
     } catch { return false; }
   };
@@ -115,7 +119,7 @@ function detectShell(): ShellType {
     return "cmd";
   }
   // Prefer bash if present (matches Python/Java); fall back to $SHELL hint then sh.
-  if (spawnSync({ cmd: ["sh", "-c", "command -v bash"], stdout: "ignore", stderr: "ignore" }).exitCode === 0) return "bash";
+  if (spawnSync({ cmd: ["sh", "-c", "command -v bash"], stdout: "ignore", stderr: "ignore", timeout: PROBE_MS }).exitCode === 0) return "bash";
   const shell = process.env.SHELL;
   if (shell && /\/(bash|zsh|fish|ksh)$/.test(shell)) return shell.endsWith("bash") ? "bash" : "sh";
   return "sh";
@@ -132,7 +136,7 @@ const shellCmd = DETECTED_SHELL === "bash" ? bashCmd
 function hasOnPath(bin: string): boolean {
   const probe = IS_WINDOWS ? `where ${bin}` : `command -v ${bin}`;
   // PowerShell's `where` is a Where-Object alias, not the binary locator.
-  return spawnSync({ cmd: IS_WINDOWS ? cmdCmd(probe) : shellCmd(probe), stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+  return spawnSync({ cmd: IS_WINDOWS ? cmdCmd(probe) : shellCmd(probe), stdout: "ignore", stderr: "ignore", timeout: PROBE_MS }).exitCode === 0;
 }
 const hasRg = hasOnPath("rg");
 const hasFindstr = hasOnPath("findstr");
@@ -545,7 +549,7 @@ async function killProcessTree(pid: number, stillRunning: () => boolean = () => 
   // Walk descendants depth-first so children die before parents (cleaner).
   let children: number[] = [];
   try {
-    const out = spawnSync({ cmd: ["pgrep", "-P", String(pid)], stdout: "pipe", stderr: "ignore" })
+    const out = spawnSync({ cmd: ["pgrep", "-P", String(pid)], stdout: "pipe", stderr: "ignore", timeout: PROBE_MS })
       .stdout.toString().trim();
     if (out) children = out.split("\n").map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
   } catch {}
