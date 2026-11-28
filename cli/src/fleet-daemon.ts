@@ -53,7 +53,7 @@ import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { IgnoreFilter } from "./fleet-ignore.ts";
 import { MAX_STAGED_PATHS, NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
-import { capsBody, fetchMemberKeys, fetchRole, fetchRoster, noteInline, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchMemberKeys, fetchRole, fetchRoster, noteInline, plainText, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, hasUnwrittenPosition, readFleetState, recordedPosition, recordPublished, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
@@ -1282,15 +1282,15 @@ function baseSleepMs(loop: SpaceLoop, pollMs: number, now: number): number {
     ? { pollMs, idleMs: undefined }
     : replicaSleepMs({ mode: replicaMode(), connected: loop.events.connected, pollMs, ...(loop.leaseMs ? { leaseMs: loop.leaseMs } : {}) });
   const sleepMs = roundSleepMs({
-    paused: loop.paused,
-    connected: loop.events.connected,
+    paused: loop.paused || loop.upgrade !== undefined,
+    connected: loop.events.connected && loop.upgrade === undefined,
     supported: loop.events.supported,
     retryAfterMs: loop.retryAfterMs,
     pollMs: idle.pollMs,
     ...(idle.idleMs !== undefined ? { idleMs: idle.idleMs } : {}),
     failures: loop.failures,
   });
-  if (loop.claim && !loop.primary && !loop.paused) {
+  if (loop.claim && !loop.primary && !loop.paused && !loop.upgrade) {
     const failures = Math.min(30, loop.failures ?? 0);
     // A replica that is waiting to take the lease and whose round failed backs off from the
     // poll's pace, not from the long wait of an idle replica with a socket: the lease is free,
@@ -1325,7 +1325,7 @@ export async function heartbeat(loop: SpaceLoop, wake: () => void, now: number =
     });
   // A space whose rounds keep failing leaves asking to the round and its longer wait - unless it holds
   // the place: the lease is what is at stake, and renewing it is one cheap request.
-  if (loop.paused || (!loop.primary && (loop.failures ?? 0) > 0) || !due) return true;
+  if (loop.paused || loop.upgrade || (!loop.primary && (loop.failures ?? 0) > 0) || !due) return true;
   try {
     const answer = await takePlace(loop);
     // A renewal that is already on its way (the round's) is not this one's: look again soon.
@@ -1438,6 +1438,11 @@ export interface SpaceLoop {
   paused: boolean;
   /** How long the gateway asked to wait before looking at a paused fleet again. */
   retryAfterMs?: number;
+  /**
+   * The fleet's newest snapshot is in a form this build cannot read (`need` is the capability it lacks): the fleet gave no
+   * place and the head is not fetched. `hint` is what the fleet says to do; asked again after `retryAfterMs`.
+   */
+  upgrade?: { need: string; hint: string };
   /** How long the gateway asked to be left alone after it refused the last request for the place. */
   refusedForMs?: number;
   /** The held connection that tells this space what happened. */
@@ -1550,12 +1555,20 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // and a socket to a fleet is not that), so one look every few hours says the
   // device is still here. Without a socket, a look now and then (as often as the
   // gateway asked) finds out.
-  if (loop.paused) {
+  if (loop.paused || loop.upgrade) {
     const since = Date.now() - loop.lastBootstrap;
-    if (loop.events.connected ? since < PAUSED_PRESENCE_MS : since < (loop.retryAfterMs ?? 60_000)) return;
+    // A paused fleet with a socket says when it is resumed; one that needs an update says nothing, so it is asked on its own clock.
+    if (loop.upgrade ? since < (loop.retryAfterMs ?? UPGRADE_RETRY_MS) : loop.events.connected ? since < PAUSED_PRESENCE_MS : since < (loop.retryAfterMs ?? 60_000)) {
+      if (loop.upgrade) report(loop.upgrade.hint);
+      return;
+    }
     await takePlace(loop);
     if (loop.paused) {
       report("the fleet is paused");
+      return;
+    }
+    if (loop.upgrade) {
+      report(loop.upgrade.hint);
       return;
     }
   } else if (
@@ -1574,6 +1587,11 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     await takePlace(loop);
     if (loop.paused) {
       report("the fleet is paused");
+      return;
+    }
+    const upgrade = upgradeOf(loop);
+    if (upgrade) {
+      report(upgrade.hint);
       return;
     }
   }
@@ -1829,6 +1847,9 @@ interface BootstrapResult {
   reason?: string;
   /** For `not-caught-up`: the sequence to have applied first. */
   catchUpTo?: number;
+  /** For `upgrade-required`: the capability this build lacks, and what the fleet says to do about it. */
+  need?: string;
+  hint?: string;
   /** The head, as the fleet had it when it answered. */
   head?: { seq: number; manifestKey?: string };
 }
@@ -1884,6 +1905,8 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     reason?: string;
     catchUpTo?: number;
     retryAfterMs?: number;
+    need?: unknown;
+    hint?: unknown;
     head?: { seq?: number; manifestKey?: string };
   };
   return {
@@ -1892,12 +1915,25 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     ...(typeof body.ttlMs === "number" && body.ttlMs > 0 ? { ttlMs: body.ttlMs } : {}),
     ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
     ...(typeof body.catchUpTo === "number" ? { catchUpTo: body.catchUpTo } : {}),
+    ...(typeof body.need === "string" ? { need: plainText(body.need, 40) } : {}),
+    ...(typeof body.hint === "string" ? { hint: plainText(body.hint) } : {}),
     ...(typeof body.retryAfterMs === "number" && body.retryAfterMs > 0 ? { retryAfterMs: body.retryAfterMs } : {}),
     ...(body.head && typeof body.head.seq === "number" && body.head.seq > 0
       ? { head: { seq: body.head.seq, ...(typeof body.head.manifestKey === "string" && body.head.manifestKey ? { manifestKey: body.head.manifestKey } : {}) } }
       : {}),
   };
 }
+
+/**
+ * What the fleet said about an update. Read through a function only so that TypeScript does not keep the narrowing it made
+ * of `loop.upgrade` before the call that may have set it.
+ */
+function upgradeOf(loop: Pick<SpaceLoop, "upgrade">): SpaceLoop["upgrade"] {
+  return loop.upgrade;
+}
+
+/** How long to wait before asking a fleet again that said this build must be updated, when it did not say. */
+export const UPGRADE_RETRY_MS = 60_000;
 
 /** The longest a request for the place may take: under a quarter of the lease. */
 export const PLACE_TIMEOUT_MS = 10_000;
@@ -2016,6 +2052,23 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
       loop.refusedForMs = undefined;
       return { primary: false, paused: true };
     }
+    // A fleet whose newest snapshot is in pieces this build cannot put together gives no place: nothing is fetched, and the
+    // fleet is asked again after the time it names. What to do about it is the fleet's to say (`hint`).
+    if (placed.reason === "upgrade-required") {
+      const before = loop.upgrade;
+      // A primary that is told this has nothing to publish for the fleet and nothing to renew: the lease is given up at once,
+      // so another member does not wait it out (it is not likely: the primary published the head itself).
+      if (loop.primary) await releaseLease(creds, loop.fleet).catch(() => false);
+      loop.upgrade = { need: placed.need ?? "", hint: placed.hint ?? "this build cannot read the fleet's newest snapshot: update prime" };
+      loop.primary = false;
+      loop.claim = false;
+      loop.refusedForMs = undefined;
+      loop.paused = false;
+      loop.retryAfterMs = placed.retryAfterMs ?? UPGRADE_RETRY_MS;
+      if (before?.hint !== loop.upgrade.hint) logAgent("space " + loop.name + ": " + loop.upgrade.hint);
+      return { primary: false, upgrade: true, reason: "upgrade-required", retryAfterMs: loop.retryAfterMs };
+    }
+    loop.upgrade = undefined;
     if (!placed.ok) {
       loop.refusedForMs = placed.retryAfterMs;
       // What the operator compares the request with: the key this machine holds, as the list of requests prints it.

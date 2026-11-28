@@ -226,6 +226,8 @@ export async function applyReady(
 export interface PlaceAnswer {
   primary: boolean;
   paused?: boolean;
+  /** The fleet's newest snapshot is in a form this build cannot read (see `SpaceLoop.upgrade`). */
+  upgrade?: boolean;
   /** Why a replica was not given the lease, as the fleet put it. */
   reason?: string;
   /** For `not-caught-up`: the sequence the member has to have applied first. */
@@ -251,11 +253,12 @@ export async function promote(deps: {
   catchUp: (seq: number) => Promise<void>;
   /** How many times the head may move under a member that is catching up. */
   attempts?: number;
-}): Promise<"primary" | "lease-held" | "claimed" | "busy" | "paused" | "gave-up"> {
+}): Promise<"primary" | "lease-held" | "claimed" | "busy" | "paused" | "upgrade" | "gave-up"> {
   for (let attempt = 0; attempt < (deps.attempts ?? 3); attempt++) {
     const answer = await deps.takePlace();
     if (answer.primary) return "primary";
     if (answer.paused) return "paused";
+    if (answer.upgrade) return "upgrade";
     if (answer.busy) return "busy";
     // Another replica is catching up to take it: this one writes nothing, and
     // asks again when that claim runs out.

@@ -88,6 +88,14 @@ when every member lists it; an earlier build says nothing, so the fleet's list i
 relays what a member says: one that lies can keep the older format in use or make a member that cannot read a
 newer one fail to open it, which it can already do by withholding it.
 
+**A fleet that needs an update.** When the newest snapshot is in a form this build cannot read (`need` names the capability it
+lacks), the gateway answers the ask for a place with `reason: "upgrade-required"` and a `hint`, and gives no lease. The
+member shows the hint (in the agent's log, once, and in the status of the round), fetches nothing, renews nothing and
+claims nothing, and asks again after the time the answer names (a minute when it names none). It carries on as before once
+the fleet answers with anything else. This build reads every form the gateway publishes today (it lists them all in
+`caps`), so the answer is not sent to it yet: the handling is there for the next capability gate. A primary that is told it
+gives the lease up at once, and `prime fleets sync` says the hint as its error.
+
 ```mermaid
 sequenceDiagram
   participant A as alpha

@@ -337,6 +337,20 @@ describe("what a member says it can do", () => {
     expect(sent).toEqual([{ seals: true, caps: ["meta2", "inline", "chunks", "test1"] }]);
   });
 
+  test("`prime fleets sync` says what the fleet asks for when it needs an update, with nothing a terminal would act on", async () => {
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () =>
+      Response.json({ ok: true, role: "replica", reason: "upgrade-required", need: "chunks", hint: "update prime \u001b[2J\u0007to read this fleet\n", retryAfterMs: 60_000 });
+    try {
+      await expect(bootstrap({ gateway: "https://gw.example", deviceId: "d", deviceToken: "t" } as never, "x")).rejects.toThrow("update prime [2J to read this fleet");
+      const { plainText } = await import("../src/fleet-transport");
+      expect(plainText("a\u001b[31mb\r\nc\u0085d")).toBe("a [31mb c d");
+      expect(plainText("x".repeat(500), 40)).toHaveLength(40);
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+    }
+  });
+
   test("every place in the source that asks for a place says what the member can do", async () => {
     const { readdirSync, readFileSync } = await import("node:fs");
     const src = join(import.meta.dir, "../src");
