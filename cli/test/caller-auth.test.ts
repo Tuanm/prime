@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CallerAuth, type CallerAuthMode, REPLY_SIG_HEADER, parseCallerAuthMode, verifyReplySig } from "../src/caller-auth.ts";
-import { addCaller, loadOrCreateCallerKey, parseCallSig, signCall } from "../src/caller-key.ts";
+import { CALL_SIG_HEADER, addCaller, loadOrCreateCallerKey, parseCallSig, signCall } from "../src/caller-key.ts";
 import { GatewayClient } from "../src/client.ts";
 import { CallSigner } from "../src/caller-key.ts";
 import { optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
@@ -486,6 +486,8 @@ describe("code-mcp behind a gateway that sends frames", () => {
 
   interface Run {
     send(frame: Record<string, unknown>): Promise<Record<string, any>>;
+    /** The gateway's address: a POST to it is turned into a frame the way the gateway does it (raw body, the signature header). */
+    url: string;
     stop(): void;
   }
 
@@ -494,10 +496,20 @@ describe("code-mcp behind a gateway that sends frames", () => {
     const pending = new Map<string, (m: Record<string, any>) => void>();
     let ready!: () => void;
     const connected = new Promise<void>((r) => (ready = r));
+    let sendFrame!: (frame: Record<string, unknown>) => Promise<Record<string, any>>;
     const gw = Bun.serve({
       port: 0,
-      fetch(req, server) {
-        return server.upgrade(req) ? undefined : new Response("no", { status: 400 });
+      async fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        if (req.method !== "POST") return new Response("no", { status: 400 });
+        // The gateway's side of the contract: the raw body and the signature go to the device as they came, and the
+        // reply goes back with its signature in a header and `responseText` (when sent) as the body, byte for byte.
+        const text = await req.text();
+        const sig = req.headers.get(CALL_SIG_HEADER);
+        const m = await sendFrame({ request: JSON.parse(text), raw: text, ...(sig ? { callerSig: sig } : {}) });
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (typeof m.replySig === "string") headers[REPLY_SIG_HEADER] = m.replySig;
+        return new Response(typeof m.responseText === "string" ? m.responseText : JSON.stringify(m.response), { headers });
       },
       websocket: {
         open(ws) {
@@ -526,18 +538,20 @@ describe("code-mcp behind a gateway that sends frames", () => {
       }),
     ]);
     let n = 0;
-    return {
-      send(frame) {
-        const id = `f${++n}`;
-        return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error("no reply from code-mcp")), 20_000);
-          pending.set(id, (m) => {
-            clearTimeout(timer);
-            resolve(m);
-          });
-          socket!.send(JSON.stringify({ id, ...frame }));
+    sendFrame = (frame) => {
+      const id = `f${++n}`;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("no reply from code-mcp")), 20_000);
+        pending.set(id, (m) => {
+          clearTimeout(timer);
+          resolve(m);
         });
-      },
+        socket!.send(JSON.stringify({ id, ...frame }));
+      });
+    };
+    return {
+      url: `http://127.0.0.1:${gw.port}`,
+      send: sendFrame,
       stop() {
         proc.kill();
         gw.stop(true);
@@ -575,6 +589,64 @@ describe("code-mcp behind a gateway that sends frames", () => {
       const replay = await r.send({ request: writeCall(marker), raw, callerSig: sig });
       expect(replay.response.error.code).toBe(-32001);
     } finally {
+      r.stop();
+    }
+  });
+
+  test("the reply frame carries the text that was signed, and a gateway that sends it as the body gives the caller what the signature covers", async () => {
+    const dir = scratch();
+    const callers = join(dir, "callers.json");
+    const key = loadOrCreateCallerKey(join(dir, "me.pem"));
+    addCaller(callers, { pub: key.publicKey });
+    const r = await run("enforce", callers);
+    try {
+      const raw = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "write", arguments: { cwd: dir, path: join(dir, "a.txt"), content: "a" } } });
+      const sig = signCall(key, "device:laptop", raw);
+      const frame = await r.send({ request: JSON.parse(raw), raw, callerSig: sig });
+      expect(typeof frame.responseText).toBe("string");
+      expect(frame.responseText).toBe(JSON.stringify(frame.response));
+      // The gateway of the contract (G9): body = responseText as it is, signature in x-prime-reply-sig.
+      const sig2 = signCall(key, "device:laptop", raw);
+      const http = await fetch(r.url, { method: "POST", body: raw, headers: { [CALL_SIG_HEADER]: sig2 } });
+      const body = await http.text();
+      const header = http.headers.get(REPLY_SIG_HEADER);
+      expect(header).not.toBeNull();
+      expect(verifyReplySig(header!, parseCallSig(sig2)!.nonce, body)).toBeDefined();
+      expect(JSON.parse(body).id).toBe(7);
+      // A body that is not the text that was signed does not verify, however alike it looks.
+      expect(verifyReplySig(header!, parseCallSig(sig2)!.nonce, JSON.stringify(JSON.parse(body), null, 1))).toBeUndefined();
+    } finally {
+      r.stop();
+    }
+  });
+
+  test("the CLI against a device behind that gateway: the reply is verified and the device pinned; a signature left off a later reply is refused", async () => {
+    const dir = scratch();
+    const callers = join(dir, "callers.json");
+    const keyPath = join(dir, "me.pem");
+    const key = loadOrCreateCallerKey(keyPath);
+    addCaller(callers, { pub: key.publicKey });
+    process.env.PRIME_DEVICE_KEYS = join(dir, "pins.json");
+    const r = await run("enforce", callers);
+    const realFetch = globalThis.fetch;
+    try {
+      const notices: string[] = [];
+      const client = new GatewayClient({ deviceId: "laptop", gateway: r.url, timeoutMs: 20_000 } as never, { signer: new CallSigner({ path: keyPath }), notice: (x) => notices.push(x) });
+      const call = () => client.callTool("write", { cwd: dir, path: join(dir, "b.txt"), content: "b" }, { handshake: "never" });
+      await call();
+      expect(notices).toEqual([]);
+      expect(Object.keys(JSON.parse(readFileSync(join(dir, "pins.json"), "utf8")))).toEqual([`laptop@${r.url}`]);
+      // The same gateway now drops the header: the pinned device is refused.
+      globalThis.fetch = (async (u: string | URL, init?: RequestInit) => {
+        const res = await realFetch(u, init);
+        const headers = new Headers(res.headers);
+        headers.delete(REPLY_SIG_HEADER);
+        return new Response(await res.text(), { status: res.status, headers });
+      }) as typeof fetch;
+      await expect(call()).rejects.toThrow(/without signing its reply/);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.PRIME_DEVICE_KEYS;
       r.stop();
     }
   });
