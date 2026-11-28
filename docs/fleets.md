@@ -355,13 +355,19 @@ under a key derived from the snapshot key, bound to the manifest's sequence, par
 fleet, so it opens for no other manifest), and a member reads them from there. While a member that
 predates it is in the fleet the manifest also shows them in the clear, as it always did, and a member
 that sees the two disagree refuses the snapshot. Once every member says it can read the metadata
-(`meta2` in the capabilities its members tell the gateway, and the gateway's `fleetCaps`), the
+(`meta2` in the capabilities each member tells the gateway; the publisher reads them in the same answer as the keys it seals for,
+so a member admitted a moment ago cannot slip between the two), the
 commit and the tree are left empty, the roster is left out, and each member's entry of `wrapped` is
 listed under a hash of the fleet's incarnation and its device id rather than the device id. The seal still
 binds the real commit, tree and roster, so nothing about what a member checks is weaker. The gateway
 still knows who the members are (it keeps the roster), the size of each pack, and when a snapshot was
 made; it no longer sees in storage which commit or tree a snapshot is. If a member that cannot read the
 metadata joins, the next snapshot goes back to the plain form and is a whole tree.
+
+To take the form back by hand (a rollback): stop advertising `meta2` (a build without it in its capabilities, or the gateway's capabilities
+cleared); the next publish is plain and a whole tree, and members that predate it read it as they always did. A gateway can lie about
+capabilities, and the worst that does is make a member that cannot read the hidden form fail to open a snapshot (it waits for the next
+whole tree): the gateway can already stop a member from reading anything, so this adds no power it did not have.
 
 Whose word this rests on: **the roster**. The operator admits the members, and the
 roster says which key each has. The checks hold against anyone who can read and write what

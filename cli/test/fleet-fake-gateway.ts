@@ -38,6 +38,8 @@ export class FakeGateway {
   incarnation: string | undefined = "incarnation-1";
   /** What every member can read, as /role says (`fleetCaps`); undefined for a gateway that predates it. */
   fleetCaps: string[] | undefined = undefined;
+  /** What a member says it can do, as /keys lists it (default: what `fleetCaps` says, for every member). */
+  memberCaps = new Map<string, string[]>();
   /** A refused publish deletes the change pack its manifest names (the gateway's cleanup). */
   dropChangePackOnRefusal = false;
   /** The next snapshots come from a publisher that seals but does not tag each entry (an earlier build). */
@@ -167,7 +169,7 @@ export class FakeGateway {
     }
     if (kind === "keys" && method === "GET") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
-      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, applied: this.applied.get(m.deviceId) ?? 0 })) });
+      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, applied: this.applied.get(m.deviceId) ?? 0, ...((this.memberCaps.get(m.deviceId) ?? this.fleetCaps) ? { caps: this.memberCaps.get(m.deviceId) ?? this.fleetCaps } : {}) })) });
     }
     if (kind === "applied" && method === "POST" && this.failApplied > 0) {
       this.failApplied--;
