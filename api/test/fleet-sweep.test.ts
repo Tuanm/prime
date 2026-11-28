@@ -356,6 +356,18 @@ describe("the sweep on a gateway with many fleets", () => {
     expect(w.bucket.objects.has("sweep/cursor")).toBe(false);
   });
 
+  test("goes through the registry's fleets in the sweep's own order, whatever order the registry lists them in", async () => {
+    const names = ["d", "b", "f", "a", "e", "c"];
+    const w = await many(names);
+    const first = await sweepFleets(w.env, { now: T0, subrequests: 14 });
+    // The registry's set is in insertion order here (d, b, f ...): a cursor that trusted it would skip or repeat fleets.
+    expect(first.next).toBe("c");
+    expect(orphansLeft(w, names).sort()).toEqual(["c", "d", "e", "f"]);
+    await sweepFleets(w.env, { now: T0, subrequests: 14 });
+    await sweepFleets(w.env, { now: T0, subrequests: 14 });
+    expect(orphansLeft(w, names)).toEqual([]);
+  });
+
   test("a run that begins in the middle goes to the end of the list and ends the round there", async () => {
     const names = ["a", "b", "c", "d"];
     const w = await many(names);
@@ -483,5 +495,35 @@ describe("the gateway runs the sweep", () => {
     expect(w.bucket.deleted).toContain(orphan);
     expect(usage.length).toBe(1);
     expect(usage[0]!.r2Writes).toBeGreaterThan(0);
+  });
+});
+
+describe("the sweep and the log of a fleet that was deleted while the bucket was down", () => {
+  test("is copied when the sweep finds the fleet's leftover objects and asks whether it exists", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const put = w.bucket.put;
+    w.bucket.put = async (k: string, ...rest: unknown[]) => {
+      if (k.startsWith("audit/")) throw new Error("bucket down");
+      return (put as (...a: unknown[]) => Promise<unknown>)(k, ...rest);
+    };
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      expect((await w.call("acme", "/delete", "admin", "operator")).status).toBe(200);
+    } finally {
+      console.error = quiet;
+    }
+    w.registered.delete("acme");
+    // The bucket was down for the deletion of the fleet's objects too: they are still there, and old.
+    w.bucket.seed("fleets/acme/packs/" + hex("1"), 30 * HOUR);
+    w.bucket.put = put;
+    expect(w.states.get("acme")!.data.get("auditOrphan")).toBe(true);
+    expect([...w.bucket.objects.keys()].some((k) => k.startsWith("audit/"))).toBe(false);
+    const report = await sweepFleets(w.env, { now: T0 });
+    expect(report.goneObjects).toBe(1);
+    expect([...w.bucket.objects.keys()].some((k) => k.startsWith("audit/acme/"))).toBe(true);
+    expect(w.states.get("acme")!.data.get("auditOrphan")).toBeUndefined();
+    expect([...w.states.get("acme")!.data.keys()].filter((k) => k.startsWith("audit:"))).toEqual([]);
   });
 });

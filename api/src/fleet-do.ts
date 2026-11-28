@@ -498,7 +498,7 @@ export class FleetDO implements DurableObject {
       await this.storage.delete("auditOrphan");
       this.fleetName = "";
     } else {
-      // Left in the object, and copied by the next ask whether the fleet exists (the gateway's daily sweep makes it) or read.
+      // Left in the object, and copied by the next ask whether the fleet exists (the gateway's daily sweep makes it, for a fleet whose objects it finds in the bucket) or read.
       await this.storage.put("auditOrphan", true);
     }
     // A fleet that is deleted is not still paused: the name can be made again.
@@ -1099,7 +1099,14 @@ export class FleetDO implements DurableObject {
       await this.touch();
       return this.applied(caller, body, request);
     }
-    if (path === "/exists" && request.method === "GET") return caller.kind === "admin" ? Response.json({ exists: await this.exists() }) : this.deny();
+    if (path === "/exists" && request.method === "GET") {
+      if (caller.kind !== "admin") return this.deny();
+      const exists = await this.exists();
+      // The sweep asks this of a fleet that is gone and still has objects in the bucket: that is when a log that could not be
+      // copied at its deletion (the bucket was down) is copied. A fleet that has none left to find is read, or made again.
+      if (!exists) await this.retryOrphanLog();
+      return Response.json({ exists });
+    }
     if (path === "/uploaded" && request.method === "POST") return this.uploaded(caller, body, request);
     if (path === "/unreferenced" && request.method === "POST") return this.unreferenced(caller, body, request);
     if (path === "/delete" && request.method === "POST") return this.delete(caller, request, body);

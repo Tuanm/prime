@@ -100,7 +100,8 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
     spend();
     const answer = await env.REGISTRY.get(env.REGISTRY.idFromName("global")).fetch("https://registry/fleets");
     if (!answer.ok) throw new Error("registry " + answer.status);
-    registered = ((await answer.json()) as { fleets?: string[] }).fleets ?? [];
+    // The cursor is a place in this order, so the order is the sweep's own and not the registry's.
+    registered = [...(((await answer.json()) as { fleets?: string[] }).fleets ?? [])].sort();
   } catch {
     report.skipped.push({ fleet: "*", why: "the registry could not be read" });
     return report;
