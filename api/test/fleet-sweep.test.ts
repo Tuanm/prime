@@ -435,16 +435,16 @@ describe("the sweep of a fleet that is gone", () => {
 });
 
 describe("what the object lets the sweep ask", () => {
-  test("a member is still held to eight keys and its own fleet; only the gateway asks about many", async () => {
+  test("a member is held to the keys of a snapshot in pieces (two lists of 128, and the manifest and pack) and its own fleet; only the gateway asks about many", async () => {
     const w = world();
     await w.fleet("acme");
-    const keys = Array.from({ length: 20 }, (_, i) => "fleets/acme/packs/" + i.toString(16).padStart(64, "0"));
+    const keys = Array.from({ length: 300 }, (_, i) => "fleets/acme/packs/" + i.toString(16).padStart(64, "0"));
     const member = await w.call("acme", "/unreferenced", "device", "dev-a", { keys });
-    expect(member.json.keys.length).toBe(8);
+    expect(member.json.keys.length).toBe(264);
     const stranger = await w.call("acme", "/unreferenced", "device", "dev-x", { keys });
     expect(stranger.status).toBe(403);
     const gateway = await w.call("acme", "/unreferenced", "admin", "operator", { keys });
-    expect(gateway.json.keys.length).toBe(20);
+    expect(gateway.json.keys.length).toBe(300);
     expect(gateway.json.exists).toBe(true);
     // Only the gateway may ask whether a fleet exists.
     expect((await w.call("acme", "/exists", "device", "dev-a", undefined, "GET")).status).toBe(403);

@@ -123,6 +123,48 @@ export const RECENT_SNAPSHOTS = 64;
  */
 export const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 
+/**
+ * A snapshot too big for one request goes in pieces ("chunks"): each piece is uploaded as an ordinary pack, and the snapshot is
+ * then published as a manifest alone that lists them. A piece is at most `CHUNK_BYTES`, a snapshot has at most `MAX_CHUNKS` of them
+ * (and as many again for the change pack beside a whole tree), and the pieces add up to at most `MAX_CHUNKED_SNAPSHOT_BYTES`.
+ * Only members that say they can read a chunked snapshot (the cap `chunks`) may be in a fleet that has one.
+ */
+export const CHUNK_BYTES = 8 * 1024 * 1024;
+export const MAX_CHUNKS = 128;
+export const MAX_CHUNKED_SNAPSHOT_BYTES = 512 * 1024 * 1024;
+export const CHUNKS_CAP = "chunks";
+/** How long a pack that was uploaded and not yet named by a snapshot is kept from the sweep: a long upload is in pieces over hours. */
+export const UPLOAD_KEEP_MS = 24 * 60 * 60 * 1000;
+/** The most uploads that are remembered at once (the two lists of one snapshot, and some to spare). */
+export const UPLOADS_KEPT = 2 * MAX_CHUNKS + 64;
+
+/** The list of pieces of a manifest, checked: `{hash, bytes}` each, lowercase hex SHA-256 and a size in 1..CHUNK_BYTES, at most MAX_CHUNKS, adding up to `whole`. */
+export function checkChunkList(
+  raw: unknown,
+  whole: unknown,
+  what: string,
+): { ok: true; hashes: string[]; bytes: number[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: what + " is a list of pieces, and has at least one" };
+  if (raw.length > MAX_CHUNKS) return { ok: false, error: what + " has " + raw.length + " pieces, and a snapshot may have " + MAX_CHUNKS };
+  const hashes: string[] = [];
+  const bytes: number[] = [];
+  let total = 0;
+  for (const c of raw as Array<{ hash?: unknown; bytes?: unknown }>) {
+    if (c === null || typeof c !== "object" || typeof c.hash !== "string" || !/^[0-9a-f]{64}$/.test(c.hash)) {
+      return { ok: false, error: what + " names a piece by the lowercase hex SHA-256 of its bytes (hash)" };
+    }
+    if (typeof c.bytes !== "number" || !Number.isSafeInteger(c.bytes) || c.bytes < 1 || c.bytes > CHUNK_BYTES) {
+      return { ok: false, error: "a piece of " + what + " is between 1 byte and " + CHUNK_BYTES + " bytes (bytes)" };
+    }
+    hashes.push(c.hash);
+    bytes.push(c.bytes);
+    total += c.bytes;
+  }
+  if (total > MAX_CHUNKED_SNAPSHOT_BYTES) return { ok: false, error: what + " is " + total + " bytes, and the most a snapshot may be is " + MAX_CHUNKED_SNAPSHOT_BYTES };
+  if (typeof whole !== "number" || whole !== total) return { ok: false, error: "the pieces of " + what + " add up to " + total + " bytes, and the manifest says " + String(whole) };
+  return { ok: true, hashes, bytes };
+}
+
 /** How many fleets one device may create in an hour. */
 export const MAX_FLEETS_PER_DEVICE = 5;
 

@@ -893,6 +893,26 @@ says; it now means twenty dollars.
 | a request body on a fleet route | 64 KB (`FLEET_BODY_MAX_BYTES`), 4 KB for the body that asks for a device with a code; the snapshot and change-pack uploads have their own limit above. The gateway answers 413 |
 | a fleet nobody touches | kept: only the operator or the owner deletes it (`reap` also takes one whose members the gateway has all forgotten, after a week) |
 
+## A snapshot too big for one request
+
+The gateway takes at most 32 MB in one request (`snapshotLimit` in the answer of `GET /role`). A snapshot bigger than that can be
+published **in pieces**: the primary uploads each piece as an ordinary pack (`POST /fleets/{fleet}/packs`, at most
+`chunkLimit` = 8 MiB, up to four at a time), and then publishes the manifest alone, which lists them as
+`chunks: [{hash, bytes}]` (and `delta.chunks` for the change pack beside a whole tree). The pieces joined are the sealed pack; the
+manifest's `packHash` and `packBytes` are those of the whole, and its `packKey` is the key of the first piece.
+
+The gateway checks the list before it moves the head: at most 128 pieces for each list, each 1 byte to 8 MiB, adding up to
+`packBytes` and to at most `chunkedLimit` = 512 MiB; the first piece is the `packKey`; and every piece is in the bucket at the size
+it is said to be (a missing one is named in the answer, `409`, and what was uploaded stays for the retry). It cannot check
+`packHash`, which needs the whole pack: the members do, when they join the pieces. A snapshot in pieces is kept, retired and
+deleted as one with all its pieces, and is never given to a member through the head event. **A fleet takes one only when every member
+says it reads them** (`chunks` in its `caps`): otherwise the publish is refused with `409` and `chunks: false`, because a member
+without it could not open the snapshot.
+
+A slow upload does not lose its pieces to the daily sweep: the object notes each pack the primary uploads and the sweep leaves it for a
+day, and what the head names (the manifest, its pack, the pieces of both lists) is always spared. Pieces that nothing names after a
+day are swept.
+
 ## What is left in the bucket
 
 A publish that is refused (it was not the primary any more, or it was behind), or whose publisher dies after

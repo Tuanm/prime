@@ -98,7 +98,7 @@ Files authenticate with the buddy's own id and token, over HTTP Basic. There is 
 | `GET /fleets/{fleet}` | a member's token | The roster. Ids are cut short for everyone but the operator. |
 | `GET /fleets/{fleet}/head` | a member's token | Where the work has got to. |
 | `GET /fleets/{fleet}/events` | a member's token | A WebSocket the fleet speaks on: `hello`, `paused`, `resumed`, `head` (a small snapshot's manifest and pack ride in it as `inline`, to members whose `caps` include `inline`), `lease-free`, `bye`. The member sends `ping`; the runtime answers `pong` for free. |
-| `POST /fleets/{fleet}/snapshot` | the primary's token | Publish a sealed pack and its manifest in one call. |
+| `POST /fleets/{fleet}/snapshot` | the primary's token | Publish a sealed pack and its manifest in one call. A snapshot in pieces is published as its manifest alone (`chunks` listing packs uploaded before it): see docs/fleets.md. |
 | `GET /fleets/{fleet}/packs/{hash}` | a member's token | Fetch a pack that is missing. |
 
 ### Operator

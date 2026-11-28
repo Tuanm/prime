@@ -1,0 +1,386 @@
+// A snapshot too big for one request: published in pieces, which the object keeps, the sweep spares, and only members that read them may have.
+import { afterEach, describe, expect, mock, setSystemTime, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { deleteRows, listRows } from "./fake-list";
+
+mock.module("cloudflare:workers", () => ({
+  DurableObject: class {
+    ctx: unknown;
+    env: unknown;
+    constructor(ctx: unknown, env: unknown) {
+      this.ctx = ctx;
+      this.env = env;
+    }
+  },
+}));
+mock.module("@cloudflare/containers", () => ({ Container: class {} }));
+
+const { FleetDO } = await import("../src/fleet-do");
+const { handleFleetRoutes } = await import("../src/fleets-routes");
+const { sweepFleets } = await import("../src/fleet-sweep");
+const { CHUNK_BYTES, MAX_CHUNKS, MAX_CHUNKED_SNAPSHOT_BYTES } = await import("../src/fleets");
+
+const KEY = "A".repeat(43) + "=";
+const HOUR = 3_600_000;
+const T0 = Date.UTC(2026, 11, 1, 3, 17);
+const hex = (c: string): string => c.repeat(64);
+const sha = (d: string | Uint8Array): string => createHash("sha256").update(d).digest("hex");
+
+/** R2 with upload times, listing by prefix and delimiter, and the conditional write the head relies on. */
+function bucketAt(clock: { now: number }) {
+  const objects = new Map<string, { body: string; etag: string; uploaded: number; size: number }>();
+  let n = 0;
+  const bucket = {
+    objects,
+    deleted: [] as string[],
+    failHead: false,
+    seed(key: string, ageMs: number, body = "x") {
+      objects.set(key, { body, etag: "s" + n++, uploaded: clock.now - ageMs, size: body.length });
+    },
+    async delete(key: string | string[]) {
+      for (const k of Array.isArray(key) ? key : [key]) {
+        bucket.deleted.push(k);
+        objects.delete(k);
+      }
+    },
+    async list(opts: { prefix?: string; limit?: number; cursor?: string; delimiter?: string }) {
+      const prefix = opts.prefix ?? "";
+      const keys = [...objects.keys()].filter((k) => k.startsWith(prefix) && (opts.cursor === undefined || k > opts.cursor)).sort();
+      if (opts.delimiter) {
+        const groups = new Set(keys.map((k) => k.slice(0, prefix.length + k.slice(prefix.length).indexOf(opts.delimiter!) + 1)));
+        return { objects: [], delimitedPrefixes: [...groups], truncated: false };
+      }
+      const limit = opts.limit ?? 1000;
+      const page = keys.slice(0, limit);
+      const truncated = keys.length > limit;
+      return { objects: page.map((key) => ({ key, uploaded: new Date(objects.get(key)!.uploaded) })), truncated, ...(truncated ? { cursor: page[page.length - 1]! } : {}) };
+    },
+    async head(key: string) {
+      const o = objects.get(key);
+      return o ? { key, size: o.size } : null;
+    },
+    async get(key: string) {
+      if (bucket.failHead && key.endsWith("/head")) throw new Error("the bucket is down");
+      const o = objects.get(key);
+      if (!o) return null;
+      return { etag: o.etag, json: async () => JSON.parse(o.body) };
+    },
+    async put(key: string, body: string, opts?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } }) {
+      const cur = objects.get(key);
+      const cond = opts?.onlyIf;
+      if (cond?.etagMatches !== undefined && cur?.etag !== cond.etagMatches) return null;
+      if (cond?.etagDoesNotMatch === "*" && cur) return null;
+      const etag = "e" + n++;
+      const size = typeof body === "string" ? body.length : ((body as { byteLength?: number }).byteLength ?? 0);
+      const text = typeof body === "string" ? body : new TextDecoder().decode(body as Uint8Array);
+      objects.set(key, { body: text.startsWith("{") ? text : "binary", etag, uploaded: clock.now, size });
+      return { etag, size: body.length };
+    },
+  };
+  return bucket;
+}
+
+function fakeState() {
+  const data = new Map<string, unknown>();
+  return {
+    data,
+    storage: {
+      async get<T>(key: string): Promise<T | undefined> {
+        const v = data.get(key);
+        return (v === undefined ? undefined : structuredClone(v)) as T | undefined;
+      },
+      async put(key: string, value: unknown): Promise<void> {
+        data.set(key, JSON.parse(JSON.stringify(value)));
+      },
+      async delete(key: string | string[]): Promise<boolean | number> {
+        return Array.isArray(key) ? deleteRows(data, key) : data.delete(key);
+      },
+      async list(o: { prefix?: string; start?: string; limit?: number; reverse?: boolean }) {
+        return listRows(data, o);
+      },
+    },
+    async blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
+      return fn();
+    },
+  };
+}
+
+type Bucket = ReturnType<typeof bucketAt>;
+
+/** A gateway's worth of fleet objects over one bucket, and a registry that lists the fleets made through it. */
+function world() {
+  const clock = { now: T0 };
+  const bucket = bucketAt(clock);
+  const registered = new Set<string>();
+  const states = new Map<string, ReturnType<typeof fakeState>>();
+  const objects = new Map<string, InstanceType<typeof FleetDO>>();
+  const fleetObject = (id: string) => {
+    let o = objects.get(id);
+    if (!o) {
+      const state = fakeState();
+      states.set(id, state);
+      o = new FleetDO({ storage: state.storage, blockConcurrencyWhile: state.blockConcurrencyWhile } as never, { BUCKET: bucket } as never);
+      objects.set(id, o);
+    }
+    return o;
+  };
+  const registry = {
+    idFromName: () => "global",
+    get: () => ({
+      fetch: async (input: string) => {
+        if (new URL(input).pathname === "/fleets") return world.registryDown ? new Response("no", { status: 500 }) : Response.json({ fleets: [...registered] });
+        return Response.json({ ok: true });
+      },
+    }),
+  };
+  const world = {
+    clock,
+    bucket,
+    registered,
+    states,
+    registryDown: false,
+    env: { BUCKET: bucket, REGISTRY: registry, FLEET: { idFromName: (n: string) => n, get: (n: string) => ({ fetch: (u: string, init?: RequestInit) => fleetObject(n).fetch(new Request(u, init)) }) } } as never,
+    fleetObject,
+    async call(id: string, path: string, caller: "admin" | "device", device: string, body?: unknown, method = "POST") {
+      const headers = new Headers({ "content-type": "application/json", "x-prime-caller": caller, "x-prime-device": device, "x-prime-fleet": id });
+      const res = await fleetObject(id).fetch(new Request("https://fleet" + path, { method, headers, body: body === undefined ? undefined : JSON.stringify({ pubkey: KEY, ...(body as object) }) }));
+      return { status: res.status, json: (await res.json()) as Record<string, any> };
+    },
+    /** A fleet whose members `caps` say they read pieces (or not); dev-a holds the lease. */
+    async fleet(id: string, caps: Record<string, string[]> = { "dev-a": ["chunks"], "dev-b": ["chunks"] }) {
+      await world.call(id, "/create", "admin", "operator");
+      registered.add(id);
+      for (const dev of Object.keys(caps)) {
+        const invite = await world.call(id, "/invite", "admin", "operator", {});
+        await world.call(id, "/join", "device", dev, { code: invite.json.code });
+        await world.call(id, "/approve", "admin", "operator", { deviceId: dev });
+      }
+      expect((await world.call(id, "/bootstrap", "device", "dev-a", { caps: caps["dev-a"] })).json.role).toBe("primary");
+      for (const dev of Object.keys(caps)) if (dev !== "dev-a") await world.call(id, "/bootstrap", "device", dev, { caps: caps[dev] });
+    },
+    /** A request through the Worker, as a member makes it. */
+    async http(id: string, method: string, path: string, body?: Uint8Array | string, device = "dev-a") {
+      const url = new URL("https://gateway/fleets/" + id + path);
+      const request = new Request(url, { method, headers: { "x-prime-device": device, "x-device-token": "t" }, body: body as never });
+      const res = (await handleFleetRoutes({ request, env: world.env, url, cfg: {} as never, authorizeDevice: async () => ({ ok: true as const }), unauthorized: () => new Response(null, { status: 401 }) }))!;
+      return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, any> };
+    },
+    /** Upload a piece as an ordinary pack. */
+    async piece(id: string, bytes: Uint8Array) {
+      const up = await world.http(id, "POST", "/packs", bytes);
+      expect(up.status).toBe(200);
+      return { hash: up.json.hash as string, bytes: bytes.length };
+    },
+    /** Publish a manifest alone (the frame is its length and itself). */
+    async publishManifest(id: string, manifest: Record<string, unknown>, pack?: Uint8Array) {
+      const text = Buffer.from(JSON.stringify(manifest));
+      const head = Buffer.alloc(4);
+      head.writeUInt32BE(text.length, 0);
+      return world.http(id, "POST", "/snapshot", Buffer.concat([head, text, pack ?? Buffer.alloc(0)]));
+    },
+  };
+  return world;
+}
+
+
+afterEach(() => setSystemTime());
+const bytesOf = (n: number, fill: number): Uint8Array => new Uint8Array(n).fill(fill);
+
+/** A manifest for pieces: the whole pack's hash is whatever the member says it is. */
+const manifestOf = (id: string, seq: number, pieces: Array<{ hash: string; bytes: number }>, over: Record<string, unknown> = {}) => ({
+  seq,
+  full: false,
+  seal: "tag",
+  chunks: pieces,
+  packBytes: pieces.reduce((n, p) => n + p.bytes, 0),
+  packHash: hex("9"),
+  packKey: "fleets/" + id + "/packs/" + pieces[0]!.hash,
+  ...over,
+});
+
+describe("what the gateway says of pieces", () => {
+  test("/role names the most a piece and a whole may be", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const role = await w.call("acme", "/role", "device", "dev-a", undefined, "GET");
+    expect(role.json).toMatchObject({ chunkLimit: CHUNK_BYTES, chunkedLimit: MAX_CHUNKED_SNAPSHOT_BYTES, snapshotLimit: 32 * 1024 * 1024 });
+    expect(CHUNK_BYTES).toBe(8 * 1024 * 1024);
+    expect(MAX_CHUNKED_SNAPSHOT_BYTES).toBe(512 * 1024 * 1024);
+  });
+});
+
+describe("publishing a snapshot in pieces", () => {
+  test("the pieces are uploaded as packs, the manifest alone is published, and the head moves", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const pieces = [await w.piece("acme", bytesOf(100, 1)), await w.piece("acme", bytesOf(100, 2)), await w.piece("acme", bytesOf(37, 3))];
+    const done = await w.publishManifest("acme", manifestOf("acme", 1, pieces));
+    expect(done.status).toBe(200);
+    expect(done.json.head.seq).toBe(1);
+    // The manifest as stored keeps what the member said of the whole pack and names the first piece as the pack.
+    const stored = JSON.parse(w.bucket.objects.get(done.json.manifestKey)!.body);
+    expect(stored).toMatchObject({ packKey: "fleets/acme/packs/" + pieces[0]!.hash, packHash: hex("9"), packBytes: 237, chunks: pieces });
+    // The snapshot is kept as one, with all its pieces, from the head on.
+    const recent = (w.states.get("acme")!.data.get("recent") as string[])[0]!.split("\n");
+    expect(recent.sort()).toEqual([done.json.manifestKey, ...pieces.map((p) => "fleets/acme/packs/" + p.hash)].sort());
+    expect(w.states.get("acme")!.data.get("storing")).toBeUndefined();
+    // The index says it is a snapshot in pieces and how big.
+    expect((w.states.get("acme")!.data.get("index") as Array<Record<string, unknown>>)[0]).toMatchObject({ seq: 1, chunked: true, packBytes: 237 });
+  });
+
+  test("a packKey that is not the first piece's, and a frame that has a pack as well as pieces, are refused", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const pieces = [await w.piece("acme", bytesOf(10, 1))];
+    const wrongKey = await w.publishManifest("acme", manifestOf("acme", 1, pieces, { packKey: "fleets/acme/packs/" + hex("e") }));
+    expect(wrongKey.status).toBe(400);
+    const both = await w.publishManifest("acme", manifestOf("acme", 1, pieces), bytesOf(5, 1));
+    expect(both.status).toBe(400);
+    // Without pieces, a manifest alone is still an empty pack.
+    expect((await w.publishManifest("acme", { seq: 1, seal: "tag" })).json.error).toBe("empty pack");
+    expect((await w.states.get("acme")!.data.get("recent")) ?? []).toEqual([]);
+  });
+
+  test("a list that is not what it must be is refused: sizes that do not add up, a bad hash, too many, too big", async () => {
+    const w = await (async () => {
+      const x = world();
+      await x.fleet("acme");
+      return x;
+    })();
+    const ok = [await w.piece("acme", bytesOf(10, 1))];
+    const publish = (m: Record<string, unknown>) => w.publishManifest("acme", m);
+    expect((await publish(manifestOf("acme", 1, ok, { packBytes: 11 }))).status).toBe(400);
+    expect((await publish(manifestOf("acme", 1, ok, { packBytes: undefined }))).status).toBe(400);
+    expect((await publish(manifestOf("acme", 1, [{ hash: "ABC", bytes: 10 }]))).status).toBe(400);
+    expect((await publish(manifestOf("acme", 1, [{ hash: hex("a"), bytes: 0 }]))).status).toBe(400);
+    expect((await publish(manifestOf("acme", 1, [{ hash: hex("a"), bytes: CHUNK_BYTES + 1 }]))).status).toBe(400);
+    expect((await publish(manifestOf("acme", 1, ok, { chunks: [] }))).status).toBe(400);
+    expect((await publish(manifestOf("acme", 1, ok, { chunks: "no" }))).status).toBe(400);
+    const many = Array.from({ length: MAX_CHUNKS + 1 }, (_, i) => ({ hash: i.toString(16).padStart(64, "0"), bytes: 1 }));
+    const tooMany = await publish(manifestOf("acme", 1, many));
+    expect(tooMany.status).toBe(400);
+    expect(tooMany.json.error).toMatch(/129 pieces/);
+    const huge = Array.from({ length: 65 }, (_, i) => ({ hash: i.toString(16).padStart(64, "0"), bytes: CHUNK_BYTES }));
+    const tooBig = await publish(manifestOf("acme", 1, huge));
+    expect(tooBig.status).toBe(400);
+    expect(tooBig.json.error).toMatch(/most a snapshot may be/);
+    expect((await publish(manifestOf("acme", 1, ok, { packHash: "short" }))).status).toBe(400);
+    // The most whole is 512 MiB: 64 pieces of the biggest size.
+    const most = Array.from({ length: 64 }, (_, i) => ({ hash: i.toString(16).padStart(64, "0"), bytes: CHUNK_BYTES }));
+    expect((await publish(manifestOf("acme", 1, most))).status).toBe(409); // sizes fine; the pieces are not there
+  });
+
+  test("a piece that is not in the bucket, or not that size, is named, and the head does not move", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const a = await w.piece("acme", bytesOf(50, 1));
+    const b = await w.piece("acme", bytesOf(50, 2));
+    const missing = { hash: hex("c"), bytes: 20 };
+    const res = await w.publishManifest("acme", manifestOf("acme", 1, [a, missing, b]));
+    expect(res.status).toBe(409);
+    expect(res.json.missing).toEqual([hex("c")]);
+    const wrong = await w.publishManifest("acme", manifestOf("acme", 1, [a, { hash: b.hash, bytes: 51 }]));
+    expect(wrong.status).toBe(409);
+    expect(wrong.json.missing).toEqual([b.hash]);
+    expect((await w.http("acme", "GET", "/head")).json.head?.seq ?? 0).toBe(0);
+    // Nothing was thrown away: the member uploads the missing one and publishes again.
+    expect(w.bucket.objects.has("fleets/acme/packs/" + a.hash)).toBe(true);
+    const c = await w.piece("acme", bytesOf(20, 3));
+    expect((await w.publishManifest("acme", manifestOf("acme", 1, [a, c, b]))).status).toBe(200);
+  });
+
+  test("a publish that the fleet refuses cleans away the pieces, once nothing names them", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const pieces = [await w.piece("acme", bytesOf(10, 1)), await w.piece("acme", bytesOf(10, 2))];
+    // Behind: the head is at 0, so seq 5 is a stale sequence.
+    const refused = await w.publishManifest("acme", manifestOf("acme", 5, pieces));
+    expect(refused.status).toBe(409);
+    for (const p of pieces) expect(w.bucket.objects.has("fleets/acme/packs/" + p.hash)).toBe(false);
+  });
+
+  test("every member must read pieces: one that does not say so keeps the fleet from having a snapshot in pieces", async () => {
+    const w = world();
+    await w.fleet("acme", { "dev-a": ["chunks"], "dev-b": [] });
+    const pieces = [await w.piece("acme", bytesOf(10, 1))];
+    const res = await w.publishManifest("acme", manifestOf("acme", 1, pieces));
+    expect(res.status).toBe(409);
+    expect(res.json).toMatchObject({ chunks: false, members: 1 });
+    expect(res.json.error).toMatch(/needs every member to read them/);
+    // And a member that says it can, later, lets it through.
+    await w.call("acme", "/bootstrap", "device", "dev-b", { caps: ["chunks"] });
+    const again = [await w.piece("acme", bytesOf(10, 1))];
+    expect((await w.publishManifest("acme", manifestOf("acme", 1, again))).status).toBe(200);
+  });
+
+  test("the change pack beside a whole tree may be in pieces too, and is kept with the snapshot", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const main = [await w.piece("acme", bytesOf(40, 1))];
+    const delta = [await w.piece("acme", bytesOf(30, 2)), await w.piece("acme", bytesOf(30, 3))];
+    const res = await w.publishManifest("acme", manifestOf("acme", 1, main, { full: true, delta: { bytes: 60, chunks: delta } }));
+    expect(res.status).toBe(200);
+    const stored = JSON.parse(w.bucket.objects.get(res.json.manifestKey)!.body);
+    expect(stored.delta.packKey).toBe("fleets/acme/packs/" + delta[0]!.hash);
+    const recent = (w.states.get("acme")!.data.get("recent") as string[])[0]!.split("\n");
+    for (const p of [...main, ...delta]) expect(recent).toContain("fleets/acme/packs/" + p.hash);
+    // A change pack whose pieces do not add up is refused.
+    const bad = await w.publishManifest("acme", manifestOf("acme", 2, main, { full: true, delta: { bytes: 61, chunks: delta } }));
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toMatch(/delta\.chunks/);
+  });
+
+  test("the cap on the extra keys of a snapshot holds a whole snapshot's two lists", async () => {
+    const w = world();
+    await w.fleet("acme");
+    // 128 pieces of 1 byte each, as the most pieces.
+    const pieces: Array<{ hash: string; bytes: number }> = [];
+    for (let i = 0; i < MAX_CHUNKS; i++) pieces.push(await w.piece("acme", new Uint8Array([i % 256, (i * 7) % 256, i >> 4, 9])));
+    const res = await w.publishManifest("acme", manifestOf("acme", 1, pieces));
+    expect(res.status).toBe(200);
+    const recent = (w.states.get("acme")!.data.get("recent") as string[])[0]!.split("\n");
+    expect(recent.length).toBe(MAX_CHUNKS + 1);
+  });
+});
+
+describe("the sweep and a snapshot in pieces", () => {
+  test("the pieces of a slow upload are spared for a day, however old, and then go if nothing names them", async () => {
+    setSystemTime(new Date(T0));
+    const w = world();
+    await w.fleet("acme");
+    const pieces = [await w.piece("acme", bytesOf(10, 1)), await w.piece("acme", bytesOf(10, 2))];
+    // Only the lease holder says what was uploaded.
+    expect((await w.call("acme", "/uploaded", "device", "dev-b", { key: "fleets/acme/packs/" + hex("1") })).status).toBe(403);
+    expect((await w.call("acme", "/uploaded", "device", "dev-a", { key: "fleets/other/packs/" + hex("1") })).status).toBe(400);
+    // The upload has gone on for three hours: the pieces are old to the sweep, and no snapshot names them yet.
+    for (const p of pieces) w.bucket.objects.get("fleets/acme/packs/" + p.hash)!.uploaded = T0 - 3 * HOUR;
+    const during = await sweepFleets(w.env, { now: T0 });
+    expect(during.orphans).toBe(0);
+    for (const p of pieces) expect(w.bucket.objects.has("fleets/acme/packs/" + p.hash)).toBe(true);
+    // The publisher died: after a day nothing keeps them.
+    w.clock.now = T0 + 25 * HOUR;
+    setSystemTime(new Date(T0 + 25 * HOUR));
+    const later = await sweepFleets(w.env, { now: T0 + 25 * HOUR });
+    expect(later.orphans).toBe(2);
+  });
+
+  test("a published snapshot's pieces are never swept: not by the object's record, nor when it has lost it", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const pieces = [await w.piece("acme", bytesOf(10, 1)), await w.piece("acme", bytesOf(10, 2))];
+    const delta = [await w.piece("acme", bytesOf(10, 3)), await w.piece("acme", bytesOf(10, 4))];
+    expect((await w.publishManifest("acme", manifestOf("acme", 1, pieces, { full: true, delta: { bytes: 20, chunks: delta } }))).status).toBe(200);
+    const orphan = await w.piece("acme", bytesOf(10, 5));
+    for (const o of w.bucket.objects.values()) o.uploaded = T0 - 400 * HOUR;
+    const state = w.states.get("acme")!.data;
+    // The object's own records of what it keeps are gone.
+    state.delete("recent");
+    state.delete("storing");
+    state.delete("uploads");
+    const report = await sweepFleets(w.env, { now: T0 });
+    expect(report.skipped).toEqual([]);
+    expect(report.orphans).toBe(1);
+    expect(w.bucket.deleted).toEqual(["fleets/acme/packs/" + orphan.hash]);
+    for (const p of [...pieces, ...delta]) expect(w.bucket.objects.has("fleets/acme/packs/" + p.hash)).toBe(true);
+  });
+});
