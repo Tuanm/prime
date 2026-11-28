@@ -540,8 +540,8 @@ that a viewer sealed and tagged would open and verify on every member; the gatew
 a compromised gateway a viewer is as trusted as a member: **admit as a viewer only a space you would trust as a member**.
 It also reads everything the fleet has, and keeps what it fetched after it is removed, like any member. What the members
 must do for the role to hold without the gateway: treat a `role: "viewer"` key as a reader only, never as a sender or a
-caller of tools, in the trust check of a snapshot (C9), in the signed roster, which must carry the role so that the
-gateway cannot relabel it (C12), and in the callers a device accepts for signed tool calls (B4).
+caller of tools, in the trust check of a snapshot, in the signed roster, which must carry the role so that the
+gateway cannot relabel it, and in the callers a device accepts for signed tool calls.
 
 **A space of an earlier build** (26.11.50) does not know the role: it believes it is a replica waiting for its turn and
 asks for its place as often as any replica. **Edits made in a viewer's own space are never published, and nothing tells

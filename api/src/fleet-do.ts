@@ -1312,7 +1312,9 @@ export class FleetDO implements DurableObject {
       return { out: Response.json({ error: "the owner's role is not changed here", hint: "remove the owner, and the fleet is handed to the longest-standing member that is not a viewer" }, { status: 409 }), freedLease: false };
     }
     if (member.role === asked) return { out: Response.json({ ok: true, member, unchanged: true }), freedLease: false };
-    members[deviceId] = { ...member, role: asked };
+    // A fleet that has no owner (the one it had was removed, and only viewers were left) is owned by the member a viewer is made.
+    const owns = asked === "member" && !Object.values(members).some((m) => m.role === "owner");
+    members[deviceId] = { ...member, role: owns ? "owner" : asked };
     await this.storage.put("members", members);
     let freedLease = false;
     if (asked === "viewer") {
@@ -1324,7 +1326,7 @@ export class FleetDO implements DurableObject {
       const claim = await this.storage.get<Claim>("claim");
       if (claim && claim.device === deviceId) await this.storage.delete("claim");
     }
-    await this.audit(caller, "role-changed", deviceId, { from: member.role, to: asked, freedLease });
+    await this.audit(caller, "role-changed", deviceId, { from: member.role, to: members[deviceId]!.role, freedLease, ...(owns ? { owner: true } : {}) });
     return { out: Response.json({ ok: true, member: members[deviceId] }), freedLease };
   }
 
