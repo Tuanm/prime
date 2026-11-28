@@ -504,7 +504,9 @@ function replyMessage(nonce: string, requestBody: string, responseText: string):
  */
 export function verifyReplySig(header: string, nonce: string, requestBody: string, responseText: string): Buffer | undefined {
   const parts = header.trim().split(".");
-  if (parts.length !== 3 || parts[0] !== REPLY_SIG_VERSION) return undefined;
+  // A fourth part is a certificate for the key (fleet replies, from a later build; see fleet-reply-cert.ts). It is not covered by this signature
+  // and is checked on its own by whoever reads it, so a build that does not know it still checks the signature.
+  if (parts.length < 3 || parts.length > 4 || parts[0] !== REPLY_SIG_VERSION) return undefined;
   const pub = parsePublicKey(parts[1]!);
   const sig = Buffer.from(parts[2]!, "base64url");
   if (!pub || sig.length !== 64) return undefined;
@@ -514,6 +516,12 @@ export function verifyReplySig(header: string, nonce: string, requestBody: strin
   } catch {
     return undefined;
   }
+}
+
+/** The certificate that came with a reply signature, if one did. */
+export function replyCertOf(header: string): string | undefined {
+  const parts = header.trim().split(".");
+  return parts.length === 4 && parts[0] === REPLY_SIG_VERSION ? parts[3] : undefined;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

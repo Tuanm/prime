@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { CallerAuth, type CallerAuthMode, REPLY_SIG_HEADER, parseCallerAuthMode, verifyReplySig } from "../src/caller-auth.ts";
+import { CallerAuth, type CallerAuthMode, REPLY_SIG_HEADER, parseCallerAuthMode, replyCertOf, verifyReplySig } from "../src/caller-auth.ts";
 import { CALL_SIG_HEADER, addCaller, removeCaller, loadOrCreateCallerKey, parseCallSig, signCall } from "../src/caller-key.ts";
 import { GatewayClient } from "../src/client.ts";
 import { CallSigner } from "../src/caller-key.ts";
@@ -497,6 +497,17 @@ describe("CallerAuth: what reaches the logs", () => {
 });
 
 describe("CallerAuth: the reply", () => {
+  test("a fourth part of the signature header is a certificate: the signature is checked as before, and more parts than that are not a signature", () => {
+    const t = setup("enforce");
+    const resp = JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} });
+    const header = t.auth.replySig({ nonce: NONCE, raw: BASH }, resp)!;
+    expect(verifyReplySig(`${header}.c1:certificate`, NONCE, BASH, resp)).toBeDefined();
+    expect(replyCertOf(`${header}.c1:certificate`)).toBe("c1:certificate");
+    expect(replyCertOf(header)).toBeUndefined();
+    expect(verifyReplySig(`${header}.a.b`, NONCE, BASH, resp)).toBeUndefined();
+    expect(verifyReplySig(`${header}.c1:certificate`, NONCE, BASH, resp + " ")).toBeUndefined();
+  });
+
   test("is signed over the call's nonce and the exact response, with the device's own key", () => {
     const t = setup("enforce");
     const resp = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "uid=1" }] } });
