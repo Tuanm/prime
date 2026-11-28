@@ -14,8 +14,7 @@
 // in every way; the 8 MiB one is sent only the ways that did the 1 MiB in under 20 s.
 
 import { createHash, randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const BASE = (process.argv[2] ?? "").replace(/\/+$/, "");
 if (!BASE) throw new Error("usage: echo $TOKEN | bun test/upload-probe.ts https://<gateway>");
@@ -61,7 +60,7 @@ async function viaBun(way: string, path: string, headers: Record<string, string>
   }
 }
 
-function viaCurl(way: string, path: string, headers: Record<string, string>, bytes: Uint8Array, extra: string[] = []) {
+async function viaCurl(way: string, path: string, headers: Record<string, string>, bytes: Uint8Array, extra: string[] = []) {
   const file = "/tmp/upload-probe-" + process.pid + ".bin";
   writeFileSync(file, bytes);
   // The device's code is given to curl on its standard input (a config), not on its command line, where a process list would show it.
@@ -70,10 +69,13 @@ function viaCurl(way: string, path: string, headers: Record<string, string>, byt
     .join("\n");
   const args = ["-sS", "--max-time", "100", "-X", "POST", ...extra, "-o", "/tmp/upload-probe-" + process.pid + ".out", "-w", "%{http_code} %{time_starttransfer} %{speed_upload} %{http_version}", "--data-binary", "@" + file, "-K", "-", BASE + path];
   const t0 = Date.now();
-  const r = spawnSync("curl", args, { encoding: "utf8", input: config });
+  // Not spawnSync: a curl that takes a minute must not stop the lease being renewed meanwhile.
+  const child = Bun.spawn(["curl", ...args], { stdin: new TextEncoder().encode(config), stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exit] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  const r = { status: exit, stdout, stderr };
   const ms = Date.now() - t0;
   let says = "";
-  try { says = " ms=" + JSON.stringify(JSON.parse(Bun.file("/tmp/upload-probe-" + process.pid + ".out").size ? require("node:fs").readFileSync("/tmp/upload-probe-" + process.pid + ".out", "utf8") : "{}").ms ?? null); } catch {}
+  try { says = " ms=" + JSON.stringify(JSON.parse(readFileSync("/tmp/upload-probe-" + process.pid + ".out", "utf8") || "{}").ms ?? null); } catch {}
   const [code, firstByte, speed, version] = (r.stdout || "").trim().split(" ");
   note(way, bytes.length / MIB, r.status === 0 ? code ?? "?" : "curl " + r.status, ms, "first byte after " + firstByte + " s, curl says " + Math.round(Number(speed) / 1024) + " KB/s over HTTP " + version + says + (r.status ? " " + (r.stderr || "").slice(0, 100) : ""));
   rmSync(file, { force: true });
@@ -93,7 +95,22 @@ try {
   await call("/fleets/" + FLEET + "/approve", OP, { deviceId: DEV });
   const boot = await call("/fleets/" + FLEET + "/bootstrap", dev(), { caps: ["chunks"] });
   if (boot.json.role !== "primary") throw new Error("not the primary: " + JSON.stringify(boot.json));
-  const renew = setInterval(() => void call("/fleets/" + FLEET + "/lease/renew", dev()).catch(() => {}), 12_000);
+  // The lease is renewed every third of it (15 s of 45) for as long as the probe runs, and taken again if it was lost, saying so: a refusal
+  // as "only the primary may publish" in a row below means it was not the gateway being slow but the lease being gone.
+  const started = Date.now();
+  const roleNow = await call("/fleets/" + FLEET + "/role", dev(), {}, "GET");
+  const every = Math.max(1000, Math.floor((typeof roleNow.json.leaseMs === "number" ? roleNow.json.leaseMs : 45_000) / 3));
+  const renew = setInterval(async () => {
+    try {
+      const r = await call("/fleets/" + FLEET + "/lease/renew", dev());
+      if (r.status === 200) return;
+      console.log("LEASE renewal refused after " + ((Date.now() - started) / 1000).toFixed(0) + " s: " + r.status + " " + JSON.stringify(r.json) + "; taking it again");
+      const again = await call("/fleets/" + FLEET + "/bootstrap", dev(), { caps: ["chunks"] });
+      console.log("LEASE bootstrap again: " + again.json.role);
+    } catch (error) {
+      console.log("LEASE renewal failed: " + String(error));
+    }
+  }, every);
   console.log("gateway " + BASE + ", fleet " + FLEET + ", device " + DEV + "\n");
   console.log("way".padEnd(34) + "size       status   time        rate   what the gateway says it spent (ms)");
 
