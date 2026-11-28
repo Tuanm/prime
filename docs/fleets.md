@@ -446,6 +446,9 @@ What the gateway can still do, whatever a member checks:
   those machines should not be connected to.
 - **Read the work tree through a lying roster**, not only author it (see above): a key it adds is sealed for
   by the primary.
+- **Say who the primary is**: the lease is the gateway's word, so it can tell two members that each holds the place, send a call to the
+  wrong one, or hold a call back. A call for a fleet is signed for the one member that is to run it ("Who may call the primary's tools"), so the
+  most that does is have it refused or not run; it cannot have it run on two members. What the gateway sees of the call, it sees in the clear.
 - **Stop the fleet**: not serve, not store, not move the head.
 - **Show an older head** (a rollback): a member sees a snapshot that is real and was the
   head once. It cannot be shown as newer, so a member that holds a higher sequence ignores it,
@@ -596,10 +599,16 @@ checked by the space that runs it against what the signed roster says, not again
   it and cannot write it): the signing keys of the live members that are not viewers, the keys the owner signed in with
   `prime fleets roster add-caller <fleet> --key <public-key> [--label <text>]` (a machine's own key: `--self`; taken out again with
   `remove-caller`), and whether this space is the primary, from the lease the agent holds.
-- Only the primary runs such a call. A replica refuses it ("the call did not run"), so a signed fleet call that the gateway kept
-  cannot be played to another member. A call signed before the space became the primary is refused as well (it may have run on the
-  member that was). The agent renews the file every 20 seconds while it runs, and a space stops believing "primary" 2 minutes after
-  it was written, so an agent that died does not leave a space that takes calls for ever.
+- **A call names the one member that is to run it**: it is signed for `fleet:<id>@<device>`. The client first asks which member answers (a signed
+  question that names no member, which no device runs and which calls a tool that does not exist), and the member says its own id; the call is then signed
+  for that member. A member that is sent a call for another one does not run it, and a call that names no member (the form older builds sign) is refused
+  with "update prime" (a device that predates this does not answer the question, and the call is signed as it was).
+- **Only the primary runs such a call.** A replica refuses it ("the call did not run"). A call signed before the space became the primary, or within 5
+  seconds after it (the members' clocks are taken to agree to that), is refused (it may have run on the member that was), and so is one signed more than
+  5 seconds ahead of the clock. The agent renews the file every 20 seconds while it runs, and a space stops believing "primary" 2 minutes after it was
+  written, so an agent that died does not leave a space that takes calls for ever. A roster that cannot be read is believed for an hour, then lists nobody.
+  What this does not do: a gateway that tells two members that each holds the place (the lease is the gateway's word) can still have the *question* answered
+  by either, but a call is signed for one of them, so it is run by that one and by no other.
 - A fleet whose roster the gateway keeps lists nobody: a call for the fleet is refused until the owner has signed the roster. A key
   the roster lists is a caller of the fleet only; it does not run calls for the device itself, whose callers file is the machine's own.
 - A member's signing key is listed because it is a member's. Nothing signs tool calls with it today; a key that is a member's and that

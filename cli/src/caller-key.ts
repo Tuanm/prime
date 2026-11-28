@@ -246,13 +246,26 @@ export function callTarget(kind: "device" | "fleet", id: string): string {
 }
 
 /**
+ * The name a call for a fleet is signed for: `fleet:<id>@<member>`, the one member that is to run it (the device id the member
+ * is registered as). A signature that names no member is `fleet:<id>@`, which no device runs: it is how a client asks which
+ * member it is talking to (see `FLEET_PROBE_TOOL`).
+ */
+export function fleetMemberTarget(fleet: string, member: string): string {
+  return `${callTarget("fleet", fleet)}@${member}`;
+}
+
+/** The tool a client's question "which member are you?" calls: no device has it, so a device that does not understand the question answers "unknown tool". */
+export const FLEET_PROBE_TOOL = "prime.fleet-member";
+
+/**
  * The signature target of a call. A call addresses a fleet when it goes through `?fleet=` (the member that is
  * called is `deviceId`, the fleet is `fleet`), and also when the name in the path is a fleet reached with its own
- * token (`fleetBuddy`): then the name is the fleet's.
+ * token (`fleetBuddy`): then the name is the fleet's. `member` is the member of the fleet that is to run it (`""`: the
+ * question which one it is); a call for a fleet that names none is the form older builds make.
  */
-export function signTarget(target: { deviceId: string; fleet?: string; fleetBuddy?: boolean }): string {
-  if (target.fleet) return callTarget("fleet", target.fleet);
-  if (target.fleetBuddy) return callTarget("fleet", target.deviceId);
+export function signTarget(target: { deviceId: string; fleet?: string; fleetBuddy?: boolean; member?: string }): string {
+  const fleet = target.fleet ?? (target.fleetBuddy ? target.deviceId : undefined);
+  if (fleet !== undefined) return target.member !== undefined ? fleetMemberTarget(fleet, target.member) : callTarget("fleet", fleet);
   return callTarget("device", target.deviceId);
 }
 
@@ -305,7 +318,7 @@ export class CallSigner {
   }
 
   /** The header for one call, or undefined when it should go unsigned. */
-  header(method: string, target: { deviceId: string; fleet?: string; fleetBuddy?: boolean }, body: string): string | undefined {
+  header(method: string, target: { deviceId: string; fleet?: string; fleetBuddy?: boolean; member?: string }, body: string): string | undefined {
     if (!methodNeedsSignature(method)) return undefined;
     const key = this.callerKey();
     return key ? signCall(key, signTarget(target), body) : undefined;
@@ -329,7 +342,7 @@ export function callerRefusedHint(signer: CallSigner | undefined, options: { fle
     return `This device only runs signed calls, and this machine has no usable caller key to sign with${signer.problem() ? ` (${signer.problem()})` : ""}.`;
   }
   if (options.fleet) {
-    return `This fleet does not trust this machine's caller key (${key.keyId}). Ask the fleet's owner to allow this key, on the machine that holds the owner key: prime fleets roster add-caller <fleet-id> --key ${key.publicKeyB64}\nIf it is already allowed, the signature may have been altered on the way: run the call again.`;
+    return `This fleet does not trust this machine's caller key (${key.keyId}). Ask the fleet's owner to allow this key, on the machine that holds the owner key: prime fleets roster add-caller <fleet-id> --key ${key.publicKeyB64}\nIf it is already allowed, the signature may have been altered on the way, or the gateway sent the call to a member other than the one it was made for (it does not run there): run the call again.`;
   }
   return (
     `This device does not trust this machine's caller key (${key.keyId}). Run on the device's machine: ${allowCallerCommand(key)}\n` +

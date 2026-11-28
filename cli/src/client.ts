@@ -12,7 +12,7 @@ import {
   TimeoutError,
 } from "./errors.ts";
 import { REPLY_SIG_HEADER, verifyReplySig } from "./caller-auth.ts";
-import { CALL_SIG_HEADER, type CallSigner, parseCallSig } from "./caller-key.ts";
+import { CALLER_REFUSED_CODE, CALL_SIG_HEADER, type CallSigner, FLEET_PROBE_TOOL, methodNeedsSignature, parseCallSig } from "./caller-key.ts";
 import { checkDeviceKey, deviceKeyLabel, pinnedDeviceKey } from "./device-pins.ts";
 import type { Target } from "./target.ts";
 
@@ -65,6 +65,10 @@ export interface CallTrace {
   method: string;
 }
 
+/** How long the answer "this member is the one" is used for a call, and how long "this device does not say" is remembered. */
+const FLEET_MEMBER_TTL_MS = 10_000;
+const FLEET_LEGACY_TTL_MS = 60_000;
+
 export class GatewayClient {
   readonly target: Target;
   private lastMs = 0;
@@ -74,6 +78,8 @@ export class GatewayClient {
   private readonly signer: CallSigner | undefined;
   private readonly notice: (text: string) => void;
   private readonly noticed = new Set<string>();
+  /** The member of the fleet that said it was the one answering, for a few seconds (see `fleetMember`). */
+  private member: { at: number; id: string | null } | undefined;
 
   /**
    * `signer` signs each call that needs it with this machine's caller key (see caller-key.ts), so a device
@@ -155,7 +161,38 @@ export class GatewayClient {
     return this.parseBody(response.status, payload ?? text);
   }
 
-  private headers(method: string, body: string): Record<string, string> {
+  /**
+   * A call for a fleet is signed for the one member that is to run it, so that a gateway that sends it to two members cannot have it
+   * run twice. Which member that is, is asked first: a signed call that names no member (and so is run by none) calls a tool no
+   * device has, and a device that checks signatures answers it with its own id. An older device does not answer that: it says
+   * "unknown tool", and the call is signed as it was before (it names the fleet only). The answer is kept for FLEET_MEMBER_TTL_MS.
+   */
+  private async fleetMember(method: string, signal: AbortSignal): Promise<string | undefined> {
+    if (!this.signer || !(this.target.fleet || this.target.fleetBuddy) || !methodNeedsSignature(method)) return undefined;
+    const now = Date.now();
+    if (this.member && now - this.member.at < (this.member.id === null ? FLEET_LEGACY_TTL_MS : FLEET_MEMBER_TTL_MS)) return this.member.id ?? undefined;
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/call", params: { name: FLEET_PROBE_TOOL, arguments: {} } });
+    const header = this.signer.header("tools/call", { ...this.target, member: "" }, body);
+    if (!header) return undefined;
+    let id: string | null = null;
+    try {
+      const response = await fetch(this.endpoint(), { method: "POST", headers: { ...this.headers("initialize", body), [CALL_SIG_HEADER]: header }, body, signal });
+      const parsed = JSON.parse(await response.text()) as { error?: { data?: { reason?: unknown; member?: unknown } } };
+      const data = parsed.error?.data;
+      if (data?.reason === "fleet-member" && typeof data.member === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(data.member)) id = data.member;
+    } catch {
+      // The question is not the call: whatever went wrong, the call itself says so again.
+    }
+    this.member = { at: now, id };
+    return id ?? undefined;
+  }
+
+  /** Forget which member answered: the primary moved. */
+  private forgetMember(): void {
+    this.member = undefined;
+  }
+
+  private headers(method: string, body: string, member?: string): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
@@ -166,7 +203,7 @@ export class GatewayClient {
     if (this.target.gatewayToken) headers.authorization = `Bearer ${this.target.gatewayToken}`;
     if (this.target.deviceToken) headers["x-device-token"] = this.target.deviceToken;
     // Signed over the exact string that is sent, and again on every attempt: a retry is a new call.
-    const signature = this.signer?.header(method, this.target, body);
+    const signature = this.signer?.header(method, member !== undefined ? { ...this.target, member } : this.target, body);
     if (signature) headers[CALL_SIG_HEADER] = signature;
     return headers;
   }
@@ -190,10 +227,11 @@ export class GatewayClient {
     this.lastAttempts = 0;
 
     const started = performance.now();
+    const member = await this.fleetMember(method, signal);
     for (let attempt = 1; ; attempt++) {
       this.lastAttempts = attempt;
       let response: Response;
-      const headers = this.headers(method, body);
+      const headers = this.headers(method, body, member);
       try {
         response = await fetch(this.endpoint(), { method: "POST", headers, body, signal });
       } catch (err) {
@@ -216,7 +254,13 @@ export class GatewayClient {
         continue;
       }
       this.checkReply(headers[CALL_SIG_HEADER], body, response.headers.get(REPLY_SIG_HEADER), text);
-      return this.parseBody(response.status, text);
+      try {
+        return this.parseBody(response.status, text);
+      } catch (err) {
+        // Refused: the member that was named may not be the one the fleet sends calls to any more, so the next call asks again.
+        if (member !== undefined && err instanceof McpError && err.code === CALLER_REFUSED_CODE) this.forgetMember();
+        throw err;
+      }
     }
   }
 

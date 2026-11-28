@@ -14,9 +14,10 @@ import { createHash, sign as cryptoSign, verify as cryptoVerify } from "node:cry
 import { mkdirSync, renameSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { FLEET_CALLERS_FRESH_MS, type FleetCallersFile, fleetCallersPathFor, readFleetCallers } from "./fleet-callers.ts";
+import { FLEET_CALLERS_FRESH_MS, FLEET_CALL_SKEW_MS, type FleetCallersFile, fleetCallersPathFor, readFleetCallers } from "./fleet-callers.ts";
 import {
   callTarget,
+  fleetMemberTarget,
   CALLER_REFUSED_CODE,
   type CallerEntry,
   type CallerKey,
@@ -67,6 +68,8 @@ export type CallerFailure =
   | "replay"
   | "not-primary"
   | "before-primary"
+  | "fleet-member"
+  | "fleet-unbound"
   | "tool-not-allowed";
 
 /** The frame the gateway tunnels in. `raw` and `callerSig` are absent on an unsigned call and from an older gateway. */
@@ -107,7 +110,7 @@ export type Admission =
     }
   | {
       action: "refuse";
-      response: { jsonrpc: "2.0"; id: unknown; error: { code: number; message: string; data: { reason: CallerFailure } } };
+      response: { jsonrpc: "2.0"; id: unknown; error: { code: number; message: string; data: { reason: CallerFailure; member?: string } } };
       /** Set when the refusal may be signed (see admit). */
       reply?: ReplyBinding;
     };
@@ -282,7 +285,8 @@ export class CallerAuth {
     if (failure === "unsigned") this.counts.unsigned++;
     else this.counts.invalid++;
     this.record(failure, request, this.mode === "enforce" ? "refused" : "ran", frame);
-    if (this.mode !== "enforce") return { action: "run", request, ...(bound ? { reply: bound } : {}) };
+    // The question which member this is is never run, whatever the mode: it is not a call.
+    if (this.mode !== "enforce" && failure !== "fleet-member") return { action: "run", request, ...(bound ? { reply: bound } : {}) };
     this.counts.refused++;
     const signable =
       bound !== undefined &&
@@ -297,7 +301,11 @@ export class CallerAuth {
       response: {
         jsonrpc: "2.0",
         id: requestId(request),
-        error: { code: CALLER_REFUSED_CODE, message: refusalMessage(failure), data: { reason: visibleReason(failure) } },
+        error: {
+          code: CALLER_REFUSED_CODE,
+          message: refusalMessage(failure, this.opts.deviceId),
+          data: { reason: visibleReason(failure), ...(failure === "fleet-member" ? { member: this.opts.deviceId } : {}) },
+        },
       },
       ...(signable ? { reply: bound } : {}),
     };
@@ -342,17 +350,30 @@ export class CallerAuth {
     let forFleet = false;
     if (entry && verifyCallSignature(parsed, Buffer.from(entry.pub, "base64"), callTarget("device", this.opts.deviceId), frame.raw)) {
       signer = entry;
-    } else if (fleetEntry && fleet.file && verifyCallSignature(parsed, Buffer.from(fleetEntry.pub, "base64"), callTarget("fleet", fleet.file.fleet), frame.raw)) {
-      signer = fleetEntry;
-      forFleet = true;
+    } else if (fleetEntry && fleet.file) {
+      // A call for the fleet names the one member that is to run it, so that a gateway that sent it to two cannot have it run twice.
+      const key = Buffer.from(fleetEntry.pub, "base64");
+      const id = fleet.file.fleet;
+      if (verifyCallSignature(parsed, key, fleetMemberTarget(id, this.opts.deviceId), frame.raw)) {
+        signer = fleetEntry;
+        forFleet = true;
+      } else if (verifyCallSignature(parsed, key, fleetMemberTarget(id, ""), frame.raw)) {
+        // The question which member this is (nothing signed for it can run): answered, not run.
+        return { ok: false, failure: "fleet-member" };
+      } else if (verifyCallSignature(parsed, key, callTarget("fleet", id), frame.raw)) {
+        // The form an older build makes: it names no member, so it could be run by every member that is sent it.
+        return { ok: false, failure: "fleet-unbound" };
+      }
     }
     if (!signer) return { ok: false, failure: "bad-signature" };
     if (forFleet) {
       const f = fleet.file!;
       // The agent's word that this space is the primary is good for a while after it was written, and no longer.
       if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary" };
-      // A call signed before this space became the primary may have run on the member that was.
-      if (parsed.ts <= f.primarySince) return { ok: false, failure: "before-primary" };
+      // A call made for the fleet is not signed ahead of the clock, and one signed before this space became the primary - or within the
+      // skew of the members' clocks of it - may have run on the member that was.
+      if (parsed.ts - now > FLEET_CALL_SKEW_MS) return { ok: false, failure: "stale" };
+      if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary" };
     }
     // Signed before this process started, or before a nonce that was forgotten: it may be a call that was run.
     if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay" };
@@ -516,7 +537,7 @@ export function requiresSignature(request: unknown): boolean {
   return isRecord(request) && typeof request.method === "string" && methodNeedsSignature(request.method);
 }
 
-export function refusalMessage(failure: CallerFailure): string {
+export function refusalMessage(failure: CallerFailure, member?: string): string {
   const base =
     "this device only runs calls signed by a key it trusts; run 'prime devices allow-caller' on this machine " +
     "(if this machine is already allowed, the signature did not reach the device as it was signed: send the call again)";
@@ -525,6 +546,10 @@ export function refusalMessage(failure: CallerFailure): string {
       return `${base} (the signature's time is more than 5 minutes from this device's clock: check both clocks)`;
     case "replay":
       return "this call was already received, or was signed before this device last started; send it again";
+    case "fleet-member":
+      return `this is the member ${member ?? ""} of the fleet: this was the question which member it is, and nothing ran`;
+    case "fleet-unbound":
+      return "a call for a fleet names the member that is to run it (this prime is too old to say which): update prime on this machine and send the call again; it did not run";
     case "not-primary":
       return "this space is not the fleet's primary now (or its agent has not said so lately), so it runs no call made for the fleet: the call did not run; the fleet's primary takes it, send it again";
     case "before-primary":
