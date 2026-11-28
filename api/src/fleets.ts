@@ -166,9 +166,17 @@ export class FleetCreationAllowance {
   }
 }
 
+/**
+ * What a member is. The owner runs the fleet and a member takes part in it. A viewer is sealed for like the others
+ * (it can read every snapshot) and is refused every write by the gateway: it holds no lease, takes no claim, and cannot
+ * make the fleet's tools be called. That refusal is the gateway's alone: the members do not yet treat a viewer's key as a
+ * reader's (see docs/fleets.md).
+ */
+export type MemberRole = "owner" | "member" | "viewer";
+
 export interface Member {
   deviceId: string;
-  role: "owner" | "member";
+  role: MemberRole;
   addedAt: number;
   addedBy: string;
   /**

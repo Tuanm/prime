@@ -123,7 +123,7 @@ These need Cloudflare Access, unless the row says otherwise. The gateway verifie
 | `GET /admin/api/fleets` | Access | Every fleet, its members, and who holds the lease. |
 | `POST /admin/api/fleets/{fleet}` | Access | Create a fleet. |
 | `POST /admin/api/fleets/{fleet}/invite` | Access | Mint a one-use invite code. |
-| `POST /admin/api/fleets/{fleet}/approve` | Access | Admit a waiting buddy. |
+| `POST /admin/api/fleets/{fleet}/approve` | Access | Admit a waiting buddy (`role: "viewer"` admits it to read only; see docs/fleets.md). |
 | `POST /admin/api/fleets/{fleet}/remove` | Access | Take a member out. |
 | `POST /admin/api/fleets/{fleet}/buddy` | Access | Set the fleet's own token. |
 | `POST /admin/api/fleets/{fleet}/meta` | Access | Rename a fleet, pause it, or set its lease (`leaseMs`, 30 s to 3 min, or `null`). |

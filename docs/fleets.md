@@ -513,6 +513,42 @@ the tooltip. The gateway keeps only that fingerprint, never the token.
 **Refresh token** makes a new one and shows it once, because there is no second
 chance.
 
+## A viewer
+
+A space can be admitted as a **viewer**: the operator (or the fleet's owner) presses **Admit as viewer** on the admin
+page, or sends `role: "viewer"` with the approval. A viewer is sealed for like any member, so it can read every
+snapshot and keep its own copy. **The gateway refuses it every write**:
+
+- it is **never given the lease** and takes no claim to catch up: its bootstrap is always answered `role: "replica",
+  reason: "viewer"` (with `retryAfterMs`, which a current agent honours; an earlier one asks as often as any replica);
+- a publish from it is refused (403), and a call for the fleet's **tools** that comes by it is refused (403, "a
+  viewer cannot call the fleet's tools") before the primary is asked. A refused call is not written to the audit log;
+- the primary reads it in the members' keys (marked `role: "viewer"`), so what it publishes is sealed for the viewer too;
+- it cannot admit, remove or delete, like any member that is not the owner.
+
+**What this does not make it.** "Never writes" is the gateway's word, and nothing else yet. A viewer holds the snapshot
+key, and its key is in the list every member trusts as a sender, so until the members check roles (see below) a snapshot
+that a viewer sealed and tagged would open and verify on every member; the gateway's refusals are what stop that. Against
+a compromised gateway a viewer is as trusted as a member: **admit as a viewer only a space you would trust as a member**.
+It also reads everything the fleet has, and keeps what it fetched after it is removed, like any member. What the members
+must do for the role to hold without the gateway: treat a `role: "viewer"` key as a reader only, never as a sender or a
+caller of tools, in the trust check of a snapshot (C9), in the signed roster, which must carry the role so that the
+gateway cannot relabel it (C12), and in the callers a device accepts for signed tool calls (B4).
+
+**A space of an earlier build** (26.11.50) does not know the role: it believes it is a replica waiting for its turn and
+asks for its place as often as any replica. **Edits made in a viewer's own space are never published, and nothing tells
+the person there why**, and they can be overwritten when a snapshot is applied. Say to the person who is admitted as a
+viewer that the space is read-only, until the build that shows it ships.
+
+**Roles in place.** `approve` with `role` for a device that is already a member makes it a viewer or a member again,
+keeping its place in the order the fleet is handed on in (the admin page's **Make viewer** / **Make member**); a member
+that is made a viewer gives up the lease it holds. The owner's role is not changed this way.
+
+**The owner.** The first space admitted to a fleet owns it, so it cannot be a viewer (409). If the owner is removed, the
+fleet goes to the longest-standing member that is **not** a viewer; if only viewers are left it has no owner and the
+operator runs it, until the next member admitted that is not a viewer, which owns it. **A fleet whose only live members
+are viewers has no primary**, so nothing in it is published: keep one member that can write.
+
 ## What was done to a fleet
 
 Each fleet keeps a log of what was done to it, who did it and when, in an order nobody can change afterwards. It
