@@ -122,6 +122,10 @@ export interface GatewayConfig {
    * Unset: no token runs fleets (the admin page, behind Access, and a fleet's owner device still do).
    */
   fleetOperatorToken?: string;
+  /** FLEET_OPERATOR_SSO_ONLY: the operator is whoever Cloudflare Access names; FLEET_OPERATOR_TOKEN is not accepted. */
+  fleetOperatorSsoOnly?: boolean;
+  /** FLEET_OPERATOR_EMAILS: the Access identities that may operate; none listed = any identity Access admits. */
+  fleetOperatorEmails?: string[];
   /** FLEET_OPERATOR_TOKEN is set, and to a value that is also the gateway token or the shared device token: it is not used. */
   fleetOperatorTokenRefused?: boolean;
   rateWindowMs: number;
@@ -145,6 +149,8 @@ export interface Env {
   DEVICE_TOKEN?: string;
   DEVICE_TOKENS?: string; // JSON map { deviceId: token } - per-device secrets (secret)
   ADMIN_TOKEN?: string;
+  FLEET_OPERATOR_SSO_ONLY?: string; // "1"/"true": operator actions need an Access identity, not the shared token
+  FLEET_OPERATOR_EMAILS?: string; // comma list of Access emails that may operate (empty = any Access admits)
   FLEET_OPERATOR_TOKEN?: string; // who runs fleets as the operator, apart from GATEWAY_TOKEN (see GatewayConfig)
   // Keys the verifiers the gateway keeps instead of tokens (src/token-hash.ts).
   // A secret of at least 32 characters; without it no device token is checked.
@@ -266,6 +272,8 @@ export function loadConfig(env: Env): GatewayConfig {
     // back as the operator's (the answer to a caller then says so: `fleetOperatorTokenRefused`).
     fleetOperatorToken: operatorTokenOk(env) ? env.FLEET_OPERATOR_TOKEN : undefined,
     fleetOperatorTokenRefused: !!env.FLEET_OPERATOR_TOKEN && !operatorTokenOk(env),
+    fleetOperatorSsoOnly: /^(1|true|yes|on)$/i.test((env.FLEET_OPERATOR_SSO_ONLY ?? "").trim()),
+    fleetOperatorEmails: (env.FLEET_OPERATOR_EMAILS ?? "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean),
     rateWindowMs: num(env, "RATE_LIMIT_WINDOW_MS", 60_000),
     rateMax: num(env, "RATE_LIMIT_MAX", 100),
     timeoutMs: num(env, "TIMEOUT_MS", 300_000),

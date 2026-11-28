@@ -222,6 +222,8 @@ npx wrangler deploy                        # publish the gateway
 | `DEVICE_TOKEN` | unset | One token for every buddy, used when there is no map. |
 | `ADMIN_TOKEN` | `GATEWAY_TOKEN` | Who may list the online buddies. With neither token set, that endpoint does not exist. |
 | `FLEET_OPERATOR_TOKEN` | unset | Who runs fleets as the operator from the command line: create, invite, approve, remove, delete, list. A secret of its own, and not the gateway token (every client holds that one; the same value is refused). Unset, no token runs fleets: the admin page (behind Access) and a fleet's owner device still do. |
+| `FLEET_OPERATOR_EMAILS` | unset | Comma-separated Access emails that may operate: on the admin page and as an operator command (`cf-access-token`, the assertion `cloudflared access token` prints, which names who ran what). Unset, any identity Access admits may; a service token is named by its service in the record (`access:service:<name>`), and is refused whenever emails are listed. |
+| `FLEET_OPERATOR_SSO_ONLY` | off | `1`: `FLEET_OPERATOR_TOKEN` is no longer accepted; an operator signs in with Access. |
 | `ACCESS_TEAM_DOMAIN` | unset | The Access team whose assertion the gateway verifies. |
 | `ACCESS_AUD` | unset | The Access application's tag. |
 | `ADMIN_ACCESS` | `enforce` | `enforce`, `warn` or `off` for the Access check. |

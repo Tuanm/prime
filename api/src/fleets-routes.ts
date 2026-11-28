@@ -13,6 +13,7 @@
 // authorization in the object.
 
 import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
+import { actorOf, emailAllowed, verifyOperatorToken, forwardableHeaders } from "./access";
 import { MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
 import { countFleetR2 } from "./usage";
 import { readBounded, readBoundedText } from "./body";
@@ -405,16 +406,61 @@ export interface FleetDeps {
 }
 
 /**
- * Whether the request carries the fleet operator's credential.
+ * Who the fleet operator is, when the request carries a credential for it. Every route that acts as the operator
+ * asks this one place, so that FLEET_OPERATOR_SSO_ONLY and FLEET_OPERATOR_EMAILS cannot be forgotten by one of them.
  *
- * Only FLEET_OPERATOR_TOKEN counts. The gateway token is what every machine and MCP client of the gateway
- * is given, so it is not an authority over fleets: a deployment that sets none has no token operator at
- * all (the admin page and a fleet's owner device remain).
+ * - An Access assertion as `cf-access-token` (what `cloudflared access token` prints) is the operator when the
+ *   deployment's Access application signed it (ACCESS_TEAM_DOMAIN and ACCESS_AUD, as for the admin page). Only the
+ *   header counts, not the cookie, which a browser sends unasked. It must name someone, a person's email or a
+ *   service token's name, and when FLEET_OPERATOR_EMAILS lists identities, one of them. `actor` is how the fleet's
+ *   record names them.
+ * - FLEET_OPERATOR_TOKEN is the operator without a name, unless FLEET_OPERATOR_SSO_ONLY switches it off. Only that
+ *   token counts: the gateway token is what every machine and MCP client of the gateway is given, so it is not an
+ *   authority over fleets; a deployment that sets none has no token operator at all (the admin page and a fleet's
+ *   owner device remain).
+ * - `none`: no operator credential was presented. `refused`: one was, and `response` says why; it is the answer.
  */
-function adminOnly(cfg: GatewayConfig, request: Request, url: URL): boolean {
-  if (!cfg.fleetOperatorToken) return false;
-  const t = extractToken(request, url, "auth");
-  return !!t && timingSafeEq(t, cfg.fleetOperatorToken);
+export type Operator = { kind: "access"; actor: string } | { kind: "token" } | { kind: "none" } | { kind: "refused"; response: Response };
+
+export async function operatorCredential(cfg: GatewayConfig, env: Env, request: Request, url: URL): Promise<Operator> {
+  const refuse = (status: number, error: string, hint?: string): Operator => ({
+    kind: "refused",
+    response: Response.json({ error, ...(hint ? { hint } : {}) }, { status, headers: { "cache-control": "no-store" } }),
+  });
+  if (request.headers.get("cf-access-token")?.trim()) {
+    const team = (env.ACCESS_TEAM_DOMAIN ?? "").trim();
+    const aud = (env.ACCESS_AUD ?? "").trim();
+    // The answers say no more than that the token was not accepted: why is for the gateway's log.
+    if (!team || !aud) {
+      console.warn("operator: an Access token was presented, but ACCESS_TEAM_DOMAIN / ACCESS_AUD are not set");
+      return refuse(401, "the Access token was not accepted");
+    }
+    const verdict = await verifyOperatorToken(request, { team, aud });
+    if (!verdict || !verdict.ok) {
+      console.warn("operator: Access token refused (" + (verdict?.reason ?? "none") + ")");
+      return refuse(401, "the Access token was not accepted");
+    }
+    const actor = actorOf(verdict);
+    if (!actor) {
+      console.warn("operator: Access token names no identity");
+      return refuse(403, "the Access token names no one");
+    }
+    if (!emailAllowed(cfg.fleetOperatorEmails, verdict.email)) {
+      console.warn("operator: " + actor + " is not in FLEET_OPERATOR_EMAILS");
+      return refuse(403, "this identity may not operate fleets here");
+    }
+    return { kind: "access", actor };
+  }
+  if (cfg.fleetOperatorToken) {
+    const t = extractToken(request, url, "auth");
+    if (t && timingSafeEq(t, cfg.fleetOperatorToken)) {
+      if (cfg.fleetOperatorSsoOnly) {
+        return refuse(403, "the operator token is switched off", "FLEET_OPERATOR_SSO_ONLY is set on this gateway: sign in with Cloudflare Access (cf-access-token)");
+      }
+      return { kind: "token" };
+    }
+  }
+  return { kind: "none" };
 }
 
 /**
@@ -452,7 +498,10 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     return Response.json({ error: "no such fleet action" }, { status: 404 });
   }
 
-  const admin = adminOnly(cfg, request, url);
+  const operator = await operatorCredential(cfg, env, request, url);
+  if (operator.kind === "refused") return operator.response;
+  const admin = operator.kind !== "none";
+  const actor = operator.kind === "access" ? operator.actor : undefined;
 
   // The routes that run a fleet are open to the operator and to the owner of
   // that fleet. A member it invited would have no way to admit anyone if only
@@ -525,7 +574,9 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
       return Response.json({ error: "expected a websocket upgrade" }, { status: 426 });
     }
     if (caller.admin || !caller.deviceId) return deps.unauthorized();
-    const listenHeaders = new Headers(request.headers);
+    // The member's own headers go on (the upgrade), but none that name an actor or carry a credential: the object
+    // is told who it is by the headers set below.
+    const listenHeaders = forwardableHeaders(request.headers);
     listenHeaders.set("x-prime-caller", "device");
     listenHeaders.set("x-prime-device", caller.deviceId);
     listenHeaders.set("x-prime-fleet", fleetId);
@@ -623,6 +674,9 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   // DO stores it so invites can be attributed. A device caller is itself.
   const owner = request.headers.get("x-prime-device") ?? url.searchParams.get("device") ?? "";
   headers.set("x-prime-device", caller.admin ? owner : (caller.deviceId ?? ""));
+  // Who the operator is, when an Access identity says so. Set here, from the verified assertion: a client's own
+  // x-prime-actor is not passed on, since these headers are built fresh.
+  if (actor) headers.set("x-prime-actor", actor);
   headers.set("x-prime-fleet", fleetId);
 
   const target = new URL("https://fleet" + (action ? "/" + action : "/create"));

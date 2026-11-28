@@ -126,6 +126,10 @@ ACCESS_AUD = "1416ea5492b03aeef025037c2a9df886289e1748d8f10f876922baea9adafcc8"
 # Until those are set, enforce keeps /admin closed to everyone (it refuses any
 # request without a verified Access assertion) - fail closed, never open.
 ADMIN_ACCESS = "enforce"
+# Who may operate fleets, by Access identity (comma list; empty = anyone Access admits), and whether the shared
+# FLEET_OPERATOR_TOKEN is switched off in favour of signing in with Access:
+# FLEET_OPERATOR_EMAILS = "you@example.com"
+# FLEET_OPERATOR_SSO_ONLY = "1"
 RATE_LIMIT_WINDOW_MS = "60000"
 RATE_LIMIT_MAX = "100"
 TIMEOUT_MS = "300000" # 5 min: long tool calls (record, wait_for, downloads)

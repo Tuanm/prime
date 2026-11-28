@@ -35,14 +35,14 @@ import { JOIN_HTML } from "./join-page";
 import { SECURITY_HTML } from "./security-page";
 import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
-import { handleFleetRoutes, markSeen } from "./fleets-routes";
+import { handleFleetRoutes, markSeen, operatorCredential } from "./fleets-routes";
 import { keyFingerprintLong, onlineNow, validFleetId } from "./fleets";
 import { sendUsage, takeFleetR2 } from "./usage";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
 import { forwardCallerSig } from "./call-sig";
 import { ipBlockKey } from "./config";
-import { verifyAccessJwt } from "./access";
+import { actorOf, emailAllowed, verifyAccessJwt, forwardableHeaders } from "./access";
 import { sandboxAsset } from "./sandbox-assets";
 
 export { DeviceDO } from "./device-do";
@@ -715,12 +715,15 @@ async function setFleetPaused(env: Env, fleetId: string, paused: boolean): Promi
   } catch {}
 }
 
-async function adminFleetAction(env: Env, fleetId: string, step: string, body: Record<string, unknown>): Promise<Response> {
+const INTERNAL_HEADERS = ["x-prime-actor", "x-prime-caller", "x-prime-fleet"];
+
+async function adminFleetAction(env: Env, fleetId: string, step: string, body: Record<string, unknown>, actor?: string): Promise<Response> {
   if (!env.FLEET) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
   const stub = env.FLEET.get(env.FLEET.idFromName(fleetId));
   const headers = new Headers({ "content-type": "application/json" });
   headers.set("x-prime-caller", "admin");
   headers.set("x-prime-fleet", fleetId);
+  if (actor) headers.set("x-prime-actor", actor);
   const path = step === "delete" ? "delete" : step;
   const res = await stub.fetch("https://fleet/" + path, { method: "POST", headers, body: JSON.stringify(body) });
   const answer = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -821,7 +824,7 @@ async function rotateAnonymous(
   env: Env,
   url: URL,
   deviceId: string,
-  ask: { proposed?: unknown; presented?: string; operator?: boolean; revoke_previous?: boolean },
+  ask: { proposed?: unknown; presented?: string; operator?: boolean; revoke_previous?: boolean; actor?: string },
 ): Promise<Response> {
   const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
   const made = await reg.fetch(
@@ -913,6 +916,13 @@ function redirectTo(url: URL, pathname: string): Response {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // The headers by which the Worker tells a Durable Object who is acting are the Worker's alone to set: one a
+    // client sends is dropped here, so that no route can pass it on.
+    if (INTERNAL_HEADERS.some((h) => request.headers.has(h))) {
+      const headers = new Headers(request.headers);
+      for (const h of INTERNAL_HEADERS) headers.delete(h);
+      request = new Request(request, { headers });
+    }
     const cfg = loadConfig(env);
     const url = new URL(request.url);
     // What the gateway is being asked for, for the monthly cost of it.
@@ -987,8 +997,9 @@ export default {
       if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
       const rateLimited = generalLimit(cfg, request);
       if (rateLimited) return rateLimited;
-      const t = extractToken(request, url, "auth");
-      if (!cfg.fleetOperatorToken || !t || !timingSafeEq(t, cfg.fleetOperatorToken)) {
+      const operator = await operatorCredential(cfg, env, request, url);
+      if (operator.kind === "refused") return operator.response;
+      if (operator.kind === "none") {
         return Response.json({ error: "only the operator may make a device's code again this way" }, { status: 403 });
       }
       const deviceId = decodeURIComponent(operatorRotate[1]!);
@@ -1001,7 +1012,7 @@ export default {
       } catch {
         return Response.json({ error: "invalid json" }, { status: 400 });
       }
-      return rotateAnonymous(env, url, deviceId, { proposed: parsed.proposed, operator: true, revoke_previous: parsed.revoke_previous === true });
+      return rotateAnonymous(env, url, deviceId, { proposed: parsed.proposed, operator: true, revoke_previous: parsed.revoke_previous === true, ...(operator.kind === "access" ? { actor: operator.actor } : {}) });
     }
 
     // ---- Anonymous device registration ----
@@ -1096,10 +1107,9 @@ export default {
         // The fleets that exist, for the operator: the list lives in the
         // registry, because the fleet objects cannot be enumerated.
         if (request.method !== "GET") return Response.json({ error: "fleet id required" }, { status: 400 });
-        const t = extractToken(request, url, "auth");
-        if (!cfg.fleetOperatorToken || !t || !timingSafeEq(t, cfg.fleetOperatorToken)) {
-          return Response.json({ error: "only the operator may list the fleets" }, { status: 403 });
-        }
+        const operator = await operatorCredential(cfg, env, request, url);
+        if (operator.kind === "refused") return operator.response;
+        if (operator.kind === "none") return Response.json({ error: "only the operator may list the fleets" }, { status: 403 });
         const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
         return reg.fetch("https://registry/fleets");
       }
@@ -1138,14 +1148,34 @@ export default {
     // JWT, so deleting or breaking the Access app closes the admin instead of
     // exposing it. "warn" allows with a log line (used while rolling this out),
     // "off" disables the check (local development and tests).
+    // The page's own calls carry its origin. A request that a browser says came from another site (Origin, or
+    // Sec-Fetch-Site) is refused before anything else, whatever the Access mode: the Access cookie rides along on
+    // such a request, so a page elsewhere could otherwise act as whoever is signed in. A request that carries
+    // neither header (a browser always sends one) is a script's, and is let through.
+    if (url.pathname.startsWith("/admin/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+      const origin = request.headers.get("origin");
+      const site = request.headers.get("sec-fetch-site");
+      // A form on another site can only send these three types, and sends one even with nothing in it; the page
+      // itself sends JSON, or nothing when it has no body.
+      const formType = /^(application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)\b/i.test(request.headers.get("content-type") ?? "");
+      if (formType || (origin !== null && origin !== url.origin) || (site !== null && site !== "same-origin" && site !== "none")) {
+        return Response.json({ error: "cross-site request refused" }, { status: 403, headers: { "cache-control": "no-store" } });
+      }
+    }
+    let adminActor: string | undefined; // who Access says is acting, for the fleet's record
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/api/")) {
       const mode = (env.ADMIN_ACCESS ?? "enforce").trim().toLowerCase();
       if (mode !== "off") {
         const team = (env.ACCESS_TEAM_DOMAIN ?? "").trim();
         const aud = (env.ACCESS_AUD ?? "").trim();
-        let verdict: { ok: boolean; reason?: string; email?: string };
+        let verdict: { ok: boolean; reason?: string; email?: string; commonName?: string };
         if (!team || !aud) verdict = { ok: false, reason: "ACCESS_TEAM_DOMAIN / ACCESS_AUD are not configured" };
         else verdict = await verifyAccessJwt(request, { team, aud });
+        // Only the listed identities operate, when FLEET_OPERATOR_EMAILS lists any.
+        if (verdict.ok && !emailAllowed(cfg.fleetOperatorEmails, verdict.email)) verdict = { ok: false, reason: "this identity may not operate here" };
+        // An identity with no name could not be recorded: a person's email or a service token's name is needed.
+        if (verdict.ok && !actorOf(verdict)) verdict = { ok: false, reason: "the Access token names no one" };
+        if (verdict.ok) adminActor = actorOf(verdict);
         if (!verdict.ok) {
           if (mode === "warn") {
             console.warn("admin: Access check failed (" + verdict.reason + ") - allowed because ADMIN_ACCESS=warn");
@@ -1254,7 +1284,7 @@ export default {
           // The page never holds a device's id: it is given the code and when the old one ends, and no URL.
           // `revoke_previous`: the code it had stops now (the page's checkbox).
           const asked = (await request.json().catch(() => ({}))) as { revoke_previous?: unknown };
-          const made = await rotateAnonymous(env, url, deviceId, { operator: true, revoke_previous: asked?.revoke_previous === true });
+          const made = await rotateAnonymous(env, url, deviceId, { operator: true, revoke_previous: asked?.revoke_previous === true, ...(adminActor ? { actor: adminActor } : {}) });
           if (!made.ok) return made;
           const j = (await made.json()) as { token: string; previous_valid_ms: number };
           return Response.json({ ok: true, token: j.token, previous_valid_ms: j.previous_valid_ms }, { headers: { "cache-control": "no-store" } });
@@ -1299,27 +1329,28 @@ export default {
           const headers = new Headers({ "content-type": "application/json" });
           headers.set("x-prime-caller", "admin");
           headers.set("x-prime-fleet", fleetId);
+          if (adminActor) headers.set("x-prime-actor", adminActor);
           const made = await stub.fetch("https://fleet/create", { method: "POST", headers, body: "{}" });
           const answer = (await made.json().catch(() => ({}))) as Record<string, unknown>;
           if (!made.ok) return Response.json({ error: String(answer.error ?? "could not create the fleet") }, { status: made.status });
           return Response.json(answer);
         }
         if (request.method === "DELETE" && step === "") {
-          return await adminFleetAction(env, fleetId, "delete", {});
+          return await adminFleetAction(env, fleetId, "delete", {}, adminActor);
         }
         if (request.method === "POST" && step === "invite") {
-          return await adminFleetAction(env, fleetId, "invite", {});
+          return await adminFleetAction(env, fleetId, "invite", {}, adminActor);
         }
         if (request.method === "POST" && step === "approve") {
           const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown; key?: unknown };
-          return await adminFleetAction(env, fleetId, "approve", { deviceId: String(body.deviceId ?? ""), ...(typeof body.key === "string" ? { key: body.key } : {}) });
+          return await adminFleetAction(env, fleetId, "approve", { deviceId: String(body.deviceId ?? ""), ...(typeof body.key === "string" ? { key: body.key } : {}) }, adminActor);
         }
         if (request.method === "POST" && step === "remove") {
           const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown; keyChange?: unknown };
-          return await adminFleetAction(env, fleetId, "remove", { deviceId: String(body.deviceId ?? ""), ...(body.keyChange === true ? { keyChange: true } : {}) });
+          return await adminFleetAction(env, fleetId, "remove", { deviceId: String(body.deviceId ?? ""), ...(body.keyChange === true ? { keyChange: true } : {}) }, adminActor);
         }
         if (request.method === "POST" && step === "reap") {
-          return await adminFleetAction(env, fleetId, "reap", {});
+          return await adminFleetAction(env, fleetId, "reap", {}, adminActor);
         }
         if (request.method === "POST" && step === "buddy") {
           // The token a client presents to reach the fleet as a device.
@@ -1340,7 +1371,7 @@ export default {
           const patch: Record<string, unknown> = {};
           if (typeof body.label === "string") patch.label = body.label;
           if (typeof body.disabled === "boolean") patch.disabled = body.disabled;
-          const done = await adminFleetAction(env, fleetId, "meta", patch);
+          const done = await adminFleetAction(env, fleetId, "meta", patch, adminActor);
           // The fleet object decided; the registry is told so the Worker can answer
           // for a paused fleet without waking the object.
           if (done.ok && typeof patch.disabled === "boolean") await setFleetPaused(env, fleetId, patch.disabled);
@@ -1763,7 +1794,7 @@ export default {
       // x-expected-token, in the same form (a verifier, or the shared env
       // token), so the DO's defense-in-depth check matches the registry
       // without the DO ever seeing a stored token. A client cannot set either.
-      const headers = new Headers(request.headers);
+      const headers = forwardableHeaders(request.headers, { keepDeviceCredential: true });
       headers.delete("x-ticket-nonce");
       headers.delete("x-expected-token");
       headers.delete("x-auth-token");
