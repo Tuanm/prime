@@ -319,8 +319,17 @@ OPTIONS FROM THE CONFIG
       token: "dev-secret"
       gateway: "prime.tuanm.workers.dev"
       enable-memory: true
+      caller-auth: "warn"        # off | warn | enforce, see below
+      callers: "/path/callers.json"
 
   Values from the config never appear on a command line (ps).
+
+  Signed calls: the tool calls that come through the gateway can be signed by
+  the machine that makes them ('prime devices allow-caller'). --caller-auth
+  warn (the default) runs a call that is not signed by a key in the callers file
+  and writes it to caller-auth/caller-auth.log beside the file; enforce refuses
+  it (JSON-RPC error -32001); off checks nothing. Listing tools, ping and
+  initialize never need a signature.
 
   Refuses to start while the service is running ('prime service').
 `;
