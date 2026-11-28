@@ -122,6 +122,7 @@ test("is terminated", async () => { process.kill(process.pid, "SIGTERM"); await 
     );
     expect(r.code).toBe(143);
     expect(r.out).toContain("TEST RUN SIGTERMed in");
+    expect(r.out).not.toContain("from outside");
     expect(r.out).toContain("terminated.test.ts");
     expect(r.out).toMatch(/after 2 test\(s\) had started/);
     expect(r.out).not.toContain("TEST STALLED");
@@ -129,23 +130,49 @@ test("is terminated", async () => { process.kill(process.pid, "SIGTERM"); await 
 });
 
 describe("what the tests left behind when the run is ended", () => {
-  test.skipIf(process.platform === "win32")("a process whose parent is gone and whose command line names the run's temporary directories is listed and ended", async () => {
-    const marker = join(tmpdir(), "stall-orphan-" + process.pid + "-" + Date.now());
-    cleanups.push(() => void Bun.spawnSync(["pkill", "-f", marker], { timeout: SYNC_CHILD_MS }));
+  // The fixture is a run of its own, with its own temporary root: it ends what names that root, and nothing else.
+  test.skipIf(process.platform === "win32")("a process whose parent is gone and whose command line names the run's own temporary root is listed and ended; one of another run is not touched", async () => {
+    const tag = process.pid + "-" + Date.now();
+    // Another run on the machine (here: this one, a suite of its own) with an agent of its own that has been left to init.
+    const other = join(tmpdir(), "fleet-concurrent-" + tag);
+    cleanups.push(() => void Bun.spawnSync(["pkill", "-f", other], { timeout: SYNC_CHILD_MS }));
+    Bun.spawnSync(["sh", "-c", `(sh -c 'sleep 600; : ${other}' >/dev/null 2>&1 &) ; exit 0`], { timeout: 10_000 });
     const r = await runFixture(
       "orphans.test.ts",
       // The shell that starts it leaves at once, so that init takes the process over, as it does a detached agent of a test.
-      `test("leaves one and blocks", () => {
-  Bun.spawnSync(["sh", "-c", "(sh -c 'sleep 600; : ${marker}' >/dev/null 2>&1 &) ; exit 0"], { timeout: 10_000 });
+      `import { tmpdir } from "node:os";
+import { join } from "node:path";
+test("leaves one and blocks", () => {
+  const mine = join(tmpdir(), "fleet-orphan-${tag}");
+  Bun.spawnSync(["sh", "-c", "(sh -c 'sleep 600; : " + mine + "' >/dev/null 2>&1 &) ; exit 0"], { timeout: 10_000 });
   Bun.spawnSync([process.execPath, "-e", "setTimeout(() => {}, 600000)"], { timeout: 120_000 });
 });`,
       { PRIME_TEST_STALL_MS: "1500" },
     );
+    cleanups.push(() => void Bun.spawnSync(["pkill", "-f", "fleet-orphan-" + tag], { timeout: SYNC_CHILD_MS }));
     expect(r.out).toContain("TEST STALLED");
     expect(r.out).toContain("whose parent has gone");
-    expect(r.out).toContain(marker);
+    expect(r.out).toContain("fleet-orphan-" + tag);
+    expect(r.out).not.toContain("fleet-concurrent-" + tag);
     await Bun.sleep(300);
-    expect(Bun.spawnSync(["pgrep", "-f", marker], { stdout: "pipe", timeout: SYNC_CHILD_MS }).stdout.toString().trim()).toBe("");
+    const alive = (pattern: string): string => Bun.spawnSync(["pgrep", "-f", pattern], { stdout: "pipe", timeout: SYNC_CHILD_MS }).stdout.toString().trim();
+    expect(alive("fleet-orphan-" + tag)).toBe("");
+    expect(alive(other)).not.toBe("");
+  }, 60_000);
+
+  test.skipIf(process.platform === "win32")("each run has a temporary root of its own, which is TMPDIR for what it starts", async () => {
+    const r = await runFixture(
+      "root.test.ts",
+      `import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+test("root", () => { console.log("ROOT " + tmpdir() + " " + spawnSync("sh", ["-c", "echo $TMPDIR"], { encoding: "utf8", timeout: 10_000 }).stdout.trim()); });`,
+      { PRIME_TEST_STALL_MS: "30000" },
+    );
+    const m = /ROOT (\S+) (\S+)/.exec(r.out);
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe(m![2]);
+    expect(m![1]).toMatch(/[\\/]pr-[A-Za-z0-9]+$/);
+    expect(m![1]).not.toBe(tmpdir());
   }, 60_000);
 });
 

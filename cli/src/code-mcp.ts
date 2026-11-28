@@ -22,6 +22,7 @@ import { ActivityJournal } from "./activity-journal.ts";
 import { CALL_RAW_ONLY, CallerAuth, type ReplyBinding, parseCallerAuthMode } from "./caller-auth.ts";
 import { callersPath } from "./caller-key.ts";
 import { spawn, spawnSync, file, write } from "bun";
+import { pickPowerShell, probeExits, type ProbeSpawn } from "./probe.ts";
 import { chmodSync, mkdtempSync, readdirSync, statSync, mkdirSync, rmdirSync, rmSync, realpathSync, lstatSync, constants as fsConstants } from "node:fs";
 import { opendir as fsOpenDir, open as fsOpen, rename as fsRename, unlink as fsUnlink, stat as fsStat } from "node:fs/promises";
 import { resolve, sep, basename, dirname, isAbsolute, relative, parse as parsePath } from "node:path";
@@ -86,27 +87,16 @@ function pwshCmd(command: string): string[] {
 // A probe for a program on the path answers at once; one that has not answered in this long (a shell that waits on
 // something, a slow disk) is taken to have found nothing, rather than holding the start of code-mcp for ever.
 const PROBE_MS = process.platform === "win32" ? 15_000 : 5_000;
+const probeSpawn: ProbeSpawn = (cmd, timeout) => spawnSync({ cmd, stdout: "ignore", stderr: "ignore", timeout });
 type ShellType = "bash" | "sh" | "cmd" | "powershell";
 const IS_WINDOWS = process.platform === "win32";
 
 // Detect which PowerShell binary is available, using raw spawn (don't go through
 // shellCmd → chicken-and-egg with DETECTED_SHELL).
 function detectPowerShellBinary(): string | null {
-  const probe = (bin: string) => {
-    try {
-      return spawnSync({
-        cmd: IS_WINDOWS
-          ? ["cmd.exe", "/d", "/s", "/c", `where ${bin}`]
-          : ["sh", "-c", `command -v ${bin}`],
-        stdout: "ignore",
-        stderr: "ignore",
-        timeout: PROBE_MS,
-      }).exitCode === 0;
-    } catch { return false; }
-  };
-  if (probe("pwsh")) return "pwsh";
-  if (probe("powershell")) return "powershell";
-  return null;
+  const probe = (bin: string) =>
+    probeExits(IS_WINDOWS ? ["cmd.exe", "/d", "/s", "/c", `where ${bin}`] : ["sh", "-c", `command -v ${bin}`], bin, PROBE_MS, probeSpawn);
+  return pickPowerShell(probe, IS_WINDOWS);
 }
 const POWERSHELL_BIN = detectPowerShellBinary();
 
@@ -119,7 +109,7 @@ function detectShell(): ShellType {
     return "cmd";
   }
   // Prefer bash if present (matches Python/Java); fall back to $SHELL hint then sh.
-  if (spawnSync({ cmd: ["sh", "-c", "command -v bash"], stdout: "ignore", stderr: "ignore", timeout: PROBE_MS }).exitCode === 0) return "bash";
+  if (probeExits(["sh", "-c", "command -v bash"], "bash", PROBE_MS, probeSpawn)) return "bash";
   const shell = process.env.SHELL;
   if (shell && /\/(bash|zsh|fish|ksh)$/.test(shell)) return shell.endsWith("bash") ? "bash" : "sh";
   return "sh";
@@ -136,7 +126,7 @@ const shellCmd = DETECTED_SHELL === "bash" ? bashCmd
 function hasOnPath(bin: string): boolean {
   const probe = IS_WINDOWS ? `where ${bin}` : `command -v ${bin}`;
   // PowerShell's `where` is a Where-Object alias, not the binary locator.
-  return spawnSync({ cmd: IS_WINDOWS ? cmdCmd(probe) : shellCmd(probe), stdout: "ignore", stderr: "ignore", timeout: PROBE_MS }).exitCode === 0;
+  return probeExits(IS_WINDOWS ? cmdCmd(probe) : shellCmd(probe), bin, PROBE_MS, probeSpawn);
 }
 const hasRg = hasOnPath("rg");
 const hasFindstr = hasOnPath("findstr");
@@ -549,8 +539,9 @@ async function killProcessTree(pid: number, stillRunning: () => boolean = () => 
   // Walk descendants depth-first so children die before parents (cleaner).
   let children: number[] = [];
   try {
-    const out = spawnSync({ cmd: ["pgrep", "-P", String(pid)], stdout: "pipe", stderr: "ignore", timeout: PROBE_MS })
-      .stdout.toString().trim();
+    const listed = spawnSync({ cmd: ["pgrep", "-P", String(pid)], stdout: "pipe", stderr: "ignore", timeout: PROBE_MS });
+    if (listed.exitedDueToTimeout) console.error(`[code-mcp] listing the children of ${pid} took longer than ${PROBE_MS / 1000} s and was given up: they are not ended with it`);
+    const out = listed.stdout.toString().trim();
     if (out) children = out.split("\n").map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
   } catch {}
   let complete = true;

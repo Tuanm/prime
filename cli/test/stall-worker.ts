@@ -4,11 +4,10 @@
 // counts, and this thread notes when the count last changed.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, writeSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { parentPort, workerData } from "node:worker_threads";
 
-type Start = { beat: SharedArrayBuffer; stallMs: number; pid: number };
-const { beat, stallMs, pid } = workerData as Start;
+type Start = { beat: SharedArrayBuffer; stallMs: number; pid: number; runRoot: string };
+const { beat, stallMs, pid, runRoot } = workerData as Start;
 const counter = new Int32Array(beat);
 let file = "(no test file has started)";
 parentPort?.on("message", (m: { file: string }) => {
@@ -67,19 +66,20 @@ function windowsDescendants(root: number): Child[] {
 
 /**
  * Processes of the tests whose parent is gone (a detached agent, a child of a shell that left): not below this process any
- * more, but their command lines name the temporary directories the tests made. Found by name in the places the tests
- * make them in, among the processes that init has taken over, so another run's live processes are never among them.
+ * more, but their command lines name a directory of this run's own temporary root (`runRoot`, which the run made and made
+ * its TMPDIR; see stall-guard.ts). Only that path counts, so a process of another run on the machine is never among them,
+ * and neither is one that merely lives in the system's temporary directory.
  */
 function leftBehind(): Child[] {
   if (process.platform === "win32") return [];
-  const places = new Set<string>([tmpdir()]);
+  const places = new Set<string>([runRoot]);
   try {
-    places.add(realpathSync(tmpdir()));
+    places.add(realpathSync(runRoot));
   } catch {
     // Not a path that exists.
   }
   const escape = (p: string): string => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = "(" + [...places].map(escape).join("|") + ")/(fleet|prime|stall|handover|dir-lock|atomic|svc)-";
+  const pattern = "(" + [...places].map(escape).join("|") + ")/";
   const listed = spawnSync("pgrep", [process.platform === "darwin" ? "-fl" : "-a", "-P", "1", "-f", pattern], { encoding: "utf8", timeout: 5000 });
   const found: Child[] = [];
   for (const line of String(listed.stdout ?? "").split("\n")) {
@@ -147,7 +147,7 @@ function giveUp(blockedMs: number): never {
   for (const c of children) lines.push(`    ${c.pid}  ${c.command}`);
   const left = leftBehind();
   if (left.length > 0) {
-    lines.push("  Processes of tests whose parent has gone, named by the temporary directories of the run (ended too):");
+    lines.push("  Processes of tests whose parent has gone, named by the run's own temporary directory (ended too):");
     for (const c of left) lines.push(`    ${c.pid}  ${c.command}`);
   }
   lines.push("  The run is ended here (exit 137 on Unix) so that it does not wait for the job's limit.", "");
