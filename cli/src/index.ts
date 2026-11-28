@@ -58,6 +58,7 @@ import {
   fleetsRoster,
   fleetsLog,
   fleetsSecrets,
+  fleetsSnapshots,
   fleetsTrust,
 } from "./fleets.ts";
 import { refreshCommandAfterUpdate, removeStaleWindowsBinary, renderUpdate, runUpdate } from "./update.ts";
@@ -438,6 +439,8 @@ async function main(argv: string[]): Promise<void> {
           return fleetsTrust(ctx);
         case "roster":
           return fleetsRoster(ctx);
+        case "snapshots":
+          return fleetsSnapshots(ctx);
         case "secrets":
           return fleetsSecrets(ctx);
         case "reap":
@@ -447,7 +450,7 @@ async function main(argv: string[]): Promise<void> {
         case "rotate-key":
           return fleetsRotateKey(ctx);
         default:
-          throw new UsageError(`unknown fleets command "${sub}"`, "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|rotate-key|set|roster|log|secrets|status> [args]");
+          throw new UsageError(`unknown fleets command "${sub}"`, "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|rotate-key|set|roster|log|secrets|snapshots|status> [args]");
       }
     case "vaults":
       return vaultsCommand(ctx);

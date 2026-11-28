@@ -24,10 +24,11 @@ import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { loadOrCreateKeyPair, loadOrCreateSignKey, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, loadOrCreateSignKey, manifestIdOf, mapLimit, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
-import { keyFingerprintOf } from "./fleet-crypto.ts";
-import { FleetTrust } from "./fleet-trust.ts";
+import { keyFingerprintOf, keyIdOf as sealingKeyIdOf, openSnapshotMeta } from "./fleet-crypto.ts";
+import { actorFrom, type SnapshotActor } from "./fleet-actor.ts";
+import { FleetTrust, metaBindingOf } from "./fleet-trust.ts";
 import {
   RosterError,
   checkSigned,
@@ -39,6 +40,7 @@ import {
   normalizeFingerprint,
   liveMembers,
   makeEntry,
+  mayPublishAt,
   ownerFingerprint,
   parseInviteCode,
   readOwnerKey,
@@ -50,7 +52,7 @@ import {
   type VerifiedRoster,
 } from "./fleet-roster.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
-import { capsBody, fetchMemberKeys, fetchRole, plainText, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchIndex, fetchManifest, fetchMemberKeys, fetchRole, fetchRoster, plainText, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { keyIdOf, loadOrCreateCallerKey, parsePublicKey } from "./caller-key.ts";
 import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
@@ -2059,4 +2061,78 @@ export async function fleetsSecrets(ctx: Ctx): Promise<void> {
   }
   ctx.out(bold(fleetId) + dim("  secret gate: " + secretGateMode() + " (PRIME_FLEET_SECRET_GATE=off|warn|exclude)"));
   ctx.out(allow.length === 0 ? dim("nothing is allowed: files that look like secrets are left out of every snapshot") : "allowed to be published:\n" + allow.map((g) => "  " + g).join("\n"));
+}
+
+// ---- who made each snapshot (see fleet-actor.ts) ------------------------------------------------------------------
+
+/**
+ * `prime fleets snapshots <fleet-id> --space <name>`: the snapshots the fleet still holds, and for each who made it and what ran
+ * for it, as the publisher said in the sealed metadata. It is read here, with this member's own key, from the manifests alone:
+ * the gateway shows none of it, and no pack is fetched. It is what the publisher said, not proof: a member that is not honest
+ * can write what it likes there.
+ */
+export async function fleetsSnapshots(ctx: Ctx): Promise<void> {
+  const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
+  const spaceName = spaceArg(ctx);
+  if (!spaceName) throw new UsageError("missing --space", "The snapshots are opened with the key of one of this machine's spaces in the fleet.");
+  const space = ctx.config.spaces[spaceName];
+  if (!space || space.fleet !== fleetId) throw new UsageError("the space \"" + spaceName + "\" is not in the fleet " + fleetId, "Run 'prime spaces list' to see the spaces.");
+  if (!space.gateway || !space.gateway_device || !space.remote_token) throw new CliError("the space " + spaceName + " has no gateway credentials");
+  const creds: FleetCredentials = { gateway: space.gateway, deviceId: space.gateway_device, deviceToken: space.remote_token, timeoutMs: num(ctx.parsed, "timeout") ?? 120_000 };
+  const keyFile = fleetKeyFile(ctx.configPath, fleetId, spaceName);
+  if (!existsSync(keyFile)) throw new CliError("this space has no key in the fleet yet");
+  const mine = [loadOrCreateKeyPair(keyFile), previousKeyPair(keyFile)].filter((k): k is NonNullable<typeof k> => k !== undefined);
+  const role = await fetchRole(creds, fleetId).catch(() => undefined);
+  const entries = (await fetchIndex(creds, fleetId, 0)) ?? [];
+  const limit = num(ctx.parsed, "limit") ?? 20;
+  const rows: Array<{ seq: number; at: number; by: string; actor?: SnapshotActor; opened: boolean; fromMember: boolean }> = [];
+  // Who the fleet's roster says its members' keys are, now and as of those that left: a snapshot is shown as its publisher's only when
+  // its sender is one of them at that sequence. (Read here without noting anything in the trust file: listing is not taking in.)
+  // With a signed roster that is the chain, verified here against the owner key this member pinned: the gateway's list is not asked. A refused chain (a rollback, a fork) is said, and nothing is shown as a member's.
+  let chain: VerifiedRoster | null | undefined;
+  let chainProblem: string | undefined;
+  try {
+    chain = await FleetTrust.beside(keyFile).verifiedRoster(creds, fleetId);
+  } catch (err) {
+    chain = undefined;
+    chainProblem = err instanceof Error ? err.message : String(err);
+  }
+  const roster = chain === null && chainProblem === undefined ? await fetchRoster(creds, fleetId).catch(() => undefined) : undefined;
+  const listed = await mapLimit(entries.slice(-limit), 6, async (e) => fetchManifest(creds, fleetId, manifestIdOf(e.manifestKey)).catch(() => undefined));
+  for (const m of listed) {
+    if (!m) continue;
+    const left = roster?.left.find((l) => l.pubkey === m.senderPublicKey);
+    const fromMember = chain
+      ? mayPublishAt(chain, m.senderPublicKey, m.seq)
+      : roster !== undefined && (roster.keys.includes(m.senderPublicKey) || (left !== undefined && left.until >= m.seq));
+    let actor: SnapshotActor | undefined;
+    let opened = false;
+    if (typeof m.meta === "string") {
+      for (const k of mine) {
+        const meta = openSnapshotMeta(m.wrapped, m.senderPublicKey, creds.deviceId, k.privateKey, role?.incarnation ?? m.incarnation, metaBindingOf(m, m.packHash, m.delta?.packHash ?? null), m.meta);
+        if (meta) {
+          opened = true;
+          // What a key that is not a member's says of itself is not shown as anyone's.
+          if (fromMember) actor = actorFrom(meta.actor);
+          break;
+        }
+      }
+    }
+    rows.push({ seq: m.seq, at: m.createdAt, by: sealingKeyIdOf(m.senderPublicKey), ...(actor ? { actor } : {}), opened, fromMember });
+  }
+  if (ctx.json) {
+    printJson({ fleet: fleetId, snapshots: rows });
+    return;
+  }
+  const tools = (a?: SnapshotActor): string =>
+    a?.tools ? a.tools.slice(0, 6).map((t) => t.tool + "×" + t.n + (t.caller === "local" ? "" : " (" + t.caller + ")")).join(", ") + (a.tools.length > 6 ? ", ..." : "") + (a.gap ? " (some calls missing)" : "") : a?.gap ? "(some calls missing)" : "";
+  ctx.out(
+    table(
+      ["SEQ", "TIME", "SIGNED BY KEY", "SOFTWARE", "TOOLS RUN"],
+      rows.map((r) => [String(r.seq), new Date(r.at).toISOString(), r.fromMember ? r.by : r.by + "  (not a member's key: unverified)", r.actor?.agent ?? (r.opened ? "-" : "(not readable here)"), tools(r.actor)]),
+    ),
+  );
+  ctx.out(dim("what the publisher said of itself in the snapshot; nothing proves it. A key the roster does not name as a member's is marked, and what it says is not shown"));
+  if (chainProblem) ctx.out(yellow("the signed roster was refused (" + chainProblem + "), so no key was checked as a member's"));
+  else if (!chain && !roster) ctx.out(yellow("the roster could not be read, so no key was checked as a member's"));
 }
