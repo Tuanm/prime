@@ -1301,13 +1301,20 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
   const role = request.role === "viewer" ? "viewer" : "member";
   const offered = deviceId + " offers the key " + fp + " and the signing key " + spubFp + ", as " + role;
   // The roster is signed with the owner key, so what goes into it is what the operator compared, not what the gateway lists.
-  if (key === undefined) {
+  // Both keys go into the signed roster, so both are what the operator compared: a signing key the gateway chose would be the member's
+  // identity for everything that member signs from then on.
+  const signingKey = str(ctx.parsed, "signing-key");
+  if (key === undefined || signingKey === undefined) {
     throw new CliError(
       "this roster is signed: " + offered + ", and the gateway is the one saying so",
-      "Compare that key with what 'prime fleets members " + fleetId + "' (or 'prime fleets status') prints on that machine itself, and then: prime fleets approve " + fleetId + " --member " + deviceId + " --key " + fp.split(".")[0] + (live ? " --rotate" : ""),
+      "Compare both with what 'prime fleets members " + fleetId + "' (or 'prime fleets status') prints on that machine itself, in full, and then: prime fleets approve " + fleetId + " --member " + deviceId + " --key <key> --signing-key <signing key>" + (live ? " --rotate" : ""),
     );
   }
-  if (key !== fp && key !== fp.split(".")[0]) throw new CliError("the key of the request is " + fp + ", not " + key + ": it is not the one you compared (or it was replaced since)");
+  if (key !== fp) throw new CliError("the key of the request is " + fp + ", not " + key + ": it is not the one you compared (or it was replaced since)");
+  const plain = (f: string): string => f.replace(/-/g, "").toUpperCase();
+  if (plain(signingKey) !== plain(spubFp)) {
+    throw new CliError("the signing key of the request is " + spubFp + ", not " + signingKey + ": it is not the one you compared (or it was replaced since)", "Nothing was signed.");
+  }
   if (live && !bool(ctx.parsed, "rotate")) {
     throw new CliError(deviceId + " is a member already, and this request is for another key (" + fp + "): that is a key change, and takes --rotate", "Only if that machine really made a new key; the current key is " + (live.xpub ? keyFingerprintOf(live.xpub) : "unknown") + ".");
   }

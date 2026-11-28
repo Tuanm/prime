@@ -513,7 +513,7 @@ prime fleets roster init acme                 # shows the members, their keys in
 prime fleets roster init acme --yes --expect <digest>   # makes the owner key, signs the genesis and an add for each member shown
 prime fleets invite acme                      # prints the code, and the code with the owner key's fingerprint after "~"
 prime fleets join acme --code p1_...~ABCDE-...   # the member pins that fingerprint; the gateway is sent the code alone
-prime fleets approve acme --member <id> --key <fp>   # in a signed fleet: an `add` entry for the key you compared (--rotate: a member's new key)
+prime fleets approve acme --member <id> --key <fp> --signing-key <fp>   # in a signed fleet: an `add` entry for the two keys you compared (--rotate: a member's new key)
 prime fleets remove acme --member <id> [--witness <url>]   # fences the member, checks the sequence it names, signs a `remove`, tells the witness
 prime fleets roster witness acme --witness <url>   # tell the witness of every removal in the chain (again, if it was down)
 prime fleets roster show acme --space work    # checks the chain; says whether the owner key is the one this member pinned
@@ -527,7 +527,7 @@ there to defeat.
   (`--expect`), and refuses if the gateway lists other keys by then. Compare each key with what that member's own machine prints
   (`prime fleets members`), not through the gateway. The members are put in the roster from the start (snapshot 0): they were members before
   the chain, and what they published then stays theirs.
-- `approve` in a signed fleet needs `--key <fingerprint>` of the key you compared; without it nothing is signed and the key the gateway offers is
+- `approve` in a signed fleet needs `--key <fingerprint>` and `--signing-key <fingerprint>`, both in full as the member's own machine prints them (a prefix is refused: the signing key is that member's identity for everything it signs, so a gateway that slipped in its own would hold it); without it nothing is signed and the key the gateway offers is
   shown. A device that is a member already and asks for another key is a key change: it needs `--rotate` as well, so a plain approve never becomes one.
 - `remove` asks the gateway to fence the member (it takes nothing more from it) and signs the sequence it answers. That sequence is the last the
   removed key is a member for; it is checked against the head read before the fence and after it, and a sequence the head never had is refused

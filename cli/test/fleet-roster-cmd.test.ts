@@ -193,7 +193,7 @@ describe("the commands that sign a fleet's roster", () => {
     const fresh = member("dev-5");
     gw.pending = [{ ...fresh }];
     out.length = 0;
-    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(fresh.pubkey) }));
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }));
     const v = verifyChain(gw.entries, { fleet: "acme" });
     expect(v.tenures.find((t) => t.device === "dev-5")?.spub).toBe(fresh.spub);
     expect(said()).toContain("admitted dev-5");
@@ -212,15 +212,30 @@ describe("the commands that sign a fleet's roster", () => {
     const live = member("dev-5"); // a member already, offered under a new key
     gw.pending = [live];
     const before = gw.entries.length;
-    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: "AAAAAAAAAAAA" }))).rejects.toThrow(/not the one you compared/);
-    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(live.pubkey) }))).rejects.toThrow(/--rotate/);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: "AAAAAAAAAAAA", "signing-key": ownerFingerprint(live.spub) }))).rejects.toThrow(/not the one you compared/);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(live.pubkey), "signing-key": ownerFingerprint(live.spub) }))).rejects.toThrow(/--rotate/);
     expect(gw.entries.length).toBe(before);
-    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(live.pubkey), rotate: true }));
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-5", key: keyFingerprintOf(live.pubkey), "signing-key": ownerFingerprint(live.spub), rotate: true }));
     const v = verifyChain(gw.entries, { fleet: "acme" });
     expect(v.tenures.find((t) => t.device === "dev-5" && t.until === null)?.xpub).toBe(live.pubkey);
     const newcomer = member("dev-11");
     gw.pending = [newcomer];
-    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-11", key: keyFingerprintOf(newcomer.pubkey), rotate: true }))).rejects.toThrow(/not a member/);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-11", key: keyFingerprintOf(newcomer.pubkey), "signing-key": ownerFingerprint(newcomer.spub), rotate: true }))).rejects.toThrow(/not a member/);
+  });
+
+  test("approve signs the signing key the operator compared, and a signing key the gateway swapped in is refused with nothing signed", async () => {
+    const joining = member("dev-33"); // what dev-33's own machine prints
+    const gwOwn = generateOwnerKey(); // the gateway's own Ed25519 key, offered with dev-33's X25519 key
+    gw.pending = [{ deviceId: "dev-33", pubkey: joining.pubkey, spub: gwOwn.publicKey, role: "member" }];
+    const before = gw.entries.length;
+    const key = keyFingerprintOf(joining.pubkey);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-33", key }))).rejects.toThrow(/signing key/);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-33", key, "signing-key": ownerFingerprint(joining.spub) }))).rejects.toThrow(/signing key of the request is/);
+    // a prefix of either is not what was compared
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-33", key: key.split(".")[0], "signing-key": ownerFingerprint(gwOwn.publicKey) }))).rejects.toThrow(/not the one you compared/);
+    expect(gw.entries.length).toBe(before);
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-33", key, "signing-key": ownerFingerprint(gwOwn.publicKey).toLowerCase().replace(/-/g, "") }));
+    expect(verifyChain(gw.entries, { fleet: "acme" }).tenures.find((t) => t.device === "dev-33")?.spub).toBe(gwOwn.publicKey);
   });
 
   test("approve refuses a request that offers no signing key", async () => {
