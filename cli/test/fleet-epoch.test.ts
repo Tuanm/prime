@@ -370,7 +370,7 @@ describe("epoch keys", () => {
       expect(w.gateway.epochKeys.get("replica-device")?.n).toBe(readEpochs(w.replica.keyFile)[0]!.n);
     });
 
-    test("rotating the member's key pair makes a new signing key and a new epoch key, and lets go of the old epoch keys after the grace", async () => {
+    test("rotating the member's key pair makes a new signing key and a new epoch key, and keeps the old epoch keys until a snapshot wrapped to the new one is taken in", async () => {
       const w = await world();
       await tickEpoch(credsFor("replica-device"), "x", w.replica.keyFile, loadOrCreateSignKey(w.replica.keyFile));
       const before = readEpochs(w.replica.keyFile);
@@ -383,10 +383,30 @@ describe("epoch keys", () => {
       expect(loadOrCreateSignKey(w.replica.keyFile).publicKey).not.toBe(signBefore);
       const after = readEpochs(w.replica.keyFile);
       expect(after.map((e) => e.n)).toEqual([1, 2]);
-      expect(after[0]!.supersededAt).toBeDefined();
+      expect(after[0]!.supersededAt).toBeUndefined();
       expect(after[1]!.posted).toBeUndefined();
+      // Not let go of by time while nothing wrapped to the new key has been taken in.
+      expect(pruneEpochs(w.replica.keyFile, Date.now() + EPOCH_GRACE_MS + 1000)).toBe(0);
+      noteEpochTakenIn(w.replica.keyFile, 2, Date.now());
       expect(pruneEpochs(w.replica.keyFile, Date.now() + EPOCH_GRACE_MS + 1000)).toBe(1);
       expect(readEpochs(w.replica.keyFile).map((e) => e.n)).toEqual([2]);
+    });
+
+    test("while the fleet has not taken the rotated key (it waits for approval), the member still reads what is wrapped to its old epoch key, however long it waits", async () => {
+      const w = await world();
+      await w.next("one\n");
+      const at = await w.pullReplica();
+      await w.next("two\n");
+      expect((await w.pullReplica()).applied).toBe(true);
+      void at;
+      rotateKeyPair(w.replica.keyFile);
+      // Half an hour and more on, the agent's tick prunes.
+      pruneEpochs(w.replica.keyFile, Date.now() + 31 * 60_000);
+      expect(readEpochs(w.replica.keyFile).map((e) => e.n)).toEqual([1, 2]);
+      // The primary still sees the replica's old key and epoch key 1 on /keys: it wraps to those.
+      await w.next("three\n");
+      expect((await w.pullReplica()).applied).toBe(true);
+      expect(readFileSync(join(w.replica.work, "file.txt"), "utf8")).toBe("three\n");
     });
 
     test("after a rotation an epoch key signed by a copy of the old key file is not wrapped to", () => {

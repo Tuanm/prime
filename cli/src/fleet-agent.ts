@@ -97,10 +97,11 @@ export function rotateKeyPair(keyFile: string): MemberKeyPair {
     // that kept it could go on reading what is published after the rotation. The fleet is told the new one with the new key (the operator
     // of a signed roster compares both), and drops the epoch key it held.
     const { publicKey, privateKeyPem } = generateOwnerKey();
-    // The epoch keys of the old pair are let go of after the usual grace (a snapshot already published may still be wrapped to one), and the next key
-    // is made now: the fleet holds none of this member's until it is posted.
+    // The epoch keys held so far are kept: the fleet goes on wrapping to them until it has taken the new key (a signed roster waits for the operator),
+    // and what is wrapped to them is opened with them. They are let go of by the usual rule, once a snapshot wrapped to the next epoch key is taken in.
+    // The next key is made now, and posted once the fleet holds the signing key it is signed with.
     const now = Date.now();
-    const old = (current.epochs ?? []).map((e) => (e.supersededAt === undefined ? { ...e, supersededAt: now } : e));
+    const old = current.epochs ?? [];
     const epochs = [...old, ...(epochSettings().enabled ? [generateEpochKey(Math.max(0, ...old.map((e) => e.n)) + 1, now)] : [])];
     const next: MemberKeyPair = { ...pair, previous, sign: { publicKey, privateKey: privateKeyPem }, ...(epochs.length > 0 ? { epochs } : {}) };
     writeFileAtomic(keyFile, JSON.stringify(next, null, 2), 0o600);

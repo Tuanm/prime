@@ -525,7 +525,7 @@ what its epochs open.
 - The key file gains `epochs`. **`prime fleets rotate-key` makes a new signing key as well as a new key pair** (the epoch keys are signed
   with it, so a copy of the old key file that kept it could go on signing keys the primary wraps to): the operator of a signed roster
   compares both (`approve --key ... --signing-key ...`), the fleet drops the epoch key it held, a new one is made and posted, and the old
-  ones are let go of after the usual half hour. A copy of the old key file together with the device's credential is still a member until
+  ones are kept until a snapshot wrapped to the new one has been taken in (the member goes on reading what the fleet wraps to them while the new key waits for approval). A copy of the old key file together with the device's credential is still a member until
   the member is removed: after a leak, remove the member and admit it again.
 - A key file restored from before the epoch keys were made, or a member that kept its key file and lost its store, opens none of the
   snapshots wrapped to an epoch key it no longer has (it says so, and takes the next whole tree, at most 57 snapshots on).
