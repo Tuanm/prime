@@ -1892,6 +1892,26 @@ describe("a gateway that keeps answering 503 for the head's manifest", () => {
     }
   }, 60_000);
 
+  test("a member that loses the lease ends the count of what was left", async () => {
+    const w = await world();
+    try {
+      const s = await primaryAtOne(w);
+      w.gateway.manifestStatus = 503;
+      edit(s, 1);
+      await expect(s.round()).rejects.toThrow(/left for the next round/);
+      expect(s.loop.postponed?.count).toBe(1);
+      // Another member holds the lease from now on: what was being waited for is nobody's business of this one's.
+      w.gateway.manifestStatus = undefined;
+      w.gateway.primary = "someone-else";
+      s.loop.lastBootstrap = 0;
+      await s.round().catch(() => undefined);
+      expect(s.loop.primary).toBe(false);
+      expect(s.loop.postponed).toBeUndefined();
+    } finally {
+      finish(w);
+    }
+  }, 60_000);
+
   test("is waited for no longer than two minutes either", async () => {
     const w = await world();
     try {
