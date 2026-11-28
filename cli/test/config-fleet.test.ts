@@ -7,6 +7,25 @@ import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
 
+describe("what `prime update` needs of a space survives a save", () => {
+  test("the entrypoint a container was made with, and what the person allowed, are read back", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prime-config-"));
+    const path = join(dir, "config.yaml");
+    try {
+      const config: Config = {
+        defaults: {},
+        devices: {},
+        spaces: { work: { id: "space-1", runtime: "docker", image: "img", mode: "ephemeral", container: "c", token: "t", fleet: "acme", entrypoint: 2, allow_rootful: true, allow_no_limits: true } },
+        codeMcp: {},
+      };
+      saveConfig(path, config);
+      expect(loadConfig(path).spaces.work).toMatchObject({ entrypoint: 2, allow_rootful: true, allow_no_limits: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the fleet fields of a space survive a save", () => {
   test("a space in a fleet keeps its fleet, its role and its work directory", () => {
     const dir = mkdtempSync(join(tmpdir(), "prime-config-"));

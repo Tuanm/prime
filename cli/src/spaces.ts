@@ -1089,6 +1089,9 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   if (persistent && bool(ctx.parsed, "ephemeral")) throw new UsageError("--persistent and --ephemeral contradict each other");
   const offline = bool(ctx.parsed, "offline");
   const fleet = str(ctx.parsed, "fleet");
+  if (fleet && persistent) {
+    throw new UsageError("a space in a fleet is not persistent", "Its work tree is a directory of this machine, and the fleet is what keeps it; drop --persistent.");
+  }
   // A space in a fleet already has an identity on the gateway, and the fleet
   // is what clients reach it through. --expose would make a second, separate
   // anonymous device, so it is dropped rather than honoured.
@@ -1155,6 +1158,8 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
     cpus,
     memory,
     ...(offline ? { offline: true } : {}),
+    ...(bool(ctx.parsed, "allow-rootful") ? { allow_rootful: true } : {}),
+    ...(bool(ctx.parsed, "allow-no-limits") ? { allow_no_limits: true } : {}),
     ...(fleet ? { fleet } : {}),
     ...(fleetWork ? { work_dir: fleetWork } : {}),
     ...(vaultCompanies.length > 0 ? { vaults: vaultCompanies } : {}),
@@ -1273,6 +1278,7 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   }
   const started = Date.now();
   const run = runContainer(runtime, space, image, secretDir, bool(ctx.parsed, "allow-no-limits"), (text) => ctx.note(text));
+  if (run.code === 0) space.entrypoint = ENTRYPOINT_VERSION;
   if (run.code === 0 && pendingBroker) {
     try {
       await activateBroker(ctx, pendingBroker);
@@ -1394,7 +1400,7 @@ export async function refreshSpaceImage(
 ): Promise<{ changed: boolean; from?: string }> {
   const space = requireSpace(ctx.config, name);
   if (!spaceNeedsRefresh(space, image)) return { changed: false, from: space.image };
-  const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
+  const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful") || space.allow_rootful === true);
   const from = space.image;
   try {
     await ensureImage(runtime, image, (text) => ctx.note(text));
@@ -1473,8 +1479,11 @@ export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promis
 /** Start the named space, whatever the command that asked for it. */
 async function startSpace(ctx: Ctx, name: string, options: { recreate?: boolean } = {}): Promise<void> {
   const space = requireSpace(ctx.config, name);
-  const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
-  const allowNoLimits = bool(ctx.parsed, "allow-no-limits");
+  // What the person allowed when they made or started the space is allowed again when `prime update` moves it (nobody is there to say so).
+  if (bool(ctx.parsed, "allow-rootful")) space.allow_rootful = true;
+  if (bool(ctx.parsed, "allow-no-limits")) space.allow_no_limits = true;
+  const runtime = await runtimeFor(space.runtime, space.allow_rootful === true);
+  const allowNoLimits = space.allow_no_limits === true;
   await ensureImage(runtime, space.image, (text) => ctx.note(text));
   const existing = containerInfo(runtime, space.container);
   if (existing.state !== "missing") {

@@ -92,6 +92,9 @@ export interface SpaceEntry {
   secret_dir?: string;
   /** The entrypoint version the container was made with (see ENTRYPOINT_VERSION in spaces.ts). */
   entrypoint?: number;
+  /** The person started this space with --allow-rootful / --allow-no-limits: a start that is not theirs (a refresh by `prime update`) does the same. */
+  allow_rootful?: boolean;
+  allow_no_limits?: boolean;
   /** Companies whose values/secrets/codes this space may use. */
   vaults?: string[];
   /** Optional subset of categories: value, secret, code (default: all). */
@@ -216,6 +219,9 @@ export function parseConfig(text: string, source: string): Config {
         ? { cgroup_mode: entry.cgroup_mode }
         : {}),
       ...(asString(entry.secret_dir) ? { secret_dir: asString(entry.secret_dir) } : {}),
+      ...(typeof entry.entrypoint === "number" && Number.isInteger(entry.entrypoint) ? { entrypoint: entry.entrypoint } : {}),
+      ...(entry.allow_rootful === true ? { allow_rootful: true } : {}),
+      ...(entry.allow_no_limits === true ? { allow_no_limits: true } : {}),
       ...(Array.isArray(entry.vaults) ? { vaults: entry.vaults.filter((flag): flag is string => typeof flag === "string") } : {}),
       ...(entry.trusted === true ? { trusted: true } : {}),
       ...(asString(entry.broker_token) ? { broker_token: asString(entry.broker_token) } : {}),
@@ -354,6 +360,9 @@ export function serializeConfig(config: Config): string {
         ["offline", space.offline === true ? true : undefined],
         ["cgroup_mode", space.cgroup_mode],
         ["secret_dir", space.secret_dir],
+        ["entrypoint", space.entrypoint],
+        ["allow_rootful", space.allow_rootful === true ? true : undefined],
+        ["allow_no_limits", space.allow_no_limits === true ? true : undefined],
         ["expose", space.expose === true ? true : undefined],
         ["gateway", space.gateway],
         ["gateway_device", space.gateway_device],

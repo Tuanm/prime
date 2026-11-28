@@ -240,3 +240,12 @@ describe("prime update moves a fleet's spaces with the build it has installed", 
     expect(r.exitCode).toBe(0);
   });
 });
+
+describe("a space in a fleet is not persistent", () => {
+  test("prime spaces create --fleet --persistent is refused before anything is made", async () => {
+    const { spacesCreate } = await import("../src/spaces.ts");
+    const parsed = { flags: new Map<string, unknown>([["fleet", "acme"], ["persistent", true]]), positionals: [] } as never;
+    const ctx = { parsed, config: { defaults: {}, devices: {}, spaces: {}, codeMcp: {} }, note: () => undefined, out: () => undefined } as unknown as Ctx;
+    await expect(spacesCreate(ctx, "26.11.0")).rejects.toThrow("not persistent");
+  });
+});
