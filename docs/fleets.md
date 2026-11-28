@@ -644,16 +644,21 @@ serving them, the objects stored and read, the rows its objects write to and rea
 storage, and what the bucket holds - and prices them at Cloudflare's list prices with
 the free allowances taken off. `/admin` shows the month, the cost and what it is
 made of. The bucket is measured by listing it, at most every six hours (a few Class A
-calls, which are counted), and is priced at the size it was last found at.
+calls, which are counted) and in an alarm of the registry, never in the request of the guard that asks for the
+number; it is priced at the size it was last found at, and `/admin` says "at least" when the listing was cut
+short (a bucket of more than twenty thousand objects).
 
 The rows are what a running fleet writes most of. A primary that renews its lease every
-fifteen seconds writes two rows a time (the lease, and the alarm that tells the members when
-it lapses; it was five before the activity stamp, the epoch and a claim that was not there
-stopped being written again), and a row written is a millionth of a dollar beyond the first
+fifteen seconds writes a row and a third a time on average (the lease, and a third of the alarm that tells
+the members when it lapses: an alarm that is already set for the time or an earlier one is left as it is, and
+when it fires early it finds the lease alive and sets the next from it, so the call that the place is free is
+never late; it was five rows before the activity stamp, the epoch, the claim that was not there and the
+alarm stopped being written again), and a row written is a millionth of a dollar beyond the first
 fifty million a month.
 
 Every object that keeps state counts its rows: the fleets, the devices, the registry and the temporary
-files.
+files. An alarm is counted as a request to the object, and an object that wakes only for its alarm (the
+temporary files) sends its counts when the alarm finishes.
 
 The ceiling is `FLEET_MONTHLY_BUDGET_USD`, twenty dollars by default. At the
 ceiling the fleet routes answer **402** and say so. The admin page keeps working,
@@ -707,8 +712,37 @@ now. What is left of the old ones:
 - **One that has connected is unaffected**: a member of a fleet, or a machine in use, keeps its code until it is
   made again (re-joining, or `prime connect` after the device is removed), and an offline device is collected
   after seven days as before. Refusing those would take every joined member's credential away at once.
-- A wrong code from an address locks that address out of the device, not the device (see above), which is what
-  keeps guessing a short code from one address in check without letting a stranger shut a member out.
+- **A device with a six-character code is locked for everyone when the wrong codes from all addresses together
+  pass 200 in ten minutes** (`ANON_LEGACY_MAX_FAILURES`), as well as the lock of an address after
+  twenty (`ANON_AUTH_MAX_FAILURES`). Per-address locks alone leave guessing unbounded: an address is cheap (a
+  /48 is 65,536 of the /64 blocks counted), and each one gets twenty tries. 200 in ten minutes is 28,800 a
+  day against 36^6 = 2.2 billion codes, about a hundred years of guessing for one device (and the guess needs
+  the device's id too, which is not guessable), while an honest member mistyping a code a few times is far
+  below it. A device with a 25-character code has no such ceiling: it cannot be guessed, and a lock for
+  everyone would be a lever for a stranger. The price of the ceiling is that someone who knows a short-code
+  member's id can keep that member out of the gateway at 200 requests every ten minutes, which is a reason to
+  make the code again (below) rather than to raise it.
+- **A lock is per address, and an address is its /64 for IPv6.** A stranger behind the same carrier-grade NAT
+  address, or in the same /64, as the member is counted with the member: twenty wrong codes from there lock the
+  member out for ten minutes too. That is inherent to counting by address; the `Retry-After` says how long is
+  left of the lock. A device with a 25-character code keeps at most twenty locked addresses (the soonest to
+  end are let go, which costs nothing for a code that cannot be guessed); one with a short code that has more
+  than twenty is locked for everyone. The misses kept are never dropped to make room for others: when the map
+  is full of recent ones a new address is not tracked on its own, and the device's total above applies.
+
+### Making a code again
+
+`prime devices rotate-code <device-id>` gives an anonymous device a new 25-character code. The device shows the
+code it has to `POST /api/devices/anonymous/rotate`; the gateway makes the new code, and the old one **keeps
+working for 24 hours**, so that what holds it can be given the new one without a gap. The command saves the new
+code (the device's entry in the config, and the `remote_token` of each space published as that device); a
+running space, buddy or fleet agent holds the old code and has to be restarted within the day (`prime spaces
+stop` and `start` for a space: the start writes the new code in). After the day the old code is refused, and the
+device is counted as having a long one. It is not done on its own at a bootstrap: a space reads its code from a
+file at its start, so a code replaced behind its back would stop it at its next reconnect.
+
+Deploy the gateway before the CLI: an older gateway has no such route, and the command says so. The members that
+still hold six-character codes are the ones to run it for.
 
 ## Known limitations
 

@@ -47,6 +47,7 @@ Every endpoint is a URL the gateway answers. The paths below are the ones to use
 | Endpoint | Needs | What it does |
 | --- | --- | --- |
 | `POST /api/devices/anonymous` | gateway token if set | Create a throwaway buddy. The answer carries its id, its code and a connect URL. |
+| `POST /api/devices/anonymous/rotate` | gateway token if set, and the buddy's id (`X-Prime-Device`) and code | Give an anonymous buddy a new 25-character code; the old one keeps working for 24 hours. `prime devices rotate-code` calls it. |
 | `WS /device/ws/{deviceId}` | the buddy's token, or a one-use ticket | Open the tunnel the gateway keeps. |
 | `POST /device/{deviceId}` | gateway token and the buddy's token | Carry one JSON-RPC call and return the answer. |
 | `GET /device/sse/{deviceId}` | gateway token and the buddy's token | Open an event stream. The first event names the URL for posting calls. |
@@ -252,7 +253,8 @@ npx wrangler deploy                        # publish the gateway
 | `ANON_CREATE_MAX`, `ANON_CREATE_WINDOW_MS` | `5`, one hour | New anonymous buddies per address. |
 | `ANON_UNUSED_TTL_MS` | one hour | Delete an anonymous buddy that never connects within this time. |
 | `ANON_IDLE_TTL_MS` | 7 days | Delete an anonymous buddy that has been offline this long. |
-| `ANON_AUTH_MAX_FAILURES`, `ANON_AUTH_LOCK_MS` | `20`, 10 minutes | Wrong codes before an anonymous buddy is locked, and for how long. |
+| `ANON_AUTH_MAX_FAILURES`, `ANON_AUTH_LOCK_MS` | `20`, 10 minutes | Wrong codes from one address (its /64 for IPv6) before that address is locked out of an anonymous buddy, and for how long. |
+| `ANON_LEGACY_MAX_FAILURES` | `200` | Wrong codes from all addresses together, in the lock window, before a buddy that still has a six-character code is locked for everyone. A 25-character code has none. |
 
 ### Files and fleets
 
