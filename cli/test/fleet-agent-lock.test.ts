@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, probeFor, procProbeWith, type ProcessProbe } from "../src/fleet-agent-lock";
 import { exePath } from "../src/code-mcp-host";
@@ -840,6 +840,13 @@ describe("switching the replica mode of a running agent", () => {
     expect(programNamed("ExecStart=" + real + ' "__fleet-agent" "--config" "/c"', real)).toBe(true);
     expect(programNamed("ExecStart=-" + real + " __fleet-agent", real)).toBe(true);
     expect(splitExecStart("/a/b 'c d' \"e f\" g%%h i$$j")).toEqual(["/a/b", "c d", "e f", "g%h", "i$j"]);
+    // C escapes and the specifiers that can be told: decoded. The rest is "cannot say", not "no".
+    expect(splitExecStart("/a/b\\x20c \"d\\ne\" f\\040g h\\sj")).toEqual(["/a/b c", "d\ne", "f g", "h j"]);
+    expect(splitExecStart("%h/bin/prime %u")).toEqual([userInfo().homedir + "/bin/prime", userInfo().username]);
+    for (const line of ["%t/prime", "/a/%S/b", "$HOME/prime", "${X}/prime", "/a/b\\q", "/a/b\\xZ1", "/a/b\\"]) expect(splitExecStart(line), line).toBeUndefined();
+    expect(programNamed("ExecStart=%t/prime __fleet-agent", real)).toBeUndefined();
+    expect(programNamed("ExecStart=" + real + " --config %h/c.yaml", real)).toBe(true);
+    expect(programNamed("ExecStart=/opt/with\\x20space/prime x", "/opt/with space/prime")).toBe(true);
   });
 
   test("a service whose manager cannot be reached from here is not restarted, and no second agent is started beside it", async () => {

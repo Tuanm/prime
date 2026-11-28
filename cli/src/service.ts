@@ -241,28 +241,62 @@ export function parseSystemdCommand(unit: string): string[] | undefined {
   return splitExecStart(line);
 }
 
+/** What a C-style escape in a systemd line stands for (a letter after the backslash); the numeric ones are read by hand. */
+const ESCAPES: Record<string, string> = { a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", '"': '"', "'": "'", s: " " };
+
 /**
- * The words of an ExecStart line as systemd reads them: blanks separate them; a word may be in double quotes (with
- * C-style escapes, as `systemdQuote` writes) or in single quotes (literal), and a line can mix them (an unquoted program
- * with quoted arguments). `%%` and `$$` stand for `%` and `$`. The prefixes systemd allows on the program ("-", "@", ":",
- * "+", "!") are not part of it.
+ * The words of an ExecStart line as systemd reads them: blanks separate them; a word may be in double quotes or in
+ * single quotes, and a line can mix them (an unquoted program with quoted arguments). C-style escapes (`\n`, `\x20`,
+ * `\040`, `\s`, `\\`) are decoded everywhere, and `%%`, `%h` (the home) and `%u` (the user) and `$$` are expanded. The
+ * prefixes systemd allows on the program ("-", "@", ":", "+", "!") are not part of it.
+ *
+ * `undefined` says that the line cannot be read without the manager: it names another specifier (`%t`, `%S`...), a
+ * variable (`$HOME`, `${X}`) or an escape that is no escape. It is not an answer of "no".
  */
-export function splitExecStart(line: string): string[] {
+export function splitExecStart(line: string): string[] | undefined {
   const words: string[] = [];
   let word = "";
   let inWord = false;
   let quote = "";
+  let firstQuoted = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
-    if (quote === '"') {
-      if (ch === "\\" && i + 1 < line.length) word += line[++i]!;
-      else if (ch === '"') quote = "";
-      else word += ch;
-    } else if (quote === "'") {
-      if (ch === "'") quote = "";
+    if (ch === "\\") {
+      const next = line[i + 1];
+      if (next === undefined) return undefined;
+      if (next === "x") {
+        const hex = /^[0-9a-fA-F]{2}/.exec(line.slice(i + 2, i + 4));
+        if (!hex) return undefined;
+        word += String.fromCharCode(Number.parseInt(hex[0], 16));
+        i += 3;
+      } else if (/[0-7]/.test(next)) {
+        const oct = /^[0-7]{3}/.exec(line.slice(i + 1, i + 4));
+        const code = oct ? Number.parseInt(oct[0], 8) : 256;
+        if (code > 255) return undefined;
+        word += String.fromCharCode(code);
+        i += 3;
+      } else if (ESCAPES[next] !== undefined) {
+        word += ESCAPES[next];
+        i += 1;
+      } else return undefined;
+      inWord = true;
+    } else if (ch === "%") {
+      const next = line[++i];
+      if (next === "%") word += "%";
+      else if (next === "h") word += userInfo().homedir;
+      else if (next === "u") word += userInfo().username;
+      else return undefined;
+      inWord = true;
+    } else if (ch === "$") {
+      if (line[++i] !== "$") return undefined;
+      word += "$";
+      inWord = true;
+    } else if (quote) {
+      if (ch === quote) quote = "";
       else word += ch;
     } else if (ch === '"' || ch === "'") {
       quote = ch;
+      if (!inWord && words.length === 0) firstQuoted = true;
       inWord = true;
     } else if (/\s/.test(ch)) {
       if (inWord) words.push(word);
@@ -274,9 +308,8 @@ export function splitExecStart(line: string): string[] {
     }
   }
   if (inWord) words.push(word);
-  const unescaped = words.map((w) => w.replace(/%%/g, "%").replace(/\$\$/g, "$"));
-  if (unescaped.length > 0 && !/^["']/.test(line.trimStart())) unescaped[0] = unescaped[0]!.replace(/^[-@:+!]+/, "");
-  return unescaped;
+  if (words.length > 0 && !firstQuoted) words[0] = words[0]!.replace(/^[-@:+!]+/, "");
+  return words;
 }
 
 /**
