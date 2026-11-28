@@ -814,6 +814,42 @@ async function authorizeDevice(
 
 
 
+/** Ask the registry to make an anonymous device's code again, and answer with what the device is to be given. */
+async function rotateAnonymous(
+  env: Env,
+  url: URL,
+  deviceId: string,
+  ask: { proposed?: unknown; presented?: string; operator?: boolean },
+): Promise<Response> {
+  const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
+  const made = await reg.fetch(
+    new Request("https://registry/anon/rotate?id=" + encodeURIComponent(deviceId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(ask),
+    }),
+  );
+  if (!made.ok) {
+    // The registry's refusal is the answer, without the headers it had.
+    return Response.json(await made.json().catch(() => ({ error: "refused" })), { status: made.status });
+  }
+  const { token, previousValidMs, repeated } = (await made.json()) as { token: string; previousValidMs: number; repeated?: boolean };
+  mapCache = null;
+  const wsScheme = url.protocol === "https:" ? "wss:" : "ws:";
+  return Response.json(
+    {
+      deviceId,
+      token,
+      connect_url: url.origin + "/device/" + encodeURIComponent(deviceId) + "?token=" + encodeURIComponent(token),
+      ws_url: wsScheme + "//" + url.host + "/device/ws/" + encodeURIComponent(deviceId),
+      anonymous: true,
+      previous_valid_ms: previousValidMs,
+      ...(repeated ? { repeated: true } : {}),
+    },
+    { headers: { "cache-control": "no-store" } },
+  );
+}
+
 /** The per-isolate limit on everything else: null when the request may go on, else the 429 that says when to come back. */
 function generalLimit(cfg: ReturnType<typeof loadConfig>, request: Request): Response | null {
   const verdict = getLimiter(cfg).check(clientIp(request));
@@ -913,9 +949,10 @@ export default {
 
     // ---- Anonymous device: make its code again ----
     // A device made when codes were six characters holds a code that can be guessed online by enough
-    // addresses. It proves it holds that code, and is given a new 25-character one; the old one goes on
-    // working for a day (the registry), so that the space and the agent that hold it can be given the new
-    // one without a gap.
+    // addresses. It proves it holds that code and proposes a new 25-character one of its own making (so a
+    // call whose answer was lost can be repeated); the old code goes on working for a day (the registry),
+    // so that the space and the agent that hold it can be given the new one without a gap. Only the code
+    // the device has now may ask: the one it replaced may only repeat a call that already succeeded.
     if (url.pathname === "/api/devices/anonymous/rotate") {
       if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
       if (cfg.gatewayToken) {
@@ -926,26 +963,43 @@ export default {
       if (rateLimited) return rateLimited;
       const deviceId = request.headers.get("x-prime-device") ?? "";
       if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      const bodyText = await readBoundedText(request, 4096);
+      if (bodyText instanceof Response) return bodyText;
+      let proposed: unknown;
+      try {
+        proposed = (JSON.parse(bodyText || "{}") as { proposed?: unknown }).proposed;
+      } catch {
+        return Response.json({ error: "invalid json" }, { status: 400 });
+      }
       const auth = await authorizeDevice(deviceId, request, url, cfg, env);
       if (auth.denied) return auth.denied;
       if (!auth.anonymous) return Response.json({ error: "only an anonymous device's code can be made again" }, { status: 400 });
-      const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-      const made = await reg.fetch("https://registry/anon/rotate?id=" + encodeURIComponent(deviceId), { method: "POST" });
-      if (!made.ok) return made;
-      const { token, previousValidMs } = (await made.json()) as { token: string; previousValidMs: number };
-      mapCache = null;
-      const wsScheme = url.protocol === "https:" ? "wss:" : "ws:";
-      return Response.json(
-        {
-          deviceId,
-          token,
-          connect_url: url.origin + "/device/" + encodeURIComponent(deviceId) + "?token=" + encodeURIComponent(token),
-          ws_url: wsScheme + "//" + url.host + "/device/ws/" + encodeURIComponent(deviceId),
-          anonymous: true,
-          previous_valid_ms: previousValidMs,
-        },
-        { headers: { "cache-control": "no-store" } },
-      );
+      return rotateAnonymous(env, url, deviceId, { proposed, presented: extractDeviceToken(request, url) ?? "" });
+    }
+
+    // The operator's: no code of the device is needed, and a lock on the device does not hold it up. It
+    // also clears the locks, so the new code is usable at once. FLEET_OPERATOR_TOKEN is the credential
+    // (the gateway token is every client's, and is not an authority over devices).
+    const operatorRotate = /^\/api\/devices\/anonymous\/([A-Za-z0-9_-]{1,64})\/rotate$/.exec(url.pathname);
+    if (operatorRotate) {
+      if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+      const rateLimited = generalLimit(cfg, request);
+      if (rateLimited) return rateLimited;
+      const t = extractToken(request, url, "auth");
+      if (!cfg.fleetOperatorToken || !t || !timingSafeEq(t, cfg.fleetOperatorToken)) {
+        return Response.json({ error: "only the operator may make a device's code again this way" }, { status: 403 });
+      }
+      const deviceId = decodeURIComponent(operatorRotate[1]!);
+      if (!validDeviceId(deviceId)) return Response.json({ error: "invalid deviceId" }, { status: 400 });
+      const bodyText = await readBoundedText(request, 4096);
+      if (bodyText instanceof Response) return bodyText;
+      let proposed: unknown;
+      try {
+        proposed = (JSON.parse(bodyText || "{}") as { proposed?: unknown }).proposed;
+      } catch {
+        return Response.json({ error: "invalid json" }, { status: 400 });
+      }
+      return rotateAnonymous(env, url, deviceId, { proposed, operator: true });
     }
 
     // ---- Anonymous device registration ----
@@ -1158,7 +1212,7 @@ export default {
         const { deviceId } = (await resolved.json()) as { deviceId: string };
         return originFor(env, env.DEVICES.get(env.DEVICES.idFromName(deviceId)));
       }
-      const anonRoute = /^\/admin\/api\/anonymous\/([a-f0-9]{24})(\/(state|clients|tools))?$/.exec(url.pathname);
+      const anonRoute = /^\/admin\/api\/anonymous\/([a-f0-9]{24})(\/(state|clients|tools|rotate))?$/.exec(url.pathname);
       if (anonRoute) {
         const resolved = await reg.fetch("https://registry/anon/resolve?ref=" + anonRoute[1]);
         if (!resolved.ok) return Response.json({ error: "not found" }, { status: 404 });
@@ -1192,6 +1246,10 @@ export default {
           }));
           const dropped = disabled ? await kickDeviceTunnel(env, deviceId) : false;
           return Response.json({ ok: true, disabled, tunnelDropped: dropped });
+        }
+        if (request.method === "POST" && action === "rotate") {
+          // The operator, proved by Access: a new code for the device, answered to the operator once.
+          return rotateAnonymous(env, url, deviceId, { operator: true });
         }
         if (request.method === "GET" && action === "clients") {
           return env.DEVICES.get(env.DEVICES.idFromName(deviceId)).fetch("https://device/clients");

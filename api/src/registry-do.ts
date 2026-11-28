@@ -25,6 +25,7 @@ import {
   r2Cost,
   r2MaxBytes,
   r2Round,
+  timingSafeEq,
   validDeviceId,
   virtualDeviceIds,
 } from "./config";
@@ -616,18 +617,54 @@ export class RegistryDO extends DurableObject<Env> {
 
     // A device is made again: it is given a new 25-character code, and the code it had keeps working for a
     // day, so that everything that holds it (a space, the agent) can be given the new one without a gap.
-    // The caller is a device that has proved it holds the code, which the Worker has checked.
+    //
+    // The new code is the caller's own proposal, so that a call whose answer was lost can be made again
+    // with the same proposal and be told it has succeeded, without a second code replacing the first (and
+    // the original code dropping at once). Only the CURRENT code may ask: the one it replaced, which works
+    // for the day, may not, or whoever held it could take the device and the owner's new code would die
+    // when the day ended. The one thing the replaced code may do is repeat a call that already succeeded.
+    // The operator (the Worker says so, having checked its credential) needs no code and is not held up
+    // by a lock: it clears the locks, which a stranger who knows the id may have been holding.
     if (request.method === "POST" && path === "/anon/rotate") {
       const id = url.searchParams.get("id") || "";
       if (!this.anon.has(id) || !this.tokens.has(id)) return Response.json({ error: "not an anonymous device" }, { status: 404 });
       if (pepperFrom(this.env) === null) return pepperMissingResponse();
-      const token = randomDeviceCode();
-      this.prevTokens.set(id, { verifier: this.tokens.get(id)!, until: Date.now() + ROTATE_GRACE_MS });
-      this.tokens.set(id, await verifierFor(this.env, "device", token));
+      const body = (await request.json().catch(() => ({}))) as { proposed?: unknown; presented?: unknown; operator?: unknown };
+      const operator = body.operator === true;
+      let proposed = typeof body.proposed === "string" ? body.proposed : undefined;
+      if (proposed === undefined) {
+        // Only the operator may leave the code to the gateway: a device's call must be repeatable.
+        if (!operator) return Response.json({ error: "propose a code: 25 characters of 0-9 and A-Z" }, { status: 400 });
+        proposed = randomDeviceCode();
+      }
+      if (proposed.length !== ANON_TOKEN_LENGTH || ![...proposed].every((c) => ANON_TOKEN_ALPHABET.includes(c))) {
+        return Response.json({ error: "the code must be " + ANON_TOKEN_LENGTH + " characters of 0-9 and A-Z" }, { status: 400 });
+      }
+      // Everything that waits is done before anything is read or set, so that two asks at once cannot both pass.
+      const proposedV = await verifierFor(this.env, "device", proposed);
+      const presentedV = typeof body.presented === "string" && body.presented ? await verifierFor(this.env, "device", body.presented) : "";
+      const now = Date.now();
+      const current = this.tokens.get(id)!;
+      const before = this.prevTokens.get(id);
+      const isCurrent = presentedV !== "" && timingSafeEq(presentedV, current);
+      const isBefore = presentedV !== "" && before !== undefined && before.until > now && timingSafeEq(presentedV, before.verifier);
+      if (timingSafeEq(proposedV, current) && (operator || isCurrent || isBefore)) {
+        // Done already: the same proposal, repeated. Nothing changes.
+        return Response.json({ deviceId: id, token: proposed, previousValidMs: before && before.until > now ? before.until - now : 0, repeated: true });
+      }
+      if (!operator && !isCurrent) {
+        return Response.json(
+          { error: isBefore ? "this code has been replaced; use the new one" : "not the device's code" },
+          { status: isBefore ? 409 : 401 },
+        );
+      }
+      this.prevTokens.set(id, { verifier: current, until: now + ROTATE_GRACE_MS });
+      this.tokens.set(id, proposedV);
+      if (operator) this.forgetLocks(id);
       // Previous first: a code that was replaced and not kept would be a device nobody can use.
       await this.persistPrevTokens();
       await this.persistTokens();
-      return Response.json({ deviceId: id, token, previousValidMs: ROTATE_GRACE_MS });
+      return Response.json({ deviceId: id, token: proposed, previousValidMs: ROTATE_GRACE_MS });
     }
 
     // Addresses refused at the edge of the Worker (both devices and MCP clients).
