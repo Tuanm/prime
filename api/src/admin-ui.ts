@@ -1636,6 +1636,12 @@ ${UI_CSS}    </style>
                 " rows read · " +
                 (Number(j.counts?.r2StoredBytes || 0) / 1e9).toFixed(2) +
                 " GB in the bucket</div>" +
+                (j.projectionWarning && !j.overBudget
+                  ? '<div class="usage-over">' + esc(String(j.warning || "At this pace the month passes its budget.")) + "</div>"
+                  : "") +
+                (j.projectedUsd != null && !j.projectionWarning && !j.overBudget
+                  ? '<div class="usage-counts">at this pace the month comes to $' + Number(j.projectedUsd).toFixed(2) + "</div>"
+                  : "") +
                 (j.overBudget
                   ? '<div class="usage-over">The fleet budget is spent: the fleets are paused until the month turns over or the budget is raised.</div>'
                   : "");

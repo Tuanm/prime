@@ -27,7 +27,7 @@ import {
   validDeviceId,
   virtualDeviceIds,
 } from "./config";
-import { bucketBytes, costOf, HitMeter, meterStorage, monthlyBudget, ZERO_USAGE, type UsageCounts } from "./usage";
+import { bucketBytes, costOf, HitMeter, meterStorage, monthlyBudget, projectMonth, ZERO_USAGE, type UsageCounts } from "./usage";
 import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, verifierFor, type TokenKind } from "./token-hash";
 
 const ONLINE_TTL_DEFAULT_MS = 150_000; // longer than keepalive timeout; swept on read
@@ -304,6 +304,8 @@ export class RegistryDO extends DurableObject<Env> {
       const counts = await this.readUsage(monthKey());
       const cost = costOf(counts);
       const budget = monthlyBudget(this.env as unknown as Record<string, string | undefined>);
+      // Where the month is going, said before the budget stops the fleets and not after.
+      const projection = projectMonth(counts, budget);
       return Response.json({
         month: monthKey(),
         counts,
@@ -312,6 +314,15 @@ export class RegistryDO extends DurableObject<Env> {
         spentUsd: cost.total,
         remainingUsd: Math.round((budget - cost.total) * 100) / 100,
         overBudget: cost.total >= budget,
+        projectedUsd: projection ? projection.usd : null,
+        projectionWarning: projection?.warn === true,
+        ...(projection?.warn
+          ? {
+              warning:
+                "at this month's pace the bill reaches $" + projection.usd.toFixed(2) + ", past the $" + budget.toFixed(2) +
+                " budget: the fleets will be stopped before the month ends unless it is raised (FLEET_MONTHLY_BUDGET_USD) or the load falls",
+            }
+          : {}),
       });
     }
 

@@ -95,6 +95,47 @@ describe("the usage the registry keeps", () => {
   });
 });
 
+describe("the warning before the budget trips", () => {
+  test("/usage says where the month is going, and warns when it will pass the budget but has not yet", async () => {
+    setSystemTime(new Date("2026-12-11T00:00:00Z"));
+    const { call } = await registry();
+    await call("POST", "/usage-add", { doRowsWritten: 40_000_000 });
+    const usage = await call("GET", "/usage");
+    expect(usage.overBudget).toBe(false);
+    expect(usage.projectionWarning).toBe(true);
+    expect(usage.projectedUsd).toBeGreaterThan(70);
+    expect(usage.warning).toMatch(/pace/);
+    expect(usage.warning).toMatch(/FLEET_MONTHLY_BUDGET_USD/);
+  });
+
+  test("a quiet month has a projection and no warning", async () => {
+    setSystemTime(new Date("2026-12-11T00:00:00Z"));
+    const { call } = await registry();
+    await call("POST", "/usage-add", { doRequests: 1000 });
+    const usage = await call("GET", "/usage");
+    expect(usage.projectionWarning).toBe(false);
+    expect(usage.projectedUsd).toBe(5);
+    expect(usage.warning).toBeUndefined();
+  });
+
+  test("in the first days there is no projection", async () => {
+    setSystemTime(new Date("2026-12-01T06:00:00Z"));
+    const { call } = await registry();
+    const usage = await call("GET", "/usage");
+    expect(usage.projectedUsd).toBeNull();
+    expect(usage.projectionWarning).toBe(false);
+  });
+
+  test("a month that has already spent its budget is not warned about: the guard has stopped it", async () => {
+    setSystemTime(new Date("2026-12-11T00:00:00Z"));
+    const { call } = await registry();
+    await call("POST", "/usage-add", { doRowsWritten: 100_000_000 });
+    const usage = await call("GET", "/usage");
+    expect(usage.overBudget).toBe(true);
+    expect(usage.projectionWarning).toBe(false);
+  });
+});
+
 describe("what the bucket holds", () => {
   test("it is listed, its size is in the month's cost, and the listing is counted as the Class A calls it is", async () => {
     const b = bucket([40e9, 40e9, 40e9], 2); // 120 GB over two pages

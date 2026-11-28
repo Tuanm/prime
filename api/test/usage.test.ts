@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bucketBytes, costOf, HitMeter, meterStorage, monthKey, monthProgress, monthlyBudget, PRICES, ZERO_USAGE, type UsageCounts } from "../src/usage";
+import { bucketBytes, costOf, HitMeter, meterStorage, monthElapsed, monthKey, monthProgress, monthlyBudget, PRICES, projectMonth, ZERO_USAGE, type UsageCounts } from "../src/usage";
 
 describe("what a month of the gateway costs", () => {
   test("an idle month costs the plan and nothing else", () => {
@@ -234,5 +234,48 @@ describe("what a bucket holds", () => {
 
   test("a bucket bigger than the pages it is walked for is measured to there, and says so", async () => {
     expect(await bucketBytes(pages([[1], [1], [1], [1]]), 2)).toEqual({ bytes: 2, calls: 2, truncated: true });
+  });
+});
+
+describe("where the month is going", () => {
+  const at = (day: number, hour = 0) => Date.UTC(2026, 11, day, hour); // December has 31 days
+
+  test("how far through the month it is, to the millisecond", () => {
+    expect(monthElapsed(Date.UTC(2026, 11, 1))).toBe(0);
+    expect(monthElapsed(Date.UTC(2026, 11, 16, 12))).toBeCloseTo(0.5, 5);
+    expect(monthElapsed(Date.UTC(2027, 0, 1) - 1)).toBeLessThan(1);
+  });
+
+  test("nothing is said in the first two days: a few hours are not a month", () => {
+    expect(projectMonth({ ...ZERO_USAGE, doRowsWritten: 1e9 }, 20, at(2, 23))).toBeNull();
+    expect(projectMonth({ ...ZERO_USAGE, doRowsWritten: 1e9 }, 20, at(3, 1))).not.toBeNull();
+  });
+
+  test("a pace that stays inside the budget does not warn, and the allowances are applied to the month, not to the days", () => {
+    // Ten days in, a tenth of the included rows: the whole month will be about a third of the allowance, and cost nothing.
+    const counts = { ...ZERO_USAGE, doRowsWritten: 5_000_000 };
+    const p = projectMonth(counts, 20, at(11))!;
+    expect(p.usd).toBe(PRICES.planMonthly);
+    expect(p.warn).toBe(false);
+  });
+
+  test("a pace that will pass the budget warns while the month so far has not", () => {
+    // Ten days in, 40M rows written: 40M is inside the 50M allowance, but the month comes to 124M, $74 over.
+    const counts = { ...ZERO_USAGE, doRowsWritten: 40_000_000 };
+    expect(costOf(counts).total).toBe(PRICES.planMonthly);
+    const p = projectMonth(counts, 20, at(11))!;
+    expect(p.usd).toBeGreaterThan(70);
+    expect(p.warn).toBe(true);
+  });
+
+  test("once the budget is spent it is the guard's to say, not the warning's", () => {
+    const counts = { ...ZERO_USAGE, doRowsWritten: 100_000_000 };
+    expect(costOf(counts).total).toBeGreaterThan(20);
+    expect(projectMonth(counts, 20, at(11))!.warn).toBe(false);
+  });
+
+  test("the size of the bucket is held, not scaled", () => {
+    const p = projectMonth({ ...ZERO_USAGE, r2StoredBytes: 20e9 }, 20, at(16, 12))!;
+    expect(p.usd).toBe(PRICES.planMonthly + 0.15);
   });
 });

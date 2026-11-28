@@ -282,6 +282,46 @@ export class HitMeter {
   }
 }
 
+/** How far through the UTC month it is, to the millisecond: 0 at the first instant, 1 at the last. */
+export function monthElapsed(at = Date.now()): number {
+  const d = new Date(at);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+  const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+  return Math.min(1, Math.max(0, (at - start) / (end - start)));
+}
+
+/** Before this much of the month has gone, the pace says nothing: the first hours are not a month. */
+export const PROJECTION_MIN_ELAPSED_MS = 2 * 24 * 60 * 60_000;
+
+export interface Projection {
+  /** What the month will cost if it goes on at the pace it has gone so far. */
+  usd: number;
+  /** The pace passes the budget though the month so far has not. */
+  warn: boolean;
+}
+
+/**
+ * What the month will cost at its pace so far, or null while it is too early to say.
+ *
+ * The counts that go up are scaled to the whole month and priced again, so the free allowances are
+ * applied once, to the month's total: a month that has used a tenth of an allowance in a tenth of
+ * the time is not charged for it. What the bucket holds is a size, not a count, and is not scaled.
+ */
+export function projectMonth(counts: UsageCounts, budgetUsd: number, at = Date.now()): Projection | null {
+  const d = new Date(at);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+  if (at - start < PROJECTION_MIN_ELAPSED_MS) return null;
+  const elapsed = monthElapsed(at);
+  if (elapsed <= 0) return null;
+  const scaled = { ...counts };
+  for (const key of ["gatewayRequests", "doRequests", "doActiveMs", "r2Writes", "r2Reads", "doRowsWritten", "doRowsRead"] as const) {
+    scaled[key] = Math.round((counts[key] || 0) / elapsed);
+  }
+  const usd = costOf(scaled).total;
+  const spent = costOf(counts).total;
+  return { usd, warn: spent < budgetUsd && usd > budgetUsd };
+}
+
 /** The month a count belongs to, in the same shape everywhere: 2026-11. */
 export function monthKey(at = Date.now()): string {
   const d = new Date(at);
