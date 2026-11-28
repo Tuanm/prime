@@ -806,6 +806,22 @@ you already run (the released 26.11.49 included); none of the changes below need
   entries) are not all interoperable with this release: a member that has seen the sender's tag in an
   entry refuses a snapshot without it. Upgrade all of them together. Builds of the released line, which
   do not seal, are read as before.
+- **`prime update` restarts the fleet agent of its configuration** (when it installed something, and only if the
+  program it installed is the one the agent runs). The new build is started first and waits for the agent's lock;
+  the old agent is then asked to stop, finishes its round, and the new one takes over, however long that takes. A
+  service's agent is restarted through its manager, and nothing is done when the manager cannot be reached from
+  where the update runs (`sudo`, `su`, cron). `prime fleets agent stop` and `agent install` during the wait also
+  stop the new build (it is written down in `fleet-agent/successor`), and a stop that arrives while the lock is
+  being handed over wins (`fleet-agent/stop`: an agent that was started before it, and takes the lock after,
+  leaves). A service installed by an earlier build keeps its manager's limits for stopping the agent (systemd:
+  every process of the unit is signalled and gets 90 seconds; launchd: 20 seconds) until `prime fleets agent
+  install` is run again; that sets five minutes, and on systemd signals the agent alone, so that the git and
+  container commands of a round are not stopped beside it.
+- **On Windows**, `prime fleets agent stop` and the update's restart ask the agent to stop in a file it looks at
+  once a second (`fleet-agent/stop`), so that it finishes its round; only an agent that is still at it after the time
+  it is given (15 seconds for `stop`, a minute for an update) is ended, as is an agent of an older build, which does
+  not look at the file, when that time is up. With a Scheduled Task installed the update starts that task (and only
+  that one) when the agent has left; without one it starts the new build first, as elsewhere.
 - **On Windows**, an agent installed by an earlier build is registered under the buddy's task name,
   `\prime\code-mcp`. `prime fleets agent install` (or `uninstall`) for the configuration it runs finds
   it by what it runs, removes it and registers `\prime\prime-fleet-agent` in its place; `agent status`

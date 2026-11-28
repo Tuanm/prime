@@ -313,9 +313,12 @@ prime update --to ./prime    # install somewhere you own
 
 An update fetches the release for this platform, checks it against the release's checksum, and swaps the file in one step, so an interrupted update cannot leave half an executable. A release without a checksum is refused. The checksum proves the download arrived intact, not that the release is trustworthy.
 
-When an update installs something, the fleet agent of this configuration is restarted so that it runs the new build, and the output says what was done. Only that agent is touched, and only if the program that was updated is the one it runs (not after `--to` elsewhere). Through its service, if it has one (the manager stops it the way it stops it for good; if the manager cannot be reached from here, as under `sudo` or cron, nothing is done); otherwise the new build is started first and waits for the agent's lock, the old agent is asked to stop and finishes its round, and the new one takes over. A new build that does not start leaves the old agent as it was. On Windows an agent can only be stopped in the middle of its round, so it is left running.
+When an update installs something, the fleet agent of this configuration is restarted so that it runs the new build, and the output says what was done. Only that agent is touched, and only if the program that was updated is the one it runs (not after `--to` elsewhere).
+- Through its service, if it has one: its manager stops it the way it stops it for good. If the manager cannot be reached from here (`sudo`, `su`, cron), nothing is done: run the update from a login session.
+- On Windows with a Scheduled Task: the agent is asked to stop in a file it looks at between rounds, the task is started again when it has left, and the agent is ended only if it is still at its round after a minute.
+- Otherwise the new build is started first and waits for the agent's lock, the old agent is asked to stop and finishes its round, and the new one takes over, for as long as that takes. A new build that does not start leaves the old agent as it was. `prime fleets agent stop` during that wait stops the new one too, and a second update does not start another.
 
-A service installed before this release gives the agent the manager's default time to stop (90 s on systemd, 20 s on launchd); `prime fleets agent install` sets 5 minutes.
+A service installed before this release keeps its manager's own limits for stopping the agent (systemd signals every process of the unit, git and container commands included, and gives it 90 seconds; launchd gives it 20) until `prime fleets agent install` is run again, which gives it 5 minutes and, on systemd, signals the agent alone.
 
 A directory you cannot write says so, and suggests the privileges that own it or `--to`. On Windows the running file is renamed aside and removed on the next run. A version carries the year and the month, so `prime --version` says how old the download is.
 

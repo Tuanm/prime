@@ -329,14 +329,20 @@ not the one it started from. Only that agent is touched, only when the program
 that was updated is the one it runs (not after --to another place), and the
 output says what was done.
   - Through its service, if it has one: the manager stops it the way it stops it
-    for good, and gives it the time it has to finish its round. If the manager
-    cannot be reached from here (sudo, su, cron), nothing is done: run it from a
-    login session.
+    for good. If the manager cannot be reached from here (sudo, su, cron),
+    nothing is done: run it from a login session. A service installed before
+    this release keeps the manager's own limits (systemd signals every process of
+    the unit and gives it 90 s, launchd 20 s) until 'prime fleets agent install'
+    is run again; that sets 5 minutes, and on systemd signals the agent alone, so
+    that the git and container commands of its round are not stopped beside it.
+  - On Windows with a Scheduled Task: the agent is asked to stop in a file it
+    looks at between rounds, the task is started again when it has left, and the
+    agent is ended only if it is still at its round after a minute.
   - Otherwise the new build is started first and waits for the agent's lock; the
     old agent is then asked to stop, finishes its round, and the new one takes
-    over. If the new build does not start, the old agent is left as it was.
-  - On Windows an agent can only be stopped in the middle of its round, so it
-    is left running: stop it and start it again when it is idle.
+    over (for as long as that takes). If the new build does not start, the old
+    agent is left as it was. 'prime fleets agent stop' during that wait stops the
+    new one too, and a second update does not start another.
 
   current   26.10.3
   latest    26.10.4

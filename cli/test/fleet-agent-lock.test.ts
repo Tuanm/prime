@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { acquireAgentLock, agentLockPath, isFleetAgentProcess, probeFor, procProbeWith, type ProcessProbe } from "../src/fleet-agent-lock";
 import { exePath } from "../src/code-mcp-host";
-import { runsProgram } from "../src/fleet-paths";
+import { commandRuns, runsProgram } from "../src/fleet-paths";
 import { bindServiceStatus, fleetAgentServiceStatus, programNamed } from "../src/fleet-service";
 import { launchdAnswered } from "../src/service";
 import {
@@ -755,7 +755,7 @@ describe("switching the replica mode of a running agent", () => {
     const direct = await restartAgent(
       configPath,
       { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: () => void spawned++ },
-      { command: [here], target: elsewhere },
+      { agentCommand: here + " __fleet-agent --config " + configPath, target: elsewhere },
     );
     expect(direct.restarted).toBe(false);
     expect(!direct.restarted && direct.reason).toMatch(/not the program of the fleet agent/);
@@ -776,9 +776,34 @@ describe("switching the replica mode of a running agent", () => {
     const same = await restartAgent(
       configPath,
       { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: newAgentHook(seen) },
-      { command: [here], target: here, startCheckMs: 50 },
+      { agentCommand: here + " __fleet-agent --config " + configPath, target: here, startCheckMs: 50 },
     );
     expect(same.restarted).toBe(true);
+  });
+
+  test("the program the agent runs is its own command line's, not the one the update ran from; a path with a space in it is found too", async () => {
+    const root = scratch();
+    const configPath = join(root, "config.json");
+    const mine = await fakeAgent();
+    running(configPath, mine.pid, "lazy");
+    const { here } = programs(root);
+    writeFileSync(here, "");
+    const seen: { envs: Array<Record<string, string | undefined>>; child?: { pid: number } } = { envs: [] };
+    // The update ran from another copy (`command`), and installed into the program the agent runs.
+    const result = await restartAgent(
+      configPath,
+      { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: newAgentHook(seen) },
+      { agentCommand: here + " __fleet-agent --config " + configPath, command: [join(root, "another-copy")], target: here, startCheckMs: 50 },
+    );
+    expect(result.restarted).toBe(true);
+    // A path with a blank in it, and a longer name that merely starts with the program's.
+    const spaced = join(root, "John Doe", "bin", "prime");
+    mkdirp(join(root, "John Doe", "bin"));
+    writeFileSync(spaced, "");
+    expect(commandRuns(spaced + " __fleet-agent --config /c", spaced)).toBe(true);
+    expect(commandRuns("/usr/bin/bun " + spaced + " __fleet-agent", spaced)).toBe(true);
+    expect(commandRuns(spaced + "-old __fleet-agent", spaced)).toBe(false);
+    expect(commandRuns("/x" + spaced + " __fleet-agent", spaced)).toBe(false);
   });
 
   test("whether a program is the one a command runs: through links, and for a script that bun runs", () => {
@@ -793,6 +818,16 @@ describe("switching the replica mode of a running agent", () => {
     expect(runsProgram([join(root, "other")], real)).toBe(false);
     expect(programNamed("ExecStart=" + link + " __fleet-agent", real)).toBe(true);
     expect(programNamed("ExecStart=/somewhere/else __fleet-agent", real)).toBe(false);
+    // What an install writes: quoted, and a path with a blank in it is one word. A definition with no command says nothing.
+    const spaced = join(root, "John Doe", "prime");
+    mkdirp(join(root, "John Doe"));
+    writeFileSync(spaced, "");
+    expect(programNamed('ExecStart="' + spaced + '" "__fleet-agent" "--config" "/c"', spaced)).toBe(true);
+    expect(programNamed('ExecStart="/Users/John" "Doe/prime" "__fleet-agent"', spaced)).toBe(false);
+    const plist = "<plist><dict><key>ProgramArguments</key><array><string>" + spaced + "</string><string>__fleet-agent</string></array></dict></plist>";
+    expect(programNamed(plist, spaced)).toBe(true);
+    expect(programNamed(plist, real)).toBe(false);
+    expect(programNamed("[Service]\nRestart=always", real)).toBeUndefined();
   });
 
   test("a service whose manager cannot be reached from here is not restarted, and no second agent is started beside it", async () => {
@@ -849,23 +884,6 @@ describe("switching the replica mode of a running agent", () => {
         stopWaitMs: 300,
       }),
     ).rejects.toThrow(/did not come back/);
-  });
-
-  test("on Windows an agent is left running: it can only be stopped in the middle of its round", async () => {
-    const root = scratch();
-    const configPath = join(root, "config.json");
-    const mine = await fakeAgent();
-    running(configPath, mine.pid, "lazy");
-    let spawned = 0;
-    const result = await restartAgent(
-      configPath,
-      { installed: () => false, pid: () => undefined, restart: () => false, spawnAgent: () => void spawned++ },
-      { platform: "win32" },
-    );
-    expect(result.restarted).toBe(false);
-    expect(!result.restarted && result.reason).toMatch(/Windows.*middle of its round/);
-    expect(spawned).toBe(0);
-    expect(() => process.kill(mine.pid, 0)).not.toThrow();
   });
 
   test("a program that was replaced while it ran is found where it was, not under the name Linux gives it", () => {

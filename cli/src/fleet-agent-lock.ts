@@ -75,6 +75,12 @@ export function probeFor(platform: string, proc: ProcessProbe = procProbe, ps: P
 
 const defaultProbe: ProcessProbe = probeFor(process.platform);
 
+/** The command line of a process, as the process list gives it; undefined where that is not known (Windows). */
+export function commandOf(pid: number, probe: ProcessProbe = defaultProbe): string | undefined {
+  const answer = probe(pid);
+  return answer && answer.status === 0 && answer.stdout.trim() !== "" ? answer.stdout.trim() : undefined;
+}
+
 /**
  * Whether this pid is a fleet agent. A pid in a lock that survived a reboot may belong to
  * any process now, and a lock that is never let go of would keep the agent from starting

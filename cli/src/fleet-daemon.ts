@@ -28,7 +28,8 @@ import { selfCommand } from "./code-mcp-host.ts";
 import { loadConfig, type SpaceEntry } from "./config.ts";
 import { CliError } from "./errors.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
-import { acquireAgentLock, isFleetAgentProcess } from "./fleet-agent-lock.ts";
+import { commandOf, isFleetAgentProcess } from "./fleet-agent-lock.ts";
+import { acquireStarting, claimSuccessor, clearSuccessor, readSuccessor, registerSuccessor, requestStop, stopSuccessor, watchForStop } from "./fleet-agent-handover.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
 import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
 import { keyIdOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
@@ -47,8 +48,8 @@ import {
   type PlaceAnswer,
   type ReplicaMode,
 } from "./fleet-replica.ts";
-import { fleetAgentServiceConfig, fleetAgentServiceRuns, fleetAgentServiceStatus, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
-import { runsProgram } from "./fleet-paths.ts";
+import { fleetAgentServiceConfig, fleetAgentServiceRuns, fleetAgentServiceStatus, startFleetAgentTask, sameConfig, installFleetAgentService, restartFleetAgentService, stopFleetAgentService, uninstallFleetAgentService } from "./fleet-service.ts";
+import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { NestedRepoCache, settle, snapshot } from "./fleet-sync.ts";
 import { fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
@@ -363,6 +364,12 @@ export interface AgentServiceHooks {
   restart(gentle?: boolean): boolean;
   /** Whether the service runs this program (undefined: its definition cannot say). Replaced in tests. */
   runs?(target: string): boolean | undefined;
+  /**
+   * Windows: whether a Scheduled Task is registered for this configuration's agent (`installed()` is false there: the
+   * agent is not restarted through a manager that can be asked to stop it), and a way to start it now.
+   */
+  task?(): boolean;
+  startTask?(): boolean;
   /** Ask the service manager to stop it (it stays installed); false when it would not. */
   stop?(): boolean;
   /**
@@ -390,6 +397,8 @@ export function agentServiceFor(
   platform: string = process.platform,
   /** Whether the service's definition runs a program (replaced in tests). */
   runs: (target: string) => boolean | undefined = fleetAgentServiceRuns,
+  /** Start the Scheduled Task (Windows; replaced in tests). */
+  startTask: () => boolean = startFleetAgentTask,
 ): AgentServiceHooks {
   // The manager is asked once for what the hooks below want to know together (is it installed, which
   // pid, can it be reached): each is a process spawned to the manager. What it said is good for a moment.
@@ -439,6 +448,19 @@ export function agentServiceFor(
       asked = undefined; // whatever it said before is not what it says after
       return restart(gentle);
     },
+    task: () => {
+      if (platform !== "win32") return false;
+      try {
+        // Bound to this configuration (a task that runs another's is not this one's).
+        return status().installed;
+      } catch {
+        return false;
+      }
+    },
+    startTask: () => {
+      asked = undefined;
+      return platform === "win32" && startTask();
+    },
     runs: (target) => {
       if (platform !== "darwin" && platform !== "linux") return undefined;
       try {
@@ -469,6 +491,9 @@ export function managerHolds(status: { installed: boolean; running?: boolean; de
 
 // How long what the service manager said stays true for one `ensureFleetAgent`.
 const STATUS_FRESH_MS = 2_000;
+
+/** How often a running agent looks for a request to stop in its directory. */
+const STOP_WATCH_MS = 1_000;
 
 /** How long a running agent is given to stop when it has to be replaced (it may be finishing a round). */
 const STOP_WAIT_MS = 15_000;
@@ -579,8 +604,8 @@ function runningAgent(configPath: string): FleetAgentState | undefined {
 }
 
 /** Ask the agent to stop and wait for it to be gone; never leave it to be started beside. */
-async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: number): Promise<void> {
-  stopFleetAgent(configPath);
+async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: number, platform: string = process.platform): Promise<void> {
+  await stopAgentProcess(configPath, state, waitMs, platform);
   const gone = Date.now() + waitMs;
   while (pidAlive(state.pid) && Date.now() < gone) await Bun.sleep(50);
   if (pidAlive(state.pid)) {
@@ -589,6 +614,32 @@ async function stopAndWait(configPath: string, state: FleetAgentState, waitMs: n
       "it may be finishing a round: try again in a moment",
     );
   }
+}
+
+/**
+ * Stop the agent process, and any successor that waits for its lock. Where a signal stops a process at the end of its
+ * round (everywhere but Windows) that is what is sent. On Windows a signal is TerminateProcess, which ends it in the
+ * middle of its round: the agent is asked in a file that it looks at while it runs, given `waitMs` to finish and leave,
+ * and ended only if it does not.
+ */
+async function stopAgentProcess(configPath: string, state: FleetAgentState, waitMs: number, platform: string = process.platform): Promise<boolean> {
+  if (platform === "win32") {
+    const was = isFleetAgentProcess(state.pid, fleetAgentDir(configPath));
+    requestStop(fleetAgentDir(configPath));
+    const gone = Date.now() + waitMs;
+    while (pidAlive(state.pid) && Date.now() < gone) await Bun.sleep(50);
+    // One that left in time is stopped; one that did not is ended now.
+    return stopFleetAgent(configPath) || was;
+  }
+  return stopFleetAgent(configPath);
+}
+
+/** Stop the successor of an agent (see `fleet-agent-handover.ts`) that is waiting for the lock. True when there was one. */
+function stopWaitingSuccessor(configPath: string): boolean {
+  const dir = fleetAgentDir(configPath);
+  if (!readSuccessor(dir)) return false;
+  requestStop(dir);
+  return stopSuccessor(dir) !== undefined;
 }
 
 /** Start a detached agent with this environment. */
@@ -616,6 +667,11 @@ export interface AgentRestartOptions {
   target?: string;
   /** Replaced in tests. */
   platform?: string;
+  /**
+   * The command line of the running agent, when it is known (replaced in tests; the process list says). Without it
+   * (Windows has no way to ask) the program of this process is taken for the agent's: what an update replaces.
+   */
+  agentCommand?: string;
   /** What this process would start the agent with (replaced in tests). */
   command?: string[];
   /** How long the new agent waits for the old one to let go of the lock. */
@@ -626,7 +682,9 @@ export interface AgentRestartOptions {
 
 /** How long a service manager is given to bring the agent back (it stops the old one first: up to its TimeoutStopSec). */
 const SERVICE_RESTART_WAIT_MS = 120_000;
-/** How long a restarted agent waits for the one it replaces to finish its round and let go. */
+/** How long an agent on Windows is given to finish its round when it is asked to stop, before it is ended. */
+const WINDOWS_GRACE_MS = 60_000;
+/** How long a restarted agent waits for the one it replaces to finish its round and let go (and then, if it is still there, waits on). */
 const REPLACE_LOCK_WAIT_MS = 15 * 60_000;
 const START_CHECK_MS = 1_500;
 
@@ -641,11 +699,14 @@ const START_CHECK_MS = 1_500;
  * - A service's agent is restarted by its manager, which stops it the way it stops it for good (and gives it
  *   its stop timeout) and starts it again. If the manager cannot be reached from here, nothing is done: a
  *   second agent started here would run beside the service's, which its manager would restart on the lock.
+ * - On Windows a registered Scheduled Task is the manager: the agent is asked to stop in a file it looks at between
+ *   rounds (a signal there would end it in the middle of one), the task is started again when it has left, and the
+ *   agent is ended only if it is still at it after a minute.
  * - One that nobody supervises is replaced: the new build is started first and waits for the agent lock, and
- *   it is only then that the old agent is asked to stop. The old one finishes its round, lets go of the lock,
- *   and the new one takes it, with whatever time that takes. A new build that does not start leaves the old
- *   agent as it was.
- * - On Windows an agent can only be stopped in the middle of its round, so it is left running.
+ *   it is only then that the old agent is asked to stop (on Windows, in that file). The old one finishes its round,
+ *   lets go of the lock, and the new one takes it, with whatever time that takes (it waits for as long as the old
+ *   agent lives). The new build is written down (`fleet-agent/successor`) so that a stop of the agent reaches it and a
+ *   second update does not start another. A new build that does not start leaves the old agent as it was.
  */
 export async function restartFleetAgentAfterUpdate(
   configPath: string,
@@ -654,12 +715,8 @@ export async function restartFleetAgentAfterUpdate(
 ): Promise<AgentRestart> {
   const existing = runningAgent(configPath);
   if (!existing) return { restarted: false };
-  if ((opts.platform ?? process.platform) === "win32") {
-    return {
-      restarted: false,
-      reason: "on Windows an agent can only be stopped in the middle of its round, so it was left running; stop it and start it again when it is idle ('prime fleets agent stop', then 'prime fleets agent start')",
-    };
-  }
+  const platform = opts.platform ?? process.platform;
+  const dir = fleetAgentDir(configPath);
   const notIt = (): AgentRestart => ({
     restarted: false,
     reason: "the update went to " + opts.target + ", which is not the program of the fleet agent, so it was left running",
@@ -667,6 +724,8 @@ export async function restartFleetAgentAfterUpdate(
   const waitMs = service.stopWaitMs;
   if (service.installed() && service.pid() === existing.pid) {
     if (opts.target !== undefined && service.runs?.(opts.target) === false) return notIt();
+    // One that an earlier update left waiting for the lock would take it from the service's agent.
+    stopWaitingSuccessor(configPath);
     if (!service.restart(true)) throw new CliError("the service manager would not restart the fleet agent (pid " + existing.pid + ")", "restart it by hand, or run 'prime fleets agent install' to set the service up again");
     const deadline = Date.now() + (waitMs ?? SERVICE_RESTART_WAIT_MS);
     for (;;) {
@@ -680,20 +739,66 @@ export async function restartFleetAgentAfterUpdate(
       await Bun.sleep(100);
     }
   }
-  const command = opts.command ?? selfCommand();
-  if (opts.target !== undefined && !runsProgram(command, opts.target)) return notIt();
+  // Which program the agent runs: its own command line says, where the process list can be asked.
+  const agentCommand = opts.agentCommand ?? commandOf(existing.pid);
+  if (opts.target !== undefined) {
+    const runs = agentCommand !== undefined ? commandRuns(agentCommand, opts.target) : runsProgram(opts.command ?? selfCommand(), opts.target);
+    if (!runs) return notIt();
+  }
   if (service.unreachable?.()) {
     throw new CliError(
       "the fleet agent (pid " + existing.pid + ") runs as a login service whose manager cannot be reached from here, so it was not restarted",
       "restart it from a login session ('prime fleets agent start'), or run 'prime update' there",
     );
   }
-  // The new build first, and the old agent only once the new one is up and waiting for its lock.
-  const env = { ...buildAgentEnv(configPath, {}, process.env, false), PRIME_FLEET_LOCK_WAIT_MS: String(opts.lockWaitMs ?? REPLACE_LOCK_WAIT_MS) };
-  const child = startAgentProcess(configPath, env, service);
+  const graceMs = waitMs ?? (platform === "win32" ? WINDOWS_GRACE_MS : STOP_WAIT_MS);
+  if (platform === "win32" && service.task?.()) {
+    // The Scheduled Task is what runs it: ask the agent to stop in the way it can finish its round for, start the task
+    // again when it has left.
+    stopWaitingSuccessor(configPath);
+    requestStop(dir, Date.now(), existing.pid);
+    await waitGone(existing.pid, graceMs);
+    if (pidAlive(existing.pid)) {
+      try {
+        process.kill(existing.pid, "SIGTERM");
+      } catch {}
+      await waitGone(existing.pid, 5_000);
+    }
+    if (!service.startTask?.()) {
+      throw new CliError(
+        "the fleet agent stopped, and Task Scheduler would not start its task again",
+        "start it with 'prime fleets agent start' (or 'prime fleets agent install' to register the task again)",
+      );
+    }
+    const deadline = Date.now() + (waitMs ?? SERVICE_RESTART_WAIT_MS);
+    for (;;) {
+      const state = runningAgent(configPath);
+      if (state && state.pid !== existing.pid) return { restarted: true, via: "service", pid: state.pid };
+      if (Date.now() > deadline) throw new CliError("the fleet agent did not come back after its task was started", "start it with 'prime fleets agent start'");
+      await Bun.sleep(100);
+    }
+  }
+  // The new build first, and the old agent only once the new one is up and waiting for its lock. Of two updates at the
+  // same moment, one starts it.
+  const claim = claimSuccessor(dir, existing.pid);
+  if (!claim.claimed) return { restarted: true, via: "direct", ...(claim.pid > 0 ? { pid: claim.pid } : {}), pending: true };
+  const env = {
+    ...buildAgentEnv(configPath, {}, process.env, false),
+    PRIME_FLEET_LOCK_WAIT_MS: String(opts.lockWaitMs ?? REPLACE_LOCK_WAIT_MS),
+    PRIME_FLEET_REPLACES: String(existing.pid),
+  };
+  let child: StartedAgent | undefined;
+  try {
+    child = startAgentProcess(configPath, env, service);
+  } catch (err) {
+    clearSuccessor(dir);
+    throw err;
+  }
+  if (child) registerSuccessor(dir, child.pid);
   const checkUntil = Date.now() + (opts.startCheckMs ?? (waitMs === undefined ? START_CHECK_MS : Math.min(START_CHECK_MS, waitMs)));
   while (Date.now() < checkUntil) {
     if (child && child.exitCode !== null) {
+      clearSuccessor(dir);
       throw new CliError(
         "the new build of the fleet agent did not start (exit " + child.exitCode + "); the running agent was left as it was",
         "check that 'prime --version' runs, then run 'prime fleets agent start'",
@@ -701,13 +806,17 @@ export async function restartFleetAgentAfterUpdate(
     }
     await Bun.sleep(50);
   }
-  try {
-    process.kill(existing.pid, "SIGTERM");
-  } catch {
-    // Gone already.
+  if (platform === "win32") requestStop(dir, Date.now(), existing.pid);
+  else {
+    try {
+      process.kill(existing.pid, "SIGTERM");
+    } catch {
+      // Gone already.
+    }
   }
   // Its state is left for it to remove when it is done: until then it is what is running.
-  const deadline = Date.now() + (waitMs ?? STOP_WAIT_MS);
+  let deadline = Date.now() + graceMs;
+  let ended = false;
   for (;;) {
     const state = runningAgent(configPath);
     if (state && state.pid !== existing.pid) return { restarted: true, via: "direct", pid: state.pid };
@@ -719,12 +828,26 @@ export async function restartFleetAgentAfterUpdate(
       );
     }
     if (Date.now() > deadline) {
+      // On Windows a round that has not finished in the time it is given is ended; the successor takes the lock then.
+      if (platform === "win32" && old && !ended) {
+        ended = true;
+        try {
+          process.kill(existing.pid, "SIGTERM");
+        } catch {}
+        deadline = Date.now() + 5_000;
+        continue;
+      }
       // The old agent is finishing its round; the new one waits for the lock and starts when it is let go.
       if (old || (child && child.exitCode === null)) return { restarted: true, via: "direct", pid: child?.pid, pending: true };
       throw new CliError("no fleet agent is running after the update", "start it with 'prime fleets agent start'");
     }
     await Bun.sleep(100);
   }
+}
+
+async function waitGone(pid: number, ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (pidAlive(pid) && Date.now() < until) await Bun.sleep(50);
 }
 
 /**
@@ -758,6 +881,8 @@ export async function installFleetAgent(
   // The service's own agent is replaced by the manager (bootout / restart stop it themselves);
   // any other is stopped here, so the one the service starts is the only one.
   const own = running !== undefined && (deps.servicePid ?? (() => fleetAgentServiceStatus(configPath).pid))() === running.pid;
+  // An update's successor that still waits for the lock would take it from the service's agent.
+  stopWaitingSuccessor(configPath);
   if (running && !own) await stopAndWait(configPath, running, deps.stopWaitMs ?? STOP_WAIT_MS);
   return deps.install();
 }
@@ -794,14 +919,17 @@ export async function stopFleetAgentManaged(
   configPath: string,
   service: AgentServiceHooks = agentServiceFor(configPath),
   waitMs: number = service.stopWaitMs ?? STOP_WAIT_MS,
+  platform: string = process.platform,
 ): Promise<{ stopped: boolean; via: "service" | "process"; restarts: boolean; serviceStopped?: boolean }> {
+  // First: a successor that waits for the lock would take it the moment the agent lets go of it.
+  const hadSuccessor = stopWaitingSuccessor(configPath);
   const existing = runningAgent(configPath);
   const installed = service.installed();
   const held = installed && (service.loaded?.() ?? true);
   if (existing === undefined) {
     // Nothing runs, but a service the manager holds is about to start one (or is failing to): stop it too.
-    if (installed && service.loaded?.() === true && service.stop?.()) return { stopped: false, via: "service", restarts: false, serviceStopped: true };
-    return { stopped: false, via: "process", restarts: false };
+    if (installed && service.loaded?.() === true && service.stop?.()) return { stopped: hadSuccessor, via: "service", restarts: false, serviceStopped: true };
+    return { stopped: hadSuccessor, via: "process", restarts: false };
   }
   if (installed && service.pid() === existing.pid && service.stop?.()) {
     const gone = Date.now() + waitMs;
@@ -814,24 +942,31 @@ export async function stopFleetAgentManaged(
   }
   // Not the service's agent, or its manager would not stop it: the process is stopped here. A service the
   // manager holds is stopped too (after the process, which it is not running), or it starts another.
-  const stopped = stopFleetAgent(configPath);
+  const stopped = await stopAgentProcess(configPath, existing, waitMs, platform);
   if (installed && service.pid() !== existing.pid && held && service.stop?.()) return { stopped, via: "process", restarts: false, serviceStopped: true };
   return { stopped, via: "process", restarts: held };
 }
 
-/** Stop the agent. Returns true when one was running. */
+/**
+ * Stop the agent. Returns true when one was running (or was about to: a successor that waits for the lock).
+ * The request to stop is written first, so that a successor that is taking the lock at this moment sees it.
+ */
 export function stopFleetAgent(configPath: string): boolean {
+  const dir = fleetAgentDir(configPath);
   const state = readFleetAgentState(configPath);
-  if (!state) return false;
+  if (!state && !readSuccessor(dir)) return false;
+  requestStop(dir);
+  const successor = stopSuccessor(dir) !== undefined;
+  if (!state) return successor;
   // A pid left in the state by an agent that is gone may belong to anything now.
-  const agent = isFleetAgentProcess(state.pid, fleetAgentDir(configPath));
+  const agent = isFleetAgentProcess(state.pid, dir);
   if (agent) {
     try {
       process.kill(state.pid, "SIGTERM");
     } catch {}
   }
   rmSync(fleetAgentStatePath(configPath), { force: true });
-  return agent;
+  return agent || successor;
 }
 
 /** Whether the agent is running, and what it is doing. */
@@ -1614,32 +1749,45 @@ function lockWaitFromEnv(): number {
  * others.
  */
 export async function runFleetAgent(configPath: string, options: FleetAgentOptions = {}): Promise<void> {
+  // When this process was started: a stop that was asked for after that is for this agent too.
+  const startedAtMs = Date.now() - process.uptime() * 1000;
+  const replaces = Number(process.env.PRIME_FLEET_REPLACES);
   // Two agents for the same spaces would both act as the primary. A restart finds the old
-  // one still finishing its round, so it is given a moment to let go.
-  const lock = await acquireAgentLock(fleetAgentDir(configPath), {
+  // one still finishing its round, so it is given a moment to let go (and one that was started to replace it
+  // waits for as long as that agent is at it).
+  const lock = await acquireStarting(fleetAgentDir(configPath), {
     waitMs: options.lockWaitMs ?? lockWaitFromEnv(),
-    // Another agent has the lock: two took a dead one at the same moment. This one stops, and its
-    // manager (or the next command) starts it again behind the lock. It finishes its current round
-    // first, so the two overlap for up to one touch interval plus that round.
-    onLost: () => {
-      process.stderr.write("the fleet agent's lock was taken by another agent; this one stops\n");
-      process.exitCode = 1;
-      process.kill(process.pid, "SIGTERM");
+    startedAt: startedAtMs,
+    ...(Number.isInteger(replaces) && replaces > 0 ? { replaces } : {}),
+    onWait: (holder) => process.stderr.write("the fleet agent (pid " + holder + ") is still finishing its round; this one keeps waiting for it\n"),
+    lock: {
+      // Another agent has the lock: two took a dead one at the same moment. This one stops, and its
+      // manager (or the next command) starts it again behind the lock. It finishes its current round
+      // first, so the two overlap for up to one touch interval plus that round.
+      onLost: () => {
+        process.stderr.write("the fleet agent's lock was taken by another agent; this one stops\n");
+        process.exitCode = 1;
+        process.kill(process.pid, "SIGTERM");
+      },
     },
   });
   if (!lock.held) {
+    if ("stopped" in lock) {
+      process.stderr.write("the fleet agent was asked to stop while this one was starting; it did not start\n");
+      return;
+    }
     process.stderr.write("another fleet agent is already running" + (lock.holder > 0 ? " (pid " + lock.holder + ")" : "") + "; this one exits\n");
     process.exitCode = 1;
     return;
   }
   try {
-    await runFleetAgentLocked(configPath, options);
+    await runFleetAgentLocked(configPath, options, startedAtMs);
   } finally {
     lock.release();
   }
 }
 
-async function runFleetAgentLocked(configPath: string, options: FleetAgentOptions): Promise<void> {
+async function runFleetAgentLocked(configPath: string, options: FleetAgentOptions, startedAtMs: number): Promise<void> {
   // What a person set (and the service was never told) is read from where it was written down.
   applyAgentSettings(configPath);
   const env = process.env;
@@ -1658,6 +1806,9 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
+  // A stop that is asked for in a file (where a signal would end the agent in the middle of its round): the loops
+  // finish what they are doing and the agent leaves, as it does for SIGTERM.
+  const endStopWatch = watchForStop(dir, startedAtMs, stop, STOP_WATCH_MS);
 
   // The runtime is found once: it is used to tell whether a space is
   // running, and looking it up on every round would be slow.
@@ -1900,6 +2051,7 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
   }
   for (const task of running.values()) await task.catch(() => {});
 
+  endStopWatch();
   for (const watcher of watchers.values()) watcher.stop();
   // Only this agent's own state: one that lost its lock to another is leaving, and the state
   // that is there is the other's.

@@ -48,3 +48,20 @@ export function samePath(a: string, b: string): boolean {
 export function runsProgram(words: string[], target: string): boolean {
   return words.some((word) => isAbsolute(word) && samePath(word, target));
 }
+
+/**
+ * Whether a command line, as the process list prints it (one string: the words are not told apart, so a path with a
+ * space in it is one only by being there), runs the program at `target`: the file is named in it, as it is spelled or
+ * as the file system resolves it, and is not just the start of a longer name.
+ */
+export function commandRuns(command: string, target: string): boolean {
+  const names = new Set([target, resolve(target), canonicalPath(target)]);
+  for (const name of names) {
+    for (let from = command.indexOf(name); from !== -1; from = command.indexOf(name, from + 1)) {
+      const before = from === 0 ? " " : command[from - 1]!;
+      const after = from + name.length >= command.length ? " " : command[from + name.length]!;
+      if (/\s/.test(before) && /\s/.test(after)) return true;
+    }
+  }
+  return false;
+}
