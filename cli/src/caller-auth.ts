@@ -37,8 +37,8 @@ const NONCE_LIMIT = 10_000;
 const LOG_LIMIT_BYTES = 1024 * 1024;
 
 export const REPLY_SIG_HEADER = "x-prime-reply-sig";
-export const REPLY_SIG_VERSION = "v1";
-const REPLY_PREFIX = "prime-reply-v1\n";
+export const REPLY_SIG_VERSION = "v2";
+const REPLY_PREFIX = "prime-reply-v2\n";
 
 /** Why a call was not accepted as signed. */
 /**
@@ -68,14 +68,20 @@ export type CallerFailure =
 /** What a device says in its register frame when it takes a signed call as `raw` alone, and answers with `responseText` alone. */
 export const CALL_RAW_ONLY = "call-raw-only";
 
-/** The request in a body, or undefined when it is not one that can be read. */
-function parseLoosely(raw: unknown): unknown {
+/** The request in a body (a leading byte-order mark is not part of the JSON), or undefined when it cannot be read. */
+function parseBody(raw: unknown, parse: (text: string) => unknown): unknown {
   if (typeof raw !== "string") return undefined;
   try {
-    return JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
+    return parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
   } catch {
     return undefined;
   }
+}
+
+/** What a reply is signed over: the call it answers (its nonce and the exact body) and the text of the reply. */
+export interface ReplyBinding {
+  nonce: string;
+  raw: string;
 }
 
 export interface TunnelFrame {
@@ -89,11 +95,17 @@ export type Admission =
       action: "run";
       /** What to hand to the JSON-RPC handler. */
       request: unknown;
-      /** Set when a trusted key signed the call: the nonce the reply is signed with. */
-      nonce?: string;
+      /** Set when a trusted key signed the call. */
       keyId?: string;
+      /** Set when the reply is to be signed: what it is bound to. */
+      reply?: ReplyBinding;
     }
-  | { action: "refuse"; response: { jsonrpc: "2.0"; id: unknown; error: { code: number; message: string; data: { reason: CallerFailure } } } };
+  | {
+      action: "refuse";
+      response: { jsonrpc: "2.0"; id: unknown; error: { code: number; message: string; data: { reason: CallerFailure } } };
+      /** Set when the refusal may be signed (see admit). */
+      reply?: ReplyBinding;
+    };
 
 export interface CallerAuthOptions {
   mode: CallerAuthMode;
@@ -185,35 +197,51 @@ export class CallerAuth {
     return c.entries ? c.entries.length > 0 : true;
   }
 
-  /** Decide what to do with one tunnelled request. */
+  /**
+   * Decide what to do with one tunnelled request.
+   *
+   * A frame whose signature header parses and that carries the body (`raw`) gets a signed reply, whatever is
+   * decided: the reply signature binds this device's key to the call's nonce, the exact body and the text of the
+   * reply, so a caller that pinned the device can tell its answer, a refusal included, from one the gateway
+   * made up. Such a frame is run from `raw` (what the reply is bound to), in every mode.
+   * Two kinds of refusal are not signed, because a gateway could produce them after the call had run, and a
+   * signed "refused" would tell the caller that it did not: a replay (or a call older than the nonces that are
+   * kept) and a nonce that this device has already run.
+   */
   admit(frame: TunnelFrame): Admission {
-    if (this.mode === "off") return { action: "run", request: frame.request };
+    const parse = this.opts.parse ?? JSON.parse;
+    const sig = typeof frame.callerSig === "string" ? parseCallSig(frame.callerSig) : undefined;
+    const binding: ReplyBinding | undefined = sig && typeof frame.raw === "string" ? { nonce: sig.nonce, raw: frame.raw } : undefined;
+    // A frame of a device that asked for them (CALL_RAW_ONLY) has `raw` and no `request`.
+    const fromRaw = binding ? parseBody(frame.raw, parse) : undefined;
+    const request = fromRaw !== undefined ? fromRaw : Object.hasOwn(frame, "request") ? frame.request : parseBody(frame.raw, parse);
+
+    if (this.mode === "off") {
+      if (request === undefined) return this.unreadable(frame);
+      return { action: "run", request, ...(binding && fromRaw !== undefined ? { reply: binding } : {}) };
+    }
 
     let failure: CallerFailure | undefined;
     if (typeof frame.callerSig === "string") {
       const verdict = this.verify(frame);
       if (verdict.ok) {
         this.counts.signed++;
-        return { action: "run", request: verdict.request, nonce: verdict.nonce, keyId: verdict.keyId };
+        return { action: "run", request: verdict.request, keyId: verdict.keyId, reply: { nonce: verdict.nonce, raw: frame.raw as string } };
       }
       failure = verdict.failure;
     }
 
-    // A frame of a device that asked for them (CALL_RAW_ONLY) has `raw` and no `request`: what it says is read from `raw`.
-    const request = Object.hasOwn(frame, "request") ? frame.request : parseLoosely(frame.raw);
-    if (request === undefined) {
-      // Neither a request nor a body that can be read: there is nothing to run, whatever the mode.
-      this.record("bad-body", undefined, "refused", frame);
-      return { action: "refuse", response: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the request could not be read", data: { reason: "invalid" } } } };
-    }
-    if (!requiresSignature(request)) return { action: "run", request };
+    if (request === undefined) return this.unreadable(frame);
+    const bound = binding && fromRaw !== undefined ? binding : undefined;
+    if (!requiresSignature(request)) return { action: "run", request, ...(bound ? { reply: bound } : {}) };
 
     failure ??= "unsigned";
     if (failure === "unsigned") this.counts.unsigned++;
     else this.counts.invalid++;
     this.record(failure, request, this.mode === "enforce" ? "refused" : "ran", frame);
-    if (this.mode !== "enforce") return { action: "run", request };
+    if (this.mode !== "enforce") return { action: "run", request, ...(bound ? { reply: bound } : {}) };
     this.counts.refused++;
+    const signable = bound && sig && failure !== "replay" && failure !== "stale" && !this.seen.has(`${sig.keyId}.${sig.nonce}`);
     return {
       action: "refuse",
       response: {
@@ -221,7 +249,14 @@ export class CallerAuth {
         id: requestId(request),
         error: { code: CALLER_REFUSED_CODE, message: refusalMessage(failure), data: { reason: visibleReason(failure) } },
       },
+      ...(signable ? { reply: bound } : {}),
     };
+  }
+
+  /** Neither a request nor a body that can be read: there is nothing to run, whatever the mode. */
+  private unreadable(frame: TunnelFrame): Admission {
+    this.record("bad-body", undefined, "refused", frame);
+    return { action: "refuse", response: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the request could not be read", data: { reason: "invalid" } } } };
   }
 
   private verify(frame: TunnelFrame): { ok: true; request: unknown; nonce: string; keyId: string } | { ok: false; failure: CallerFailure } {
@@ -335,11 +370,10 @@ export class CallerAuth {
   }
 
   /** Sign a reply so the caller knows this device (and not the gateway) answered. undefined if the key cannot be had. */
-  replySig(nonce: string, responseText: string): string | undefined {
+  replySig(call: ReplyBinding, responseText: string): string | undefined {
     try {
       this.replyKey ??= loadOrCreateCallerKey(join(this.stateDir, "device-ed25519.pem"));
-      const digest = createHash("sha256").update(responseText).digest("hex");
-      const sig = cryptoSign(null, Buffer.from(`${REPLY_PREFIX}${nonce}\n${digest}`, "utf8"), this.replyKey.privateKey).toString("base64url");
+      const sig = cryptoSign(null, replyMessage(call.nonce, call.raw, responseText), this.replyKey.privateKey).toString("base64url");
       return `${REPLY_SIG_VERSION}.${this.replyKey.publicKey.toString("base64url")}.${sig}`;
     } catch (err) {
       if (!this.replyFailureSaid) {
@@ -351,20 +385,25 @@ export class CallerAuth {
   }
 }
 
+/** The bytes a reply signature covers: the call (nonce and exact body) and the text of the reply, each by its hash. */
+function replyMessage(nonce: string, requestBody: string, responseText: string): Buffer {
+  const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+  return Buffer.from(`${REPLY_PREFIX}${nonce}\n${hash(requestBody)}\n${hash(responseText)}`, "utf8");
+}
+
 /**
- * Check a reply signature header against the call's nonce and the response text received.
+ * Check a reply signature header against the call's nonce, the body that was sent and the response text received.
  * Returns the device's public key when the signature is good, undefined when it is malformed or wrong.
  * Whether that key is the one this device is known by is for the caller to decide (see device-pins.ts).
  */
-export function verifyReplySig(header: string, nonce: string, responseText: string): Buffer | undefined {
+export function verifyReplySig(header: string, nonce: string, requestBody: string, responseText: string): Buffer | undefined {
   const parts = header.trim().split(".");
   if (parts.length !== 3 || parts[0] !== REPLY_SIG_VERSION) return undefined;
   const pub = parsePublicKey(parts[1]!);
   const sig = Buffer.from(parts[2]!, "base64url");
   if (!pub || sig.length !== 64) return undefined;
-  const digest = createHash("sha256").update(responseText).digest("hex");
   try {
-    const ok = cryptoVerify(null, Buffer.from(`${REPLY_PREFIX}${nonce}\n${digest}`, "utf8"), publicKeyFromRaw(pub), sig);
+    const ok = cryptoVerify(null, replyMessage(nonce, requestBody, responseText), publicKeyFromRaw(pub), sig);
     return ok ? pub : undefined;
   } catch {
     return undefined;

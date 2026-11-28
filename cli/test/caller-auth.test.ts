@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CallerAuth, type CallerAuthMode, REPLY_SIG_HEADER, parseCallerAuthMode, verifyReplySig } from "../src/caller-auth.ts";
-import { CALL_SIG_HEADER, addCaller, loadOrCreateCallerKey, parseCallSig, signCall } from "../src/caller-key.ts";
+import { CALL_SIG_HEADER, addCaller, removeCaller, loadOrCreateCallerKey, parseCallSig, signCall } from "../src/caller-key.ts";
 import { GatewayClient } from "../src/client.ts";
 import { CallSigner } from "../src/caller-key.ts";
 import { optionsFromConfig, parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
@@ -110,7 +110,7 @@ describe("CallerAuth: a signed call", () => {
     if (a.action === "run") {
       expect(a.request).toEqual(JSON.parse(BASH));
       expect(a.keyId).toBe(t.key.keyId);
-      expect(a.nonce).toBeDefined();
+      expect(a.reply?.nonce).toBeDefined();
     }
     expect(t.auth.counts.signed).toBe(1);
   });
@@ -120,7 +120,9 @@ describe("CallerAuth: a signed call", () => {
     addCaller(t.callers, { pub: t.key.publicKey });
     const ping = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
     const a = t.auth.admit({ request: JSON.parse(BASH), raw: ping + " ", callerSig: t.sign(ping) });
-    expect(refusedWith(a)).toBe("invalid");
+    // What the frame says in `request` is not what runs: the body is (a ping needs no signature), never the gateway's bash.
+    expect(a.action).toBe("run");
+    expect((a as { request: { method: string } }).request.method).toBe("ping");
   });
 
   test("a signed body that starts with a byte-order mark runs: the mark is hashed, and not parsed", () => {
@@ -286,6 +288,83 @@ describe("CallerAuth: a signed call", () => {
   });
 });
 
+describe("CallerAuth: which replies are signed", () => {
+  /** The reply binding of an admission, or undefined. */
+  const bound = (a: ReturnType<CallerAuth["admit"]>) => a.reply;
+
+  test("a refusal of a call that parses is signed (the caller sees the real refusal and its hint), bound to the exact body", () => {
+    const t = setup("enforce"); // nobody is trusted
+    const sig = t.sign(BASH);
+    const a = t.auth.admit(t.frame(BASH, sig));
+    expect(refusedWith(a)).toBe("invalid");
+    expect(bound(a)).toEqual({ nonce: parseCallSig(sig)!.nonce, raw: BASH });
+    // tool-not-allowed and an unreadable callers file are refusals of calls that did not run, and are signed too
+    addCaller(t.callers, { pub: t.key.publicKey, tools: ["read"] });
+    expect(bound(t.auth.admit(t.frame(BASH, t.sign(BASH))))).toBeDefined();
+    writeFileSync(t.callers, "{ broken");
+    expect(bound(t.auth.admit(t.frame(BASH, t.sign(BASH))))).toBeDefined();
+  });
+
+  test("a call that is refused with nothing to bind a reply to (no signature, no body) is not signed", () => {
+    const t = setup("enforce");
+    expect(bound(t.auth.admit(t.frame(BASH)))).toBeUndefined();
+    expect(bound(t.auth.admit({ request: JSON.parse(BASH), callerSig: t.sign(BASH) }))).toBeUndefined();
+    expect(bound(t.auth.admit(t.frame(BASH, "v1.nope")))).toBeUndefined();
+  });
+
+  test("a replay, a call that is too old, and a nonce that already ran are refused unsigned: a gateway could make them after the call ran", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const sig = t.sign(BASH);
+    expect(t.auth.admit(t.frame(BASH, sig)).action).toBe("run");
+    const replay = t.auth.admit(t.frame(BASH, sig));
+    expect(refusedWith(replay)).toBe("replay");
+    expect(bound(replay)).toBeUndefined();
+    // the same nonce on a body that is not the one that ran (a forged frame): "invalid", and still not signed
+    const forged = t.auth.admit(t.frame(BASH.replace("id", "ls"), sig));
+    expect(refusedWith(forged)).toBe("invalid");
+    expect(bound(forged)).toBeUndefined();
+    const old = t.auth.admit(t.frame(BASH, t.sign(BASH, "device:laptop", { now: Date.now() - 6 * 60_000 })));
+    expect(refusedWith(old)).toBe("stale");
+    expect(bound(old)).toBeUndefined();
+  });
+
+  test("off: a signed call runs from its body and its reply is signed; warn: the same for a call the device does not trust", () => {
+    for (const mode of ["off", "warn"] as const) {
+      const t = setup(mode);
+      const evil = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: { command: "rm -rf /" } } };
+      const sig = t.sign(BASH);
+      const a = t.auth.admit({ request: evil, raw: BASH, callerSig: sig });
+      expect(a.action).toBe("run");
+      // what runs is what the reply is bound to, never what the gateway wrote next to it
+      expect((a as { request: unknown }).request).toEqual(JSON.parse(BASH));
+      expect(bound(a)).toEqual({ nonce: parseCallSig(sig)!.nonce, raw: BASH });
+    }
+    // a call with no signature has nothing to answer to
+    expect(bound(setup("off").auth.admit({ request: JSON.parse(BASH) }))).toBeUndefined();
+  });
+
+  test("a body that cannot be read within the parser's limits is not run, whatever the mode, and says so", () => {
+    for (const mode of ["off", "warn", "enforce"] as const) {
+      const dir = scratch();
+      const auth = new CallerAuth({
+        mode,
+        deviceId: "laptop",
+        callersFile: join(dir, "c.json"),
+        parse: (text) => {
+          if (text.includes("DEEP")) throw new Error("too deep");
+          return JSON.parse(text);
+        },
+      });
+      const a = auth.admit({ raw: '{"jsonrpc":"2.0","id":1,"method":"tools/call","x":"DEEP"}' });
+      expect(a.action).toBe("refuse");
+      expect((a as { response: { error: { code: number } } }).response.error.code).toBe(-32700);
+      // a frame with `request` that is unsigned is not affected by the parser of `raw`
+      expect(auth.admit({ request: JSON.parse(BASH), raw: '{"x":"DEEP"}' }).action).toBe(mode === "enforce" ? "refuse" : "run");
+    }
+  });
+});
+
 describe("CallerAuth: what reaches the logs", () => {
   test("text the gateway wrote is quoted and bounded in the service log, so it cannot write lines of its own", () => {
     const t = setup("warn");
@@ -308,8 +387,8 @@ describe("CallerAuth: what reaches the logs", () => {
     expect(auth.admit({ request: JSON.parse(BASH) }).action).toBe("run");
     await auth.flush();
     expect(logs.filter((x) => x.includes("cannot write the log"))).toHaveLength(1);
-    expect(auth.replySig(NONCE, "{}")).toBeUndefined();
-    expect(auth.replySig(NONCE, "{}")).toBeUndefined();
+    expect(auth.replySig({ nonce: NONCE, raw: BASH }, "{}")).toBeUndefined();
+    expect(auth.replySig({ nonce: NONCE, raw: BASH }, "{}")).toBeUndefined();
     expect(logs.filter((x) => x.includes("replies are not signed"))).toHaveLength(1);
   });
 });
@@ -318,15 +397,17 @@ describe("CallerAuth: the reply", () => {
   test("is signed over the call's nonce and the exact response, with the device's own key", () => {
     const t = setup("enforce");
     const resp = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "uid=1" }] } });
-    const header = t.auth.replySig(NONCE, resp)!;
-    expect(header.startsWith("v1.")).toBe(true);
-    const pub = verifyReplySig(header, NONCE, resp);
+    const header = t.auth.replySig({ nonce: NONCE, raw: BASH }, resp)!;
+    expect(header.startsWith("v2.")).toBe(true);
+    const pub = verifyReplySig(header, NONCE, BASH, resp);
     expect(pub).toBeDefined();
     expect(existsSync(join(t.dir, "caller-auth", "device-ed25519.pem"))).toBe(true);
-    expect(verifyReplySig(header, NONCE, resp + " ")).toBeUndefined();
-    expect(verifyReplySig(header, "other", resp)).toBeUndefined();
+    expect(verifyReplySig(header, NONCE, BASH, resp + " ")).toBeUndefined();
+    expect(verifyReplySig(header, "other", BASH, resp)).toBeUndefined();
+    // It is bound to the body of the call it answers: the same reply to another body does not verify.
+    expect(verifyReplySig(header, NONCE, BASH.replace("bash", "ls"), resp)).toBeUndefined();
     // The same device key signs every reply.
-    expect(verifyReplySig(t.auth.replySig("x", resp)!, "x", resp)?.equals(pub!)).toBe(true);
+    expect(verifyReplySig(t.auth.replySig({ nonce: "x", raw: BASH }, resp)!, "x", BASH, resp)?.equals(pub!)).toBe(true);
   });
 });
 
@@ -345,7 +426,7 @@ describe("the CLI checks a device's reply signature", () => {
       const nonce = parseCallSig(hdrs["x-prime-call-sig"])!.nonce;
       const text = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ok" }] } });
       if (mode === "strip") return new Response(text.replace("ok", "forged by the gateway"));
-      return new Response(mode === "tamper" ? text.replace("ok", "no") : text, { headers: { [REPLY_SIG_HEADER]: auth.replySig(nonce, text)! } });
+      return new Response(mode === "tamper" ? text.replace("ok", "no") : text, { headers: { [REPLY_SIG_HEADER]: auth.replySig({ nonce, raw: init?.body as string }, text)! } });
     }) as unknown as typeof fetch;
   }
   const newAuth = () => new CallerAuth({ mode: "warn", deviceId: "laptop", callersFile: join(scratch(), "c.json") });
@@ -382,6 +463,88 @@ describe("the CLI checks a device's reply signature", () => {
     // The device itself is still fine.
     deviceStub(device);
     await call(client);
+  });
+
+  /** A device that does what code-mcp does with a call (admit, answer, sign the reply when it is bound), through a gateway that passes it on as it is. */
+  function liveDevice(auth: CallerAuth) {
+    globalThis.fetch = (async (_u: string | URL, init?: RequestInit) => {
+      const body = init?.body as string;
+      const sig = (init?.headers as Record<string, string>)["x-prime-call-sig"];
+      const admission = auth.admit({ request: JSON.parse(body), raw: body, ...(sig ? { callerSig: sig } : {}) });
+      const response =
+        admission.action === "refuse"
+          ? admission.response
+          : { jsonrpc: "2.0", id: (admission.request as { id: number }).id, result: { content: [{ type: "text", text: "ok" }] } };
+      const text = JSON.stringify(response);
+      const header = admission.reply ? auth.replySig(admission.reply, text) : undefined;
+      return new Response(text, { headers: header ? { [REPLY_SIG_HEADER]: header } : {} });
+    }) as unknown as typeof fetch;
+  }
+
+  /** A device in `mode` that trusts the key at `keyPath`. */
+  function trusting(mode: CallerAuthMode, keyPath: string) {
+    const dir = scratch();
+    const callers = join(dir, "callers.json");
+    const auth = new CallerAuth({ mode, deviceId: "laptop", callersFile: callers });
+    const key = loadOrCreateCallerKey(keyPath);
+    return { auth, callers, key, dir };
+  }
+
+  test("a pinned device that refuses the call says so, signed: the caller gets the refusal and what to do about it, not an accusation of the gateway", async () => {
+    pins();
+    const keyPath = join(scratch(), "k.pem");
+    const { auth, callers, key } = trusting("enforce", keyPath);
+    addCaller(callers, { pub: key.publicKey });
+    const client = new GatewayClient(target as never, { signer: new CallSigner({ path: keyPath }), notice: () => {} });
+    liveDevice(auth);
+    await call(client); // runs, and pins the device
+    removeCaller(callers, key.keyId); // revoked
+    const refused = await call(client).then(() => undefined, (e: unknown) => e as { code?: number; message: string; data?: { reason?: string } });
+    expect(refused).toBeDefined();
+    expect(refused!.message).not.toMatch(/without signing its reply|gateway may have made/);
+    expect(refused!.code).toBe(-32001);
+  });
+
+  test("a pinned device in --caller-auth off still signs its replies, so its answers are not lost", async () => {
+    pins();
+    const keyPath = join(scratch(), "k.pem");
+    const { auth, key, callers, dir } = trusting("enforce", keyPath);
+    addCaller(callers, { pub: key.publicKey });
+    const client = new GatewayClient(target as never, { signer: new CallSigner({ path: keyPath }), notice: () => {} });
+    liveDevice(auth);
+    await call(client); // pins
+    liveDevice(new CallerAuth({ mode: "off", deviceId: "laptop", callersFile: callers, stateDir: join(dir, "caller-auth") })); // the same device key (same state directory)
+    await call(client);
+    await call(client);
+  });
+
+  test("a refusal signed for one call cannot be handed back as the answer to another", async () => {
+    pins();
+    const keyPath = join(scratch(), "k.pem");
+    const { auth, key, callers } = trusting("enforce", keyPath);
+    addCaller(callers, { pub: key.publicKey });
+    const client = new GatewayClient(target as never, { signer: new CallSigner({ path: keyPath }), notice: () => {} });
+    liveDevice(auth);
+    await call(client); // pins
+    // The gateway keeps the device's answer to a call it altered, and returns it for the real one.
+    const device = globalThis.fetch;
+    globalThis.fetch = (async (u: string | URL, init?: RequestInit) => {
+      const other = { ...init, body: (init!.body as string).replace('"bash"', '"ls"') };
+      const answer = await device(u, other);
+      return new Response(await answer.text(), { headers: answer.headers });
+    }) as typeof fetch;
+    await expect(call(client)).rejects.toThrow(/does not match the reply/);
+  });
+
+  test("an answer a pinned device did not sign says that the call may or may not have run, and not to repeat it", async () => {
+    pins();
+    const notices: string[] = [];
+    const client = newClient(notices);
+    const device = newAuth();
+    deviceStub(device);
+    await call(client);
+    deviceStub(device, "strip");
+    await expect(call(client)).rejects.toThrow(/may or may not have run: do not repeat it/);
   });
 
   test("a device that has never signed may answer unsigned (an older build), and an unsigned bad signature is reported", async () => {
@@ -462,8 +625,8 @@ describe("prime devices callers: the keys to compare out of band", () => {
     expect(JSON.parse(none.out).pinned).toEqual({ device: "laptop", gateway, key: null });
 
     const device = new CallerAuth({ mode: "warn", deviceId: "laptop", callersFile: join(dir, "callers.json") });
-    const header = device.replySig(NONCE, "{}")!;
-    const pub = verifyReplySig(header, NONCE, "{}")!;
+    const header = device.replySig({ nonce: NONCE, raw: BASH }, "{}")!;
+    const pub = verifyReplySig(header, NONCE, BASH, "{}")!;
     checkDeviceKey(gateway, "laptop", pub, env.PRIME_DEVICE_KEYS);
 
     const shown = JSON.parse((await cli(["devices", "callers", "--device", "laptop", "--gateway", gateway, "--json"], env)).out);
@@ -624,7 +787,7 @@ describe("code-mcp behind a gateway that sends frames", () => {
       expect(existsSync(marker)).toBe(true); // ran what was signed
       expect(existsSync(join(dir, "other.txt"))).toBe(false); // not what the gateway wrote
       const nonce = parseCallSig(sig)!.nonce;
-      expect(verifyReplySig(swapped.replySig, nonce, JSON.stringify(swapped.response))).toBeDefined();
+      expect(verifyReplySig(swapped.replySig, nonce, raw, JSON.stringify(swapped.response))).toBeDefined();
 
       const replay = await r.send({ request: writeCall(marker), raw, callerSig: sig });
       expect(replay.response.error.code).toBe(-32001);
@@ -651,10 +814,10 @@ describe("code-mcp behind a gateway that sends frames", () => {
       const body = await http.text();
       const header = http.headers.get(REPLY_SIG_HEADER);
       expect(header).not.toBeNull();
-      expect(verifyReplySig(header!, parseCallSig(sig2)!.nonce, body)).toBeDefined();
+      expect(verifyReplySig(header!, parseCallSig(sig2)!.nonce, raw, body)).toBeDefined();
       expect(JSON.parse(body).id).toBe(7);
       // A body that is not the text that was signed does not verify, however alike it looks.
-      expect(verifyReplySig(header!, parseCallSig(sig2)!.nonce, JSON.stringify(JSON.parse(body), null, 1))).toBeUndefined();
+      expect(verifyReplySig(header!, parseCallSig(sig2)!.nonce, raw, JSON.stringify(JSON.parse(body), null, 1))).toBeUndefined();
     } finally {
       r.stop();
     }
@@ -706,7 +869,7 @@ describe("code-mcp behind a gateway that sends frames", () => {
       expect(JSON.parse(frame.responseText).id).toBe(9);
       expect(JSON.parse(frame.responseText).error).toBeUndefined();
       expect(existsSync(join(dir, "c.txt"))).toBe(true);
-      expect(verifyReplySig(frame.replySig, parseCallSig(sig)!.nonce, frame.responseText)).toBeDefined();
+      expect(verifyReplySig(frame.replySig, parseCallSig(sig)!.nonce, raw, frame.responseText)).toBeDefined();
       // a refusal comes the same way
       const refused = await r.send({ raw: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "write", arguments: {} } }) });
       expect(refused).not.toHaveProperty("response");
@@ -714,6 +877,61 @@ describe("code-mcp behind a gateway that sends frames", () => {
       // a frame with `request` is answered as before
       const old = await r.send({ request: { jsonrpc: "2.0", id: 11, method: "ping" } });
       expect(old.response.id).toBe(11);
+    } finally {
+      r.stop();
+    }
+  });
+
+  test("the device signs a refusal and the answers of off mode, and does not sign a replay; a signed refusal is bound to the body it refused", async () => {
+    const dir = scratch();
+    const callers = join(dir, "callers.json");
+    const key = loadOrCreateCallerKey(join(dir, "me.pem"));
+    const other = loadOrCreateCallerKey(join(dir, "other.pem"));
+    addCaller(callers, { pub: key.publicKey });
+    const call = (id: number) => JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "write", arguments: { cwd: dir, path: join(dir, `r${id}.txt`), content: "r" } } });
+    const r = await run("enforce", callers);
+    try {
+      // a key this device does not trust: refused, and the refusal is signed (so a pinned caller sees it)
+      const raw = call(1);
+      const sig = signCall(other, "device:laptop", raw);
+      const refused = await r.send({ raw, callerSig: sig });
+      expect(JSON.parse(refused.responseText).error.code).toBe(-32001);
+      expect(verifyReplySig(refused.replySig, parseCallSig(sig)!.nonce, raw, refused.responseText)).toBeDefined();
+      // ... and bound to that body: it is not an answer to another
+      expect(verifyReplySig(refused.replySig, parseCallSig(sig)!.nonce, call(2), refused.responseText)).toBeUndefined();
+      expect(existsSync(join(dir, "r1.txt"))).toBe(false);
+      // a call that ran, then the same frame again: the second is a replay, and is not signed
+      const raw3 = call(3);
+      const sig3 = signCall(key, "device:laptop", raw3);
+      const ran = await r.send({ raw: raw3, callerSig: sig3 });
+      expect(ran.replySig).toBeDefined();
+      const replay = await r.send({ raw: raw3, callerSig: sig3 });
+      expect(JSON.parse(replay.responseText).error.data.reason).toBe("replay");
+      expect(replay).not.toHaveProperty("replySig");
+      // a forged variant of a call that ran (the same nonce, another body) is not signed either
+      const forged = await r.send({ raw: call(4), callerSig: sig3 });
+      expect(forged).not.toHaveProperty("replySig");
+      // a body deeper than the parser allows is not run, signed or not
+      let deep = "1";
+      for (let n = 0; n < 400; n++) deep = `{"a":${deep}}`;
+      const bomb = `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":${deep}}`;
+      const refusedDeep = await r.send({ raw: bomb, callerSig: signCall(key, "device:laptop", bomb) });
+      expect(JSON.parse(refusedDeep.responseText).error.code).toBe(-32700);
+    } finally {
+      r.stop();
+    }
+  });
+
+  test("off: a signed call runs from its body, and its reply is signed", async () => {
+    const dir = scratch();
+    const key = loadOrCreateCallerKey(join(dir, "me.pem"));
+    const r = await run("off", join(dir, "callers.json"));
+    try {
+      const raw = JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "write", arguments: { cwd: dir, path: join(dir, "off.txt"), content: "o" } } });
+      const sig = signCall(key, "device:laptop", raw);
+      const out = await r.send({ request: { jsonrpc: "2.0", id: 6, method: "ping" }, raw, callerSig: sig });
+      expect(existsSync(join(dir, "off.txt"))).toBe(true); // the body ran, not the request the gateway put beside it
+      expect(verifyReplySig(out.replySig, parseCallSig(sig)!.nonce, raw, JSON.stringify(out.response))).toBeDefined();
     } finally {
       r.stop();
     }

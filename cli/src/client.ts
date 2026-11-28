@@ -215,7 +215,7 @@ export class GatewayClient {
         await sleep(backoffMs);
         continue;
       }
-      this.checkReply(headers[CALL_SIG_HEADER], response.headers.get(REPLY_SIG_HEADER), text);
+      this.checkReply(headers[CALL_SIG_HEADER], body, response.headers.get(REPLY_SIG_HEADER), text);
       return this.parseBody(response.status, text);
     }
   }
@@ -223,11 +223,11 @@ export class GatewayClient {
   /**
    * A device signs its reply to a signed call. Once a device has signed a reply, its key is pinned, and from then
    * on a reply of its that is unsigned, signed wrongly or signed by another key is not the device's answer, so it
-   * is refused (the call has run, and the message says that). A device that has never signed is left alone: it
+   * is refused (the call may or may not have run, and the message says that: an answer the device signed, a refusal included, is never refused here). A device that has never signed is left alone: it
    * may be an older build. A fleet is answered by whichever member holds the lease, so its replies are checked
    * for a good signature only; their keys come from the fleet's roster, not from a first use.
    */
-  private checkReply(callSig: string | undefined, replySig: string | null, text: string): void {
+  private checkReply(callSig: string | undefined, requestBody: string, replySig: string | null, text: string): void {
     if (!callSig) return;
     const nonce = parseCallSig(callSig)?.nonce;
     if (!nonce) return;
@@ -245,7 +245,7 @@ export class GatewayClient {
     }
     const refuse = (what: string): never => {
       throw new CliError(
-        `${device} ${what}; the call has run, but the answer may have been made by the gateway and is not shown`,
+        `${device} ${what}; the answer is not shown because the gateway may have made it. The call may or may not have run: do not repeat it before checking`,
         `The key pinned for ${device} is ${deviceKeyLabel(Buffer.from(pinned!, "base64"))}. If the device really changed its key, run: prime devices callers --device ${device} --forget`,
       );
     };
@@ -253,7 +253,7 @@ export class GatewayClient {
       if (pinned) refuse("answered a signed call without signing its reply, as it has before");
       return;
     }
-    const pub = verifyReplySig(replySig, nonce, text);
+    const pub = verifyReplySig(replySig, nonce, requestBody, text);
     if (!pub) {
       if (pinned) refuse("answered with a signature that does not match the reply");
       this.once(`the reply from ${device} carries a signature that does not match it; the gateway may have changed the answer`);
