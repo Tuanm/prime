@@ -2,12 +2,12 @@
 // and the real code-mcp behind a stub gateway for who is written down as the caller.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ACTIVITY_LIMIT_BYTES, ActivityJournal, readActivity } from "../src/activity-journal.ts";
+import { ACTIVITY_LIMIT_BYTES, ActivityJournal, READ_LIMIT_BYTES, readActivity } from "../src/activity-journal.ts";
 import { addCaller, loadOrCreateCallerKey, signCall } from "../src/caller-key.ts";
 import { parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
 import { withDirLock } from "../src/dir-lock.ts";
@@ -446,6 +446,55 @@ describe("code-mcp journals the calls it runs", () => {
       expect(existsSync(join(dir, "activity.jsonl"))).toBe(false);
     } finally {
       r.stop();
+    }
+  });
+});
+
+// A journal a space writes is read by the host: the space can make it anything.
+describe("readActivity of a file that someone else controls", () => {
+  test.skipIf(process.platform === "win32")("does not follow a link, and says so", () => {
+    const dir = scratch();
+    try {
+      writeFileSync(join(dir, "secret.txt"), '{"seq":1,"fid":"0123456789abcdef","ts":"2026-01-01T00:00:00.000Z","tool":"read","caller":"unsigned"}\n');
+      symlinkSync(join(dir, "secret.txt"), join(dir, "activity.jsonl"));
+      expect(() => readActivity(join(dir, "activity.jsonl"))).toThrow("is a link");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform === "win32")("reads a regular file only", () => {
+    const dir = scratch();
+    try {
+      mkdirSync(join(dir, "activity.jsonl"));
+      expect(() => readActivity(join(dir, "activity.jsonl"))).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("takes at most the end of a file that is bigger than a journal can be, and never half a line", () => {
+    const dir = scratch();
+    try {
+      const line = (n: number) => JSON.stringify({ seq: n, fid: "0123456789abcdef", ts: "2026-01-01T00:00:00.000Z", tool: "t", caller: "unsigned" }) + "\n";
+      const lines: string[] = [];
+      let bytes = 0;
+      let n = 0;
+      while (bytes < READ_LIMIT_BYTES * 2) {
+        const l = line(++n);
+        lines.push(l);
+        bytes += l.length;
+      }
+      writeFileSync(join(dir, "activity.jsonl"), lines.join(""));
+      const read = readActivity(join(dir, "activity.jsonl"));
+      expect(read.entries.length).toBeGreaterThan(0);
+      expect(read.entries.length).toBeLessThan(n);
+      expect(read.position.seq).toBe(n);
+      // the newest are the ones kept, in order, whole
+      expect(read.entries.at(-1)!.seq).toBe(n);
+      for (let i = 1; i < read.entries.length; i++) expect(read.entries[i]!.seq).toBe(read.entries[i - 1]!.seq + 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

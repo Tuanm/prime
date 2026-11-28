@@ -96,6 +96,7 @@ const LIST_FLAGS: FlagSpec[] = [
 
 const CALLERS_FLAGS: FlagSpec[] = [
   flag("callers", "string", "The callers file to use (default: callers.json beside the config)", { placeholder: "<path>" }),
+  flag("space", "string", "Work on the callers of this space (the file its device reads)", { placeholder: "<name>" }),
 ];
 
 const CALLERS_LIST_FLAGS: FlagSpec[] = [

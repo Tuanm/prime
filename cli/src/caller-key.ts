@@ -333,6 +333,7 @@ export function callerRefusedHint(signer: CallSigner | undefined, options: { fle
   }
   return (
     `This device does not trust this machine's caller key (${key.keyId}). Run on the device's machine: ${allowCallerCommand(key)}\n` +
+    "(for a space made with 'prime spaces create', add --space <name> to that command)\n" +
     "If this machine is already allowed there, the signature may have been altered on the way (the gateway can do that): run the call again."
   );
 }
