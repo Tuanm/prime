@@ -18,6 +18,7 @@ import {
   ANON_TOKEN_LENGTH,
   FILE_ID_RE,
   anonConfig,
+  anonLockKey,
   ipBlockKey,
   r2Budget,
   r2Cost,
@@ -120,8 +121,8 @@ export class RegistryDO extends DurableObject<Env> {
   private onlineTtlMs = ONLINE_TTL_DEFAULT_MS;
   private anon = new Map<string, AnonRec>(); // deviceId -> record (persisted)
   private anonCreates = new Map<string, number[]>(); // client IP -> recent creation times (memory)
-  private anonFailures = new Map<string, number[]>(); // deviceId -> recent wrong-token times (memory)
-  private anonLockedUntil = new Map<string, number>(); // deviceId -> lock expiry (memory)
+  private anonFailures = new Map<string, number[]>(); // anonLockKey(device, address) -> recent wrong-token times (memory)
+  private anonLockedUntil = new Map<string, number>(); // anonLockKey(device, address) -> lock expiry (memory)
   private fleetCreates = new FleetCreationAllowance();
   private fleets = new Set<string>(); // the fleets that exist (persisted)
   private fleetBuddies = new Map<string, string>(); // fleetId -> verifier of its token (persisted)
@@ -432,7 +433,8 @@ export class RegistryDO extends DurableObject<Env> {
         map: RegistryDO.verifiersOnly(this.tokens),
         anonymous: [...this.anon.keys()],
         online: [...this.online.keys()],
-        locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([id]) => id),
+        // Each is a device and the address that was locked out of it (see `anonLockKey`).
+        locked: [...this.anonLockedUntil].filter(([, until]) => until > now).map(([key]) => key),
         buddies: RegistryDO.verifiersOnly(this.fleetBuddies),
         paused: [...this.pausedFleets],
         // Read on every request the Worker gates, so they come in the same
@@ -498,7 +500,8 @@ export class RegistryDO extends DurableObject<Env> {
           ref: rec.ref,
           online: this.online.has(id),
           disabled: this.disabled.has(id),
-          locked: (this.anonLockedUntil.get(id) || 0) > now,
+          // Whether any address is locked out of it right now.
+          locked: this.lockedOut(id, now),
           createdAt: rec.createdAt,
           lastSeenAt: rec.lastSeenAt,
         }))
@@ -516,19 +519,24 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({ error: "not found" }, { status: 404 });
     }
 
-    // A wrong device code for an anonymous device. Six characters is a small
-    // space, so too many misses lock the device for everyone until the window
-    // passes - enforced here, globally, rather than per isolate.
+    // A wrong device code for an anonymous device. Too many misses lock the address they came from
+    // out of that device until the window passes - enforced here, globally, rather than per isolate.
+    // The lock is per (device, address): a stranger's wrong codes lock the stranger, never the member
+    // whose code is right (the code is long enough, since it is made, that guessing it is out of reach).
     if (request.method === "POST" && path === "/anon/fail") {
       const id = url.searchParams.get("id") || "";
       if (!this.anon.has(id)) return Response.json({ locked: false });
       const policy = anonConfig(this.env);
       const now = Date.now();
-      const misses = (this.anonFailures.get(id) || []).filter((t) => now - t < policy.authLockMs);
+      const key = anonLockKey(id, url.searchParams.get("ip") || "");
+      const misses = (this.anonFailures.get(key) || []).filter((t) => now - t < policy.authLockMs);
       misses.push(now);
-      this.anonFailures.set(id, misses);
+      // Re-inserted, so the oldest in the map is the one that has been quiet longest.
+      this.anonFailures.delete(key);
+      this.anonFailures.set(key, misses);
+      this.pruneFailures(now, policy.authLockMs);
       const locked = misses.length >= policy.authMaxFailures;
-      if (locked) this.anonLockedUntil.set(id, now + policy.authLockMs);
+      if (locked) this.anonLockedUntil.set(key, now + policy.authLockMs);
       return Response.json({ locked });
     }
 
@@ -777,8 +785,7 @@ export class RegistryDO extends DurableObject<Env> {
     this.online.delete(id);
     this.disabled.delete(id);
     const wasAnon = this.anon.delete(id);
-    this.anonFailures.delete(id);
-    this.anonLockedUntil.delete(id);
+    this.forgetLocks(id);
     await this.persistTokens();
     await this.persist();
     await this.persistDisabled();
@@ -807,8 +814,7 @@ export class RegistryDO extends DurableObject<Env> {
       this.online.delete(id);
       this.disabled.delete(id);
       this.anon.delete(id);
-      this.anonFailures.delete(id);
-      this.anonLockedUntil.delete(id);
+      this.forgetLocks(id);
     }
     if (doomed.length) {
       await this.persistTokens();
@@ -817,6 +823,35 @@ export class RegistryDO extends DurableObject<Env> {
       await this.persistAnon();
     }
     for (const [id, until] of this.anonLockedUntil) if (until <= now) this.anonLockedUntil.delete(id);
+  }
+
+  /** Whether any address is locked out of the device. */
+  private lockedOut(id: string, now: number): boolean {
+    const prefix = id + "|";
+    for (const [key, until] of this.anonLockedUntil) if (until > now && key.startsWith(prefix)) return true;
+    return false;
+  }
+
+  /** Forget every miss and lock held against a device that is gone. */
+  private forgetLocks(id: string): void {
+    const prefix = id + "|";
+    for (const key of [...this.anonFailures.keys()]) if (key.startsWith(prefix)) this.anonFailures.delete(key);
+    for (const key of [...this.anonLockedUntil.keys()]) if (key.startsWith(prefix)) this.anonLockedUntil.delete(key);
+  }
+
+  /**
+   * Bound the misses kept: a stranger can make one entry for each address it has, so what has had no
+   * miss in the window is dropped, and past a hard cap the quietest go first.
+   */
+  private pruneFailures(now: number, windowMs: number): void {
+    if (this.anonFailures.size < 2000) return;
+    for (const [key, times] of this.anonFailures) {
+      if (!times.some((t) => now - t < windowMs)) this.anonFailures.delete(key);
+    }
+    for (const key of this.anonFailures.keys()) {
+      if (this.anonFailures.size <= 10_000) break;
+      this.anonFailures.delete(key);
+    }
   }
 
   /** Bound the per-IP creation map: drop IPs with nothing left in the window. */

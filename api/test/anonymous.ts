@@ -227,18 +227,27 @@ try {
   }
   check("a registered device is not held to the anonymous limit", !regBurst.includes(429), regBurst.join(","));
 
-  // ---- brute-force lock on the 6-character code ----
+  // ---- brute-force lock: per device and address, so a stranger cannot lock the member out ----
+  // Three wrong codes from each of three addresses are below the limit of four for any one of them.
+  const scattered: number[] = [];
+  for (const ip of ["10.5.4.1", "10.5.4.2", "10.5.4.3"]) for (let i = 0; i < 3; i++) scattered.push((await mcp(B, id2, { token: "AAAAA" + i, ip })).status);
+  check("wrong codes are refused", scattered.every((s) => s === 401), scattered.join(","));
+  // Four from one address lock that address.
   const misses: number[] = [];
-  for (let i = 0; i < 4; i++) misses.push((await mcp(B, id2, { token: "AAAAA" + i, ip: "10.5.5." + i })).status);
-  check("wrong codes are refused", misses.every((s) => s === 401), misses.join(","));
+  for (let i = 0; i < 4; i++) misses.push((await mcp(B, id2, { token: "BBBBB" + i, ip: "10.5.5.1" })).status);
+  check("four wrong codes from one address are refused", misses.every((s) => s === 401), misses.join(","));
   await Bun.sleep(2200); // past the entry's 2s registry cache
-  const lockedRight = await mcp(B, id2, { token: tok2, ip: "10.5.5.9" });
-  check("after 4 misses even the right code is refused (locked)", lockedRight.status === 429, String(lockedRight.status));
-  check("the lock also holds the tunnel", (await upgradeStatus(B + "/device/ws/" + id2, { "x-device-token": tok2 })) === 429);
+  const lockedRight = await mcp(B, id2, { token: tok2, ip: "10.5.5.1" });
+  check("that address is locked out, the right code included", lockedRight.status === 429, String(lockedRight.status));
+  check("the lock also holds that address's tunnel", (await upgradeStatus(B + "/device/ws/" + id2, { "x-device-token": tok2, "cf-connecting-ip": "10.5.5.1" })) === 429);
+  const elsewhere = await mcp(B, id2, { token: tok2, ip: "10.5.5.9" });
+  check("another address with the right code is not locked out", elsewhere.status === 503, String(elsewhere.status) + " (503 = offline, i.e. authenticated)");
+  const scatteredRight = await mcp(B, id2, { token: tok2, ip: "10.5.4.1" });
+  check("nor is an address that failed fewer times than the limit", scatteredRight.status === 503, String(scatteredRight.status));
   const lockedRow = ((await (await fetch(B + "/admin/api/anonymous")).json()) as any).devices.find((d: any) => d.locked);
   check("the admin sees it as locked", Boolean(lockedRow));
   await Bun.sleep(4500);
-  const unlocked = await mcp(B, id2, { token: tok2, ip: "10.5.5.10" });
+  const unlocked = await mcp(B, id2, { token: tok2, ip: "10.5.5.1" });
   check("the lock expires", unlocked.status === 503, String(unlocked.status) + " (503 = offline, i.e. authenticated)");
   check("a registered device is never locked", (await Promise.all([1, 2, 3, 4, 5].map((i) => mcp(B, "reg1", { token: "nope" + i, ip: "10.6.6." + i })))).every((r) => r.status === 401) &&
     (await mcp(B, "reg1", { token: "reg1-secret", ip: "10.6.6.9" })).status === 503);

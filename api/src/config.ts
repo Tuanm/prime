@@ -300,6 +300,16 @@ export function anonConfig(env: Env): AnonConfig {
   };
 }
 
+/**
+ * What a lock on an anonymous device is held against: the device and the address the wrong codes
+ * came from (an IPv6 address by its /64, as a block is). A device id has no "|" in it, so the key
+ * cannot be made to read as another device's. A lock held against the device alone would be a lever
+ * for anyone who knew its id: twenty wrong codes would shut the right code out, too.
+ */
+export function anonLockKey(deviceId: string, ip: string): string {
+  return deviceId + "|" + (ipBlockKey(ip) ?? "unknown");
+}
+
 /** Anonymous ids: "anon-" + 16 hex. Never produced by the admin UI's own ids. */
 export const ANON_ID_RE = /^anon-[a-f0-9]{16}$/;
 

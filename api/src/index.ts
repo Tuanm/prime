@@ -22,7 +22,7 @@
 // the admin UI can register devices at runtime without a redeploy. It keeps a
 // verifier per device (src/token-hash.ts), never the token.
 
-import { anonConfig, loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
+import { anonConfig, anonLockKey, loadConfig, timingSafeEq, extractToken, extractDeviceToken, validDeviceId, virtualDeviceIds } from "./config";
 import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, tokenVerifies } from "./token-hash";
 import type { Env, GatewayConfig } from "./config";
 import { RateLimiter, clientIp } from "./rate-limit";
@@ -105,7 +105,7 @@ let limiterMax = 0;
 interface RegistrySnapshot {
   map: Map<string, string>; // deviceId -> token (registered, anonymous and virtual)
   anon: Set<string>; // which of those are anonymous
-  locked: Set<string>; // anonymous devices locked after too many wrong codes
+  locked: Set<string>; // (device, address) pairs locked after too many wrong codes: see anonLockKey
   buddies: Map<string, string>; // fleetId -> the token its clients present
   online: Set<string>; // which devices hold a tunnel right now
   paused: Set<string>; // the fleets the operator has paused
@@ -777,9 +777,10 @@ async function authorizeDevice(
   const snap = await resolveSnapshot(env, deviceId);
   const anonymous = snap.anon.has(deviceId);
   if (hasNonVirtualDevice(snap, env) && !snap.map.has(deviceId)) return { denied: unauthorized(), anonymous };
-  // Locked after too many wrong codes: refuse everyone, the right code included,
-  // or the lock would not stop guessing.
-  if (anonymous && snap.locked.has(deviceId)) {
+  // Locked after too many wrong codes: that address is refused, the right code included, or the lock
+  // would not stop it guessing. Only that address: another one, with the right code, is let in, so a
+  // stranger's wrong codes cannot shut the member out.
+  if (anonymous && snap.locked.has(anonLockKey(deviceId, clientIp(request)))) {
     return {
       denied: Response.json({ error: "too many failed attempts; try again later" }, { status: 429, headers: { "retry-after": "600" } }),
       anonymous,
@@ -804,7 +805,7 @@ async function authorizeDevice(
       if (anonymous) {
         try {
           const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
-          const r = await reg.fetch("https://registry/anon/fail?id=" + encodeURIComponent(deviceId), { method: "POST" });
+          const r = await reg.fetch("https://registry/anon/fail?id=" + encodeURIComponent(deviceId) + "&ip=" + encodeURIComponent(clientIp(request)), { method: "POST" });
           const j = (await r.json()) as { locked?: boolean };
           if (j.locked) mapCache = null; // pick the lock up on the next request
         } catch {}
