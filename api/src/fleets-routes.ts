@@ -426,7 +426,9 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     if (parts[0] === "packs" && /^[0-9a-f]{64}$/.test(claimed) && Number.isInteger(declared) && declared > 0 && canStream()) {
       return streamedPack(deps, deviceId, role, bucket, prefix, claimed, declared);
     }
+    const readFrom = Date.now();
     const body = await readBounded(deps.request, MAX_SNAPSHOT_BYTES);
+    const readMs = Date.now() - readFrom;
     if (body instanceof Response) return uploadTooBig(MAX_SNAPSHOT_BYTES + 1, "change pack");
     if (body.byteLength === 0) return Response.json({ error: "empty payload" }, { status: 400 });
     const digest = await sha256Hex(body);
@@ -442,8 +444,10 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     }
     // Content addressed: writing the same bytes twice is free and idempotent.
     countFleetR2("write");
+    const putFrom = Date.now();
     await bucket.put(key, body, { httpMetadata: { contentType: "application/octet-stream" } });
-    return Response.json({ ok: true, key, hash: digest, size: body.byteLength, epoch: role.epoch });
+    // How long each step took here, so that a slow upload can be told to be slow in the network or in the bucket.
+    return Response.json({ ok: true, key, hash: digest, size: body.byteLength, epoch: role.epoch, ms: { read: readMs, put: Date.now() - putFrom } });
   }
 
   // Download a payload. Any member may read.
@@ -486,6 +490,7 @@ async function streamedPack(
   length: number,
 ): Promise<Response> {
   const key = prefix + hash;
+  const from = Date.now();
   const noted = await noteUpload(deps, deviceId, hash);
   if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again", code: "fleet-unreachable" }, { status: 503, headers: { "retry-after": "5" } });
   if (!noted.primary) return Response.json({ error: "only the primary may publish", code: "not-primary" }, { status: 409 });
@@ -493,6 +498,7 @@ async function streamedPack(
   if (!body) return Response.json({ error: "empty payload" }, { status: 400 });
   // Whether it is there already is not guessed at: a bucket that cannot say is not "absent".
   let held: { size: number } | null;
+  const notedMs = Date.now() - from;
   try {
     countFleetR2("read");
     held = await bucket.head(key);
@@ -504,7 +510,9 @@ async function streamedPack(
     await body.cancel().catch(() => {});
     return Response.json({ ok: true, key, hash, size: length, epoch: role.epoch, again: true });
   }
+  const headMs = Date.now() - from - notedMs;
   const fixed = new FixedLengthStream(length);
+  const putFrom = Date.now();
   const copying = body.pipeTo(fixed.writable);
   countFleetR2("write");
   try {
@@ -517,7 +525,8 @@ async function streamedPack(
     }
     return Response.json({ error: "the bucket could not take the pack: try again", code: "bucket-unavailable" }, { status: 503, headers: { "retry-after": "5" } });
   }
-  return Response.json({ ok: true, key, hash, size: length, epoch: role.epoch });
+  // How long each step took here (the body is read while it is put), so that a slow upload can be told to be slow in the network or here.
+  return Response.json({ ok: true, key, hash, size: length, epoch: role.epoch, ms: { note: notedMs, head: headMs, put: Date.now() - putFrom } });
 }
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
