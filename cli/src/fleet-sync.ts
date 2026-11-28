@@ -54,6 +54,8 @@ export interface SnapshotOptions {
   gitDir: string;
   /** Directories to leave alone, relative to the work tree. */
   exclude?: string[];
+  /** With `tree`: paths to take out of that tree (the work tree is not staged, and the index of the snapshots is left as it is). */
+  drop?: string[];
   /** Previous snapshot commit, for the history. */
   base?: string | null;
   /** The sequence this snapshot is, so its commit can be kept reachable. */
@@ -565,6 +567,30 @@ async function stagePaths(gitDir: string, work: string, env: Record<string, stri
   }
 }
 
+/**
+ * A tree less some paths, made in an index of its own: the tree is read into a scratch index, the paths are dropped from it and it is
+ * written. No file of the work tree is read or staged, and the index of the snapshots is not touched: it goes on holding the files
+ * that were left out, so that every later tree contains them, the scan finds them again and each snapshot lists them as left out
+ * (a member that jumps over one snapshot would otherwise not be told, and would remove the file).
+ */
+async function treeWithout(gitDir: string, work: string, tree: string, drop: string[]): Promise<string> {
+  const scratch = join(gitDir, "drop.index");
+  const env = gitEnv(gitDir, work, scratch);
+  try {
+    await gitText(gitDir, ["read-tree", tree], env);
+    // Names are taken as they are (`:x` and `*` are files here), and given on stdin: many of them would not fit in a command line.
+    await gitRun(
+      gitDir,
+      ["rm", "-r", "-f", "--cached", "-q", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul"],
+      { ...env, GIT_LITERAL_PATHSPECS: "1" },
+      drop.join("\u0000") + "\u0000",
+    );
+    return await gitText(gitDir, ["write-tree"], env);
+  } finally {
+    rmSync(scratch, { force: true });
+  }
+}
+
 // Take a snapshot of the work tree.
 //
 // The index is a temporary file, so the user's index, refs, HEAD and working
@@ -580,7 +606,7 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
   let tree: string;
   if (opts.tree !== undefined) {
     if (!OBJECT_ID.test(opts.tree)) throw new Error("not a tree: " + opts.tree);
-    tree = opts.tree;
+    tree = opts.drop !== undefined && opts.drop.length > 0 ? await treeWithout(gitDir, work, opts.tree, opts.drop) : opts.tree;
   } else {
     // Nested repositories are excluded: the fleet does not mirror them.
     const stage = async (): Promise<void> => {
