@@ -19,6 +19,8 @@ import { UsageError, exitCodeOf } from "./errors.ts";
 import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
 import { RotateRefusedError, formatDuration, newDeviceCode, rotateAnonymousCode, type RotatedCode } from "./connect.ts";
 import { DEFAULT_GATEWAY, ENV, assertDeviceId, entryFromOverrides, normalizeGateway } from "./target.ts";
+import { forgetDeviceKey, PinsFileError, pinnedDeviceKey } from "./device-pins.ts";
+import { dirname, join } from "node:path";
 
 /** Is this error the device answering (as opposed to a transport failure)? */
 function isDeviceAnswer(err: unknown): boolean {
@@ -419,7 +421,27 @@ export async function devicesAllowCaller(ctx: Ctx): Promise<void> {
   ctx.out(`  tools         ${entry.tools ? entry.tools.join(", ") : "all"}`);
 }
 
+/** What the pinned key of a device is, for `callers --device`. */
+function pinReport(ctx: Ctx, deviceId: string): { gateway: string; key: string | null; forgotten?: boolean } {
+  const gateway = targetFor(ctx, deviceId, overridesFrom(ctx.parsed)).gateway;
+  try {
+    if (bool(ctx.parsed, "forget")) return { gateway, key: null, forgotten: forgetDeviceKey(gateway, deviceId) };
+    return { gateway, key: pinnedDeviceKey(gateway, deviceId) ?? null };
+  } catch (err) {
+    if (err instanceof PinsFileError) throw new UsageError(err.message);
+    throw err;
+  }
+}
+
 export async function devicesCallers(ctx: Ctx): Promise<void> {
+  const deviceFlag = str(ctx.parsed, "device");
+  if (bool(ctx.parsed, "forget") && deviceFlag === undefined) throw new UsageError("--forget needs --device <id>");
+  const pin = deviceFlag !== undefined ? pinReport(ctx, assertDeviceId(deviceFlag)) : undefined;
+  if (pin && bool(ctx.parsed, "forget")) {
+    if (ctx.json) printJson({ device: deviceFlag, forgotten: pin.forgotten });
+    else ctx.out(pin.forgotten ? `${green("✓")} forgot the key pinned for ${bold(deviceFlag!)}` : dim(`no key was pinned for ${deviceFlag}`));
+    return;
+  }
   const path = callersFile(ctx);
   const callers = callersOrFail(path);
   const keyPath = callerKeyPath();
@@ -434,9 +456,20 @@ export async function devicesCallers(ctx: Ctx): Promise<void> {
       ownProblem = err instanceof Error ? err.message : String(err);
     }
   }
+  // The key this device signs its replies with, if it has made one: it is shown so that it can be compared, out of band,
+  // with the key another machine pinned for it.
+  let replyKey: { keyId: string; publicKeyB64: string } | undefined;
+  const replyKeyFile = join(dirname(path), "caller-auth", "device-ed25519.pem");
+  if (existsSync(replyKeyFile)) {
+    try {
+      replyKey = loadOrCreateCallerKey(replyKeyFile);
+    } catch {}
+  }
   if (ctx.json) {
     printJson({
       callers_file: path,
+      ...(pin ? { pinned: { device: deviceFlag, gateway: pin.gateway, key: pin.key } } : {}),
+      ...(replyKey ? { device_reply_key: { key_id: replyKey.keyId, public_key: replyKey.publicKeyB64 } } : {}),
       this_machine: own ? { key_id: own.keyId, public_key: own.publicKeyB64 } : ownProblem ? { unusable: ownProblem } : null,
       callers: callers.map((c) => ({ key_id: c.keyId, label: c.label, added_at: c.addedAt, tools: c.tools ?? null })),
     });
@@ -450,6 +483,8 @@ export async function devicesCallers(ctx: Ctx): Promise<void> {
   }
   if (own) ctx.note(dim(`this machine's caller key: ${own.keyId}  ${own.publicKeyB64}`));
   else if (ownProblem) ctx.note(dim(`this machine's caller key: unusable (${ownProblem})`));
+  if (replyKey) ctx.note(dim(`the reply key of the device that uses this file: ${replyKey.keyId}  ${replyKey.publicKeyB64}`));
+  if (pin) ctx.out(pin.key ? `pinned key of ${deviceFlag}: ${keyIdOf(Buffer.from(pin.key, "base64"))}  ${pin.key}` : dim(`no key is pinned for ${deviceFlag} yet (it is pinned at its first signed reply)`));
 }
 
 export async function devicesRevokeCaller(ctx: Ctx): Promise<void> {

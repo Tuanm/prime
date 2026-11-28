@@ -13,7 +13,7 @@ import {
 } from "./errors.ts";
 import { REPLY_SIG_HEADER, verifyReplySig } from "./caller-auth.ts";
 import { CALL_SIG_HEADER, type CallSigner, parseCallSig } from "./caller-key.ts";
-import { checkDeviceKey, deviceKeyLabel } from "./device-pins.ts";
+import { checkDeviceKey, deviceKeyLabel, pinnedDeviceKey } from "./device-pins.ts";
 import type { Target } from "./target.ts";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
@@ -78,7 +78,7 @@ export class GatewayClient {
   /**
    * `signer` signs each call that needs it with this machine's caller key (see caller-key.ts), so a device
    * that only runs calls signed by a key it trusts accepts it. Without one the call goes out unsigned.
-   * `notice` hears of a reply that a device signed wrongly or with a key other than the one it first used.
+   * `notice` hears of what is wrong with a reply that is not refused.
    */
   constructor(target: Target, options: { signer?: CallSigner; notice?: (text: string) => void } = {}) {
     this.target = target;
@@ -220,29 +220,58 @@ export class GatewayClient {
     }
   }
 
-  /** A device signs its reply to a signed call: say so if it is signed wrongly, or by a key that is not the one it had. */
+  /**
+   * A device signs its reply to a signed call. Once a device has signed a reply, its key is pinned, and from then
+   * on a reply of its that is unsigned, signed wrongly or signed by another key is not the device's answer, so it
+   * is refused (the call has run, and the message says that). A device that has never signed is left alone: it
+   * may be an older build. A fleet is answered by whichever member holds the lease, so its replies are checked
+   * for a good signature only; their keys come from the fleet's roster, not from a first use.
+   */
   private checkReply(callSig: string | undefined, replySig: string | null, text: string): void {
-    if (!callSig || !replySig) return;
+    if (!callSig) return;
     const nonce = parseCallSig(callSig)?.nonce;
     if (!nonce) return;
-    const device = this.target.deviceId;
-    const pub = verifyReplySig(replySig, nonce, text);
-    let problem: string | undefined;
-    if (!pub) {
-      problem = `the reply from ${device} carries a signature that does not match it`;
-    } else {
+    const { gateway, deviceId: device } = this.target;
+    const pooled = Boolean(this.target.fleet || this.target.fleetBuddy);
+    let pinned: string | undefined;
+    let pinsBroken = false;
+    if (!pooled) {
       try {
-        if (checkDeviceKey(this.target.gateway, device, pub) === "changed") {
-          problem = `${device} answered with a different key (${deviceKeyLabel(pub)}) from the one it first used`;
-        }
-      } catch {
-        // The pin cannot be kept (a read-only home): the signature itself was good.
+        pinned = pinnedDeviceKey(gateway, device);
+      } catch (err) {
+        pinsBroken = true;
+        this.once(`cannot check the keys pinned for devices: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    if (problem && !this.noticed.has(problem)) {
-      this.noticed.add(problem);
-      this.notice(`prime: warning: ${problem}; the gateway may have changed the answer`);
+    const refuse = (what: string): never => {
+      throw new CliError(
+        `${device} ${what}; the call has run, but the answer may have been made by the gateway and is not shown`,
+        `The key pinned for ${device} is ${deviceKeyLabel(Buffer.from(pinned!, "base64"))}. If the device really changed its key, run: prime devices callers --device ${device} --forget`,
+      );
+    };
+    if (replySig === null) {
+      if (pinned) refuse("answered a signed call without signing its reply, as it has before");
+      return;
     }
+    const pub = verifyReplySig(replySig, nonce, text);
+    if (!pub) {
+      if (pinned) refuse("answered with a signature that does not match the reply");
+      this.once(`the reply from ${device} carries a signature that does not match it; the gateway may have changed the answer`);
+      return;
+    }
+    if (pooled || pinsBroken) return;
+    try {
+      if (checkDeviceKey(gateway, device, pub) === "changed") refuse(`answered with a different key (${deviceKeyLabel(pub)}) from the one it first used`);
+    } catch (err) {
+      if (err instanceof CliError) throw err;
+      this.once(`cannot pin the key of ${device}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private once(text: string): void {
+    if (this.noticed.has(text)) return;
+    this.noticed.add(text);
+    this.notice(`prime: warning: ${text}`);
   }
 
   private parseBody(status: number, text: string): unknown {
