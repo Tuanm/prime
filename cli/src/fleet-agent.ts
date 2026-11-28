@@ -25,12 +25,18 @@ import {
   fetchMemberKeys,
   fetchRole,
   reportApplied,
+  getChunks,
   getPayload,
   payloadHash,
+  putChunks,
   putPayload,
   putSnapshot,
   type FleetCredentials,
   META_CAP,
+  CHUNKS_CAP,
+  CHUNK_BYTES,
+  chunkListProblem,
+  type Chunk,
   type FleetHead,
   type FleetManifest,
 } from "./fleet-transport";
@@ -423,9 +429,22 @@ export async function publish(
   // What the gateway would refuse is not uploaded in part: the change pack of a checkpoint goes up before
   // the snapshot that names it, and one that is then refused leaves it stored, one more for every attempt.
   const limit = role?.snapshotLimit;
+  // A pack that does not fit in one request is sent in pieces, when the gateway takes them (it says how big a piece
+  // and a whole chunked pack may be) and every member can read them. Otherwise it is refused, as it always was.
+  let chunkBytes: number | undefined;
+  const sendInPieces = sealed.ciphertexts.map(() => false);
   if (limit !== undefined) {
     const biggest = Math.max(...sealed.ciphertexts.map((c) => c.length)) + MANIFEST_ALLOWANCE_BYTES;
-    if (biggest > limit) throw new Error(snapshotTooBigMessage(biggest, limit));
+    if (biggest > limit) {
+      const canChunk = role?.fleetCaps?.includes(CHUNKS_CAP) === true && role.chunkedLimit !== undefined;
+      if (!canChunk) throw new Error(snapshotTooBigMessage(biggest, limit));
+      const chunkedLimit = role!.chunkedLimit!;
+      if (biggest - MANIFEST_ALLOWANCE_BYTES > chunkedLimit) throw new Error(snapshotTooBigMessage(biggest - MANIFEST_ALLOWANCE_BYTES, chunkedLimit));
+      chunkBytes = Math.min(CHUNK_BYTES, role!.chunkLimit ?? CHUNK_BYTES);
+      sealed.ciphertexts.forEach((c, i) => {
+        sendInPieces[i] = c.length + MANIFEST_ALLOWANCE_BYTES > limit;
+      });
+    }
   }
 
   // The change travels first and on its own: the gateway stores it and the
@@ -444,14 +463,31 @@ export async function publish(
     if (again !== null && again.seq !== (head?.seq ?? 0)) {
       throw new Error("the fleet head moved while publishing: another member won");
     }
-    const stored = await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
     // The hash the seal binds is the one computed here, of the bytes that were sealed: what the
     // gateway says it stored them under is only believed if it is the same.
     const deltaHash = payloadHash(sealed.ciphertexts[1]);
-    if (stored.hash !== deltaHash) {
-      throw new Error("the gateway stored the change pack under another hash than the one it was sent with (" + stored.hash + ", not " + deltaHash + ")");
+    if (sendInPieces[1]) {
+      const pieces = await putChunks(creds, fleet, sealed.ciphertexts[1], chunkBytes);
+      delta = { packKey: pieces.firstKey, packHash: deltaHash, bytes: sealed.ciphertexts[1].length, chunks: pieces.chunks };
+    } else {
+      const stored = await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
+      if (stored.hash !== deltaHash) {
+        throw new Error("the gateway stored the change pack under another hash than the one it was sent with (" + stored.hash + ", not " + deltaHash + ")");
+      }
+      delta = { packKey: stored.key, packHash: deltaHash, bytes: sealed.ciphertexts[1].length };
     }
-    delta = { packKey: stored.key, packHash: deltaHash, bytes: sealed.ciphertexts[1].length };
+  }
+
+  // A main pack in pieces goes up before the snapshot, which then names it and carries no pack of its own.
+  let mainPieces: { chunks: Chunk[]; firstKey: string } | undefined;
+  if (sendInPieces[0]) {
+    if (delta === undefined) {
+      // The head was not looked at again (that is done before a change pack goes up): it is, before a long upload.
+      let again = await fetchHead(creds, fleet).catch(() => null);
+      if (again === null) again = await fetchHead(creds, fleet).catch(() => null);
+      if (again !== null && again.seq !== (head?.seq ?? 0)) throw new Error("the fleet head moved while publishing: another member won");
+    }
+    mainPieces = await putChunks(creds, fleet, main, chunkBytes);
   }
 
   const manifest: FleetManifest = {
@@ -461,9 +497,10 @@ export async function publish(
     tree: snap.tree,
     // The gateway fills these in: it is the one that knows where the bytes
     // ended up.
-    packKey: "",
-    packHash: "",
+    packKey: mainPieces?.firstKey ?? "",
+    packHash: mainPieces ? payloadHash(main) : "",
     packBytes: main.length,
+    ...(mainPieces ? { chunks: mainPieces.chunks } : {}),
     ...(delta ? { delta } : {}),
     full: wantFull,
     // The snapshot this one follows is the head's, whoever published it: the
@@ -495,15 +532,21 @@ export async function publish(
   }
   // The pack and the manifest travel together, and the gateway moves the head
   // in the same call. One round trip instead of six.
-  let moved = await putSnapshot(creds, fleet, manifest, main);
+  // (A pack that went up in pieces is not in the frame: the manifest names the pieces.)
+  const frame = mainPieces ? Buffer.alloc(0) : main;
+  let moved = await putSnapshot(creds, fleet, manifest, frame);
   if (!moved.ok && /catch up first/.test(moved.error ?? "") && (head?.seq ?? 0) <= appliedSeq) {
     // The fleet says this member has not applied the head, which it holds: the
     // report that said so was lost. Say it again, and publish once more.
     await reportApplied(creds, fleet, appliedSeq);
     // The refusal may have taken what the manifest names with it (a gateway cleans up after a publish
     // that did not move the head): the change pack is stored again before the manifest is sent again.
-    if (sealed.ciphertexts[1]) await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
-    moved = await putSnapshot(creds, fleet, manifest, main);
+    if (sealed.ciphertexts[1]) {
+      if (sendInPieces[1]) await putChunks(creds, fleet, sealed.ciphertexts[1], chunkBytes);
+      else await putPayload(creds, fleet, "packs", sealed.ciphertexts[1]);
+    }
+    if (mainPieces) await putChunks(creds, fleet, main, chunkBytes);
+    moved = await putSnapshot(creds, fleet, manifest, frame);
   }
   // Too big for the gateway to take: the head did not move, and nobody won; the gateway says what to do.
   if (!moved.ok && moved.status === 413) throw new Error(moved.error ?? "the snapshot is too big for the gateway");
@@ -591,6 +634,8 @@ export interface RouteStep {
   bytes: number;
   /** Whether it is the whole tree (an anchor) rather than the change. */
   whole: boolean;
+  /** The pieces the pack is in, when it was too big to be stored as one. */
+  chunks?: Chunk[];
 }
 
 /** What it takes to bring a member from `lastSeq` to the head. */
@@ -640,16 +685,18 @@ function openableBy(manifest: FleetManifest, who: Asker): boolean {
 function changeOf(manifest: FleetManifest, who: Asker): RouteStep | null {
   if (!openableBy(manifest, who)) return null;
   if (!manifest.full) {
-    return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_CHANGE, whole: false };
+    return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_CHANGE, whole: false, ...(manifest.chunks ? { chunks: manifest.chunks } : {}) };
   }
-  if (manifest.delta) return { manifest, packKey: manifest.delta.packKey, bytes: manifest.delta.bytes, whole: false };
+  if (manifest.delta) {
+    return { manifest, packKey: manifest.delta.packKey, bytes: manifest.delta.bytes, whole: false, ...(manifest.delta.chunks ? { chunks: manifest.delta.chunks } : {}) };
+  }
   return null;
 }
 
 // The pack that brings a member that holds nothing of the fleet to this snapshot.
 function wholeOf(manifest: FleetManifest, who: Asker): RouteStep | null {
   if (!manifest.full || !openableBy(manifest, who)) return null;
-  return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_WHOLE, whole: true };
+  return { manifest, packKey: manifest.packKey, bytes: manifest.packBytes ?? UNKNOWN_WHOLE, whole: true, ...(manifest.chunks ? { chunks: manifest.chunks } : {}) };
 }
 
 /**
@@ -752,6 +799,15 @@ interface HeadFetch {
   packs: Map<string, Promise<Buffer>>;
 }
 
+// The sealed pack of a step: one payload, or its pieces joined. What the pieces are is the manifest's word, so a list that
+// no publisher makes is refused here (the pack they make is then checked against the hash the seal binds, as a whole one is).
+function fetchPack(creds: FleetCredentials, fleet: string, step: RouteStep): Promise<Buffer> {
+  if (step.chunks === undefined) return getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
+  const problem = chunkListProblem(step.chunks);
+  if (problem) return Promise.reject(new TamperedSnapshotError(step.manifest.seq, problem));
+  return getChunks(creds, fleet, step.chunks);
+}
+
 // Start fetching the head's manifest, and its pack as soon as the manifest says which. Nothing here is
 // written anywhere: what is not used is dropped with the plan, and a fetch that fails is only heard of
 // by the step that takes its pack.
@@ -766,7 +822,7 @@ function startHeadFetch(creds: FleetCredentials, fleet: string, lastSeq: number,
     if (m.seq !== lastSeq + 1 || m.seq !== head.seq) return;
     const step = chooseRoute([m], lastSeq, who)?.[0];
     if (!step || packs.has(step.packKey)) return;
-    const pack = getPayload(creds, fleet, "packs", manifestIdOf(step.packKey));
+    const pack = fetchPack(creds, fleet, step);
     pack.catch(quiet);
     packs.set(step.packKey, pack);
   }, quiet);
@@ -918,7 +974,7 @@ async function downloadStep(
   /** The pack, when it is already being downloaded. */
   ahead?: Promise<Buffer>,
 ): Promise<{ plain: Buffer; manifest: FleetManifest }> {
-  const sealed = await (ahead ?? getPayload(creds, fleet, "packs", manifestIdOf(step.packKey)));
+  const sealed = await (ahead ?? fetchPack(creds, fleet, step));
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
   // A member that rotated its key still opens what was sealed for the key it had, until it has taken that in.

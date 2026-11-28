@@ -40,6 +40,13 @@ export class FakeGateway {
   fleetCaps: string[] | undefined = undefined;
   /** What a member says it can do, as /keys lists it (default: what `fleetCaps` says, for every member). */
   memberCaps = new Map<string, string[]>();
+  /** What /role says one piece, and a whole chunked pack, may be (a gateway that takes packs in pieces). */
+  chunkLimit: number | undefined = undefined;
+  chunkedLimit: number | undefined = undefined;
+  /** How long a pack upload takes (ms), and how many were in flight at once at most. */
+  packDelayMs = 0;
+  packPostsInFlight = 0;
+  maxPackPostsInFlight = 0;
   /** A refused publish deletes the change pack its manifest names (the gateway's cleanup). */
   dropChangePackOnRefusal = false;
   /** The next snapshots come from a publisher that seals but does not tag each entry (an earlier build). */
@@ -162,7 +169,7 @@ export class FakeGateway {
     }
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);
-      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(this.fleetCaps !== undefined ? { fleetCaps: this.fleetCaps } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) }, this.serverDate ? { headers: { date: this.serverDate } } : undefined);
+      return Response.json({ member, primary: creds.deviceId === this.primary, epoch: 1, ...(member && this.incarnation !== undefined ? { incarnation: this.incarnation } : {}), ...(this.sealGate ? { sealGate: true } : {}), ...(this.advertiseLimit && this.snapshotLimit !== undefined ? { snapshotLimit: this.snapshotLimit } : {}), ...(this.fleetCaps !== undefined ? { fleetCaps: this.fleetCaps } : {}), ...(this.chunkLimit !== undefined ? { chunkLimit: this.chunkLimit } : {}), ...(this.chunkedLimit !== undefined ? { chunkedLimit: this.chunkedLimit } : {}), ...(member && this.keyProofKey ? { keyProofKey: this.keyProofKey } : {}) }, this.serverDate ? { headers: { date: this.serverDate } } : undefined);
     }
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });
@@ -190,10 +197,22 @@ export class FakeGateway {
       const manifestBytes = bytes.subarray(4, 4 + manifestLength);
       const pack = bytes.subarray(4 + manifestLength);
       const hash = (b: Buffer) => createHash("sha256").update(b).digest("hex");
-      const packKey = "fleets/x/packs/" + hash(pack);
       const manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
-      manifest.packKey = packKey;
-      manifest.packHash = hash(pack);
+      let packKey = "fleets/x/packs/" + hash(pack);
+      if (pack.length === 0) {
+        // A pack that went up in pieces: the manifest names them, they must all be there, and they may add up to so much.
+        const pieces = manifest.chunks as Array<{ hash: string; bytes: number }> | undefined;
+        if (!Array.isArray(pieces) || pieces.length === 0) return Response.json({ error: "empty pack" }, { status: 400 });
+        if (this.chunkedLimit !== undefined && pieces.reduce((n, c) => n + c.bytes, 0) > this.chunkedLimit) {
+          return Response.json({ error: "this snapshot is bigger than the gateway takes in pieces", limit: this.chunkedLimit }, { status: 413 });
+        }
+        const gone = pieces.find((c) => !this.payloads.has("fleets/x/packs/" + c.hash));
+        if (gone) return Response.json({ error: "a piece of the pack was not stored: " + gone.hash }, { status: 400 });
+        packKey = String(manifest.packKey);
+      } else {
+        manifest.packKey = packKey;
+        manifest.packHash = hash(pack);
+      }
       // Each of these is a publisher that predates something the manifest is sealed over,
       // so what it published has no seal either.
       if (this.legacyManifests || this.stripRoster || this.unsealed) delete manifest.seal;
@@ -215,7 +234,7 @@ export class FakeGateway {
       }
       const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
       const manifestKey = "fleets/x/manifests/" + hash(finalManifest);
-      this.payloads.set(packKey, pack);
+      if (pack.length > 0) this.payloads.set(packKey, pack);
       this.payloads.set(manifestKey, finalManifest);
       this.indexEntries.push({
         seq: typeof manifest.seq === "number" ? manifest.seq : 0,
@@ -247,6 +266,13 @@ export class FakeGateway {
       }
       const hash = createHash("sha256").update(bytes).digest("hex");
       const key = "fleets/x/" + kind + "/" + hash;
+      this.packPostsInFlight++;
+      this.maxPackPostsInFlight = Math.max(this.maxPackPostsInFlight, this.packPostsInFlight);
+      try {
+        if (this.packDelayMs > 0) await new Promise((r) => setTimeout(r, this.packDelayMs));
+      } finally {
+        this.packPostsInFlight--;
+      }
       this.payloads.set(key, bytes);
       return Response.json({ ok: true, key, hash, size: bytes.length });
     }

@@ -51,6 +51,23 @@ export interface FleetHead {
   epoch: number;
 }
 
+/** One piece of a sealed pack that was too big for one request: stored under its own hash, in order. */
+export interface Chunk {
+  /** sha256 (hex) of the piece. */
+  hash: string;
+  bytes: number;
+}
+
+/** What a member says it can read, by name (see `META_CAP`): packs in pieces, for a snapshot bigger than one request. */
+export const CHUNKS_CAP = "chunks";
+
+/** The size a pack is cut into, and the most a member takes a manifest to say: it is the gateway's word, so it is checked. */
+export const CHUNK_BYTES = 8 * 1024 * 1024;
+const CHUNK_BYTES_MAX = 2 * CHUNK_BYTES;
+/** The most pieces one pack may have, and the most bytes one chunked pack may be, whatever a manifest says. */
+export const CHUNKS_MAX = 128;
+export const CHUNKED_BYTES_MAX = 512 * 1024 * 1024;
+
 export interface FleetManifest {
   fleet: string;
   seq: number;
@@ -65,11 +82,16 @@ export interface FleetManifest {
   /** Size of the sealed pack in bytes, so a member can choose the cheaper route. */
   packBytes?: number;
   /**
+   * The pack in pieces, when it was too big to send at once: `packHash` is still the hash of the whole sealed
+   * pack (what the seal binds), and `packKey` is the first piece's. Present only when every member could read it.
+   */
+  chunks?: Chunk[];
+  /**
    * The change since the snapshot before, for a snapshot whose pack is a whole
    * tree. A member that holds that snapshot takes this instead of the tree; it
    * is sealed with the same key as the pack. Older members ignore it.
    */
-  delta?: { packKey: string; packHash: string; bytes: number };
+  delta?: { packKey: string; packHash: string; bytes: number; chunks?: Chunk[] };
   /**
    * True when the pack carries the whole tree.
    *
@@ -271,6 +293,86 @@ function inlineFor(fleet: string, kind: "packs" | "manifests", id: string, now: 
   return Buffer.from(held.bytes);
 }
 
+/**
+ * Store a sealed pack as pieces of at most `chunkBytes`, at most `inFlight` at a time. Each piece is stored under
+ * its own hash, and the hash the gateway answers with has to be the one computed here. Nothing is cleaned up on a
+ * failure: what was stored is content-addressed, so sending it again costs nothing, and the gateway sweeps what
+ * no snapshot names.
+ */
+export async function putChunks(
+  creds: FleetCredentials,
+  fleet: string,
+  pack: Buffer,
+  chunkBytes: number = CHUNK_BYTES,
+  inFlight = 4,
+): Promise<{ chunks: Chunk[]; firstKey: string }> {
+  const size = Math.max(1, Math.min(chunkBytes, CHUNK_BYTES_MAX));
+  const pieces: Buffer[] = [];
+  for (let at = 0; at < pack.length; at += size) pieces.push(pack.subarray(at, Math.min(pack.length, at + size)));
+  if (pieces.length === 0 || pieces.length > CHUNKS_MAX) throw new FleetTransportError("a pack of " + pack.length + " bytes is " + pieces.length + " pieces of " + size + ": not one that can be sent in pieces");
+  const keys: string[] = new Array(pieces.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= pieces.length) return;
+      const piece = pieces[i]!;
+      const stored = await putPayload(creds, fleet, "packs", piece);
+      if (stored.hash !== payloadHash(piece)) {
+        throw new FleetTransportError("the gateway stored piece " + (i + 1) + " under another hash than the one it was sent with (" + stored.hash + ")");
+      }
+      keys[i] = stored.key;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(inFlight, pieces.length) }, worker));
+  return { chunks: pieces.map((p) => ({ hash: payloadHash(p), bytes: p.length })), firstKey: keys[0]! };
+}
+
+/** Whether a manifest's list of pieces is one a member will fetch: it is the gateway's word until the whole pack is checked against the seal. */
+export function chunkListProblem(chunks: unknown): string | undefined {
+  if (!Array.isArray(chunks) || chunks.length === 0 || chunks.length > CHUNKS_MAX) return "its list of pieces is empty or too long";
+  let total = 0;
+  for (const c of chunks as Array<Partial<Chunk>>) {
+    if (typeof c?.hash !== "string" || !/^[0-9a-f]{64}$/.test(c.hash)) return "a piece of it is not named by a hash";
+    if (typeof c.bytes !== "number" || !Number.isSafeInteger(c.bytes) || c.bytes <= 0 || c.bytes > CHUNK_BYTES_MAX) return "a piece of it has a size no piece has";
+    total += c.bytes;
+  }
+  if (total > CHUNKED_BYTES_MAX) return "its pieces add up to more than a pack may be";
+  return undefined;
+}
+
+/**
+ * Fetch the pieces of a pack, at most `inFlight` at a time, and join them. Each piece is checked against the hash and
+ * size the manifest lists it with, as it arrives; whether they make the pack the publisher sealed is checked by the caller
+ * against the hash the seal binds. The result is built in one buffer (about the size of the pack, once).
+ */
+export async function getChunks(creds: FleetCredentials, fleet: string, chunks: Chunk[], inFlight = 4): Promise<Buffer> {
+  const problem = chunkListProblem(chunks);
+  if (problem) throw new FleetTransportError(problem);
+  const offsets: number[] = [];
+  let total = 0;
+  for (const c of chunks) {
+    offsets.push(total);
+    total += c.bytes;
+  }
+  const out = Buffer.allocUnsafe(total);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= chunks.length) return;
+      const c = chunks[i]!;
+      const piece = await getPayload(creds, fleet, "packs", c.hash);
+      if (piece.length !== c.bytes || payloadHash(piece) !== c.hash) {
+        throw new FleetTransportError("piece " + (i + 1) + " of " + chunks.length + " is not the one its manifest names (its hash or size differs)");
+      }
+      piece.copy(out, offsets[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(inFlight, chunks.length) }, worker));
+  return out;
+}
+
 /** Fetch a stored payload. */
 export async function getPayload(creds: FleetCredentials, fleet: string, kind: "packs" | "manifests", id: string): Promise<Buffer> {
   const brought = inlineFor(fleet, kind, id);
@@ -381,10 +483,10 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; keyProofKey?: string; serverTimeMs?: number; fleetCaps?: string[] }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; chunkLimit?: number; chunkedLimit?: number; keyProofKey?: string; serverTimeMs?: number; fleetCaps?: string[] }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
-  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; keyProofKey?: unknown; fleetCaps?: unknown };
+  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; chunkLimit?: unknown; chunkedLimit?: unknown; keyProofKey?: unknown; fleetCaps?: unknown };
   // The gateway's clock, from the answer's Date header: a proof is only good for a few minutes of its own, so a
   // machine whose clock is off must not make every proof fail.
   const dated = Date.parse(res.headers.get("date") ?? "");
@@ -399,6 +501,9 @@ export async function fetchRole(
     ...(body.sealGate === true ? { sealGate: true as const } : {}),
     // The most one upload may be: said by a gateway that has a limit.
     ...(typeof body.snapshotLimit === "number" && body.snapshotLimit > 0 ? { snapshotLimit: body.snapshotLimit } : {}),
+    // What one piece of a chunked pack may be, and the most a whole chunked pack may be: said by a gateway that takes them.
+    ...(typeof body.chunkLimit === "number" && body.chunkLimit > 0 ? { chunkLimit: body.chunkLimit } : {}),
+    ...(typeof body.chunkedLimit === "number" && body.chunkedLimit > 0 ? { chunkedLimit: body.chunkedLimit } : {}),
     // The key a member shows that it holds its old key with, when it changes its own: said by a gateway that asks for the proof.
     ...(typeof body.keyProofKey === "string" && body.keyProofKey ? { keyProofKey: body.keyProofKey } : {}),
     // What every member of the fleet can do (what all of them list): said by a gateway that has them.
