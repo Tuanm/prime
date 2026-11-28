@@ -660,7 +660,7 @@ async function adminFleets(env: Env): Promise<Response> {
     headers.set("x-prime-fleet", id);
     const info = await stub.fetch("https://fleet/reap", { method: "POST", headers }).catch(() => null);
     if (!info || !info.ok) continue;
-    const body = (await info.json()) as { members?: string[]; lastActivity?: number; meta?: { label?: string; disabled?: boolean } };
+    const body = (await info.json()) as { members?: string[]; lastActivity?: number; rosterSigned?: boolean; meta?: { label?: string; disabled?: boolean } };
     // The registry's copy of "paused" is only a copy: put it right if it fell behind.
     if ((body.meta?.disabled === true) !== snapshot.paused.has(id)) void setFleetPaused(env, id, body.meta?.disabled === true);
     const roster = await stub.fetch("https://fleet/members", { method: "GET", headers }).catch(() => null);
@@ -702,6 +702,8 @@ async function adminFleets(env: Env): Promise<Response> {
       fleet: id,
       label: body.meta?.label ?? "",
       disabled: body.meta?.disabled === true,
+      // The members are what an owner-signed chain says: they are admitted and removed with the owner key, not here.
+      rosterSigned: body.rosterSigned === true,
       // Which token this fleet answers to as a device, if the operator set
       // one: a fingerprint, never the token.
       buddy: await buddyFingerprint(snapshot.buddies.get(id)),
@@ -748,7 +750,12 @@ async function adminFleetAction(env: Env, fleetId: string, step: string, body: R
   const path = step === "delete" ? "delete" : step;
   const res = await stub.fetch("https://fleet/" + path, { method: "POST", headers, body: JSON.stringify(body) });
   const answer = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) return Response.json({ error: String(answer.error ?? "the fleet refused") }, { status: res.status });
+  if (!res.ok) {
+    return Response.json(
+      { error: String(answer.error ?? "the fleet refused"), ...(typeof answer.hint === "string" ? { hint: answer.hint } : {}), ...(answer.rosterSigned === true ? { rosterSigned: true } : {}) },
+      { status: res.status },
+    );
+  }
   return Response.json(answer);
 }
 

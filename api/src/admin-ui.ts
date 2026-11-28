@@ -1087,12 +1087,12 @@ ${UI_CSS}    </style>
           leaves.className = "fleet-tree";
           ordered.forEach(function (m) {
             var leaf = document.createElement("li");
-            leaf.appendChild(fleetNode(f.fleet, m, m.deviceId === f.primary));
+            leaf.appendChild(fleetNode(f.fleet, m, m.deviceId === f.primary, f.rosterSigned === true));
             leaves.appendChild(leaf);
           });
           pending.forEach(function (p) {
             var leaf = document.createElement("li");
-            leaf.appendChild(fleetPendingNode(f.fleet, p));
+            leaf.appendChild(fleetPendingNode(f.fleet, p, f.rosterSigned === true));
             leaves.appendChild(leaf);
           });
 
@@ -1135,7 +1135,7 @@ ${UI_CSS}    </style>
         // A space in the fleet, drawn as a row of the device list: the status
         // outside, the box with the name and the device id, and the actions in
         // the menu.
-        function fleetNode(fleet, m, isPrimary) {
+        function fleetNode(fleet, m, isPrimary, signed) {
           var li = document.createElement("li");
           li.className = "row fleet-row" + (isPrimary ? " primary" : "") + (m.disabled ? " disabled" : "");
           var dot = document.createElement("span");
@@ -1162,6 +1162,8 @@ ${UI_CSS}    </style>
             facts.push("applied " + m.applied + (typeof m.fetched === "number" ? ", fetched " + m.fetched : ""));
           }
           if (facts.length) nameInput.title += " (" + facts.join("; ") + ")";
+          // The roster of this fleet is signed: who is in it, with which key and as what, is the owner key's to say.
+          if (signed) nameInput.title += " [signed roster: a change is made with prime fleets approve / remove on the operator's machine]";
 
           // The space is a device, so it has the actions a device has.
           var menu = fleetMenu([
@@ -1195,7 +1197,7 @@ ${UI_CSS}    </style>
             {
               // The owner is not changed here: it is removed, and the fleet is handed on.
               text: m.role === "viewer" ? "Make member" : "Make viewer",
-              disabled: m.role === "owner",
+              disabled: m.role === "owner" || signed,
               onClick: function () {
                 var toViewer = m.role !== "viewer";
                 fleetAction(fleet, "approve", { deviceId: m.deviceId, role: toViewer ? "viewer" : "member" }, (toViewer ? "made " + fleetName(m) + " a viewer" : "made " + fleetName(m) + " a member"));
@@ -1204,6 +1206,7 @@ ${UI_CSS}    </style>
             {
               text: "Remove",
               danger: true,
+              disabled: signed,
               onClick: function () {
                 fleetAction(fleet, "remove", { deviceId: m.deviceId }, "removed " + fleetName(m));
               },
@@ -1219,7 +1222,7 @@ ${UI_CSS}    </style>
 
         // A space that asked to join: the same row, with the two answers in
         // the menu.
-        function fleetPendingNode(fleet, p) {
+        function fleetPendingNode(fleet, p, signed) {
           var li = document.createElement("li");
           li.className = "row fleet-row waiting";
           var dot = document.createElement("span");
@@ -1246,14 +1249,29 @@ ${UI_CSS}    </style>
             offered.textContent = "new key " + (p.key || "(unreadable)");
             answers.appendChild(offered);
           }
+          // A fleet whose roster is signed admits with an entry the owner key signs, on the operator's machine: here the request only
+          // waits, and can be declined.
+          if (signed && !p.keyChange) {
+            var waitingSign = document.createElement("span");
+            waitingSign.className = "fleet-key";
+            waitingSign.textContent = "awaiting roster signature";
+            waitingSign.title = "prime fleets approve " + fleet + " --member " + p.deviceId + " --key <fingerprint> --signing-key <fingerprint>  (compare both with what that member's own machine prints)";
+            answers.appendChild(waitingSign);
+          } else if (signed) {
+            var waitingRotate = document.createElement("span");
+            waitingRotate.className = "fleet-key";
+            waitingRotate.textContent = "awaiting roster signature (new key)";
+            waitingRotate.title = "prime fleets approve " + fleet + " --member " + p.deviceId + " --key <fingerprint> --signing-key <fingerprint> --rotate";
+            answers.appendChild(waitingRotate);
+          }
           var admit = fleetBtn("Admit", function () {
             fleetAction(fleet, "approve", p.keyChange ? { deviceId: p.deviceId, key: p.key } : { deviceId: p.deviceId }, (p.keyChange ? "replaced the key of " : "admitted ") + (p.label || p.deviceId));
           }, "primary");
           // A key that cannot be named cannot be approved: the gateway would refuse it.
           if (p.keyChange && !p.key) admit.disabled = true;
-          answers.appendChild(admit);
+          if (!signed) answers.appendChild(admit);
           // A viewer reads every snapshot and never writes, holds the lease or has the fleet's tools called.
-          if (!p.keyChange) {
+          if (!p.keyChange && !signed) {
             answers.appendChild(fleetBtn("Admit as viewer", function () {
               fleetAction(fleet, "approve", { deviceId: p.deviceId, role: "viewer" }, "admitted " + (p.label || p.deviceId) + " as a viewer");
             }));

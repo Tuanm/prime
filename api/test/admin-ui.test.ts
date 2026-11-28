@@ -350,6 +350,46 @@ describe("the fleets in the admin interface", () => {
     expect(sent?.body).toEqual({ deviceId: "d2", key: "Zk3Q9wPq1Xc=" });
   });
 
+  test("a fleet whose roster is signed waits for the owner key: the requests say so, and the members cannot be changed here", async () => {
+    const page = loadPage([
+      {
+        fleet: "acme",
+        rosterSigned: true,
+        members: [{ deviceId: "d1", role: "owner", label: "alpha", addedAt: 1, online: true }, { deviceId: "d2", role: "member", label: "beta", addedAt: 2, online: true }],
+        primary: "d1",
+        pending: [{ deviceId: "d3", label: "gamma", requestedAt: 6, online: true }],
+      },
+    ]);
+    await page.settle();
+    const texts: string[] = [];
+    const buttons: El[] = [];
+    const walk = (el: El): void => {
+      if (el.textContent) texts.push(el.textContent);
+      if (el.tagName === "button") buttons.push(el);
+      el.children.forEach(walk);
+    };
+    page.list().forEach(walk);
+    expect(texts).toContain("awaiting roster signature");
+    // The request can still be declined; it cannot be admitted from here.
+    expect(buttons.map((b) => b.textContent)).not.toContain("Admit");
+    expect(buttons.map((b) => b.textContent)).not.toContain("Admit as viewer");
+    expect(buttons.map((b) => b.textContent)).toContain("Decline");
+    const leaves = page.list()[0]!.children[1]!;
+    const member = leaves.children[1]!.children[0]!;
+    expect(action(member, "Remove")!.disabled).toBe(true);
+    expect(action(member, "Make viewer")!.disabled).toBe(true);
+    // A fleet that is not signed is as it was.
+    const open = loadPage([{ fleet: "acme", members: [{ deviceId: "d2", role: "member", label: "beta", addedAt: 2, online: true }], primary: null, pending: [{ deviceId: "d3", label: "gamma", requestedAt: 6, online: true }] }]);
+    await open.settle();
+    const openButtons: El[] = [];
+    const walkOpen = (el: El): void => {
+      if (el.tagName === "button") openButtons.push(el);
+      el.children.forEach(walkOpen);
+    };
+    open.list().forEach(walkOpen);
+    expect(openButtons.map((b) => b.textContent)).toContain("Admit");
+  });
+
   test("a fleet is a cloud, and it offers Save and Deactivate", async () => {
     const page = loadPage([
       {
