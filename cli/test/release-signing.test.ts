@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { RELEASE_KEYS, SIGNED_SINCE, isDevBuild, parseReleaseFile, trustedReleaseKeys, verifyReleaseSignature } from "../src/release-key.ts";
+import { RELEASE_KEYS, SIGNED_SINCE, isDevBuild, isPreSigningRelease, parseReleaseFile, trustedReleaseKeys, verifyReleaseSignature } from "../src/release-key.ts";
 import { assetNameFor, runUpdate } from "../src/update.ts";
 import { defaultImage, imageLabel } from "../src/spaces.ts";
 import { applyTestTimeout } from "./setup";
@@ -246,6 +246,19 @@ describe("prime update checks the signature", () => {
     // Below it, a rollback to what was made before signing still works.
     serve({ version: "26.11.49", signed: "none" });
     expect((await update("26.12.20", { version: "26.11.49", force: true })).outcome.signature).toBe("unsigned");
+  });
+
+  test("only a release that was really published before signing can be installed unsigned: not a name made up below the first signed version", async () => {
+    expect(isPreSigningRelease("26.11.7")).toBe(true);
+    expect(isPreSigningRelease("26.11.50")).toBe(true);
+    for (const made of ["26.11.50+1", "26.11.9-rc.1", "26.11.6", "26.11.51", "26.10.1", "26.11.07", "25.12.3", "0.0.1"]) expect(isPreSigningRelease(made)).toBe(false);
+    for (const made of ["26.11.50+1", "26.11.49-rc.1", "26.10.1", "26.11.6"]) {
+      serve({ version: made, signed: "none" });
+      await expect(update("26.12.20", { version: made, force: true })).rejects.toThrow(/not a release that was published before releases were signed/);
+      expect(existsSync(join(dir, "prime"))).toBe(false);
+    }
+    serve({ version: "26.11.7", signed: "none" });
+    expect((await update("26.12.20", { version: "26.11.7", force: true })).outcome.signature).toBe("unsigned");
   });
 
   test("an unsigned release is not installed again over the same version", async () => {

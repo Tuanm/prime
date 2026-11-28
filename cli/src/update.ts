@@ -19,7 +19,7 @@ import { accessSync, chmodSync, constants, existsSync, renameSync, rmSync, write
 import { dirname } from "node:path";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, yellow } from "./output.ts";
-import { SIGNED_SINCE, parseReleaseFile, sha256OfBytes, verifyReleaseSignature } from "./release-key.ts";
+import { SIGNED_SINCE, isPreSigningRelease, parseReleaseFile, sha256OfBytes, verifyReleaseSignature } from "./release-key.ts";
 import { compareVersions, isValidVersion } from "./version.ts";
 
 export const TAG_PREFIX = "prime-v";
@@ -351,14 +351,16 @@ export async function verifySignedRelease(
       "A release is signed by its publisher after it is built. If this one was just made, wait for the signature; if not, do not install it.",
     );
   if (!releaseAsset && !signatureAsset) {
-    if (compareVersions(release.version, SIGNED_SINCE) < 0 && compareVersions(release.version, current) < 0) {
+    if (isPreSigningRelease(release.version) && compareVersions(release.version, current) < 0) {
       say("warning: release " + release.version + " was made before releases were signed and carries no signature; installing it unverified");
       return "unsigned";
     }
     throw refuse(
       compareVersions(release.version, SIGNED_SINCE) >= 0
         ? `releases from ${SIGNED_SINCE} on are always signed, and it has no RELEASE and RELEASE.sig`
-        : "it has no RELEASE and RELEASE.sig, and it is not older than this build",
+        : isPreSigningRelease(release.version)
+          ? "it has no RELEASE and RELEASE.sig, and it is not older than this build"
+          : `it has no RELEASE and RELEASE.sig, and ${release.version} is not a release that was published before releases were signed`,
     );
   }
   if (!releaseAsset || !signatureAsset) throw refuse(`it has ${releaseAsset ? "RELEASE" : "RELEASE.sig"} but not ${releaseAsset ? "RELEASE.sig" : "RELEASE"}`);
