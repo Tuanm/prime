@@ -488,6 +488,32 @@ What the gateway can still do, whatever a member checks:
   an added manifest field), so mixed fleets keep working in that direction.
 - **Know who is in the fleet, how big the work tree is, and when it changes.**
 
+### A copied key file opens only the snapshots of a day or two
+
+A member's key file holds the private half of the key every snapshot is wrapped for. The gateway keeps the last
+64 snapshots, so a copy of that file (a stolen laptop, a backup) used to open all of them, whenever it was taken.
+Now a member makes an **epoch key** (an X25519 pair) every 24 hours, or after 256 snapshots taken in, whichever is first
+(`PRIME_FLEET_EPOCH_HOURS`, 1 to 168), and tells the fleet its public half, signed by its signing key
+(`POST /fleets/{fleet}/epoch-key`). The primary wraps each snapshot's key to the members' epoch keys, with a key of its own
+that it makes for that one snapshot and does not keep, and a member **deletes the private half of an epoch key** half an hour after it has
+taken in a snapshot wrapped to a newer one. So a copy of the key file opens the snapshots of the epochs it still holds (the current
+one, a day or so) and none of the older ones. What it gives up: **a member cannot open a snapshot older than that either**, which a
+restore of an old state needs; the fleet's own history (`prime fleets snapshots`) shows who made them and when, and opens only
+what its epochs open.
+
+- The epoch key's signature is checked against the signing key **the signed roster names** for the member, not what the gateway lists:
+  a gateway that puts a key of its own in place of a member's is not wrapped to (and the primary says so). A fleet with no signed roster
+  has only the gateway's word for the signing key, as it has for the sealing key, and the epoch keys do no more there against a
+  gateway than the keys they sit beside: they protect the key file, not the roster.
+- The newest epoch key is never deleted. A key older than twice its length and a week is deleted whatever; a member that lost a
+  snapshot to that takes the next whole tree (at most 56 snapshots on).
+- It holds **only once every publisher is on this build**: a member of an earlier build wraps to the long-term key, and what it wraps
+  is as open to a copy as before. Members of earlier builds are wrapped to as they were, and read the fleet as before; they post no epoch key.
+- `PRIME_FLEET_EPOCH=off` makes no keys and wraps to none (a gateway that offers none, or one that says no, is asked again an hour
+  later); what a member holds still opens what it opens.
+- The key file gains `epochs`. A rotation of the key pair keeps them; a key file restored from before they were made opens none of
+  the snapshots wrapped to them (it says so, and takes the next whole tree).
+
 ## Joining
 
 The operator makes the fleet - from `/admin`, or with `prime fleets create` where

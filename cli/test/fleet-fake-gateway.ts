@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, verify as cryptoVerify } from "node:crypto";
+import { publicKeyFromRaw } from "../src/caller-key";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { type FleetCredentials } from "../src/fleet-transport";
@@ -75,6 +76,13 @@ export class FakeGateway {
   keyChangePending = false;
   /** The signed roster the gateway serves (GET /roster); undefined: a gateway that has none (404). */
   roster: { mode: "open" | "signed"; entries: unknown[] } | undefined = undefined;
+  /** Whether the gateway takes epoch keys (POST /epoch-key, and /keys lists them); an earlier one answers 404. */
+  epochSupport = false;
+  /** Each member's signing key (what the gateway knows of it), and the epoch key it last took. */
+  spubs = new Map<string, string>();
+  epochKeys = new Map<string, { n: number; pub: string; notAfter: number; sig: string }>();
+  /** The epoch keys posted, in order (the entry as sent). */
+  epochPosts: unknown[][] = [];
   /** Requests of each kind, by route. */
   requests = new Map<string, number>();
   /** Pack downloads, by the pack's key. */
@@ -180,9 +188,33 @@ export class FakeGateway {
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });
     }
+    if (kind === "epoch-key" && method === "POST") {
+      // As the gateway checks it: the member's own signing key, a number above the one held, a form.
+      if (!this.epochSupport) return Response.json({ error: "no such fleet action" }, { status: 404 });
+      if (!this.members.has(creds.deviceId)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const said = JSON.parse(String(body ?? "{}")) as { entry?: unknown[]; sig?: string };
+      const e = said.entry;
+      if (!Array.isArray(e) || e.length !== 7 || e[0] !== "prime-epoch-v1" || typeof said.sig !== "string") return Response.json({ error: "form" }, { status: 400 });
+      if (e[3] !== creds.deviceId) return Response.json({ error: "not your key" }, { status: 400 });
+      const spub = this.spubs.get(creds.deviceId);
+      if (!spub) return Response.json({ error: "no signing key" }, { status: 409 });
+      let good = false;
+      try {
+        good = cryptoVerify(null, Buffer.from(JSON.stringify(e), "utf8"), publicKeyFromRaw(Buffer.from(spub, "base64url")), Buffer.from(said.sig, "base64url"));
+      } catch {
+        good = false;
+      }
+      if (!good) return Response.json({ error: "bad signature" }, { status: 401 });
+      const held = this.epochKeys.get(creds.deviceId);
+      if (held && (e[4] as number) < held.n) return Response.json({ error: "stale", n: held.n }, { status: 409 });
+      if (held && e[4] === held.n) return Response.json({ ok: true, again: true });
+      this.epochPosts.push(e);
+      this.epochKeys.set(creds.deviceId, { n: e[4] as number, pub: e[5] as string, notAfter: e[6] as number, sig: said.sig });
+      return Response.json({ ok: true });
+    }
     if (kind === "keys" && method === "GET") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
-      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, applied: this.applied.get(m.deviceId) ?? 0, ...((this.memberCaps.get(m.deviceId) ?? this.fleetCaps) ? { caps: this.memberCaps.get(m.deviceId) ?? this.fleetCaps } : {}) })) });
+      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, ...(this.epochSupport && this.spubs.has(m.deviceId) ? { spub: this.spubs.get(m.deviceId) } : {}), ...(this.epochSupport && this.epochKeys.has(m.deviceId) ? { epochKey: this.epochKeys.get(m.deviceId) } : {}), applied: this.applied.get(m.deviceId) ?? 0, ...((this.memberCaps.get(m.deviceId) ?? this.fleetCaps) ? { caps: this.memberCaps.get(m.deviceId) ?? this.fleetCaps } : {}) })) });
     }
     if (kind === "applied" && method === "POST" && this.failApplied > 0) {
       this.failApplied--;

@@ -106,8 +106,10 @@ export interface FleetManifest {
   parentSeq?: number;
   /** The sender's public key, so a receiver can derive the shared secret. */
   senderPublicKey: string;
+  /** The ephemeral public key the entries wrapped to epoch keys were wrapped with (see `WrappedKey.epoch`). */
+  epk?: string;
   /** The snapshot key, wrapped for each member. */
-  wrapped: Array<{ memberId: string; wrapped: string; keyId?: string; mac?: string }>;
+  wrapped: Array<{ memberId: string; wrapped: string; keyId?: string; mac?: string; epoch?: number }>;
   /**
    * Who this snapshot was sealed for, and with which keys (see `rosterOf`). A
    * member that applies it knows the roster it stands on, so when it takes over it
@@ -527,6 +529,16 @@ export async function releaseLease(creds: FleetCredentials, fleet: string): Prom
   return res.ok;
 }
 
+export interface PostedEpochKey {
+  n: number;
+  /** base64 of the raw 32 byte X25519 public key. */
+  pub: string;
+  /** Milliseconds since the epoch: after it the key is not wrapped to. */
+  notAfter: number;
+  /** base64url of the member's signature over the entry (see `epochEntry` in fleet-epoch.ts). */
+  sig: string;
+}
+
 /**
  * The members' public keys, which only the primary may read.
  *
@@ -536,16 +548,53 @@ export async function releaseLease(creds: FleetCredentials, fleet: string): Prom
 export async function fetchMemberKeys(
   creds: FleetCredentials,
   fleet: string,
-): Promise<Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: string[] }>> {
+): Promise<Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: string[]; spub?: string; epochKey?: PostedEpochKey }>> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/keys");
   if (!res.ok) throw new FleetTransportError("could not read the members' keys: " + res.status);
-  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: unknown }> };
+  const body = (await res.json()) as { members?: Array<{ deviceId: string; pubkey?: string; applied?: number; caps?: unknown; spub?: unknown; epochKey?: unknown }> };
   // What each member says it can do comes in the same answer as the keys it is sealed for: a format is used only when
   // every member that is sealed for can read it, and a member admitted between two answers cannot slip between them.
   return (body.members ?? []).map((m) => {
-    const { caps, ...rest } = m;
-    return Array.isArray(caps) ? { ...rest, caps: caps.filter((c): c is string => typeof c === "string") } : rest;
+    const { caps, spub, epochKey, ...rest } = m;
+    return {
+      ...rest,
+      ...(Array.isArray(caps) ? { caps: caps.filter((c): c is string => typeof c === "string") } : {}),
+      // What the gateway says of a member's signing key and its epoch key is its word until the epoch key's signature is checked (see fleet-epoch.ts).
+      ...(typeof spub === "string" ? { spub } : {}),
+      ...(postedEpochKeyOf(epochKey) ? { epochKey: postedEpochKeyOf(epochKey)! } : {}),
+    };
   });
+}
+
+function postedEpochKeyOf(v: unknown): PostedEpochKey | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const o = v as Record<string, unknown>;
+  if (typeof o.n !== "number" || !Number.isSafeInteger(o.n) || o.n < 1) return undefined;
+  if (typeof o.pub !== "string" || typeof o.sig !== "string" || typeof o.notAfter !== "number" || !Number.isFinite(o.notAfter)) return undefined;
+  return { n: o.n, pub: o.pub, notAfter: o.notAfter, sig: o.sig };
+}
+
+/** What the gateway answers to a member's epoch key. */
+export type EpochPostResult =
+  | { ok: true; again?: true }
+  /** `n`: the number the gateway holds, on a refusal for being behind it; `retryAfterMs`: when it is too soon; `status` 404/405: a gateway that has no such route. */
+  | { ok: false; status: number; error: string; n?: number; retryAfterMs?: number };
+
+/** Say the fleet a new epoch key, signed (see `epochEntry`): the primary wraps snapshot keys to it from then on. */
+export async function postEpochKey(creds: FleetCredentials, fleet: string, entry: readonly unknown[], sig: string): Promise<EpochPostResult> {
+  const res = await request(creds, "POST", "/fleets/" + encodeURIComponent(fleet) + "/epoch-key", JSON.stringify({ entry, sig }));
+  if (res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { again?: unknown };
+    return { ok: true, ...(body.again === true ? { again: true as const } : {}) };
+  }
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown; n?: unknown; retryAfterMs?: unknown };
+  return {
+    ok: false,
+    status: res.status,
+    error: typeof body.error === "string" ? body.error : "status " + res.status,
+    ...(typeof body.n === "number" && Number.isSafeInteger(body.n) ? { n: body.n } : {}),
+    ...(typeof body.retryAfterMs === "number" && body.retryAfterMs > 0 ? { retryAfterMs: body.retryAfterMs } : {}),
+  };
 }
 
 /**
