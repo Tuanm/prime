@@ -762,10 +762,13 @@ back would stop it at its next reconnect.
   once. Neither needs a code of the device, a lock on the device does not stop them, and they clear the device's
   locks, so the new code works at once. An operator whose machine does not hold the device is shown the code and
   nothing is saved.
-- **The config.** The change is made under a lock next to the file, on the file as it is at that moment, so two
-  `rotate-code`s cannot lose one another's. A command that read the config at its start and writes all of it later
-  (`prime spaces ...`) does not take that lock, and can put back what it read: if that is this code, the pending
-  code is still in the file it read (or the operator makes the code again).
+- **The config.** Every command that saves `config.yaml` does it the same way (`saveConfig`, and `updateConfig` for a
+  change made in a moment): under a lock next to the file, the file is read again, what **this command** changed
+  since it read the config is applied to it (field by field: another command changing one field of a device and this
+  one another both stay; one both changed is the later save's), and the result is written to disk before the name
+  moves (fsync, then rename). So a `prime spaces start` that takes a minute does not put back a code that
+  `rotate-code` saved during it, and two commands racing lose neither change. The pending code is also in the
+  file as `pending_token`, and an operator's rotate recovers if all else is lost.
 
 Deploy the gateway before the CLI: an older gateway has no such route, and the command says so. The members that
 still hold six-character codes are the ones to run it for.
