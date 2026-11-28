@@ -84,9 +84,11 @@ describe("a tree less the files that look like secrets", () => {
       names.push("fixtures/" + "k".repeat(60) + i + ".txt");
       writeFileSync(join(w.work, names[i]!), "x\n");
     }
-    writeFileSync(join(w.work, ":(top)odd"), "o\n");
+    // A name with a colon is not a file name on Windows; `*` is only asked for, and is no file anywhere.
+    const odd = process.platform === "win32" ? [] : [":(top)odd"];
+    for (const name of odd) writeFileSync(join(w.work, name), "o\n");
     const taken = await snapshot({ work: w.work, gitDir: w.gitDir, base: null, treeOnly: true });
-    const without = await snapshot({ work: w.work, gitDir: w.gitDir, base: null, treeOnly: true, tree: taken.tree, drop: [...names, ":(top)odd", "*"] });
+    const without = await snapshot({ work: w.work, gitDir: w.gitDir, base: null, treeOnly: true, tree: taken.tree, drop: [...names, ...odd, "*"] });
     expect(listing(w.gitDir, w.work, without.tree)).toEqual([".env", "a.txt", "src/b.txt"]);
   });
 });
