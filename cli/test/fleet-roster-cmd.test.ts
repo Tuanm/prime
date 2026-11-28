@@ -411,6 +411,54 @@ describe("the commands that sign a fleet's roster", () => {
     gw.entries[1] = saved;
   });
 
+  describe("while the roster is not signed yet", () => {
+    const withSpace = (flags: Record<string, string | boolean>) => {
+      const c = ctx("trust", ["pin", "acme"], { space: "w", ...flags }) as unknown as { config: { spaces: Record<string, unknown> }; configPath: string };
+      c.config.spaces = { w: { fleet: "acme", gateway: gw.url, gateway_device: "dev-1", remote_token: "t" } };
+      return c as never;
+    };
+    const unsigned = async (run: () => Promise<void>) => {
+      const was = gw.signed;
+      gw.signed = false;
+      try {
+        await run();
+      } finally {
+        gw.signed = was;
+      }
+    };
+
+    test("an invite carries the code alone and says why, and carries the owner key once the roster is signed", async () => {
+      await unsigned(async () => {
+        out.length = 0;
+        await fleetsInvite(ctx("invite", ["acme"]));
+        expect(said()).toContain("CODE-123");
+        expect(said()).not.toContain("~");
+        expect(said()).toContain("not signed yet");
+      });
+      out.length = 0;
+      await fleetsInvite(ctx("invite", ["acme"]));
+      expect(said()).toContain("CODE-123~");
+    });
+
+    test("trust pin refuses a roster that is not signed, and pins once it is; --clear takes a pin back", async () => {
+      const fp = ownerFingerprint(readOwnerKey(keyFile).publicKey);
+      const keyPath = fleetKeyFile(join(dir, "config.yaml"), "acme", "w");
+      await unsigned(async () => {
+        await expect(fleetsTrust(withSpace({ owner: fp }))).rejects.toThrow(/not signed yet/);
+      });
+      expect(FleetTrust.ownerPinned(keyPath)).toBeUndefined();
+      await fleetsTrust(withSpace({ owner: fp }));
+      expect(FleetTrust.ownerPinned(keyPath)).toBe(fp.replace(/-/g, ""));
+      out.length = 0;
+      await fleetsTrust(withSpace({ clear: true }));
+      expect(FleetTrust.ownerPinned(keyPath)).toBeUndefined();
+      expect(said()).toContain("no longer pins");
+      await fleetsTrust(withSpace({ clear: true }));
+      expect(said()).toContain("pinned no owner key");
+      await expect(fleetsTrust(withSpace({ clear: true, owner: fp }))).rejects.toThrow(/do not go together/);
+    });
+  });
+
   test("trust pin needs a fleet space and a well-formed fingerprint", async () => {
     await expect(fleetsTrust(ctx("trust", ["pin", "acme"], { space: "none", owner: "x" }))).rejects.toThrow(/owner/);
   });

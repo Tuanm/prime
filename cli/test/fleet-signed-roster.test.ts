@@ -306,3 +306,79 @@ describe("a viewer reads the fleet and never writes it", () => {
     expect(got.applied).toBe(true);
   });
 });
+
+describe("a pin made before the roster is signed", () => {
+  test("makes a member refuse every pull, says how to take it back, and --clear does: the reviewer's case", async () => {
+    forgetIncarnationAnswers();
+    forgetRosterAnswers();
+    const root = mkdtempSync(join(tmpdir(), "fleet-early-pin-"));
+    try {
+      const gateway = new FakeGateway();
+      useFakeGateway(gateway);
+      const primary: MemberPaths = { work: join(root, "p"), gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+      const replica: MemberPaths = { work: join(root, "r"), gitDir: join(root, "r-meta"), keyFile: join(root, "r.key") };
+      mkdirSync(primary.work, { recursive: true });
+      mkdirSync(replica.work, { recursive: true });
+      gateway.seed("primary-device", loadOrCreateKeyPair(primary.keyFile).publicKey);
+      gateway.seed("replica-device", loadOrCreateKeyPair(replica.keyFile).publicKey);
+      writeFileSync(join(primary.work, "f.txt"), "one\n");
+      await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+      FleetTrust.pinOwner(replica.keyFile, "SEEAYA4FQ7QWJFLM2S4LUH6FSJ");
+      await expect(pull(credsFor("replica-device"), "x", replica, 0)).rejects.toThrow(/pin was made too early.*--clear/);
+      expect(FleetTrust.unpinOwner(replica.keyFile)).toBe("SEEAYA4FQ7QWJFLM2S4LUH6FSJ");
+      forgetRosterAnswers();
+      expect((await pull(credsFor("replica-device"), "x", replica, 0)).applied).toBe(true);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an answer that the roster is open is not asked for again for minutes, a signed one is asked for as before", async () => {
+    forgetIncarnationAnswers();
+    forgetRosterAnswers();
+    const root = mkdtempSync(join(tmpdir(), "fleet-open-cache-"));
+    try {
+      const gateway = new FakeGateway();
+      useFakeGateway(gateway);
+      const primary: MemberPaths = { work: join(root, "p"), gitDir: join(root, "p-meta"), keyFile: join(root, "p.key") };
+      mkdirSync(primary.work, { recursive: true });
+      gateway.seed("primary-device", loadOrCreateKeyPair(primary.keyFile).publicKey);
+      writeFileSync(join(primary.work, "f.txt"), "one\n");
+      const asks = (): number => gateway.requests.get("GET roster") ?? 0;
+      const first = await publish(credsFor("primary-device"), "x", primary, null, 0, 2);
+      const afterFirst = asks();
+      expect(afterFirst).toBeGreaterThan(0);
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + 60_000; // a minute later: the 5 s cache would ask again
+        writeFileSync(join(primary.work, "f.txt"), "two\n");
+        await publish(credsFor("primary-device"), "x", primary, first.commit, first.seq, 2, first.roster);
+      } finally {
+        Date.now = realNow;
+      }
+      expect(asks()).toBe(afterFirst);
+    } finally {
+      (globalThis as { __restoreFetch?: () => void }).__restoreFetch?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("two processes that make the first key together", () => {
+  test("end up with one key pair, the one on disk", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fleet-keymake-"));
+    try {
+      const keyFile = join(root, "k.key");
+      const script = "import {loadOrCreateKeyPair} from " + JSON.stringify(join(import.meta.dir, "../src/fleet-agent.ts")) + "; console.log(loadOrCreateKeyPair(" + JSON.stringify(keyFile) + ").publicKey)";
+      const run = () => Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", env: process.env });
+      const procs = [run(), run(), run(), run()];
+      const keys = await Promise.all(procs.map(async (p) => (await new Response(p.stdout).text()).trim()));
+      const onDisk = loadOrCreateKeyPair(keyFile).publicKey;
+      expect(new Set(keys).size).toBe(1);
+      expect(keys[0]).toBe(onDisk);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
