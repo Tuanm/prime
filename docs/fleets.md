@@ -367,7 +367,7 @@ metadata joins, the next snapshot goes back to the plain form and is a whole tre
 This is not unlinkability. In the form that hides the metadata, a member's entry is listed under a hash instead of its device id, but the entry still
 carries the fingerprint of the member's key (`keyId`) and the manifest still carries the sender's key: anyone who can read the gateway's storage can tell
 which entries are one key's across manifests, and (through a manifest in the earlier form that is still kept, for 64 snapshots after the switch) which device that key is.
-What the form hides is the commit, the tree and the device ids from a search of the text.
+What the form hides is the commit, the tree and the device ids from a search of the text. The keys of the packs (`packKey`, and `delta.packKey` beside a whole tree) and their hashes stay in the clear: the gateway's sweep of what is no longer kept reads them there.
 
 To take the form back by hand (a rollback): stop advertising `meta2` (a build without it in its capabilities, or the gateway's capabilities
 cleared); the next publish is plain and a whole tree, and members that predate it read it as they always did. A gateway can lie about
