@@ -677,7 +677,7 @@ describe("switching the replica mode of a running agent", () => {
           return spawn(env);
         },
       },
-      { startCheckMs: 100, command: [programs(root).here], target: programs(root).here },
+      { startCheckMs: 100, agentCommand: programs(root).here + " __fleet-agent --config " + configPath, target: programs(root).here },
     );
     // The old agent was still running when the new one was started, and is asked to stop after.
     expect(oldAliveWhenStarted).toBe(true);
@@ -800,6 +800,13 @@ describe("switching the replica mode of a running agent", () => {
     const spaced = join(root, "John Doe", "bin", "prime");
     mkdirp(join(root, "John Doe", "bin"));
     writeFileSync(spaced, "");
+    // Where the process list cannot say (Windows), the program of the process that updates is taken for the agent's.
+    const fallback = await restartAgent(
+      configPath,
+      { installed: () => false, pid: () => undefined, restart: () => false, stopWaitMs: 300, spawnAgent: newAgentHook(seen) },
+      { agentCommand: null, command: [here], target: join(root, "elsewhere-prime"), startCheckMs: 50 },
+    );
+    expect(fallback.restarted).toBe(false);
     expect(commandRuns(spaced + " __fleet-agent --config /c", spaced)).toBe(true);
     expect(commandRuns("/usr/bin/bun " + spaced + " __fleet-agent", spaced)).toBe(true);
     expect(commandRuns(spaced + "-old __fleet-agent", spaced)).toBe(false);

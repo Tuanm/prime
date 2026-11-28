@@ -669,9 +669,9 @@ export interface AgentRestartOptions {
   platform?: string;
   /**
    * The command line of the running agent, when it is known (replaced in tests; the process list says). Without it
-   * (Windows has no way to ask) the program of this process is taken for the agent's: what an update replaces.
+   * (Windows has no way to ask; null says so) the program of this process is taken for the agent's: what an update replaces.
    */
-  agentCommand?: string;
+  agentCommand?: string | null;
   /** What this process would start the agent with (replaced in tests). */
   command?: string[];
   /** How long the new agent waits for the old one to let go of the lock. */
@@ -740,7 +740,7 @@ export async function restartFleetAgentAfterUpdate(
     }
   }
   // Which program the agent runs: its own command line says, where the process list can be asked.
-  const agentCommand = opts.agentCommand ?? commandOf(existing.pid);
+  const agentCommand = opts.agentCommand === undefined ? commandOf(existing.pid) : (opts.agentCommand ?? undefined);
   if (opts.target !== undefined) {
     const runs = agentCommand !== undefined ? commandRuns(agentCommand, opts.target) : runsProgram(opts.command ?? selfCommand(), opts.target);
     if (!runs) return notIt();
