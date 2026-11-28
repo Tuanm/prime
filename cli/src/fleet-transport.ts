@@ -95,10 +95,24 @@ export interface FleetManifest {
    * does not match. Absent from snapshots of publishers that predate it.
    */
   seal?: string;
+  /**
+   * What the gateway has no need to read, sealed with a key derived from the snapshot key (see `SnapshotMeta` in
+   * fleet-crypto.ts): the commit and tree, who the snapshot is sealed for, and what a feature adds. A member
+   * reads these from here when it is present, and from the fields above only when it is not. When every member can
+   * read it (`META_CAP`), those fields are left empty (`tipCommit` and `tree` are "", `roster` is absent) and the
+   * entries of `wrapped` are listed under `wrapIdOf`, not device ids. Absent from snapshots of publishers that predate it.
+   */
+  meta?: string;
   /** Which epoch published this, for the fencing check. */
   epoch: number;
   createdAt: number;
 }
+
+/**
+ * What a member says it can read (`caps` in its bootstrap), by name: a format is published only when the gateway
+ * says every member has it (`fleetCaps` of the role).
+ */
+export const META_CAP = "meta2";
 
 export class FleetTransportError extends Error {}
 
@@ -182,6 +196,14 @@ const fetchedAs = new WeakMap<FleetManifest, string>();
 /** The id (hash) a manifest was fetched under, if it was fetched. */
 export function manifestHashOf(m: FleetManifest): string | undefined {
   return fetchedAs.get(m);
+}
+
+/** A copy of a manifest (with its metadata read into it) is the same manifest as far as the hash it was fetched under goes. */
+export function manifestCopy(from: FleetManifest, changes: Partial<FleetManifest>): FleetManifest {
+  const copy: FleetManifest = { ...from, ...changes };
+  const hash = fetchedAs.get(from);
+  if (hash !== undefined) fetchedAs.set(copy, hash);
+  return copy;
 }
 
 export async function fetchManifest(creds: FleetCredentials, fleet: string, id: string): Promise<FleetManifest> {

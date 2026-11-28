@@ -14,8 +14,8 @@ import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write";
 import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
-import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, type MemberKeyPair } from "./fleet-crypto";
-import { FleetTrust, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, sealFieldsOf, verifySnapshot } from "./fleet-trust";
+import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair } from "./fleet-crypto";
+import { FleetTrust, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
   PayloadGoneError,
   type IndexEntry,
@@ -30,6 +30,7 @@ import {
   putPayload,
   putSnapshot,
   type FleetCredentials,
+  META_CAP,
   type FleetHead,
   type FleetManifest,
 } from "./fleet-transport";
@@ -106,6 +107,11 @@ export function dropPreviousKey(keyFile: string, only?: string): void {
   const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
   const { previous: _gone, ...kept } = raw;
   writeFileAtomic(keyFile, JSON.stringify(kept, null, 2), 0o600);
+}
+
+/** Whether a manifest shows the gateway nothing of the snapshot (see `FleetManifest.meta`). */
+function hidesMeta(m: FleetManifest): boolean {
+  return m.meta !== undefined && m.tipCommit === "" && m.tree === "";
 }
 
 /** The members a snapshot is sealed for, as one string: who, and with which key. */
@@ -269,10 +275,18 @@ export async function publish(
   // has seen them refuses that one, and a whole tree is the way around it - the replica starts
   // from this one and never needs the snapshot it refused. A head whose manifest cannot be read
   // is taken as one of those: the whole tree is the safe side of not knowing.
+  // The manifest's metadata is sealed, and nothing in the clear but what the gateway needs, when every member can
+  // read that (the gateway says so in `fleetCaps`). A fleet that has a member that cannot is published as it always was,
+  // and a snapshot that is built on one in the other form is a whole tree, which the member that cannot read it needs.
+  const hideMeta = role?.member === true && role.fleetCaps?.includes(META_CAP) === true;
   const headUnsealed =
     head !== null && !(noBase || membershipChanged || checkpoint)
       ? await fetchManifest(creds, fleet, manifestIdOf(head.manifestKey)).then(
-          (m) => m.seal === undefined || !m.wrapped.some((w) => w.mac !== undefined) || (incarnation !== undefined && m.incarnation === undefined),
+          (m) =>
+            m.seal === undefined ||
+            !m.wrapped.some((w) => w.mac !== undefined) ||
+            (incarnation !== undefined && m.incarnation === undefined) ||
+            (m.meta !== undefined && hidesMeta(m) !== hideMeta),
           () => true,
         )
       : false;
@@ -303,7 +317,7 @@ export async function publish(
   // One key seals them all, so a member opens either with what it was given.
   const sealed = sealManyForMembers(
     payloads,
-    members.map((m) => ({ memberId: m.deviceId, publicKey: m.pubkey })),
+    members.map((m) => ({ memberId: hideMeta ? wrapIdOf(incarnation, m.deviceId) : m.deviceId, publicKey: m.pubkey })),
     keys.privateKey,
     keys.publicKey,
   );
@@ -369,6 +383,18 @@ export async function publish(
   // this is, what it follows, and the packs it is made of. (The gateway fills in
   // the packs' keys, but the hashes it computes are the ones taken here.)
   manifest.seal = sealed.seal(sealFieldsOf(manifest, payloadHash(main), delta?.packHash ?? null));
+  // What the manifest says of the snapshot, sealed, for a member that reads it from here. The fields beside it stay as
+  // they were (a member that predates it reads them) unless every member can read it: then the gateway is shown none.
+  manifest.meta = sealed.sealMeta(metaBindingOf(manifest, payloadHash(main), delta?.packHash ?? null), {
+    tipCommit: manifest.tipCommit,
+    tree: manifest.tree,
+    roster: manifest.roster,
+  });
+  if (hideMeta) {
+    manifest.tipCommit = "";
+    manifest.tree = "";
+    delete manifest.roster;
+  }
   // The pack and the manifest travel together, and the gateway moves the head
   // in the same call. One round trip instead of six.
   let moved = await putSnapshot(creds, fleet, manifest, main);
@@ -481,7 +507,7 @@ export interface Asker {
 
 function openableBy(manifest: FleetManifest, who: Asker): boolean {
   if (who.skipThrough !== undefined && manifest.seq <= who.skipThrough) return false;
-  const entry = manifest.wrapped.find((w) => w.memberId === who.memberId);
+  const entry = wrappedEntryFor(manifest.wrapped, who.memberId, manifest.incarnation);
   if (!entry) return false;
   // A snapshot from an older publisher does not say which key: trust the id.
   return entry.keyId === undefined || who.keyId === undefined || entry.keyId === who.keyId || (who.alsoKeyId !== undefined && entry.keyId === who.alsoKeyId);
@@ -769,18 +795,18 @@ async function downloadStep(
   trust?: FleetTrust,
   /** The pack, when it is already being downloaded. */
   ahead?: Promise<Buffer>,
-): Promise<{ plain: Buffer }> {
+): Promise<{ plain: Buffer; manifest: FleetManifest }> {
   const sealed = await (ahead ?? getPayload(creds, fleet, "packs", manifestIdOf(step.packKey)));
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
   // A member that rotated its key still opens what was sealed for the key it had, until it has taken that in.
   const opened =
-    openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey) ??
-    (keys.previous ? openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.previous.privateKey) : null);
+    openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey, m.incarnation) ??
+    (keys.previous ? openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.previous.privateKey, m.incarnation) : null);
   if (!opened) {
     // A sealed snapshot with a key wrapped for exactly this member's key, whose pack
     // does not open, is not "sealed before this device joined": it is damaged or swapped.
-    const mine = m.wrapped.find((w) => w.memberId === creds.deviceId);
+    const mine = wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation);
     const ours = [keyIdOf(keys.publicKey), ...(keys.previous ? [keyIdOf(keys.previous.publicKey)] : [])];
     if (m.seal !== undefined && mine?.keyId !== undefined && ours.includes(mine.keyId)) {
       throw new TamperedSnapshotError(m.seq, "its pack does not open with the key it was wrapped for this member (damaged, or another snapshot's)");
@@ -789,8 +815,10 @@ async function downloadStep(
   }
   // Opening proves the pack came from a holder of the snapshot key; it does not say
   // that the manifest is the one that holder made.
-  await verifySnapshot(creds, fleet, m, sealed, m.delta !== undefined && step.packKey === m.delta.packKey, opened, trust);
-  return { plain: opened.plain };
+  // What it says of the commit, tree and roster is read from its sealed metadata when it has any, and that is
+  // what the caller goes on with.
+  const checked = await verifySnapshot(creds, fleet, m, sealed, m.delta !== undefined && step.packKey === m.delta.packKey, opened, trust);
+  return { plain: opened.plain, manifest: checked };
 }
 
 /** The fleet has no route from what a member holds to its head (no whole tree to start from). */
@@ -945,7 +973,7 @@ async function ingestRoute(
   from: Position,
   onFetched?: (fetched: Position) => void | Promise<void>,
 ): Promise<Position> {
-  const downloads: Array<Promise<{ plain: Buffer }> | undefined> = [];
+  const downloads: Array<Promise<{ plain: Buffer; manifest: FleetManifest }> | undefined> = [];
   const trust = FleetTrust.beside(paths.keyFile);
   const start = (i: number): void => {
     if (i < plan.chain.length && downloads[i] === undefined) {
@@ -960,10 +988,11 @@ async function ingestRoute(
 
   let fetched = from;
   for (const [i, step] of plan.chain.entries()) {
-    const { plain: pack } = await downloads[i]!;
+    const { plain: pack, manifest: m } = await downloads[i]!;
     downloads[i] = undefined; // let the bytes go
     start(i + DOWNLOADS_AT_ONCE);
-    const m = step.manifest;
+    // From here the step is the snapshot as it was opened (a failure later on is routed around from what was kept).
+    step.manifest = m;
     // Whether this one may be taken in is asked here, in order, and what it shows is
     // remembered once it has been: a snapshot downloaded ahead of the ones before it
     // says nothing yet about what the fleet has shown.
