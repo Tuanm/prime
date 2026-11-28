@@ -326,6 +326,7 @@ OPTIONS FROM THE CONFIG
       enable-memory: true
       caller-auth: "warn"        # off | warn | enforce, see below
       callers: "/path/callers.json"
+      activity-log: "/path/activity.jsonl"
 
   Values from the config never appear on a command line (ps).
 
@@ -336,6 +337,11 @@ OPTIONS FROM THE CONFIG
   it (JSON-RPC error -32001); off checks nothing. A callers file that cannot be
   read refuses every signed call under enforce (under warn they run and are logged).
   Listing tools, ping and initialize never need a signature.
+
+  --activity-log <file> keeps a journal of the tool calls: one JSON line with
+  the time, the tool and who signed the call (the signer's key id, "unsigned",
+  or "local" for a call to the device's own port). The arguments are never
+  recorded; the file never grows past 1 MiB, the oldest lines going first.
 
   Refuses to start while the service is running ('prime service').
 `;

@@ -18,6 +18,7 @@
 //   --mcp <path>       aggregate tools from external MCP servers defined in the given JSON config (Claude Desktop format).
 
 import { loadRunVault, runCodeInChild } from "./run-tool.ts";
+import { ActivityJournal } from "./activity-journal.ts";
 import { CALL_RAW_ONLY, CallerAuth, type ReplyBinding, parseCallerAuthMode } from "./caller-auth.ts";
 import { callersPath } from "./caller-key.ts";
 import { spawn, spawnSync, file, write } from "bun";
@@ -160,6 +161,9 @@ Options:
                          key runs and is logged) or enforce (refused)
   --callers <file>       Keys trusted to sign calls (default: callers.json beside
                          the config); edit it with 'prime devices allow-caller'
+  --activity-log <file>  Keep a journal of the tool calls (time, tool, and the key
+                         that signed it or "unsigned"; never the arguments),
+                         at most 1 MiB, oldest lines dropped first
   -h, --help             Show this help and exit`;
 
 // Bare --gateway (no value) connects to the default managed gateway.
@@ -190,6 +194,7 @@ try {
       "gateway-token": { type: "string" },
       "caller-auth": { type: "string" },
       callers: { type: "string" },
+      "activity-log": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     strict: true,
@@ -216,6 +221,7 @@ const token: string | undefined = args.token;
 // --gateway-token wins, otherwise --token (the token registered for the
 // device id in the gateway is what authenticates the tunnel).
 const gatewayToken: string | undefined = args["gateway-token"] ?? token;
+const activityJournal = typeof args["activity-log"] === "string" && args["activity-log"] ? new ActivityJournal(resolve(args["activity-log"])) : undefined;
 const callerAuthMode = args["caller-auth"] === undefined ? "warn" : parseCallerAuthMode(args["caller-auth"]);
 if (!callerAuthMode) {
   console.error(`error: invalid --caller-auth: ${args["caller-auth"]} (use off, warn or enforce)`);
@@ -5630,13 +5636,15 @@ function validMcpRequest(msg: Json): boolean {
   return true;
 }
 
-async function handle(msg: Json): Promise<Json | null> {
+// `caller` says on whose word a call runs, for the activity journal: the key id of the machine that signed it,
+// "unsigned" when no trusted key did, "local" for a call that came to this device's own port.
+async function handle(msg: Json, caller = "local"): Promise<Json | null> {
   if (!validMcpRequest(msg)) return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
-  const result = await dispatchMcpRequest(msg);
+  const result = await dispatchMcpRequest(msg, caller);
   return Object.hasOwn(msg, "id") ? result : null;
 }
 
-async function dispatchMcpRequest(msg: Json): Promise<Json | null> {
+async function dispatchMcpRequest(msg: Json, caller: string): Promise<Json | null> {
   const { id, method, params } = (msg ?? {}) as any;
   const ok = (result: Json) => ({ jsonrpc: "2.0", id, result });
   const err = (code: number, message: string) => ({ jsonrpc: "2.0", id, error: { code, message } });
@@ -5676,6 +5684,7 @@ async function dispatchMcpRequest(msg: Json): Promise<Json | null> {
         return err(-32602, "Invalid params: name must be a nonempty string");
       }
       const { name, arguments: args } = params;
+      activityJournal?.record(name, caller);
       // Aggregated tool: forward to subprocess, spill oversized blocks
       // before returning so the agent's context window stays bounded.
       if (aggregatedTools.has(name)) {
@@ -6301,7 +6310,7 @@ if (gatewayDomain) {
         // (initialize, ping, tools/list, tools/call, raw methods, aggregated
         // tools). Bypassing the local HTTP round trip removes per-call TCP +
         // HTTP overhead and keeps the relay responsive under heavy load.
-        const resp = await handle(admission.request as Json);
+        const resp = await handle(admission.request as Json, admission.keyId ?? "unsigned");
         if (resp === null) {
           // Notification: acknowledge with response:null so the gateway
           // answers 204 No Content (strict clients reject error bodies).
