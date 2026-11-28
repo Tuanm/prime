@@ -15,6 +15,8 @@ mock.module("cloudflare:workers", () => ({
 }));
 mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 
+const { installStreamPolyfill } = await import("./stream-polyfill");
+installStreamPolyfill();
 const { FleetDO } = await import("../src/fleet-do");
 const { handleFleetRoutes } = await import("../src/fleets-routes");
 const { sweepFleets } = await import("../src/fleet-sweep");
@@ -34,6 +36,7 @@ function bucketAt(clock: { now: number }) {
     objects,
     deleted: [] as string[],
     failHead: false,
+    failSize: false,
     seed(key: string, ageMs: number, body = "x") {
       objects.set(key, { body, etag: "s" + n++, uploaded: clock.now - ageMs, size: body.length });
     },
@@ -56,6 +59,7 @@ function bucketAt(clock: { now: number }) {
       return { objects: page.map((key) => ({ key, uploaded: new Date(objects.get(key)!.uploaded) })), truncated, ...(truncated ? { cursor: page[page.length - 1]! } : {}) };
     },
     async head(key: string) {
+      if (bucket.failSize) throw new Error("the bucket is down");
       const o = objects.get(key);
       return o ? { key, size: o.size } : null;
     },
@@ -65,7 +69,16 @@ function bucketAt(clock: { now: number }) {
       if (!o) return null;
       return { etag: o.etag, json: async () => JSON.parse(o.body) };
     },
-    async put(key: string, body: string, opts?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } }) {
+    /** What the last puts were given: a stream is a body that was not held whole. */
+    putKinds: [] as string[],
+    async put(key: string, given: string | Uint8Array | ReadableStream<Uint8Array>, opts?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string }; sha256?: string }) {
+      bucket.putKinds.push(typeof given === "string" ? "string" : given instanceof ReadableStream ? "stream" : "bytes");
+      const body: string | Uint8Array = given instanceof ReadableStream ? new Uint8Array(await new Response(given).arrayBuffer()) : given;
+      // The bucket checks a hash it is given, and keeps nothing (and leaves what is under the key) when the body is another.
+      const wanted = (opts as { sha256?: string } | undefined)?.sha256;
+      if (wanted !== undefined && createHash("sha256").update(typeof body === "string" ? Buffer.from(body) : body).digest("hex") !== wanted) {
+        throw new Error("put: the SHA-256 checksum you specified did not match what we received (10037)");
+      }
       const cur = objects.get(key);
       const cond = opts?.onlyIf;
       if (cond?.etagMatches !== undefined && cur?.etag !== cond.etagMatches) return null;
@@ -159,15 +172,16 @@ function world() {
       for (const dev of Object.keys(caps)) if (dev !== "dev-a") await world.call(id, "/bootstrap", "device", dev, { caps: caps[dev] });
     },
     /** A request through the Worker, as a member makes it. */
-    async http(id: string, method: string, path: string, body?: Uint8Array | string, device = "dev-a") {
+    async http(id: string, method: string, path: string, body?: Uint8Array | string, device = "dev-a", headers: Record<string, string> = {}) {
       const url = new URL("https://gateway/fleets/" + id + path);
-      const request = new Request(url, { method, headers: { "x-prime-device": device, "x-device-token": "t" }, body: body as never });
+      const request = new Request(url, { method, headers: { "x-prime-device": device, "x-device-token": "t", ...(body !== undefined ? { "content-length": String(typeof body === "string" ? Buffer.byteLength(body) : body.length) } : {}), ...headers }, body: body as never });
       const res = (await handleFleetRoutes({ request, env: world.env, url, cfg: {} as never, authorizeDevice: async () => ({ ok: true as const }), unauthorized: () => new Response(null, { status: 401 }) }))!;
       return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, any> };
     },
     /** Upload a piece as an ordinary pack. */
-    async piece(id: string, bytes: Uint8Array) {
-      const up = await world.http(id, "POST", "/packs", bytes);
+    async piece(id: string, bytes: Uint8Array, streamed = true) {
+      // A member that says the hash of the piece (as a newer build does) has it streamed; one that does not has it held and hashed.
+      const up = await world.http(id, "POST", "/packs", bytes, "dev-a", streamed ? { "x-prime-sha256": sha(bytes) } : {});
       expect(up.status).toBe(200);
       return { hash: up.json.hash as string, bytes: bytes.length };
     },
@@ -412,6 +426,112 @@ describe("a member that does not read pieces, in a fleet whose head is in pieces
     await w.call("acme", "/join", "device", "dev-x", { code: invite.json.code });
     expect((await w.call("acme", "/approve", "admin", "operator", { deviceId: "dev-x" })).json.warning).toBeUndefined();
     expect((await w.call("acme", "/bootstrap", "device", "dev-x", {})).json.reason).not.toBe("upgrade-required");
+  });
+});
+
+describe("a piece that says its hash is streamed to the bucket, which checks it", () => {
+  const withHash = (bytes: Uint8Array, hash = sha(bytes)) => ({ "x-prime-sha256": hash });
+
+  test("goes to the bucket as a stream, under the hash it named, and is checked against it", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const bytes = bytesOf(5000, 7);
+    const res = await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes));
+    expect(res.status).toBe(200);
+    expect(res.json).toMatchObject({ hash: sha(bytes), size: 5000, key: "fleets/acme/packs/" + sha(bytes) });
+    expect(w.bucket.putKinds).toEqual(["stream"]);
+    expect(w.bucket.objects.get("fleets/acme/packs/" + sha(bytes))!.size).toBe(5000);
+    // It is noted for the sweep as any other upload is.
+    expect(Object.keys(w.states.get("acme")!.data.get("uploads") as object)).toEqual([sha(bytes)]);
+  });
+
+  test("one that is not the pack whose hash was named is refused with 400 and nothing is written", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const bytes = bytesOf(4000, 3);
+    const other = sha(bytesOf(4000, 4));
+    const res = await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes, other));
+    expect(res.status).toBe(400);
+    expect(w.bucket.objects.has("fleets/acme/packs/" + other)).toBe(false);
+    expect(w.bucket.deleted).toEqual([]);
+  });
+
+  test("a wrong body under the hash of a pack that is there, at the same size or another, leaves that pack as it was: nothing is overwritten or deleted", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const good = bytesOf(4000, 4);
+    expect((await w.http("acme", "POST", "/packs", good, "dev-a", withHash(good))).status).toBe(200);
+    const key = "fleets/acme/packs/" + sha(good);
+    const etag = w.bucket.objects.get(key)!.etag;
+    // The same size: the pack is there, so the body is dropped.
+    const sameSize = await w.http("acme", "POST", "/packs", bytesOf(4000, 9), "dev-a", withHash(good));
+    expect(sameSize.json).toMatchObject({ again: true });
+    // Another size: the bucket checks the hash, finds a body that is not the pack, and keeps what it has.
+    for (const length of [10, 5000]) {
+      const res = await w.http("acme", "POST", "/packs", bytesOf(length, 9), "dev-a", withHash(good));
+      expect(res.status).toBe(400);
+    }
+    expect(w.bucket.objects.get(key)!.etag).toBe(etag);
+    expect(w.bucket.objects.get(key)!.size).toBe(4000);
+    expect(w.bucket.deleted).toEqual([]);
+  });
+
+  test("a bucket that cannot say whether the pack is there is a 503 with nothing written, not 'absent'", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const bytes = bytesOf(100, 6);
+    w.bucket.failSize = true;
+    const res = await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes));
+    expect(res.status).toBe(503);
+    w.bucket.failSize = false;
+    expect(w.bucket.putKinds).toEqual([]);
+    expect(w.bucket.deleted).toEqual([]);
+    expect((await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes))).status).toBe(200);
+  });
+
+  test("one that is sent again at the size the bucket holds is not written again", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const bytes = bytesOf(3000, 9);
+    await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes));
+    const again = await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes));
+    expect(again.json).toMatchObject({ ok: true, again: true, hash: sha(bytes) });
+    expect(w.bucket.putKinds).toEqual(["stream"]);
+  });
+
+  test("a bucket that fails on its own is a 503 to try again, and nothing is deleted", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const bytes = bytesOf(3000, 5);
+    const put = w.bucket.put;
+    w.bucket.put = async () => {
+      throw new Error("internal error (500)");
+    };
+    expect((await w.http("acme", "POST", "/packs", bytes, "dev-a", withHash(bytes))).status).toBe(503);
+    w.bucket.put = put;
+    expect(w.bucket.deleted).toEqual([]);
+  });
+
+  test("a hash that is not 64 hex characters, or none, is the held path as before; and so is a runtime that cannot stream", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const a = bytesOf(100, 1);
+    expect((await w.http("acme", "POST", "/packs", a, "dev-a", { "x-prime-sha256": "abc" })).status).toBe(200);
+    expect((await w.http("acme", "POST", "/packs", bytesOf(100, 2))).status).toBe(200);
+    const { removeStreamPolyfill, installStreamPolyfill: put } = await import("./stream-polyfill");
+    removeStreamPolyfill();
+    const b = bytesOf(100, 3);
+    expect((await w.http("acme", "POST", "/packs", b, "dev-a", withHash(b))).status).toBe(200);
+    put();
+    expect(w.bucket.putKinds).toEqual(["bytes", "bytes", "bytes"]);
+  });
+
+  test("a member that is not the primary is refused before its body is read, hash or no hash", async () => {
+    const w = world();
+    await w.fleet("acme", { "dev-a": ["chunks"], "dev-b": ["chunks"] });
+    const bytes = bytesOf(100, 1);
+    expect((await w.http("acme", "POST", "/packs", bytes, "dev-b", withHash(bytes))).status).toBe(409);
+    expect(w.bucket.putKinds).toEqual([]);
   });
 });
 

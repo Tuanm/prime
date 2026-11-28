@@ -420,6 +420,12 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     // Said before the body is read, when the sender says how long it is, and again after.
     const declared = Number(deps.request.headers.get("content-length") ?? 0);
     if (declared > MAX_SNAPSHOT_BYTES) return uploadTooBig(declared, "change pack");
+    // A pack whose sender says its hash (and how long it is) is streamed to the bucket as it arrives and hashed on the way: the Worker
+    // shares its memory with every other request, and a piece held whole is 8 MiB of it, four times over, for each member uploading.
+    const claimed = (deps.request.headers.get("x-prime-sha256") ?? "").toLowerCase();
+    if (parts[0] === "packs" && /^[0-9a-f]{64}$/.test(claimed) && Number.isInteger(declared) && declared > 0 && canStream()) {
+      return streamedPack(deps, deviceId, role, bucket, prefix, claimed, declared);
+    }
     const body = await readBounded(deps.request, MAX_SNAPSHOT_BYTES);
     if (body instanceof Response) return uploadTooBig(MAX_SNAPSHOT_BYTES + 1, "change pack");
     if (body.byteLength === 0) return Response.json({ error: "empty payload" }, { status: 400 });
@@ -457,6 +463,61 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
   }
 
   return null;
+}
+
+/** Whether this runtime can give the bucket a body of a length it knows (the Workers runtime can). */
+function canStream(): boolean {
+  return typeof (globalThis as { FixedLengthStream?: unknown }).FixedLengthStream === "function";
+}
+
+/**
+ * Store a pack from a body that is read once, as it comes, straight into the bucket under the key the sender named. The bucket checks
+ * the hash itself (`sha256`) and refuses a body that is not that pack, or not as long as it said, without writing anything and without
+ * touching an object that is already under the key: nothing here ever deletes. A pack the bucket already holds at that size is not
+ * written again (the body is dropped unread).
+ */
+async function streamedPack(
+  deps: PayloadDeps,
+  deviceId: string,
+  role: FleetRole,
+  bucket: NonNullable<FleetDeps["env"]["BUCKET"]>,
+  prefix: string,
+  hash: string,
+  length: number,
+): Promise<Response> {
+  const key = prefix + hash;
+  const noted = await noteUpload(deps, deviceId, hash);
+  if (noted === "unavailable") return Response.json({ error: "the fleet could not be reached to note the upload: try again" }, { status: 503, headers: { "retry-after": "5" } });
+  if (!noted.primary) return Response.json({ error: "only the primary may publish" }, { status: 409 });
+  const body = deps.request.body;
+  if (!body) return Response.json({ error: "empty payload" }, { status: 400 });
+  // Whether it is there already is not guessed at: a bucket that cannot say is not "absent".
+  let held: { size: number } | null;
+  try {
+    countFleetR2("read");
+    held = await bucket.head(key);
+  } catch {
+    await body.cancel().catch(() => {});
+    return Response.json({ error: "the bucket could not be asked: try again" }, { status: 503, headers: { "retry-after": "5" } });
+  }
+  if (held && held.size === length) {
+    await body.cancel().catch(() => {});
+    return Response.json({ ok: true, key, hash, size: length, epoch: role.epoch, again: true });
+  }
+  const fixed = new FixedLengthStream(length);
+  const copying = body.pipeTo(fixed.writable);
+  countFleetR2("write");
+  try {
+    await Promise.all([bucket.put(key, fixed.readable, { sha256: hash, httpMetadata: { contentType: "application/octet-stream" } }), copying]);
+  } catch (error) {
+    // A body that is not the pack it names, or not as long as it said, or that broke off: the bucket kept nothing of it (and left what
+    // was under the key as it was). Anything else the bucket says is its own trouble, to be tried again.
+    if (/checksum|sha-?256|too many bytes|fewer bytes|FixedLengthStream/i.test(String(error))) {
+      return Response.json({ error: "the body is not the pack whose hash was named, or not as long as it said: upload it again" }, { status: 400 });
+    }
+    return Response.json({ error: "the bucket could not take the pack: try again" }, { status: 503, headers: { "retry-after": "5" } });
+  }
+  return Response.json({ ok: true, key, hash, size: length, epoch: role.epoch });
 }
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {

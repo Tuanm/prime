@@ -965,8 +965,16 @@ A pack upload from a member that is not the primary is refused before its body i
 before it is stored, so that the daily sweep does not take a piece of a slow upload from under the publisher: it leaves a pack that was uploaded and that no snapshot
 names yet for a day (up to 768 are remembered, three snapshots' worth), and what the head names (the manifest, its pack, the pieces
 of both lists) is always spared. Pieces that nothing names after a day are swept. A piece may be at most 8 MiB in a snapshot's
-list (`chunkLimit`) whatever a reader would take; a member that sends the size `GET /role` gives is always inside it. Four pieces at a
-time are about 64 MiB held by the Worker (each body is read into one buffer and stored from it), which is what the 128 MB leaves room for.
+list (`chunkLimit`) whatever a reader would take; a member that sends the size `GET /role` gives is always inside it. **A piece is streamed, not held.** A member that sends the piece's hash with it (`x-prime-sha256`, 64 hex characters, with the
+`content-length` of the body) has it written to the bucket as it arrives, under that hash, and the bucket itself checks the hash
+(`sha256` of the put): a body that is not that pack, or not as long as it said, is refused with `400` and nothing is written, and an
+object that is already under the key is left exactly as it was, so a wrong body can neither replace nor remove a right pack (nothing
+here ever deletes). A pack the bucket already holds under that hash at that size is not written again (the body is dropped); a bucket that
+cannot say whether it is there, or fails on its own, is `503` to try again. Four pieces in flight therefore cost the Worker a few
+buffers of the stream, not 32 MiB. (The smoke test prints the local runtime's growth for a streamed and for a held round; the local runtime
+also runs the simulated bucket, which reads a body whole, so it cannot be held to a number.) A pack sent without the hash (a build that does
+not send it, or a runtime that cannot stream) is read whole into one buffer, hashed and stored, as before; so is a whole snapshot in one
+`POST /snapshot` frame (up to 32 MB), which is why a big one is better sent in pieces.
 
 ## What is left in the bucket
 
@@ -1030,7 +1038,10 @@ done; then it checks the fleet agrees and applies it:
 lower one would make its key a valid sender for snapshots made before it was admitted, which only a member that was in the
 fleet before the roster can have. (So an add is signed at the head as it was when the member asked to join, which the
 gateway recorded with the request, or later: a fleet that publishes every few seconds does not move the head out from under an
-owner who is a minute away from the key.) A refusal is 400 for an entry that is not one,
+owner who is a minute away from the key.)
+The refusal carries a code a member reads instead of the words: `409 {code: "head-moved", head, floor}` for an add below the head the request was
+made at (`head` is the head now, `floor` the one the request was made at: sign again at `head`), and `409 {code: "ahead-of-head", head}` for an entry
+that takes effect after the head. A refusal is 400 for an entry that is not one,
 401 for a signature that does not verify, 409 for one the chain or the fleet does not agree with, with the reason.
 The same entry sent again (the answer was lost) is answered as it was. A chain may hold 1,000 entries; at that a fleet
 is put under a new genesis.
