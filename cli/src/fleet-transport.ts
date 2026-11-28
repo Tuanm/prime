@@ -156,7 +156,10 @@ export interface FleetManifest {
   createdAt: number;
 }
 
-export class FleetTransportError extends Error {}
+export class FleetTransportError extends Error {
+  /** Whether asking again may well work: the body broke off on the way (the gateway says so with a 400), or the fleet could not be asked just then (a 503). */
+  retryable = false;
+}
 
 /** The gateway answered with a status that is not a success (the status is kept, to tell a busy gateway from a refusal). */
 export class FleetStatusError extends FleetTransportError {
@@ -260,7 +263,12 @@ export async function putPayload(
     kind === "packs" ? { "x-prime-sha256": payloadHash(bytes) } : {},
   );
   if (res.status === 409) throw new FleetTransportError("only the primary may publish");
-  if (!res.ok) throw new FleetTransportError("could not store the payload: " + res.status);
+  if (!res.ok) {
+    const said = ((await res.json().catch(() => ({}))) as { error?: unknown }).error;
+    const err = new FleetTransportError("could not store the payload: " + res.status + (typeof said === "string" ? " (" + said.slice(0, 160) + ")" : ""));
+    err.retryable = res.status === 503 || (res.status === 400 && typeof said === "string" && /broke off/i.test(said));
+    throw err;
+  }
   return (await res.json()) as { key: string; hash: string; size: number };
 }
 
@@ -371,7 +379,7 @@ export async function putChunks(
       const i = next++;
       if (i >= pieces.length) return;
       const piece = pieces[i]!;
-      const stored = await putPayload(creds, fleet, "packs", piece);
+      const stored = await putPieceAgain(creds, fleet, piece);
       if (stored.hash !== payloadHash(piece)) {
         throw new FleetTransportError("the gateway stored piece " + (i + 1) + " under another hash than the one it was sent with (" + stored.hash + ")");
       }
@@ -381,6 +389,21 @@ export async function putChunks(
   await Promise.all(Array.from({ length: Math.min(inFlight, pieces.length) }, worker));
   return { chunks: pieces.map((p) => ({ hash: payloadHash(p), bytes: p.length })), firstKey: keys[0]! };
 }
+
+/** One piece, stored; asked again (twice) when it broke off on the way or the fleet could not be asked, which a piece of 8 MiB over a poor link meets now and then. */
+async function putPieceAgain(creds: FleetCredentials, fleet: string, piece: Buffer): Promise<{ key: string; hash: string; size: number }> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await putPayload(creds, fleet, "packs", piece);
+    } catch (err) {
+      if (!(err instanceof FleetTransportError) || !err.retryable || attempt >= 2) throw err;
+      await new Promise((r) => setTimeout(r, pieceRetry.delayMs));
+    }
+  }
+}
+
+/** How long to wait before a piece is sent again (a test makes it short). */
+export const pieceRetry = { delayMs: 1000 };
 
 /** Whether a manifest's list of pieces is one a member will fetch: it is the gateway's word until the whole pack is checked against the seal. */
 export function chunkListProblem(chunks: unknown): string | undefined {

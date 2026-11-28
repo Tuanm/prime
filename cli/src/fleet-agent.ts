@@ -328,6 +328,9 @@ export interface PublishResult {
 /** What a snapshot's manifest and framing add to its pack, at most, for the check against the gateway's limit. */
 const MANIFEST_ALLOWANCE_BYTES = 256 * 1024;
 
+/** A pack of more than this many bytes is uploaded as pieces whenever every member can read them (the gateway holds one request's body whole). */
+export const STREAM_ABOVE_BYTES = 4 * 1024 * 1024;
+
 function snapshotTooBigMessage(bytes: number, limit: number): string {
   const mb = (n: number): number => Math.ceil(n / (1024 * 1024));
   return (
@@ -656,16 +659,18 @@ export async function publish(
   // and a whole chunked pack may be) and every member can read them. Otherwise it is refused, as it always was.
   let chunkBytes: number | undefined;
   const sendInPieces = sealed.ciphertexts.map(() => false);
+  const canChunk = members.length > 0 && members.every((m) => m.caps?.includes(CHUNKS_CAP) === true) && role?.chunkedLimit !== undefined;
   if (limit !== undefined) {
     const biggest = Math.max(...sealed.ciphertexts.map((c) => c.length)) + MANIFEST_ALLOWANCE_BYTES;
-    if (biggest > limit) {
-      const canChunk = members.length > 0 && members.every((m) => m.caps?.includes(CHUNKS_CAP) === true) && role?.chunkedLimit !== undefined;
-      if (!canChunk) throw new Error(snapshotTooBigMessage(biggest, limit));
+    if (biggest > limit && !canChunk) throw new Error(snapshotTooBigMessage(biggest, limit));
+    if (canChunk) {
       const chunkedLimit = role!.chunkedLimit!;
       if (biggest - MANIFEST_ALLOWANCE_BYTES > chunkedLimit) throw new Error(snapshotTooBigMessage(biggest - MANIFEST_ALLOWANCE_BYTES, chunkedLimit));
       chunkBytes = Math.min(CHUNK_BYTES, role!.chunkLimit ?? CHUNK_BYTES);
+      // A pack in one request is held whole by the gateway's Worker, which shares its memory with every other request: once every
+      // member can read pieces, a pack of more than `STREAM_ABOVE_BYTES` goes up as pieces, each streamed (see `putPayload`), however small the limit of one request is.
       sealed.ciphertexts.forEach((c, i) => {
-        sendInPieces[i] = c.length + MANIFEST_ALLOWANCE_BYTES > limit;
+        sendInPieces[i] = c.length + MANIFEST_ALLOWANCE_BYTES > limit || c.length > STREAM_ABOVE_BYTES;
       });
     }
   }
