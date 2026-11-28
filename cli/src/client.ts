@@ -11,6 +11,7 @@ import {
   OfflineError,
   TimeoutError,
 } from "./errors.ts";
+import { CALL_SIG_HEADER, type CallSigner } from "./caller-key.ts";
 import type { Target } from "./target.ts";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
@@ -68,9 +69,15 @@ export class GatewayClient {
   private lastAttemptCount = 0;
   private handshaken = false;
   private localSid?: string;
+  private readonly signer: CallSigner | undefined;
 
-  constructor(target: Target) {
+  /**
+   * `signer` signs each call that needs it with this machine's caller key (see caller-key.ts), so a device
+   * that only runs calls signed by a key it trusts accepts it. Without one the call goes out unsigned.
+   */
+  constructor(target: Target, options: { signer?: CallSigner } = {}) {
     this.target = target;
+    this.signer = options.signer;
   }
 
   get lastRoundTripMs(): number {
@@ -142,7 +149,7 @@ export class GatewayClient {
     return this.parseBody(response.status, payload ?? text);
   }
 
-  private headers(): Record<string, string> {
+  private headers(method: string, body: string): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
@@ -152,6 +159,9 @@ export class GatewayClient {
     // entry checks the first, the DeviceDO forwards the second to the device.
     if (this.target.gatewayToken) headers.authorization = `Bearer ${this.target.gatewayToken}`;
     if (this.target.deviceToken) headers["x-device-token"] = this.target.deviceToken;
+    // Signed over the exact string that is sent, and again on every attempt: a retry is a new call.
+    const signature = this.signer?.header(method, this.target, body);
+    if (signature) headers[CALL_SIG_HEADER] = signature;
     return headers;
   }
 
@@ -178,7 +188,7 @@ export class GatewayClient {
       this.lastAttempts = attempt;
       let response: Response;
       try {
-        response = await fetch(this.endpoint(), { method: "POST", headers: this.headers(), body, signal });
+        response = await fetch(this.endpoint(), { method: "POST", headers: this.headers(method, body), body, signal });
       } catch (err) {
         this.lastMs = Math.round(performance.now() - started);
         // Never retried: a dropped connection may have reached the device, and
