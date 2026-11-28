@@ -158,6 +158,31 @@ export interface FleetManifest {
 
 export class FleetTransportError extends Error {}
 
+/** The gateway answered with a status that is not a success (the status is kept, to tell a busy gateway from a refusal). */
+export class FleetStatusError extends FleetTransportError {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+/** What the gateway returned is not the manifest that was asked for: other bytes than the ones the id is the hash of. */
+export class HashMismatchError extends FleetTransportError {}
+
+/**
+ * Whether asking again can change the answer: a request that did not get one (the network, a time limit), a gateway that
+ * is busy (5xx) or asks to slow down (429). A refusal, a payload that is gone, bytes that are not the ones asked for or do
+ * not parse are answers, and the same every time.
+ */
+export function isDoubt(err: unknown): boolean {
+  if (err instanceof FleetStatusError) return err.status >= 500 || err.status === 429;
+  if (err instanceof FleetTransportError) return false;
+  if (err instanceof SyntaxError) return false;
+  return true;
+}
+
 /** A payload the gateway no longer has (a snapshot it let go while it was being fetched). */
 export class PayloadGoneError extends FleetTransportError {
   constructor() {
@@ -255,7 +280,7 @@ export async function fetchManifest(creds: FleetCredentials, fleet: string, id: 
   const bytes = await getPayload(creds, fleet, "manifests", id);
   // What came back is what the head (or the snapshot after it) named, or it is not this manifest at all.
   if (payloadHash(bytes) !== id) {
-    throw new FleetTransportError("the manifest the gateway returned is not the one that was asked for");
+    throw new HashMismatchError("the manifest the gateway returned is not the one that was asked for");
   }
   const manifest = JSON.parse(bytes.toString("utf8")) as FleetManifest;
   // The hash it was stored under: of the bytes that came back, which is what the id says when it is a hash.
@@ -396,7 +421,7 @@ export async function getPayload(creds: FleetCredentials, fleet: string, kind: "
   if (brought !== undefined) return brought;
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/" + kind + "/" + encodeURIComponent(id));
   if (res.status === 404) throw new PayloadGoneError();
-  if (!res.ok) throw new FleetTransportError("could not read the payload: " + res.status);
+  if (!res.ok) throw new FleetStatusError("could not read the payload: " + res.status, res.status);
   return Buffer.from(await res.arrayBuffer());
 }
 
@@ -506,6 +531,8 @@ export async function fetchRole(
   fleet: string,
 ): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; chunkLimit?: number; chunkedLimit?: number; keyProofKey?: string; serverTimeMs?: number; fleetCaps?: string[] }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
+  // A gateway that is busy or asks to slow down has not said who this member is: that is not "not a member".
+  if (res.status >= 500 || res.status === 429) throw new FleetStatusError("could not ask for the role: " + res.status, res.status);
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
   const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; chunkLimit?: unknown; chunkedLimit?: unknown; keyProofKey?: unknown; fleetCaps?: unknown };
   // The gateway's clock, from the answer's Date header: a proof is only good for a few minutes of its own, so a
