@@ -573,7 +573,7 @@ prime fleets log acme --json
 
 The command recomputes the chain from the entries (the same canonical JSON the gateway hashes) and checks the head the gateway reports. It
 also keeps the head it last verified, beside the config (`fleet-audit/`), and says so when a later read is shorter than that or has a different
-entry at that number: the log was cut back or rewritten. A log that does not verify fails the command (exit 1). What it cannot do: a
+entry at that number: the log was cut back or rewritten. When the page read does not hold the entry it remembers (and the one after it), those two are asked for, so a rewrite of entries older than the page is found too (one more request); the remembered head moves only once that entry has been checked, and when the gateway no longer serves it (it is in its archive) the command says the read was not checked against the last one and keeps the old head until a read with `--all`. A log that does not verify fails the command (exit 1). What it cannot do: a
 gateway that was taken over from the start can write a consistent log of its own; the head is only a reference for later.
 
 An operator can act as a named person instead of with the shared operator token:

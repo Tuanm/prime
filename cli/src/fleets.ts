@@ -1835,16 +1835,32 @@ export async function fleetsLog(ctx: Ctx): Promise<void> {
   // What this machine saw of the log before.
   const pinFile = auditPinFile(ctx, t.gateway, fleetId);
   const pinned = readAuditPin(pinFile);
+  // Whether the entries read reach back to the one this machine pinned (so that the pin may move to the head read).
+  let reachesPin = true;
   if (!problem && pinned) {
     if (head.n < pinned.n) problem = "the log is shorter than when it was last checked here (entry " + pinned.n + "): it was cut back";
     else {
-      const same = entries.find((e) => e.n === pinned.n);
-      const next = entries.find((e) => e.n === pinned.n + 1);
+      let seen = entries;
+      const has = (n: number): boolean => seen.some((e) => e.n === n);
+      // A page that does not hold the pinned entry (and the one after it, when there is one) says nothing about whether the log was
+      // rewritten before it: a rewrite changes the hash of every entry from there on, the pinned one included. So those two are asked for.
+      if (!has(pinned.n) || (head.n > pinned.n && !has(pinned.n + 1))) {
+        try {
+          seen = [...entries, ...(await page("?after=" + (pinned.n - 1) + "&limit=2")).entries];
+        } catch (err) {
+          if (!(err instanceof CliError)) throw err;
+          reachesPin = false;
+        }
+      }
+      const same = seen.find((e) => e.n === pinned.n);
+      const next = seen.find((e) => e.n === pinned.n + 1);
       if (same && auditEntryHash(same) !== pinned.hash) problem = "entry " + pinned.n + " is not the one this machine checked before: the log was rewritten";
       else if (next && next.prev !== pinned.hash) problem = "entry " + next.n + " does not follow the entry " + pinned.n + " this machine checked before: the log was rewritten";
+      // The gateway's archive may no longer serve the pinned entry: then nothing was checked against it, and the pin stays where it was.
+      else if (!same) reachesPin = false;
     }
   }
-  if (!problem && inside.last !== null && lastRow && lastRow.n === head.n && (!pinned || head.n >= pinned.n)) {
+  if (!problem && inside.last !== null && lastRow && lastRow.n === head.n && (!pinned || (head.n >= pinned.n && reachesPin))) {
     try {
       mkdirSync(dirname(pinFile), { recursive: true, mode: 0o700 });
       writeFileAtomic(pinFile, JSON.stringify({ n: head.n, hash: head.hash }) + "\n", 0o600);
@@ -1852,6 +1868,7 @@ export async function fleetsLog(ctx: Ctx): Promise<void> {
       // Not being able to keep it only means the next read has nothing to compare with.
     }
   }
+  const notChecked = pinned !== undefined && !problem && !reachesPin;
 
   if (ctx.json) {
     printJson({ fleet: fleetId, head, first, entries, verified: problem === null, ...(problem ? { problem } : {}), ...(unrecorded ? { unrecorded } : {}) });
@@ -1868,6 +1885,7 @@ export async function fleetsLog(ctx: Ctx): Promise<void> {
     ctx.out(dim("head " + head.n + " " + head.hash.slice(0, 16) + (first > 1 ? "  (entries before " + first + " are in the gateway's archive)" : "")));
     if (unrecorded) ctx.out(yellow(unrecorded + " action(s) could not be written to the log"));
     if (!problem) ctx.out(green("chain intact") + dim(entries.length > 0 ? " over the " + entries.length + " entries shown" : ""));
+    if (notChecked) ctx.out(yellow("not checked against the last read here (entry " + pinned!.n + "): the gateway did not give that entry. Run with --all"));
     else ctx.out(yellow("BROKEN: " + problem));
   }
   if (problem) throw new CliError("the audit log does not verify: " + problem, "The gateway (or whoever holds it) changed the log. Do not rely on it.");
