@@ -8,12 +8,18 @@
 import { createHash } from "node:crypto";
 
 /**
+ * What a member says it can read, by name (`meta2`: a manifest whose commit, tree and roster are sealed, see `SnapshotMeta`): a
+ * format is published only when every member of the fleet lists it (the keys listed for the snapshot carry each member's).
+ */
+export const META_CAP = "meta2";
+
+/**
  * What this build can do beyond the first form of the wire, said to the fleet each time a place is taken (`caps` in
  * the body of a bootstrap). A format that only some members read is used by a publisher only when every member of the
  * fleet lists its name (`role.fleetCaps`; see `fleetHas`). Short lower-case names, added here as the code that
  * reads and writes the form lands, and nowhere else: this build says only what it does.
  */
-export const MEMBER_CAPS: readonly string[] = [];
+export const MEMBER_CAPS: readonly string[] = [META_CAP];
 
 /** What a capability's name looks like: the pattern the gateway keeps (`^[a-z0-9][a-z0-9-]{0,23}$`), so that both sides read the same names. */
 export const CAP_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/;
@@ -107,12 +113,6 @@ export interface FleetManifest {
   epoch: number;
   createdAt: number;
 }
-
-/**
- * What a member says it can read (`caps` in its bootstrap), by name: a format is published only when the gateway
- * says every member has it (`fleetCaps` of the role).
- */
-export const META_CAP = "meta2";
 
 export class FleetTransportError extends Error {}
 
