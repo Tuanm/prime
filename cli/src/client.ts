@@ -12,6 +12,7 @@ import {
   TimeoutError,
 } from "./errors.ts";
 import { REPLY_SIG_HEADER, verifyReplySig } from "./caller-auth.ts";
+import { FleetAuthority } from "./fleet-reply-trust.ts";
 import { CALLER_REFUSED_CODE, CALL_SIG_HEADER, type CallSigner, FLEET_PROBE_TOOL, methodNeedsSignature, parseCallSig } from "./caller-key.ts";
 import { checkDeviceKey, deviceKeyLabel, pinnedDeviceKey } from "./device-pins.ts";
 import type { Target } from "./target.ts";
@@ -80,14 +81,17 @@ export class GatewayClient {
   private readonly noticed = new Set<string>();
   /** The member of the fleet that said it was the one answering, for a few seconds (see `fleetMember`). */
   private member: { at: number; id: string | null } | undefined;
+  private authorityOf: FleetAuthority | undefined;
+  private readonly injectedAuthority: FleetAuthority | undefined;
 
   /**
    * `signer` signs each call that needs it with this machine's caller key (see caller-key.ts), so a device
    * that only runs calls signed by a key it trusts accepts it. Without one the call goes out unsigned.
    * `notice` hears of what is wrong with a reply that is not refused.
    */
-  constructor(target: Target, options: { signer?: CallSigner; notice?: (text: string) => void } = {}) {
+  constructor(target: Target, options: { signer?: CallSigner; notice?: (text: string) => void; authority?: FleetAuthority } = {}) {
     this.target = target;
+    this.injectedAuthority = options.authority;
     this.signer = options.signer;
     this.notice = options.notice ?? ((text) => process.stderr.write(`${text}\n`));
   }
@@ -169,6 +173,10 @@ export class GatewayClient {
    */
   private async fleetMember(method: string, signal: AbortSignal): Promise<string | undefined> {
     if (!this.signer || !(this.target.fleet || this.target.fleetBuddy) || !methodNeedsSignature(method)) return undefined;
+    if (!this.authority().pinned()) {
+      const fleet = this.target.fleet ?? this.target.deviceId;
+      this.once(`the replies of the fleet ${fleet} are not authenticated: a gateway can answer for a member. Pin the fleet's owner on this machine: prime fleets roster pin-caller ${fleet} --owner <fingerprint>`);
+    }
     const now = Date.now();
     if (this.member && now - this.member.at < (this.member.id === null ? FLEET_LEGACY_TTL_MS : FLEET_MEMBER_TTL_MS)) return this.member.id ?? undefined;
     // A question that was not answered (the network, a 5xx, a 429, a body that is not JSON) is asked once more, and is not remembered:
@@ -201,6 +209,15 @@ export class GatewayClient {
       // The question is not the call: whatever went wrong, the call itself says so again.
       return "failed";
     }
+  }
+
+  /** What this machine can verify of the fleet's members (see fleet-reply-trust.ts): nothing, unless the fleet's owner is pinned here. */
+  private authority(): FleetAuthority {
+    const fleet = this.target.fleet ?? this.target.deviceId;
+    this.authorityOf ??=
+      this.injectedAuthority ??
+      new FleetAuthority({ gateway: this.target.gateway, fleet, headers: () => ({ "x-prime-device": this.target.deviceId, ...(this.target.deviceToken ? { "x-device-token": this.target.deviceToken } : {}) }) });
+    return this.authorityOf;
   }
 
   /** Forget which member answered: the primary moved. */
@@ -248,7 +265,8 @@ export class GatewayClient {
     this.lastAttempts = 0;
 
     const started = performance.now();
-    const member = await this.fleetMember(method, signal);
+    let member = await this.fleetMember(method, signal);
+    let retried = false;
     for (let attempt = 1; ; attempt++) {
       this.lastAttempts = attempt;
       let response: Response;
@@ -281,8 +299,18 @@ export class GatewayClient {
         if (err instanceof McpError && err.code === CALLER_REFUSED_CODE) {
           // Refused: the member that was named may not be the one the fleet sends calls to any more, so the next call asks again.
           this.forgetMember();
-          // Not sent again here, whoever signed the refusal: a fleet's answers are not authenticated (any key can sign a reply), so a
-          // gateway could turn a call that ran into "did not run" and have it run again. The user's next call asks again.
+          // One more try, and only when it is certain that the call did not run anywhere: the member the call was made for says it is not the
+          // primary, and proves it is that member (its certificate for the key of the reply is signed by the key the owner's roster names for it).
+          // The call was made for that member alone, so no other can have run it. A refusal that no member of the roster signed (a gateway can
+          // sign one with a key of its own) or that another member gave is not enough: the call may have run on the member it was made for.
+          const reason = (err.data as { reason?: unknown } | undefined)?.reason;
+          const replySig = response.headers.get(REPLY_SIG_HEADER);
+          const nonce = parseCallSig(headers[CALL_SIG_HEADER] ?? "")?.nonce;
+          if (!retried && member !== undefined && reason === "not-primary" && replySig !== null && nonce !== undefined && (await this.authority().certifiedBy(replySig, nonce, body, text, member))) {
+            retried = true;
+            member = await this.fleetMember(method, signal);
+            if (member !== undefined) continue;
+          }
         }
         throw err;
       }

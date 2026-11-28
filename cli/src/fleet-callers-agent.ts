@@ -1,12 +1,14 @@
 // The agent's side of fleet-callers.ts: what it writes for a space's tool server, from the roster it verified and the
 // lease it holds.
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { CallerEntry } from "./caller-key.ts";
-import { type FleetCallersFile, FLEET_CALLERS_FILE, FLEET_CALLERS_RENEW_MS, FLEET_ROSTER_KEEP_MS, FLEET_ROSTER_REFRESH_MS, FLEET_CALLERS_VERSION, callersOfRoster } from "./fleet-callers.ts";
+import { loadOrCreateSignKey } from "./fleet-agent.ts";
+import { REPLY_CERT_RENEW_MS, REPLY_CERT_TTL_MS, publicKeyOfPem, signReplyCert } from "./fleet-reply-cert.ts";
+import { type FleetCallersFile, FLEET_CALLERS_FILE, FLEET_CALLERS_RENEW_MS, FLEET_ROSTER_KEEP_MS, FLEET_ROSTER_REFRESH_MS, FLEET_CALLERS_VERSION, callersOfRoster, replyKeyFileOf } from "./fleet-callers.ts";
 import type { FleetCredentials } from "./fleet-transport.ts";
 import { FleetTrust, RosterRefusedError } from "./fleet-trust.ts";
 import type { VerifiedRoster } from "./fleet-roster.ts";
@@ -23,6 +25,8 @@ export class FleetCallersWriter {
     callers: [],
   };
   private failureSaid = false;
+  /** The member's certificate for this space's reply key (see fleet-reply-cert.ts). */
+  private replyCert: FleetCallersFile["replyCert"];
   /** When the roster was last read (and verified, or refused): a roster that cannot be read is believed for FLEET_ROSTER_KEEP_MS and no longer. */
   private rosterAt = 0;
 
@@ -43,6 +47,15 @@ export class FleetCallersWriter {
     } else {
       this.lastRoster = { roster: "signed", head: { n: v.head.n, hash: v.head.hash }, callers: callersOfRoster(v) };
     }
+  }
+
+  /** The certificate that is being written now, if any. */
+  currentReplyCert(): FleetCallersFile["replyCert"] {
+    return this.replyCert;
+  }
+
+  setReplyCert(cert: FleetCallersFile["replyCert"]): void {
+    this.replyCert = cert;
   }
 
   /** Whether the roster is to be read again: when the space has just become the primary, and then every FLEET_ROSTER_REFRESH_MS. */
@@ -72,6 +85,7 @@ export class FleetCallersWriter {
       primarySince: this.primarySince,
       writtenAt: now,
       ...(this.lastRoster.head ? { head: this.lastRoster.head } : {}),
+      ...(this.replyCert ? { replyCert: this.replyCert } : {}),
       callers: this.lastRoster.callers,
     };
     // What the file says apart from when it was written.
@@ -131,7 +145,37 @@ export async function refreshFleetCallers(loop: CallersLoop, log: (text: string)
       // Anything else is the network: what was verified last stays.
     }
   }
+  issueReplyCert(loop, writer, dir, log);
   writer.update(loop.primary);
+}
+
+/**
+ * Certify the key this space signs its replies with, with the member's signing key (which stays here, on the host). The space makes
+ * its reply key when it first signs a reply, so until then there is nothing to certify. A new certificate is made when the key changed
+ * or the one that is held has less than REPLY_CERT_RENEW_MS left.
+ */
+export function issueReplyCert(loop: CallersLoop & { creds: { deviceId: string } }, writer: FleetCallersWriter, secretDir: string, log: (text: string) => void, now: number = Date.now()): void {
+  let replyKey: string | undefined;
+  try {
+    const file = replyKeyFileOf(secretDir);
+    replyKey = existsSync(file) ? publicKeyOfPem(readFileSync(file, "utf8")) : undefined;
+  } catch {
+    replyKey = undefined;
+  }
+  if (replyKey === undefined) {
+    writer.setReplyCert(undefined);
+    return;
+  }
+  const held = writer.currentReplyCert();
+  if (held && held.key === replyKey && held.until - now > REPLY_CERT_RENEW_MS) return;
+  try {
+    const sign = loadOrCreateSignKey(loop.paths.keyFile);
+    const until = now + REPLY_CERT_TTL_MS;
+    writer.setReplyCert({ key: replyKey, until, cert: signReplyCert(sign.privateKey, { fleet: loop.fleet, device: loop.creds.deviceId, replyKey }, until) });
+  } catch (err) {
+    writer.setReplyCert(undefined);
+    log(`cannot certify the reply key of this space: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Refresh a space's file now and then. Returns what stops it (it writes "not the primary" once more). */

@@ -556,6 +556,7 @@ USAGE
   prime fleets roster witness <fleet-id> --witness <url>  Tell the witness of the removals in the chain
   prime fleets roster add-caller <fleet-id> --key <public-key> | --self [--label <text>]  Let a machine's caller key call the fleet's primary (the owner key signs it)
   prime fleets roster remove-caller <fleet-id> --key <public-key> | --self  Take it out again
+  prime fleets roster pin-caller <fleet-id> --owner <fingerprint> | --clear  On a machine that calls the fleet: whose roster its replies are checked against
 
 The agent holds the fleet's lease while it runs, so it belongs in a service:
 'prime fleets agent install' is what keeps a member a member across a reboot.

@@ -36,6 +36,7 @@ import {
   fleetKeyOf,
   inviteWithOwner,
   isFingerprint,
+  normalizeFingerprint,
   liveMembers,
   makeEntry,
   ownerFingerprint,
@@ -56,6 +57,7 @@ import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgentManaged, uninstallFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
+import { pinFleetOwner, unpinFleetOwner } from "./fleet-reply-trust.ts";
 import { accessToken, defaultAccessRunner, type AccessRunner } from "./access-login.ts";
 
 /** How the Access token is fetched; tests replace it. */
@@ -1532,7 +1534,8 @@ const ROSTER_USAGE =
   "       prime fleets roster pin <fleet-id> --space <name> --owner <fingerprint> | --clear\n" +
   "       prime fleets roster witness <fleet-id> --witness <url>\n" +
   "       prime fleets roster add-caller <fleet-id> --key <public-key> | --self [--label <text>]\n" +
-  "       prime fleets roster remove-caller <fleet-id> --key <public-key> | --self";
+  "       prime fleets roster remove-caller <fleet-id> --key <public-key> | --self\n" +
+  "       prime fleets roster pin-caller <fleet-id> --owner <fingerprint> | --clear [--gateway <url>]";
 
 /** `prime fleets roster init|show|pin` */
 export async function fleetsRoster(ctx: Ctx): Promise<void> {
@@ -1551,6 +1554,8 @@ export async function fleetsRoster(ctx: Ctx): Promise<void> {
       return rosterCaller(ctx, requireFleetId(rawFleet), "caller");
     case "remove-caller":
       return rosterCaller(ctx, requireFleetId(rawFleet), "caller-remove");
+    case "pin-caller":
+      return rosterPinCaller(ctx, requireFleetId(rawFleet));
     default:
       throw new UsageError("unknown roster command \"" + what + "\"", ROSTER_USAGE);
   }
@@ -1756,6 +1761,33 @@ async function rosterCaller(ctx: Ctx, fleetId: string, op: "caller" | "caller-re
     return;
   }
   ctx.out(green(op === "caller" ? "allowed" : "removed") + " " + bold(keyIdOf(raw)) + (op === "caller" ? " to call the primary of " + fleetId + (label ? " (" + label + ")" : "") : " from the callers of " + fleetId) + dim("  entry " + done.n + " of the roster"));
+}
+
+/**
+ * `prime fleets roster pin-caller <fleet> --owner <fingerprint> | --clear`: on a machine that calls the fleet (not a member of it), which owner key
+ * the fleet's replies are checked against. The fingerprint is what `roster init` printed, or the one in the invite (`~<fingerprint>`); compare it
+ * with the operator's. Without a pin the replies of the fleet are not authenticated, and the client says so.
+ */
+async function rosterPinCaller(ctx: Ctx, fleetId: string): Promise<void> {
+  const gateway = normalizeGateway(str(ctx.parsed, "gateway") ?? ctx.config.defaults.gateway ?? process.env[ENV.gateway] ?? DEFAULT_GATEWAY);
+  if (bool(ctx.parsed, "clear")) {
+    const had = unpinFleetOwner(gateway, fleetId);
+    if (ctx.json) printJson({ fleet: fleetId, gateway, cleared: had });
+    else ctx.out(had ? "no owner is pinned for " + bold(fleetId) + " on this machine now" : dim("no owner was pinned for " + fleetId));
+    return;
+  }
+  const given = str(ctx.parsed, "owner");
+  if (given === undefined) throw new UsageError("missing --owner <fingerprint>", ROSTER_USAGE);
+  // The fingerprint itself, or an invite code that carries it (`<code>~<fingerprint>`).
+  const fp = given.includes("~") ? parseInvite(given).ownerFp : isFingerprint(given) ? normalizeFingerprint(given) : undefined;
+  if (fp === undefined) throw new UsageError("that is not an owner key fingerprint", "It is 26 letters and digits, as 'prime fleets roster init' prints it.");
+  const before = pinFleetOwner(gateway, fleetId, fp);
+  if (ctx.json) {
+    printJson({ fleet: fleetId, gateway, owner: fp, ...(before && before.ownerFp !== fp ? { replaced: before.ownerFp } : {}) });
+    return;
+  }
+  ctx.out(green("pinned") + " owner " + bold(fp) + " for " + bold(fleetId) + dim(" on " + gateway) + (before && before.ownerFp !== fp ? yellow("  (it was " + before.ownerFp + ")") : ""));
+  ctx.out(dim("replies of " + fleetId + " are now accepted as a member's only when the member's key in the owner's signed roster vouches for them"));
 }
 
 /** `prime fleets roster witness <fleet> --witness <url>`: tell the witness of every removal in the chain (they are public; again is harmless). */

@@ -91,6 +91,8 @@ function parseBody(raw: unknown, parse: (text: string) => unknown): unknown {
 export interface ReplyBinding {
   nonce: string;
   raw: string;
+  /** The call was made for a fleet (its key is one of the fleet's callers): the reply carries the member's certificate for the key it is signed with. */
+  fleet?: boolean;
 }
 
 export interface TunnelFrame {
@@ -269,17 +271,19 @@ export class CallerAuth {
     }
 
     let failure: CallerFailure | undefined;
+    let fleetCall = false;
     if (typeof frame.callerSig === "string") {
       const verdict = this.verify(frame);
       if (verdict.ok) {
         this.counts.signed++;
-        return { action: "run", request: verdict.request, keyId: verdict.keyId, reply: { nonce: verdict.nonce, raw: frame.raw as string } };
+        return { action: "run", request: verdict.request, keyId: verdict.keyId, reply: { nonce: verdict.nonce, raw: frame.raw as string, ...(verdict.fleet ? { fleet: true } : {}) } };
       }
       failure = verdict.failure;
+      fleetCall = verdict.fleet === true;
     }
 
     if (request === undefined) return this.unreadable(frame);
-    const bound = binding && fromRaw !== undefined ? binding : undefined;
+    const bound = binding && fromRaw !== undefined ? (fleetCall ? { ...binding, fleet: true } : binding) : undefined;
     if (!requiresSignature(request)) return { action: "run", request, ...(bound ? { reply: bound } : {}) };
 
     failure ??= "unsigned";
@@ -331,7 +335,7 @@ export class CallerAuth {
     return { action: "refuse", response: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the request could not be read", data: { reason: "invalid" } } } };
   }
 
-  private verify(frame: TunnelFrame): { ok: true; request: unknown; nonce: string; keyId: string } | { ok: false; failure: CallerFailure } {
+  private verify(frame: TunnelFrame): { ok: true; request: unknown; nonce: string; keyId: string; fleet?: boolean } | { ok: false; failure: CallerFailure; fleet?: boolean } {
     const parsed = parseCallSig(frame.callerSig as string);
     if (!parsed) return { ok: false, failure: "malformed" };
     if (typeof frame.raw !== "string") return { ok: false, failure: "no-raw" };
@@ -347,6 +351,8 @@ export class CallerAuth {
     const fleet = this.fleetCallers();
     const fleetEntry = fleet.file?.callers.find((e) => e.keyId === parsed.keyId);
     if (!entry && !fleetEntry) return { ok: false, failure: "unknown-key" };
+    // A call whose key is a fleet's caller and not this device's own was made for the fleet: its reply carries the certificate.
+    const fleetCall = fleetEntry !== undefined && entry === undefined;
     let signer: CallerEntry | undefined;
     let forFleet = false;
     if (entry && verifyCallSignature(parsed, Buffer.from(entry.pub, "base64"), callTarget("device", this.opts.deviceId), frame.raw)) {
@@ -360,21 +366,21 @@ export class CallerAuth {
         forFleet = true;
       } else if (verifyCallSignature(parsed, key, fleetMemberTarget(id, ""), frame.raw)) {
         // The question which member this is (nothing signed for it can run): answered, not run.
-        return { ok: false, failure: "fleet-member" };
+        return { ok: false, failure: "fleet-member", fleet: true };
       } else if (verifyCallSignature(parsed, key, callTarget("fleet", id), frame.raw)) {
         // The form an older build makes: it names no member, so it could be run by every member that is sent it.
-        return { ok: false, failure: "fleet-unbound" };
+        return { ok: false, failure: "fleet-unbound", fleet: true };
       }
     }
-    if (!signer) return { ok: false, failure: "bad-signature" };
+    if (!signer) return { ok: false, failure: "bad-signature", ...(fleetCall ? { fleet: true } : {}) };
     if (forFleet) {
       const f = fleet.file!;
       // The agent's word that this space is the primary is good for a while after it was written, and no longer.
-      if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary" };
+      if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary", fleet: true };
       // A call made for the fleet is not signed ahead of the clock, and one signed before this space became the primary - or within the
       // skew of the members' clocks of it - may have run on the member that was.
-      if (parsed.ts - now > FLEET_FUTURE_MS) return { ok: false, failure: "ahead" };
-      if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary" };
+      if (parsed.ts - now > FLEET_FUTURE_MS) return { ok: false, failure: "ahead", fleet: true };
+      if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary", fleet: true };
     }
     // Signed before this process started, or before a nonce that was forgotten: it may be a call that was run.
     if (parsed.ts <= this.floorTs) return { ok: false, failure: "replay" };
@@ -403,7 +409,7 @@ export class CallerAuth {
         this.floorTs = Math.max(this.floorTs, oldest[1].ts);
       }
     }
-    return { ok: true, request, nonce: parsed.nonce, keyId: parsed.keyId };
+    return { ok: true, request, nonce: parsed.nonce, keyId: parsed.keyId, ...(forFleet ? { fleet: true } : {}) };
   }
 
   private forgetOldNonces(now: number): void {
@@ -475,12 +481,20 @@ export class CallerAuth {
     while (this.flushing) await this.flushing;
   }
 
+  /** The member's certificate for this reply key, when the agent has written one that is for it and has not run out. */
+  private replyCert(replyKey: string): string | undefined {
+    const c = this.fleetCallers().file?.replyCert;
+    return c && c.key === replyKey && c.until > this.now() + 60_000 ? c.cert : undefined;
+  }
+
   /** Sign a reply so the caller knows this device (and not the gateway) answered. undefined if the key cannot be had. */
   replySig(call: ReplyBinding, responseText: string): string | undefined {
     try {
       this.replyKey ??= loadOrCreateCallerKey(join(this.stateDir, "device-ed25519.pem"));
       const sig = cryptoSign(null, replyMessage(call.nonce, call.raw, responseText), this.replyKey.privateKey).toString("base64url");
-      return `${REPLY_SIG_VERSION}.${this.replyKey.publicKey.toString("base64url")}.${sig}`;
+      const head = `${REPLY_SIG_VERSION}.${this.replyKey.publicKey.toString("base64url")}.${sig}`;
+      const cert = call.fleet ? this.replyCert(this.replyKey.publicKey.toString("base64url")) : undefined;
+      return cert ? `${head}.${cert}` : head;
     } catch (err) {
       if (!this.replyFailureSaid) {
         this.replyFailureSaid = true;
