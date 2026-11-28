@@ -221,7 +221,7 @@ const token: string | undefined = args.token;
 // --gateway-token wins, otherwise --token (the token registered for the
 // device id in the gateway is what authenticates the tunnel).
 const gatewayToken: string | undefined = args["gateway-token"] ?? token;
-const activityJournal = typeof args["activity-log"] === "string" && args["activity-log"] ? new ActivityJournal(resolve(args["activity-log"])) : undefined;
+const activityJournal = typeof args["activity-log"] === "string" && args["activity-log"] ? new ActivityJournal(resolve(args["activity-log"]), { onError: (message) => console.error(message) }) : undefined;
 const callerAuthMode = args["caller-auth"] === undefined ? "warn" : parseCallerAuthMode(args["caller-auth"]);
 if (!callerAuthMode) {
   console.error(`error: invalid --caller-auth: ${args["caller-auth"]} (use off, warn or enforce)`);
@@ -5684,10 +5684,10 @@ async function dispatchMcpRequest(msg: Json, caller: string): Promise<Json | nul
         return err(-32602, "Invalid params: name must be a nonempty string");
       }
       const { name, arguments: args } = params;
-      activityJournal?.record(name, caller);
       // Aggregated tool: forward to subprocess, spill oversized blocks
       // before returning so the agent's context window stays bounded.
       if (aggregatedTools.has(name)) {
+        activityJournal?.record(name, caller);
         const result = await callAggregated(name, Object.hasOwn(params, "arguments") ? args : {});
         if (result && typeof result === "object" && "content" in result) {
           return ok({ ...result, content: await spillContentBlocks(result.content, name) });
@@ -5702,6 +5702,8 @@ async function dispatchMcpRequest(msg: Json, caller: string): Promise<Json | nul
       const t = Object.hasOwn(tools, name) ? tools[name] : undefined;
       if (!t && SHELL_TOOL_NAMES.has(name)) throw new Error(`shell tool '${name}' is unavailable on this server`);
       if (!t) return err(-32601, `unknown tool: ${name}`);
+      // Noted when the tool is known and allowed, just before it runs: a name that is not a tool, or is disabled, is not what ran here.
+      activityJournal?.record(name, caller);
       const result = await t.handler(args === undefined ? {} : args);
       const text = typeof result === "string" ? result : JSON.stringify(result);
       // `read` honors a no_truncate flag end-to-end: the handler already returned
