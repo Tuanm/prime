@@ -135,6 +135,8 @@ interface Storing {
 const STORING_GRACE_MS = 60_000;
 // The most publishes recorded as storing at once; a longer list is of publishers that died, oldest let go.
 const STORING_MAX_ENTRIES = 64;
+// How many keys the gateway's sweep may ask about at once (a member asks about 8).
+const SWEEP_ASK_MAX = 1000;
 const LEFT_KEYS_KEPT = 256;
 const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 };
 
@@ -943,6 +945,7 @@ export class FleetDO implements DurableObject {
       await this.touch();
       return this.applied(caller, body, request);
     }
+    if (path === "/exists" && request.method === "GET") return caller.kind === "admin" ? Response.json({ exists: await this.exists() }) : this.deny();
     if (path === "/unreferenced" && request.method === "POST") return this.unreferenced(caller, body, request);
     if (path === "/delete" && request.method === "POST") return this.delete(caller, request, body);
     if (path === "/audit" && request.method === "GET") return this.readAudit(caller, url);
@@ -1922,15 +1925,48 @@ export class FleetDO implements DurableObject {
   // request that already succeeded writes the same bytes: those are the head's) and deletes them.
   // Only this fleet's own packs and manifests are answered for.
   private async unreferenced(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
-    if (caller.kind !== "device") return this.deny();
-    const members = await this.members();
-    if (!members[caller.deviceId]) return this.deny();
+    const gateway = caller.kind === "admin";
+    if (!gateway) {
+      if (caller.kind !== "device") return this.deny();
+      const members = await this.members();
+      if (!members[caller.deviceId]) return this.deny();
+    }
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
     const own = new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/(packs|manifests)/[0-9a-f]{64}$");
-    const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, 8) : [];
+    // A member asks about what it has just stored; the gateway's sweep asks about a whole fleet's worth.
+    const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, gateway ? SWEEP_ASK_MAX : 8) : [];
+    if (gateway && !(await this.exists())) return Response.json({ exists: false, keys: [] });
     const recent = (await this.storage.get<string[]>("recent")) ?? [];
     const kept = new Set([...recent.flatMap((entry) => entry.split("\n")), ...(await this.storingKeys())]);
-    return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
+    if (gateway) {
+      // What the head names is kept whatever this object remembers: the head is in the bucket, and losing the
+      // object's own record of it must not make the snapshot everyone is on look like an orphan. When it cannot
+      // be read the answer is an error, so that nothing is deleted on a guess.
+      try {
+        for (const key of await this.headKeys(fleetId)) kept.add(key);
+      } catch {
+        return Response.json({ error: "the head could not be read" }, { status: 503 });
+      }
+    }
+    return Response.json({ ...(gateway ? { exists: true } : {}), keys: asked.filter((k) => !kept.has(k)) });
+  }
+
+  // The objects the head of the fleet needs: its manifest, the pack that manifest names, and the change pack
+  // it carries. Empty when the fleet has no head yet. Throws when the bucket cannot say.
+  private async headKeys(fleetId: string): Promise<string[]> {
+    this.meter.r2("read");
+    const headObject = await this.bucket().get(this.headKey(fleetId));
+    if (!headObject) return [];
+    const head = (await headObject.json()) as Partial<Head>;
+    if (typeof head.manifestKey !== "string" || head.manifestKey === "") return [];
+    const keys = [head.manifestKey];
+    this.meter.r2("read");
+    const manifestObject = await this.bucket().get(head.manifestKey);
+    if (!manifestObject) return keys;
+    const manifest = (await manifestObject.json()) as { packKey?: unknown; delta?: { packKey?: unknown } };
+    if (typeof manifest.packKey === "string") keys.push(manifest.packKey);
+    if (typeof manifest.delta?.packKey === "string") keys.push(manifest.delta.packKey);
+    return keys;
   }
 
   // The join requests waiting for the operator. Read tolerantly: an earlier build kept the keys of a

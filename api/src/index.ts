@@ -38,6 +38,7 @@ import { handleCloudMcp } from "./cloud-device";
 import { handleFiles } from "./files-routes";
 import { handleFleetRoutes, markSeen, operatorCredential } from "./fleets-routes";
 import { keyFingerprintLong, onlineNow, validFleetId } from "./fleets";
+import { sweepFleets } from "./fleet-sweep";
 import { sendUsage, takeFleetR2 } from "./usage";
 import { handleSandbox, handleSandboxDevicePage, verifyTicket } from "./sandbox";
 import { effectiveDisabledSet, invalidateDisabledCache } from "./device-state";
@@ -1445,6 +1446,10 @@ export default {
         return Response.json({ error: "not found" }, { status: 404 });
       }
 
+      if (request.method === "POST" && url.pathname === "/admin/api/fleet-sweep") {
+        // The daily sweep of what fleets leave in the bucket, on request: ?dry=1 only counts.
+        return Response.json({ ok: true, ...(await sweepFleets(env, { dryRun: url.searchParams.get("dry") === "1" })) });
+      }
       if (request.method === "GET" && url.pathname === "/admin/api/usage") {
         // What the month has cost so far, against the budget it must not pass.
         const reg = env.REGISTRY.get(env.REGISTRY.idFromName("global"));
@@ -1882,5 +1887,24 @@ export default {
     }
 
     return Response.json({ error: "not found" }, { status: 404 });
+  },
+
+  // Once a day (see [triggers] in wrangler.toml): clear away what fleets left in the bucket, and report what was cleared
+  // in the log. What it counts of the bucket's operations is sent on with the usage, like any other.
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const report = await sweepFleets(env);
+          console.log("fleet sweep " + JSON.stringify(report));
+        } catch (error) {
+          console.error("fleet sweep failed: " + (error instanceof Error ? error.message : String(error)));
+        }
+        const r2 = takeFleetR2();
+        if (r2.writes > 0 || r2.reads > 0) {
+          await sendUsage(env.REGISTRY.get(env.REGISTRY.idFromName("global")), { gatewayRequests: 0, r2Writes: r2.writes, r2Reads: r2.reads }).catch(() => undefined);
+        }
+      })(),
+    );
   },
 };
