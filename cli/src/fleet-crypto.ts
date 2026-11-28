@@ -27,7 +27,7 @@ export interface MemberKeyPair {
    * Only the key file has it; it is tried when the current key does not open a snapshot.
    */
   previous?: MemberKeyPair;
-  /** The member's signing key (see `loadOrCreateSignKey`); made when it is first needed, and kept across rotations of the pair. */
+  /** The member's signing key (see `loadOrCreateSignKey`); made when it is first needed, and made anew with each rotation of the pair (see `rotateKeyPair`). */
   sign?: MemberSignKey;
   /**
    * The epoch keys this member holds (see `EpochKey`), oldest first. A snapshot can be wrapped to one of them rather than to the
@@ -51,6 +51,11 @@ export interface EpochKey {
   createdAt: number;
   /** The signing key (its public half) the fleet took this key under: a key not posted, or posted under a signing key since replaced, is posted again. */
   posted?: string;
+  /**
+   * The signed entry that is sent for this key: made once and sent again as it is, because the fleet answers "taken already" only to the same
+   * `notAfter` and signature, and answers another with a refusal that a lost answer (or a second process of this member) would otherwise make into a renumbering.
+   */
+  signed?: { spub: string; notAfter: number; sig: string };
   /** When a snapshot wrapped to a newer epoch was taken in: the private half is deleted a little after (see `pruneEpochs`). */
   supersededAt?: number;
 }

@@ -522,8 +522,17 @@ what its epochs open.
   is as open to a copy as before. Members of earlier builds are wrapped to as they were, and read the fleet as before; they post no epoch key.
 - `PRIME_FLEET_EPOCH=off` makes no keys and wraps to none (a gateway that offers none, or one that says no, is asked again an hour
   later); what a member holds still opens what it opens.
-- The key file gains `epochs`. A rotation of the key pair keeps them; a key file restored from before they were made opens none of
-  the snapshots wrapped to them (it says so, and takes the next whole tree).
+- The key file gains `epochs`. **`prime fleets rotate-key` makes a new signing key as well as a new key pair** (the epoch keys are signed
+  with it, so a copy of the old key file that kept it could go on signing keys the primary wraps to): the operator of a signed roster
+  compares both (`approve --key ... --signing-key ...`), the fleet drops the epoch key it held, a new one is made and posted, and the old
+  ones are let go of after the usual half hour. A copy of the old key file together with the device's credential is still a member until
+  the member is removed: after a leak, remove the member and admit it again.
+- A key file restored from before the epoch keys were made, or a member that kept its key file and lost its store, opens none of the
+  snapshots wrapped to an epoch key it no longer has (it says so, and takes the next whole tree, at most 57 snapshots on).
+- **Going back to an earlier build** after epoch keys were posted: set `PRIME_FLEET_EPOCH=off` first and wait twice the epoch's length (two days; the
+  gateway stops offering a key then) before the downgrade. An earlier build does not read a snapshot wrapped to an epoch key, and reports it as damaged.
+- A key is signed once and sent again as it was until the fleet has it, so a post whose answer was lost, or two processes of one member
+  posting at once, are told "taken already" and neither changes the key's number.
 
 ## Joining
 

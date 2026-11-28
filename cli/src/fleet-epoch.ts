@@ -11,7 +11,7 @@ import { createPrivateKey, sign as cryptoSign, verify as cryptoVerify } from "no
 import { publicKeyFromRaw } from "./caller-key";
 import { generateEpochKey, type EpochKey } from "./fleet-crypto";
 import { updateKeyFile, readKeyPair } from "./fleet-keyfile";
-import { postEpochKey, fetchRole, type FleetCredentials, type PostedEpochKey } from "./fleet-transport";
+import { EPOCH_CAP, postEpochKey, fetchRole, type FleetCredentials, type PostedEpochKey } from "./fleet-transport";
 
 export const EPOCH_ENTRY = "prime-epoch-v1";
 const HOUR_MS = 3_600_000;
@@ -80,7 +80,7 @@ const warnedBadEpoch = new Set<string>();
  * hold is said once, and that member is wrapped to as it was before.
  */
 export function epochsToWrapTo(
-  members: ReadonlyArray<{ deviceId: string; spub?: string; epochKey?: PostedEpochKey }>,
+  members: ReadonlyArray<{ deviceId: string; spub?: string; epochKey?: PostedEpochKey; caps?: string[] }>,
   signing: ReadonlyMap<string, string> | null,
   fleet: string,
   incarnation: string | undefined,
@@ -90,7 +90,8 @@ export function epochsToWrapTo(
   const out = new Map<string, { n: number; publicKey: string }>();
   if (!settings.enabled || incarnation === undefined) return out;
   for (const m of members) {
-    if (!m.epochKey) continue;
+    // A member that does not list the cap is a build that reads an epoch-wrapped snapshot as damaged (a rollback after it posted a key): wrapped as it always was.
+    if (!m.epochKey || m.caps?.includes(EPOCH_CAP) !== true) continue;
     const spub = signing ? signing.get(m.deviceId) : m.spub;
     if (spub !== undefined && epochKeyHolds(m.epochKey, { fleet, incarnation, device: m.deviceId, spub }, now)) {
       out.set(m.deviceId, { n: m.epochKey.n, publicKey: m.epochKey.pub });
@@ -194,6 +195,8 @@ const lastTick = new Map<string, number>();
 const notBefore = new Map<string, number>();
 const TICK_MS = 60_000;
 const NO_ROUTE_MS = HOUR_MS;
+/** A signed entry with less than this left to run is signed again (the fleet would take it for a key about to lapse). */
+const SIGNED_STALE_MS = 2 * HOUR_MS;
 
 /**
  * Make an epoch key when it is time, post the newest one when the fleet does not have it (not yet posted, or posted under another signing key),
@@ -211,33 +214,44 @@ export async function tickEpoch(creds: FleetCredentials, fleet: string, keyFile:
     if (!key || key.posted === signKey.publicKey) return;
     const role = await fetchRole(creds, fleet);
     if (!role.member || role.incarnation === undefined) return;
-    const post = async (k: EpochKey): Promise<boolean> => {
+    // Signed once, under the key file's lock, and sent again as it is until the fleet has taken it: a second process of this member, or a post
+    // whose answer was lost, sends the same entry, which the fleet answers "taken already", and does not make another one that it would refuse.
+    let sent: { spub: string; notAfter: number; sig: string } | undefined;
+    updateKeyFile(keyFile, (p) => {
+      const mine = (p.epochs ?? []).find((e) => e.n === key.n);
+      if (!mine || mine.posted === signKey.publicKey) return undefined;
+      if (mine.signed && mine.signed.spub === signKey.publicKey && mine.signed.notAfter >= now + SIGNED_STALE_MS) {
+        sent = mine.signed;
+        return undefined;
+      }
       const notAfter = now + Math.min(2 * settings.lengthMs, NOT_AFTER_MAX_MS);
-      const entry = epochEntry(fleet, role.incarnation!, creds.deviceId, k.n, k.publicKey, notAfter);
-      const result = await postEpochKey(creds, fleet, entry, signEpochEntry(entry, signKey.privateKey));
-      if (result.ok) {
-        updateKeyFile(keyFile, (p) => ({ ...p, epochs: (p.epochs ?? []).map((e) => (e.n === k.n ? { ...e, posted: signKey.publicKey } : e)) }));
-        return true;
-      }
-      if (result.status === 404 || result.status === 405) {
-        // A gateway that has no such route: the key was never used by anyone, and is not kept.
-        notBefore.set(id, now + NO_ROUTE_MS);
-        updateKeyFile(keyFile, (p) => {
-          const keep = (p.epochs ?? []).filter((e) => !(e.n === k.n && e.posted === undefined));
-          if (keep.length === (p.epochs ?? []).length) return undefined;
-          const { epochs: _gone, ...rest } = p;
-          return keep.length > 0 ? { ...rest, epochs: keep } : rest;
-        });
-      }
-      else if (result.status === 429) notBefore.set(id, now + Math.max(result.retryAfterMs ?? 0, TICK_MS));
-      else if (result.status === 409 && result.n !== undefined && result.n >= k.n) {
-        // The fleet holds a later number than this key file knows of (the file was lost, or copied back): number this one after it.
-        const renumbered = result.n + 1;
-        updateKeyFile(keyFile, (p) => ({ ...p, epochs: (p.epochs ?? []).map((e) => (e.n === k.n && e.posted === undefined ? { ...e, n: renumbered } : e)) }));
-      } else notBefore.set(id, now + 10 * 60_000);
-      return false;
-    };
-    await post(key);
+      const sig = signEpochEntry(epochEntry(fleet, role.incarnation!, creds.deviceId, mine.n, mine.publicKey, notAfter), signKey.privateKey);
+      sent = { spub: signKey.publicKey, notAfter, sig };
+      return { ...p, epochs: (p.epochs ?? []).map((e) => (e.n === mine.n ? { ...e, signed: sent! } : e)) };
+    });
+    if (!sent) return;
+    const entry = epochEntry(fleet, role.incarnation, creds.deviceId, key.n, key.publicKey, sent.notAfter);
+    const result = await postEpochKey(creds, fleet, entry, sent.sig);
+    if (result.ok) {
+      updateKeyFile(keyFile, (p) => ({ ...p, epochs: (p.epochs ?? []).map((e) => (e.n === key.n ? { ...e, posted: signKey.publicKey } : e)) }));
+      return;
+    }
+    if (result.status === 404 || result.status === 405) {
+      // A gateway that has no such route: the key was never used by anyone, and is not kept.
+      notBefore.set(id, now + NO_ROUTE_MS);
+      updateKeyFile(keyFile, (p) => {
+        const keep = (p.epochs ?? []).filter((e) => !(e.n === key.n && e.posted === undefined));
+        if (keep.length === (p.epochs ?? []).length) return undefined;
+        const { epochs: _gone, ...rest } = p;
+        return keep.length > 0 ? { ...rest, epochs: keep } : rest;
+      });
+    } else if (result.status === 429) notBefore.set(id, now + Math.max(result.retryAfterMs ?? 0, TICK_MS));
+    else if (result.status === 409 && result.n !== undefined && result.n >= key.n) {
+      // The fleet holds a key of this member that is not this one (the key file was lost, or copied back, or an entry with another expiry
+      // was taken): the next key is made after it. This one is kept as it is, with its number: snapshots may be wrapped to it.
+      const after = result.n + 1;
+      updateKeyFile(keyFile, (p) => ((p.epochs ?? []).some((e) => e.n >= after) ? undefined : { ...p, epochs: [...(p.epochs ?? []), generateEpochKey(after, now)] }));
+    } else notBefore.set(id, now + 10 * 60_000);
   } catch {
     // Nothing here may stop a fetch or a publish; the next minute asks again.
     notBefore.set(id, now + 5 * 60_000);
