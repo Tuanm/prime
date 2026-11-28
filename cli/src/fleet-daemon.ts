@@ -31,7 +31,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { commandOf, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { acquireStarting, claimSuccessor, clearSuccessor, isSuccessorProcess, mayAskAgainToStop, takeHandoverEnv, readSuccessor, registerSuccessor, requestStop, stopSuccessor, stopWaitingSuccessor as stopWaiting, watchForStop } from "./fleet-agent-handover.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
+import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, loadOrCreateSignKey, previousKeyPair, publish, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
 import { keyFingerprintOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
 import {
@@ -1834,7 +1834,7 @@ interface BootstrapResult {
 }
 
 /** Take a place in the fleet, without the CLI's machinery. */
-async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: string, label?: string, keyProof?: KeyProof): Promise<BootstrapResult> {
+async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: string, label?: string, keyProof?: KeyProof, spub?: string): Promise<BootstrapResult> {
   const res = await fetch(creds.gateway + "/fleets/" + encodeURIComponent(fleet) + "/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json", "x-prime-device": creds.deviceId, "x-device-token": creds.deviceToken },
@@ -1843,7 +1843,7 @@ async function bootstrapHere(creds: FleetCredentials, fleet: string, pubkey?: st
     // was renamed - or an identity another space took over - reads correctly
     // in the operator's list.
     // A key other than the one the fleet holds is taken only on the old key's proof, or the operator's say-so.
-    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(keyProof ? { keyProof } : {}), ...(label ? { label } : {}), seals: true, ...capsBody() }),
+    body: JSON.stringify({ ...(pubkey ? { pubkey } : {}), ...(spub ? { spub } : {}), ...(keyProof ? { keyProof } : {}), ...(label ? { label } : {}), seals: true, ...capsBody() }),
     // Asking for the place is how the lease is renewed: a request that hangs for
     // a minute would outlast the lease, so it is cut short (and asked again).
     signal: AbortSignal.timeout(Math.min(creds.timeoutMs ?? PLACE_TIMEOUT_MS, PLACE_TIMEOUT_MS)),
@@ -1999,7 +1999,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
       // On the gateway's clock when it says what it is (a proof is good for ten minutes), else on this machine's.
       if (role?.keyProofKey) proof = proveKeyChange(before.privateKey, role.keyProofKey, keys.publicKey, loop.fleet, loop.creds.deviceId, role.serverTimeMs !== undefined ? role.serverTimeMs + (Date.now() - fetchedAt) : Date.now());
     }
-    const placed = await bootstrapHere(creds, loop.fleet, keys.publicKey, loop.name, proof).catch((err: unknown) => {
+    const placed = await bootstrapHere(creds, loop.fleet, keys.publicKey, loop.name, proof, loadOrCreateSignKey(loop.paths.keyFile).publicKey).catch((err: unknown) => {
       // The request did not get an answer: what an earlier refusal asked for is history.
       loop.refusedForMs = undefined;
       throw err;

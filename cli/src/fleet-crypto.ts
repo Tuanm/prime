@@ -27,6 +27,16 @@ export interface MemberKeyPair {
    * Only the key file has it; it is tried when the current key does not open a snapshot.
    */
   previous?: MemberKeyPair;
+  /** The member's signing key (see `loadOrCreateSignKey`); made when it is first needed, and kept across rotations of the pair. */
+  sign?: MemberSignKey;
+}
+
+/** The Ed25519 key a member signs with: its roster entries (rotate-self), its witness checkpoints, its calls. */
+export interface MemberSignKey {
+  /** base64url of the raw 32 byte public key: the `spub` the fleet's roster names. */
+  publicKey: string;
+  /** PEM (PKCS#8) of the private key. */
+  privateKey: string;
 }
 
 const CURVE = "x25519";

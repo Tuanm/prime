@@ -555,8 +555,28 @@ file, nobody can add or remove a member of a signed fleet.
 An entry is a thirteen-place array (`prime-roster-v1`, fleet, incarnation, n, prevHash, at, op, device, xpub, spub, role,
 seqAt, extra) signed as its JSON text; `prevHash` is the hash of the entry before it together with its signature. The
 fingerprint is 26 letters and digits of the owner key's hash. A member pins it at join (from the invite) and never
-accepts a chain whose genesis names another key. The member's own check of the chain and the witness follow in the
-member-side packages; this one covers what the operator does.
+accepts a chain whose genesis names another key.
+
+#### What a member does with it
+
+- **Its signing key.** The key file of a member gains an Ed25519 `sign` key, made when first needed (under a lock, and
+  kept when the key pair is rotated). Its public half, `spub`, goes to the gateway with the member's key when it joins and
+  every time it asks for its place; the operator signs it into the roster.
+- **Every pull and every publish reads the chain** (`GET /fleets/<id>/roster`, kept for 5 seconds) and checks it from the
+  genesis: the owner key named is the one this member pinned, every signature and `prevHash` holds, and it contains the
+  newest entry this member has seen (`rosterHead` in the trust file). A member that has pinned nothing pins the owner key of the
+  first signed chain it sees and prints its fingerprint; compare it with `prime fleets roster show` where the key is.
+- **A snapshot is taken in only if the chain says its key was a member's (not a viewer's) at that sequence**: from the
+  `add` to the `remove`, with the `seqAt` the owner signed. What the gateway lists no longer decides.
+- **A publisher seals only for the members the chain names, with the keys it names.** A key the gateway adds to its list, or
+  puts in place of a member's, is skipped and named ("the gateway lists a key the signed roster does not"); the
+  publisher itself must be a member in the chain.
+- **The fleet is the one the chain names**: its incarnation is the genesis's, so a snapshot of an earlier fleet of the same
+  name is refused without having to have been learnt first.
+- **No way back.** A member that pinned an owner key or saw a signed chain refuses a gateway that says the roster is not
+  signed, a chain that does not contain the newest entry it saw, and a chain of another owner.
+
+The witness (a second place a member's newest snapshot is recorded) follows in its own package.
 
 ## Use cases
 

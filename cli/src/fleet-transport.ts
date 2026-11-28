@@ -580,3 +580,18 @@ export async function fetchRoster(creds: FleetCredentials, fleet: string): Promi
   }
   return { keys, left };
 }
+
+/**
+ * The fleet's roster as a chain of entries signed with its owner key (see fleet-roster.ts), exactly as the gateway holds
+ * it. A gateway that has none (it predates the signed roster, or this fleet's roster is still the gateway's own) says
+ * `mode: "open"` and no entries. The entries are not checked here: whoever uses them verifies the chain.
+ */
+export async function fetchRosterChain(creds: FleetCredentials, fleet: string): Promise<{ mode: "open" | "signed"; entries: unknown[] }> {
+  const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/roster");
+  if (res.status === 404 || res.status === 405) return { mode: "open", entries: [] };
+  if (!res.ok) throw new FleetTransportError("could not read the signed roster: " + res.status);
+  const body = (await res.json().catch(() => undefined)) as { mode?: unknown; entries?: unknown } | undefined;
+  if (!body || typeof body !== "object") throw new FleetTransportError("the signed roster the gateway sent is not JSON");
+  const entries = Array.isArray(body.entries) ? body.entries : [];
+  return { mode: body.mode === "signed" ? "signed" : "open", entries };
+}
