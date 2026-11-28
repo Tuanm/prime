@@ -250,7 +250,7 @@ describe("the list of pieces", () => {
 });
 
 describe("the gateway's own check of a list of pieces", () => {
-  // The gateway side (`checkChunkList` in api/src/fleets.ts) is in this repository once it has landed; until then there is nothing to compare with.
+  // The gateway side: `checkChunkList` in api/src/fleets.ts (or the file named by PRIME_GATEWAY_FLEETS, a copy from a branch).
   const file = process.env.PRIME_GATEWAY_FLEETS ?? join(import.meta.dir, "..", "..", "api", "src", "fleets.ts");
   type Gateway = {
     checkChunkList(raw: unknown, whole: unknown, what: string): { ok: true; hashes: string[]; bytes: number[] } | { ok: false; error: string };
@@ -267,7 +267,9 @@ describe("the gateway's own check of a list of pieces", () => {
 
   test("agrees with this side on the numbers, takes what putChunks lists, and refuses what this side refuses", async () => {
     const g = await load();
-    if (!g) return; // the gateway's code is not in this checkout yet: nothing to compare with
+    // The gateway is in this repository: a path or a function that moved is a test that must say so, not one that passes without looking.
+    expect(g, "the gateway's checkChunkList is in " + file).toBeDefined();
+    if (!g) return;
     expect(g.CHUNK_BYTES).toBe(CHUNK_BYTES);
     expect(g.MAX_CHUNKS).toBe(CHUNKS_MAX);
     expect(g.MAX_CHUNKED_SNAPSHOT_BYTES).toBe(CHUNKED_BYTES_MAX);
