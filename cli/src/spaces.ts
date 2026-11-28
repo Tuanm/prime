@@ -1664,9 +1664,9 @@ function runtimeInteractive(runtime: RuntimeInfo, args: string[]): number {
  * The answer comes from the fleet itself, not from the configuration, which is
  * only as fresh as the last time this machine looked.
  *
- * undefined means the fleet could not be asked.
+ * "viewer" is a member that the fleet admitted to read only. undefined means the fleet could not be asked.
  */
-async function spaceIsPrimary(space: SpaceEntry): Promise<boolean | undefined> {
+async function spaceIsPrimary(space: SpaceEntry): Promise<boolean | "viewer" | undefined> {
   if (!space.fleet || !space.gateway || !space.gateway_device || !space.remote_token) return undefined;
   try {
     const res = await fetch(space.gateway + "/fleets/" + encodeURIComponent(space.fleet) + "/primary", {
@@ -1674,8 +1674,10 @@ async function spaceIsPrimary(space: SpaceEntry): Promise<boolean | undefined> {
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return undefined;
-    const body = (await res.json()) as { member?: boolean; primary?: string | null };
+    const body = (await res.json()) as { member?: boolean; primary?: string | null; role?: string };
     if (!body.member) return false;
+    // A viewer reads the fleet and is never its primary: said apart, since waiting for the lease is no advice for it.
+    if (body.role === "viewer") return "viewer";
     return body.primary === space.gateway_device;
   } catch {
     return undefined;
@@ -1703,8 +1705,11 @@ export async function spacesEnter(ctx: Ctx): Promise<void> {
     if (primary !== true) {
       const other = primarySpaceName(ctx.config, space.fleet);
       fail(
-        'space "' + name + '" is ' + (primary === false ? "a replica" : "not known to be the primary") + " of fleet " + space.fleet,
-        primary === false
+        'space "' + name + '" is ' + (primary === "viewer" ? "a viewer" : primary === false ? "a replica" : "not known to be the primary") + " of fleet " + space.fleet,
+        primary === "viewer"
+          ? "A viewer reads the fleet and never writes it: an edit made in it is thrown away when it mirrors, and it is never given the lease." +
+            (other && other !== name ? ' The primary is space "' + other + '".' : " Enter the space that holds the lease.")
+          : primary === false
           ? "Only the primary of a fleet is entered: it is the one that writes, and an edit in a replica is thrown away when it mirrors." +
             (other && other !== name
               ? " The primary is space \"" + other + "\"."

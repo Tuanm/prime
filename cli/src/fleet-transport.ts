@@ -576,12 +576,12 @@ export async function putSnapshot(
 export async function fetchRole(
   creds: FleetCredentials,
   fleet: string,
-): Promise<{ member: boolean; primary: boolean; epoch: number; incarnation?: string; sealGate?: true; snapshotLimit?: number; chunkLimit?: number; chunkedLimit?: number; keyProofKey?: string; serverTimeMs?: number; fleetCaps?: string[] }> {
+): Promise<{ member: boolean; primary: boolean; epoch: number; role?: "owner" | "member" | "viewer"; incarnation?: string; sealGate?: true; snapshotLimit?: number; chunkLimit?: number; chunkedLimit?: number; keyProofKey?: string; serverTimeMs?: number; fleetCaps?: string[] }> {
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/role");
   // A gateway that is busy or asks to slow down has not said who this member is: that is not "not a member".
   if (res.status >= 500 || res.status === 429) throw new FleetStatusError("could not ask for the role: " + res.status, res.status);
   if (!res.ok) return { member: false, primary: false, epoch: 0 };
-  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; chunkLimit?: unknown; chunkedLimit?: unknown; keyProofKey?: unknown; fleetCaps?: unknown };
+  const body = (await res.json()) as { member?: boolean; primary?: boolean; epoch?: number; role?: unknown; incarnation?: unknown; sealGate?: unknown; snapshotLimit?: unknown; chunkLimit?: unknown; chunkedLimit?: unknown; keyProofKey?: unknown; fleetCaps?: unknown };
   // The gateway's clock, from the answer's Date header: a proof is only good for a few minutes of its own, so a
   // machine whose clock is off must not make every proof fail.
   const dated = Date.parse(res.headers.get("date") ?? "");
@@ -589,6 +589,8 @@ export async function fetchRole(
     member: body.member === true,
     primary: body.primary === true,
     epoch: body.epoch ?? 0,
+    // What the fleet admitted this member as (a gateway that has viewers says it).
+    ...(body.role === "owner" || body.role === "member" || body.role === "viewer" ? { role: body.role } : {}),
     ...(Number.isFinite(dated) ? { serverTimeMs: dated } : {}),
     // Which fleet of this name it is: absent from a gateway that predates it.
     ...(typeof body.incarnation === "string" && body.incarnation ? { incarnation: body.incarnation } : {}),

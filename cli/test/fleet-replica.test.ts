@@ -3221,3 +3221,80 @@ describe("the beat of a replica that waits for the lease", () => {
     }
   });
 });
+
+describe("a member the fleet admitted as a viewer", () => {
+  /** A viewer that has been told so by the fleet, with the fleet at a snapshot it holds. */
+  async function viewer(w: World) {
+    w.gateway.seed("primary-device", loadOrCreateKeyPair(w.primary.keyFile).publicKey);
+    const s = await baseline(w, "v1");
+    w.gateway.viewers.add("v1");
+    // Without a socket a replica asks for its place: that is how the fleet tells it what it is.
+    s.loop.events.connected = false;
+    s.loop.lastBootstrap = 0;
+    await s.round();
+    return s;
+  }
+
+  test("is told so when it asks for its place, and takes no claim for the lease", async () => {
+    const w = await world();
+    try {
+      const s = await viewer(w);
+      expect(s.loop.viewer).toBe(true);
+      expect(s.loop.primary).toBe(false);
+      expect(s.loop.claim).toBe(false);
+      expect(w.gateway.primary).not.toBe("v1");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("never asks for a claim after the lease is freed, or after a claim was set before it knew", async () => {
+    const w = await world();
+    try {
+      const s = await viewer(w);
+      const asked = w.gateway.bootstraps;
+      w.gateway.primary = ""; // the lease is free
+      s.loop.claim = true; // what a lease-free (or a not-caught-up) said before the fleet told it what it is
+      s.loop.claimAt = 0;
+      await s.round();
+      await s.round();
+      // It asks once, to learn again what it is (and the fleet says it is a viewer); the claim is gone, and nothing takes over.
+      expect(w.gateway.bootstraps).toBe(asked + 1);
+      expect(s.loop.claim).toBe(false);
+      expect(s.loop.promoting).toBeFalsy();
+      expect(s.said.some((m) => m.startsWith("took over"))).toBe(false);
+      expect(w.gateway.primary).toBe("");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("keeps its work tree as the fleet's: a snapshot is written as it arrives, as for a member that mirrors", async () => {
+    const w = await world();
+    try {
+      const s = await viewer(w);
+      expect(s.state().seq).toBe(1);
+      for (let i = 0; i < 3; i++) await w.publishNext();
+      s.loop.headDirty = true;
+      await s.round();
+      expect(s.state().seq).toBe(4);
+      expect(sameTree(fingerprint(w.primaryWork), fingerprint(s.paths.work))).toBe(true);
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a member that is a member again asks for the lease as one", async () => {
+    const w = await world();
+    try {
+      const s = await viewer(w);
+      w.gateway.viewers.delete("v1");
+      w.gateway.primary = "";
+      s.loop.lastBootstrap = 0;
+      await s.round();
+      expect(s.loop.viewer).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
+});
