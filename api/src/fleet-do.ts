@@ -81,6 +81,8 @@ interface FleetMeta {
 const PAUSED_ROUTES = new Set(["/join", "/bootstrap", "/head/advance"]);
 /** How long a member is told to wait before asking a paused fleet again. */
 const PAUSED_RETRY_MS = 60_000;
+/** How long a viewer is told to wait before asking again: it will never be given the lease, so there is no hurry. */
+const VIEWER_RETRY_MS = 30_000;
 
 interface Caller {
   kind: "admin" | "device";
@@ -543,9 +545,12 @@ export class FleetDO implements DurableObject {
     if (caller.kind !== "device") return this.deny();
     const members = await this.members();
     if (!members[caller.deviceId]) return Response.json({ member: false, primary: null });
-    await this.auditRelay(caller, request, held ? held.holder : null);
+    // A viewer cannot make the fleet's tools be called: the gateway refuses it before it asks the primary.
+    const viewer = members[caller.deviceId]!.role === "viewer";
+    if (!viewer) await this.auditRelay(caller, request, held ? held.holder : null);
     return Response.json({
       member: true,
+      ...(viewer ? { role: "viewer" } : {}),
       primary: held ? held.holder : null,
       epoch: held ? held.epoch : 0,
       ...(held?.since !== undefined ? { since: held.since } : {}),
@@ -656,6 +661,8 @@ export class FleetDO implements DurableObject {
         ...(m.pubkey ? { pubkey: m.pubkey } : {}),
         // What it says it can do, so that a format is used only when every member can read it.
         ...(m.caps && m.caps.length > 0 ? { caps: m.caps } : {}),
+        // A viewer is sealed for like the others and never writes.
+        ...(m.role === "viewer" ? { role: "viewer" } : {}),
         // How far this member has got. The admin page shows it; the publisher
         // does not decide anything from it (a member that fell behind catches
         // up from the newest checkpoint).
@@ -1173,9 +1180,17 @@ export class FleetDO implements DurableObject {
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
+    let freedLease = false;
     await this.state.blockConcurrencyWhile(async () => {
       const pending = await this.joinRequests();
       const request = pending[deviceId];
+      if (!request && body.role !== undefined && (await this.members())[deviceId]) {
+        // A member that is already in, with a role: what changes is the role (member or viewer), in place.
+        const changed = await this.changeRole(caller, deviceId, body.role);
+        out = changed.out;
+        freedLease = changed.freedLease;
+        return;
+      }
       if (!request) {
         out = Response.json({ error: "no such request" }, { status: 404 });
         return;
@@ -1225,13 +1240,24 @@ export class FleetDO implements DurableObject {
         out = Response.json({ error: "fleet is full" }, { status: 409 });
         return;
       }
-      delete pending[deviceId];
+      // What it is admitted as: a member, or a viewer that reads and never writes. The owner is not made here.
+      if (body.role !== undefined && body.role !== "member" && body.role !== "viewer") {
+        out = Response.json({ error: "role is member or viewer" }, { status: 400 });
+        return;
+      }
       // The first member the operator admits owns the fleet: a fleet with
       // nobody in it cannot be run by anybody.
-      const first = Object.keys(members).length === 0;
+      const empty = Object.keys(members).length === 0;
+      if (empty && body.role === "viewer") {
+        out = Response.json({ error: "the first member of a fleet owns it, so it cannot be a viewer", hint: "admit a member first" }, { status: 409 });
+        return;
+      }
+      // A fleet that has no owner (the one it had was removed, and only viewers were left) is owned by the next one that is not a viewer.
+      const owns = body.role !== "viewer" && !Object.values(members).some((m) => m.role === "owner");
+      delete pending[deviceId];
       const member: Member = {
         deviceId,
-        role: first ? "owner" : "member",
+        role: owns ? "owner" : body.role === "viewer" ? "viewer" : "member",
         addedAt: Date.now(),
         addedBy: caller.deviceId,
         ...(request.pubkey ? { pubkey: request.pubkey } : {}),
@@ -1243,7 +1269,38 @@ export class FleetDO implements DurableObject {
       await this.audit(caller, "member-admitted", deviceId, { role: member.role, ...(member.pubkey ? { key: await keyFingerprintLong(member.pubkey) } : {}) });
       out = Response.json({ ok: true, member });
     });
+    // Told after the decision is made and stored, outside the block that made it.
+    if (freedLease) this.broadcast({ type: "lease-free" }, deviceId);
     return out;
+  }
+
+  /**
+   * Make a member a viewer, or a viewer a member, where it stands: it keeps its place in the order the fleet is handed on in.
+   * The owner is not changed here (it is removed, and the fleet is handed on). A member that is made a viewer lets go of the lease
+   * it holds, and the others are told it is free.
+   */
+  private async changeRole(caller: Caller, deviceId: string, asked: unknown): Promise<{ out: Response; freedLease: boolean }> {
+    if (asked !== "member" && asked !== "viewer") return { out: Response.json({ error: "role is member or viewer" }, { status: 400 }), freedLease: false };
+    const members = await this.members();
+    const member = members[deviceId]!;
+    if (member.role === "owner") {
+      return { out: Response.json({ error: "the owner's role is not changed here", hint: "remove the owner, and the fleet is handed to the longest-standing member that is not a viewer" }, { status: 409 }), freedLease: false };
+    }
+    if (member.role === asked) return { out: Response.json({ ok: true, member, unchanged: true }), freedLease: false };
+    members[deviceId] = { ...member, role: asked };
+    await this.storage.put("members", members);
+    let freedLease = false;
+    if (asked === "viewer") {
+      const held = await this.lease();
+      if (held && held.holder === deviceId) {
+        await this.storage.delete("lease");
+        freedLease = true;
+      }
+      const claim = await this.storage.get<Claim>("claim");
+      if (claim && claim.device === deviceId) await this.storage.delete("claim");
+    }
+    await this.audit(caller, "role-changed", deviceId, { from: member.role, to: asked, freedLease });
+    return { out: Response.json({ ok: true, member: members[deviceId] }), freedLease };
   }
 
   private async remove(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
@@ -1309,7 +1366,8 @@ export class FleetDO implements DurableObject {
       // over is a fleet nobody can run.
       let ownerTo: string | undefined;
       if (member.role === "owner") {
-        const rest = Object.values(members).sort((a, b) => a.addedAt - b.addedAt);
+        // A viewer never runs a fleet: if only viewers are left, the fleet has no owner and the operator runs it.
+        const rest = Object.values(members).filter((m) => m.role !== "viewer").sort((a, b) => a.addedAt - b.addedAt);
         if (rest.length > 0) {
           const next = rest[0]!;
           members[next.deviceId] = { ...next, role: "owner" };
@@ -1474,6 +1532,13 @@ export class FleetDO implements DurableObject {
       const members = await this.members();
       if (!members[caller.deviceId]) {
         out = this.deny();
+        return;
+      }
+      // A viewer reads and never writes: it is never given the lease, and takes no claim to catch up (it would hold the
+      // place of a member that can publish). It is a replica that stays one; an earlier build of it asks again and is
+      // told the same, as it does of any replica.
+      if (members[caller.deviceId]!.role === "viewer") {
+        out = Response.json({ ok: true, role: "replica", reason: "viewer", head, epoch: head.epoch, ttlMs, retryAfterMs: VIEWER_RETRY_MS });
         return;
       }
       const row = await this.leaseRow();
@@ -1719,6 +1784,9 @@ export class FleetDO implements DurableObject {
 
     const held = await this.lease();
     if (!held || held.holder !== caller.deviceId) return Response.json({ error: "not the lease holder" }, { status: 409 });
+    // Not reachable by a viewer, which is never given the lease; refused all the same, so that a lease it held some
+    // other way (a role that changed under it) cannot publish.
+    if ((await this.members())[caller.deviceId]?.role === "viewer") return Response.json({ error: "a viewer does not publish" }, { status: 403 });
 
     const key = this.headKey(fleetId);
     // A publish whose object died after it wrote the head and before it was kept is made good first.

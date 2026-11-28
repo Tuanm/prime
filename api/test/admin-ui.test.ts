@@ -411,7 +411,7 @@ describe("the fleets in the admin interface", () => {
     const box = space.children.find((c) => c.className === "box")!;
     // The name, and the actions: the device id is not shown.
     expect(box.children.length).toBe(2);
-    expect(menuOf(space)).toEqual(["View", "Tools", "Clients", "Deactivate", "Remove"]);
+    expect(menuOf(space)).toEqual(["View", "Tools", "Clients", "Deactivate", "Make viewer", "Remove"]);
   });
 
   test("the card for a new device is an outline that can be cancelled", () => {

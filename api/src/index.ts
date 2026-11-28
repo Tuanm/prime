@@ -323,8 +323,12 @@ async function relayToFleet(
     headers: askHeaders,
   });
   if (!info.ok) return Response.json({ error: "no such fleet" }, { status: 404 });
-  const body = (await info.json()) as { member?: boolean; primary?: string | null; since?: number };
+  const body = (await info.json()) as { member?: boolean; role?: string; primary?: string | null; since?: number };
   if (!asBuddy && !body.member) return Response.json({ error: "not a member of this fleet" }, { status: 403 });
+  // A viewer reads the fleet's state; it does not have the fleet's tools called.
+  if (!asBuddy && body.role === "viewer") {
+    return Response.json({ error: "a viewer cannot call the fleet's tools", hint: "ask the operator to admit this device as a member" }, { status: 403 });
+  }
   // The lease outlives the space that holds it by design, so a primary whose
   // tunnel is gone would be the answer for a while yet. It is taken out of the
   // running here, and the fleet is asked again: the member that is waiting in
@@ -1379,8 +1383,8 @@ export default {
           return await adminFleetAction(env, fleetId, "invite", {}, adminActor);
         }
         if (request.method === "POST" && step === "approve") {
-          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown; key?: unknown };
-          return await adminFleetAction(env, fleetId, "approve", { deviceId: String(body.deviceId ?? ""), ...(typeof body.key === "string" ? { key: body.key } : {}) }, adminActor);
+          const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown; key?: unknown; role?: unknown };
+          return await adminFleetAction(env, fleetId, "approve", { deviceId: String(body.deviceId ?? ""), ...(typeof body.key === "string" ? { key: body.key } : {}), ...(body.role !== undefined ? { role: body.role } : {}) }, adminActor);
         }
         if (request.method === "POST" && step === "remove") {
           const body = (await request.json().catch(() => ({}))) as { deviceId?: unknown; keyChange?: unknown };

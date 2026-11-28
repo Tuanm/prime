@@ -1151,7 +1151,9 @@ ${UI_CSS}    </style>
             ? "the primary: it holds the lease, so it is the one that writes"
             : m.role === "owner"
               ? "the owner of the fleet"
-              : "a member of the fleet";
+              : m.role === "viewer"
+                ? "a viewer: it reads every snapshot and never writes"
+                : "a member of the fleet";
           // The key snapshots are sealed for, as a fingerprint (the KEY of 'prime fleets members' on that
           // machine says the same), and how far the member says it has got.
           var facts = [];
@@ -1188,6 +1190,15 @@ ${UI_CSS}    </style>
               danger: !m.disabled,
               onClick: function () {
                 fleetDeviceState(m);
+              },
+            },
+            {
+              // The owner is not changed here: it is removed, and the fleet is handed on.
+              text: m.role === "viewer" ? "Make member" : "Make viewer",
+              disabled: m.role === "owner",
+              onClick: function () {
+                var toViewer = m.role !== "viewer";
+                fleetAction(fleet, "approve", { deviceId: m.deviceId, role: toViewer ? "viewer" : "member" }, (toViewer ? "made " + fleetName(m) + " a viewer" : "made " + fleetName(m) + " a member"));
               },
             },
             {
@@ -1241,6 +1252,12 @@ ${UI_CSS}    </style>
           // A key that cannot be named cannot be approved: the gateway would refuse it.
           if (p.keyChange && !p.key) admit.disabled = true;
           answers.appendChild(admit);
+          // A viewer reads every snapshot and never writes, holds the lease or has the fleet's tools called.
+          if (!p.keyChange) {
+            answers.appendChild(fleetBtn("Admit as viewer", function () {
+              fleetAction(fleet, "approve", { deviceId: p.deviceId, role: "viewer" }, "admitted " + (p.label || p.deviceId) + " as a viewer");
+            }));
+          }
           answers.appendChild(fleetBtn("Decline", function () {
             fleetAction(fleet, "remove", p.keyChange ? { deviceId: p.deviceId, keyChange: true } : { deviceId: p.deviceId }, "declined " + (p.label || p.deviceId));
           }, "danger"));
