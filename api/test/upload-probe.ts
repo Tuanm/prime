@@ -9,7 +9,8 @@
 //
 // The operator token is read from the first line of stdin (never from an argument, so that it is not in a process list):
 //   echo "$TOKEN" | bun test/upload-probe.ts https://<gateway>
-// It makes one anonymous device (5 an hour per address) and a fleet of its own, and deletes the fleet at the end. A 1 MiB body goes first
+// It makes one anonymous device (5 an hour per address) and a fleet of its own, and deletes the fleet at the end. The device is not removed:
+// nothing but the admin API (behind Access) deletes an anonymous device, and the gateway collects it itself a week after it was last online. A 1 MiB body goes first
 // in every way; the 8 MiB one is sent only the ways that did the 1 MiB in under 20 s.
 
 import { createHash, randomBytes } from "node:crypto";
@@ -63,10 +64,13 @@ async function viaBun(way: string, path: string, headers: Record<string, string>
 function viaCurl(way: string, path: string, headers: Record<string, string>, bytes: Uint8Array, extra: string[] = []) {
   const file = "/tmp/upload-probe-" + process.pid + ".bin";
   writeFileSync(file, bytes);
-  const args = ["-sS", "--max-time", "100", "-X", "POST", ...extra, "-o", "/tmp/upload-probe-" + process.pid + ".out", "-w", "%{http_code} %{time_starttransfer} %{speed_upload} %{http_version}", "--data-binary", "@" + file,
-    "-H", "Expect:", "-H", "content-type: application/octet-stream", "-H", "x-prime-device: " + DEV, "-H", "x-device-token: " + CODE, ...Object.entries(headers).flatMap(([k, v]) => ["-H", k + ": " + v]), BASE + path];
+  // The device's code is given to curl on its standard input (a config), not on its command line, where a process list would show it.
+  const config = ["Expect:", "content-type: application/octet-stream", "x-prime-device: " + DEV, "x-device-token: " + CODE, ...Object.entries(headers).map(([k, v]) => k + ": " + v)]
+    .map((h) => 'header = "' + h.replace(/["\\]/g, "\\$&") + '"')
+    .join("\n");
+  const args = ["-sS", "--max-time", "100", "-X", "POST", ...extra, "-o", "/tmp/upload-probe-" + process.pid + ".out", "-w", "%{http_code} %{time_starttransfer} %{speed_upload} %{http_version}", "--data-binary", "@" + file, "-K", "-", BASE + path];
   const t0 = Date.now();
-  const r = spawnSync("curl", args, { encoding: "utf8" });
+  const r = spawnSync("curl", args, { encoding: "utf8", input: config });
   const ms = Date.now() - t0;
   let says = "";
   try { says = " ms=" + JSON.stringify(JSON.parse(Bun.file("/tmp/upload-probe-" + process.pid + ".out").size ? require("node:fs").readFileSync("/tmp/upload-probe-" + process.pid + ".out", "utf8") : "{}").ms ?? null); } catch {}

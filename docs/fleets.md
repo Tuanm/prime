@@ -988,6 +988,8 @@ also runs the simulated bucket, which reads a body whole, so it cannot be held t
 not send it, or a runtime that cannot stream) is read whole into one buffer, hashed and stored, as before; so is a whole snapshot in one
 `POST /snapshot` frame (up to 32 MB), which is why a big one is better sent in pieces.
 
+**What a refused or failed upload says.** A pack upload (`POST /packs`) and a snapshot answer with a `code` besides the words, so that a member does not have to match them: `not-a-member` (403), `not-primary` (409: the member is not the primary, or its lease moved while the body was read), `too-big` (413), `empty-payload` (400), `body-mismatch` (400: the body is not the pack whose hash was named, or not as long as it said; send it again), `fleet-unreachable` (503, `retry-after`: the fleet's object could not note the upload) and `bucket-unavailable` (503, `retry-after`). `bucket-unavailable` means **retry**, not "refused": a body that breaks off on the way (the connection dropped, a member that stopped) is likely to land on it rather than on `body-mismatch`. A 5xx with no `code` is not the gateway's own answer (the platform's: Cloudflare's page, error 1102), and is not to be retried as one.
+
 ## What is left in the bucket
 
 A publish that is refused (it was not the primary any more, or it was behind), or whose publisher dies after
