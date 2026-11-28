@@ -301,8 +301,8 @@ describe("the lock on a member's state file", () => {
 describe("what a member says it can do", () => {
   test("this build says what it reads beyond the first form of the wire, and a list is said as it is", async () => {
     const { MEMBER_CAPS, capsBody, fleetHas } = await import("../src/fleet-transport");
-    expect(MEMBER_CAPS).toEqual(["meta2", "inline", "chunks"]);
-    expect(capsBody()).toEqual({ caps: ["meta2", "inline", "chunks"] });
+    expect(MEMBER_CAPS).toEqual(["meta2", "inline", "chunks", "epoch"]);
+    expect(capsBody()).toEqual({ caps: ["meta2", "inline", "chunks", "epoch"] });
     expect(capsBody([])).toEqual({});
     expect(capsBody(["meta2", "inline"])).toEqual({ caps: ["meta2", "inline"] });
     expect(fleetHas({ fleetCaps: ["meta2"] }, "meta2")).toBe(true);
@@ -334,7 +334,7 @@ describe("what a member says it can do", () => {
       (globalThis as { fetch: unknown }).fetch = real;
       caps.pop();
     }
-    expect(sent).toEqual([{ seals: true, caps: ["meta2", "inline", "chunks", "test1"] }]);
+    expect(sent).toEqual([{ seals: true, caps: ["meta2", "inline", "chunks", "epoch", "test1"] }]);
   });
 
   test("every place in the source that asks for a place says what the member can do", async () => {
@@ -431,7 +431,7 @@ describe("taking a place in the fleet", () => {
     } finally {
       (globalThis as { fetch: unknown }).fetch = real;
     }
-    expect(sent).toEqual({ seals: true, caps: ["meta2", "inline", "chunks"] });
+    expect(sent).toEqual({ seals: true, caps: ["meta2", "inline", "chunks", "epoch"] });
   });
 });
 

@@ -13,10 +13,11 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write";
-import { withDirLockSync } from "./dir-lock";
+import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
 import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
-import { generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
+import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
+import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
 import { FleetTrust, RosterRefusedError, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
 import {
   PayloadGoneError,
@@ -71,12 +72,6 @@ export function loadOrCreateKeyPair(keyFile: string): MemberKeyPair {
   return readKeyPair(keyFile) ?? withKeyFileLock(keyFile, () => loadOrCreateKeyPairLocked(keyFile));
 }
 
-function readKeyPair(keyFile: string): MemberKeyPair | undefined {
-  if (!existsSync(keyFile)) return undefined;
-  const raw = JSON.parse(readFileSync(keyFile, "utf8")) as MemberKeyPair;
-  return raw && typeof raw.publicKey === "string" && typeof raw.privateKey === "string" ? raw : undefined;
-}
-
 /** For a caller that holds the key file's lock: the key pair, made if it is not there (checked again, since another process may have made it while this one waited). */
 function loadOrCreateKeyPairLocked(keyFile: string): MemberKeyPair {
   const found = readKeyPair(keyFile);
@@ -98,16 +93,20 @@ export function rotateKeyPair(keyFile: string): MemberKeyPair {
     const current = loadOrCreateKeyPairLocked(keyFile);
     const previous = current.previous ?? { publicKey: current.publicKey, privateKey: current.privateKey };
     const pair = generateMemberKeyPair();
-    // The signing key is the member's own, not the pair's: the roster names it, and a rotation of the pair does not change it.
-    const next: MemberKeyPair = { ...pair, previous, ...(current.sign ? { sign: current.sign } : {}) };
+    // The signing key is made anew with the pair: it signs the epoch keys the primary wraps snapshots to, so a copy of the old key file
+    // that kept it could go on reading what is published after the rotation. The fleet is told the new one with the new key (the operator
+    // of a signed roster compares both), and drops the epoch key it held.
+    const { publicKey, privateKeyPem } = generateOwnerKey();
+    // The epoch keys held so far are kept: the fleet goes on wrapping to them until it has taken the new key (a signed roster waits for the operator),
+    // and what is wrapped to them is opened with them. They are let go of by the usual rule, once a snapshot wrapped to the next epoch key is taken in.
+    // The next key is made now, and posted once the fleet holds the signing key it is signed with.
+    const now = Date.now();
+    const old = current.epochs ?? [];
+    const epochs = [...old, ...(epochSettings().enabled ? [generateEpochKey(Math.max(0, ...old.map((e) => e.n)) + 1, now)] : [])];
+    const next: MemberKeyPair = { ...pair, previous, sign: { publicKey, privateKey: privateKeyPem }, ...(epochs.length > 0 ? { epochs } : {}) };
     writeFileAtomic(keyFile, JSON.stringify(next, null, 2), 0o600);
     return pair;
   });
-}
-
-function withKeyFileLock<T>(keyFile: string, fn: () => T): T {
-  mkdirSync(join(keyFile, ".."), { recursive: true });
-  return withDirLockSync(keyFile + ".lock", fn, { waitMs: 5000, staleMs: 10_000 });
 }
 
 /**
@@ -165,6 +164,18 @@ export function dropPreviousKey(keyFile: string, only?: string): void {
     const { previous: _gone, ...kept } = raw;
     writeFileAtomic(keyFile, JSON.stringify(kept, null, 2), 0o600);
   });
+}
+
+/**
+ * What is kept for later (which epoch keys can go): it is never a reason for a publish that moved the head, or a snapshot that was taken in, to be
+ * reported as failed (a lock that does not come, a file the system will not rename over). The next snapshot taken in does it again.
+ */
+function bookkeeping(fn: () => void): void {
+  try {
+    fn();
+  } catch {
+    // Not being able to write it only leaves an epoch key a little longer than it was to be.
+  }
 }
 
 /** Whether a manifest shows the gateway nothing of the snapshot (see `FleetManifest.meta`). */
@@ -242,7 +253,7 @@ export async function rosterMembers<M extends { deviceId: string; pubkey?: strin
   ownKey: string,
   seq: number,
   listed: M[],
-): Promise<{ sealFor: M[]; skipped: string[] }> {
+): Promise<{ sealFor: M[]; skipped: string[]; signing: Map<string, string> | null }> {
   let v;
   try {
     v = await FleetTrust.beside(keyFile).verifiedRoster(creds, fleet);
@@ -250,18 +261,21 @@ export async function rosterMembers<M extends { deviceId: string; pubkey?: strin
     if (err instanceof RosterRefusedError) throw new Error(err.message);
     throw err;
   }
-  if (v === null) return { sealFor: listed, skipped: [] };
+  if (v === null) return { sealFor: listed, skipped: [], signing: null };
   if (!mayPublishAt(v, ownKey, seq)) {
     throw new Error("the fleet's signed roster does not let this member publish snapshot " + seq + " (its key is not a member's at that sequence, or this member is a viewer)");
   }
   const live = new Map(liveMembers(v).map((t) => [t.device, t.xpub]));
+  // The signing key the roster gives each member: what a member's epoch key is checked against.
+  const signing = new Map<string, string>();
+  for (const t of liveMembers(v)) if (t.spub !== null) signing.set(t.device, t.spub);
   const sealFor: M[] = [];
   const skipped: string[] = [];
   for (const m of listed) {
     if (m.pubkey !== undefined && live.get(m.deviceId) === m.pubkey) sealFor.push(m);
     else skipped.push(m.deviceId);
   }
-  return { sealFor, skipped };
+  return { sealFor, skipped, signing };
 }
 
 export interface PublishResult {
@@ -420,6 +434,8 @@ export async function publish(
   options: PublishOptions = {},
 ): Promise<PublishResult> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
+  // Epoch keys are looked after in passing (made, posted, let go of): never a reason for this to fail.
+  await tickEpoch(creds, fleet, paths.keyFile, loadOrCreateSignKey(paths.keyFile));
   // Whether the work tree is still the one of the snapshot the caller took, asked while the fleet is
   // being asked about the head (the two do not wait for each other). Not trusted if this publish
   // writes into the work tree (it catches up first) or builds on something else.
@@ -455,7 +471,7 @@ export async function publish(
 
   // A fleet whose roster is signed is sealed for the members the roster names, with the keys it names, and for no
   // key the gateway adds to its list: a snapshot sealed for a key that is not a member's is the gateway reading it.
-  const { sealFor: members, skipped } = await rosterMembers(creds, fleet, paths.keyFile, keys.publicKey, seq, listed);
+  const { sealFor: members, skipped, signing } = await rosterMembers(creds, fleet, paths.keyFile, keys.publicKey, seq, listed);
   if (skipped.length > 0) noteUnrostered(fleet, skipped);
 
   // A delta is only useful to a member that already holds the snapshot it is
@@ -517,13 +533,15 @@ export async function publish(
     ...(reuse && known ? { tree: known.tree } : {}),
     ...(paths.nested ? { nested: paths.nested } : {}),
   });
+  // A member that has an epoch key the fleet can show is signed by its signing key has the snapshot key wrapped to that.
+  const epochOf = epochsToWrapTo(members, signing, fleet, incarnation);
   const payloads = [wantFull ? snap.pack : snap.delta!];
   if (withDelta && snap.delta) payloads.push(snap.delta);
 
   // One key seals them all, so a member opens either with what it was given.
   const sealed = sealManyForMembers(
     payloads,
-    members.map((m) => ({ memberId: hideMeta ? wrapIdOf(incarnation, m.deviceId) : m.deviceId, publicKey: m.pubkey })),
+    members.map((m) => ({ memberId: hideMeta ? wrapIdOf(incarnation, m.deviceId) : m.deviceId, publicKey: m.pubkey, ...(epochOf.has(m.deviceId) ? { epoch: epochOf.get(m.deviceId)! } : {}) })),
     keys.privateKey,
     keys.publicKey,
   );
@@ -610,6 +628,7 @@ export async function publish(
     // the one a member that was away can walk back along.
     ...(head ? { parentManifest: head.manifestKey, parentSeq: head.seq } : {}),
     senderPublicKey: sealed.senderPublicKey,
+    ...(sealed.epk !== undefined ? { epk: sealed.epk } : {}),
     wrapped: sealed.wrapped,
     roster,
     ...(incarnation !== undefined ? { incarnation } : {}),
@@ -672,6 +691,8 @@ export async function publish(
   // This fleet has a snapshot with a seal now: from here an unsealed one that is newer is refused.
   const trust = FleetTrust.beside(paths.keyFile);
   trust.noteTakenIn(manifest, creds.deviceId);
+  // This member holds the snapshot it made: one wrapped to an epoch key of its own is as good as taken in.
+  bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(manifest.wrapped, creds.deviceId, incarnation)?.epoch));
   trust.pin(incarnation);
   try {
     trust.save();
@@ -779,6 +800,8 @@ export interface Asker {
   keyId?: string;
   /** The fingerprint of the key it had before it rotated: what was sealed for that one opens too, until it is taken in. */
   alsoKeyId?: string;
+  /** The epoch keys it still holds: a snapshot wrapped to another (one deleted) is not openable. Absent: every one is taken to be. */
+  epochs?: readonly number[];
   /** Snapshots up to this sequence are known not to open (a step that failed): leave them out. */
   skipThrough?: number;
   /** What a step costs besides its pack, in bytes (default `ROUTE_STEP_COST`). */
@@ -789,6 +812,7 @@ function openableBy(manifest: FleetManifest, who: Asker): boolean {
   if (who.skipThrough !== undefined && manifest.seq <= who.skipThrough) return false;
   const entry = wrappedEntryFor(manifest.wrapped, who.memberId, manifest.incarnation);
   if (!entry) return false;
+  if (entry.epoch !== undefined && who.epochs !== undefined && !who.epochs.includes(entry.epoch)) return false;
   // A snapshot from an older publisher does not say which key: trust the id.
   return entry.keyId === undefined || who.keyId === undefined || entry.keyId === who.keyId || (who.alsoKeyId !== undefined && entry.keyId === who.alsoKeyId);
 }
@@ -1091,14 +1115,17 @@ async function downloadStep(
   // The gateway cannot open this: the snapshot key was sealed for us.
   const m = step.manifest;
   // A member that rotated its key still opens what was sealed for the key it had, until it has taken that in.
+  const epochs = { ...(m.epk !== undefined ? { epk: m.epk } : {}), keys: keys.epochs ?? [] };
   const opened =
-    openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey, m.incarnation) ??
-    (keys.previous ? openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.previous.privateKey, m.incarnation) : null);
+    openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.privateKey, m.incarnation, epochs) ??
+    (keys.previous ? openPayload(sealed, m.wrapped, m.senderPublicKey, creds.deviceId, keys.previous.privateKey, m.incarnation, epochs) : null);
   if (!opened) {
     // A sealed snapshot with a key wrapped for exactly this member's key, whose pack
     // does not open, is not "sealed before this device joined": it is damaged or swapped.
     const mine = wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation);
     const ours = [keyIdOf(keys.publicKey), ...(keys.previous ? [keyIdOf(keys.previous.publicKey)] : [])];
+    // Wrapped to an epoch key that this member no longer has (it deleted its private half): sealed for a key it let go of, not damaged.
+    if (mine?.epoch !== undefined && !(keys.epochs ?? []).some((e) => e.n === mine.epoch)) throw new NotSealedError(m.seq);
     if (m.seal !== undefined && mine?.keyId !== undefined && ours.includes(mine.keyId)) {
       throw new TamperedSnapshotError(m.seq, "its pack does not open with the key it was wrapped for this member (damaged, or another snapshot's)");
     }
@@ -1178,6 +1205,7 @@ export async function fetchAhead(
   hint?: HeadHint,
 ): Promise<{ head: FleetHead; fetched: Position; steps: number; evicted: number }> {
   const keys = loadOrCreateKeyPair(paths.keyFile);
+  await tickEpoch(creds, fleet, paths.keyFile, loadOrCreateSignKey(paths.keyFile));
   const keyId = keyIdOf(keys.publicKey);
   // A route can run through a snapshot that cannot be opened (the index does not
   // say who a snapshot is sealed for, and a manifest only turns up the problem
@@ -1194,7 +1222,7 @@ export async function fetchAhead(
   // that publishes fast outruns a member that downloads a big tree slowly.
   let evicted = 0;
   for (let attempt = 0; ; attempt++) {
-    const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(keys.previous ? { alsoKeyId: keyIdOf(keys.previous.publicKey) } : {}), ...(skipThrough !== undefined ? { skipThrough } : {}) }).catch((err: unknown) => {
+    const plan = await planCatchUp(creds, fleet, position.seq, hint, { keyId, ...(keys.epochs ? { epochs: keys.epochs.map((e) => e.n) } : {}), ...(keys.previous ? { alsoKeyId: keyIdOf(keys.previous.publicKey) } : {}), ...(skipThrough !== undefined ? { skipThrough } : {}) }).catch((err: unknown) => {
       // Going around a refused snapshot found no route: say why it was refused, not what the planner missed.
       throw refused && (err instanceof NotSealedYetError || err instanceof NoRouteError) ? refused : err;
     });
@@ -1297,6 +1325,8 @@ async function ingestRoute(
     });
     trust.noteTakenIn(m, creds.deviceId);
     trust.save();
+    // Taking in a snapshot wrapped to a newer epoch key is what lets go of the older ones (after a short while).
+    bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation)?.epoch));
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);
   }

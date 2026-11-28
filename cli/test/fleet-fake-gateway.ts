@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, verify as cryptoVerify } from "node:crypto";
+import { publicKeyFromRaw } from "../src/caller-key";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { type FleetCredentials } from "../src/fleet-transport";
@@ -75,6 +76,18 @@ export class FakeGateway {
   keyChangePending = false;
   /** The signed roster the gateway serves (GET /roster); undefined: a gateway that has none (404). */
   roster: { mode: "open" | "signed"; entries: unknown[] } | undefined = undefined;
+  /** Whether the gateway takes epoch keys (POST /epoch-key, and /keys lists them); an earlier one answers 404. */
+  epochSupport = false;
+  /** Each member's signing key (what the gateway knows of it), and the epoch key it last took. */
+  spubs = new Map<string, string>();
+  epochKeys = new Map<string, { n: number; pub: string; notAfter: number; sig: string }>();
+  /** When each member's epoch key was taken, and how long the gateway makes the next wait (0: not at all, as the unit tests need). */
+  epochKeyAt = new Map<string, number>();
+  epochMinIntervalMs = 0;
+  /** The next this many posts of an epoch key are taken, and their answer is lost (a timeout). */
+  loseEpochAnswers = 0;
+  /** The epoch keys posted, in order (the entry as sent). */
+  epochPosts: unknown[][] = [];
   /** Requests of each kind, by route. */
   requests = new Map<string, number>();
   /** Pack downloads, by the pack's key. */
@@ -180,9 +193,45 @@ export class FakeGateway {
     if (kind === "members" && method === "GET") {
       return Response.json({ members: [...this.members.values()], left: this.left });
     }
+    if (kind === "epoch-key" && method === "POST") {
+      // As the gateway checks it: the member's own signing key, a number above the one held, a form.
+      if (!this.epochSupport) return Response.json({ error: "no such fleet action" }, { status: 404 });
+      if (!this.members.has(creds.deviceId)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const said = JSON.parse(String(body ?? "{}")) as { entry?: unknown[]; sig?: string };
+      const e = said.entry;
+      if (!Array.isArray(e) || e.length !== 7 || e[0] !== "prime-epoch-v1" || typeof said.sig !== "string") return Response.json({ error: "form" }, { status: 400 });
+      if (e[3] !== creds.deviceId) return Response.json({ error: "not your key" }, { status: 400 });
+      const spub = this.spubs.get(creds.deviceId);
+      if (!spub) return Response.json({ error: "no signing key" }, { status: 409 });
+      let good = false;
+      try {
+        good = cryptoVerify(null, Buffer.from(JSON.stringify(e), "utf8"), publicKeyFromRaw(Buffer.from(spub, "base64url")), Buffer.from(said.sig, "base64url"));
+      } catch {
+        good = false;
+      }
+      if (!good) return Response.json({ error: "bad signature" }, { status: 401 });
+      // The gateway's own rule (`epochKey` in api/src/fleet-do.ts): the same key again is "taken already" only with the same expiry and signature; another
+      // number at or below the one held is refused with the held number; a key too soon after the last is made to wait.
+      const held = this.epochKeys.get(creds.deviceId);
+      if (held && held.n === e[4] && held.pub === e[5] && held.notAfter === e[6] && held.sig === said.sig) return Response.json({ ok: true, n: held.n, again: true });
+      if (held && (e[4] as number) <= held.n) return Response.json({ error: "an epoch key is newer than the one the fleet holds (n " + held.n + ")", n: held.n }, { status: 409 });
+      const heldAt = this.epochKeyAt.get(creds.deviceId);
+      if (held && heldAt !== undefined && this.epochMinIntervalMs > 0 && Date.now() - heldAt < this.epochMinIntervalMs) {
+        const wait = this.epochMinIntervalMs - (Date.now() - heldAt);
+        return Response.json({ error: "an epoch key was taken a moment ago", retryAfterMs: wait }, { status: 429 });
+      }
+      this.epochKeyAt.set(creds.deviceId, Date.now());
+      this.epochPosts.push(e);
+      this.epochKeys.set(creds.deviceId, { n: e[4] as number, pub: e[5] as string, notAfter: e[6] as number, sig: said.sig });
+      if (this.loseEpochAnswers > 0) {
+        this.loseEpochAnswers--;
+        return new Response("{}", { status: 503 });
+      }
+      return Response.json({ ok: true });
+    }
     if (kind === "keys" && method === "GET") {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
-      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, applied: this.applied.get(m.deviceId) ?? 0, ...((this.memberCaps.get(m.deviceId) ?? this.fleetCaps) ? { caps: this.memberCaps.get(m.deviceId) ?? this.fleetCaps } : {}) })) });
+      return Response.json({ members: [...this.members.values()].map((m) => ({ deviceId: m.deviceId, pubkey: m.pubkey, ...(this.epochSupport && this.spubs.has(m.deviceId) ? { spub: this.spubs.get(m.deviceId) } : {}), ...(this.epochSupport && this.epochKeys.has(m.deviceId) ? { epochKey: this.epochKeys.get(m.deviceId) } : {}), applied: this.applied.get(m.deviceId) ?? 0, ...((this.memberCaps.get(m.deviceId) ?? this.fleetCaps) ? { caps: this.memberCaps.get(m.deviceId) ?? this.fleetCaps } : {}) })) });
     }
     if (kind === "applied" && method === "POST" && this.failApplied > 0) {
       this.failApplied--;

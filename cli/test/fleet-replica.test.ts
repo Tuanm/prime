@@ -672,7 +672,8 @@ describe("the agent's round for a replica", () => {
         expect(statSync(file).mode & 0o777).toBe(process.platform === "win32" ? statSync(file).mode & 0o777 : 0o600);
         dropPreviousKey(file);
         expect(previousKeyPair(file)).toBeUndefined();
-        expect(loadOrCreateKeyPair(file)).toEqual({ publicKey: third.publicKey, privateKey: third.privateKey });
+        expect(loadOrCreateKeyPair(file)).toMatchObject({ publicKey: third.publicKey, privateKey: third.privateKey });
+        expect(loadOrCreateKeyPair(file).previous).toBeUndefined();
       } finally {
         finish(w);
       }
@@ -1864,7 +1865,7 @@ describe("the lease the fleet reports", () => {
       s.loop.lastBootstrap = 1;
       s.loop.primary = true;
       await heartbeat(s.loop as never, () => undefined, 10_000_000);
-      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline", "chunks"]); // what this build reads
+      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline", "chunks", "epoch"]); // what this build reads
       const caps = MEMBER_CAPS as string[];
       caps.push("test1");
       try {
@@ -1873,7 +1874,7 @@ describe("the lease the fleet reports", () => {
       } finally {
         caps.pop();
       }
-      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline", "chunks", "test1"]);
+      expect(w.gateway.bootstrapBodies.at(-1)!.caps).toEqual(["meta2", "inline", "chunks", "epoch", "test1"]);
     } finally {
       finish(w);
     }
