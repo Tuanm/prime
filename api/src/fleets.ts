@@ -135,8 +135,11 @@ export const MAX_CHUNKED_SNAPSHOT_BYTES = 512 * 1024 * 1024;
 export const CHUNKS_CAP = "chunks";
 /** How long a pack that was uploaded and not yet named by a snapshot is kept from the sweep: a long upload is in pieces over hours. */
 export const UPLOAD_KEEP_MS = 24 * 60 * 60 * 1000;
-/** The most uploads that are remembered at once (the two lists of one snapshot, and some to spare). */
-export const UPLOADS_KEPT = 2 * MAX_CHUNKS + 64;
+/**
+ * The most uploads that are remembered at once: the two lists of a snapshot in pieces are at most 256, so this holds three
+ * snapshots' worth. Kept by hash, a row of this many is about 80 KB, which a Durable Object's value (128 KiB) holds.
+ */
+export const UPLOADS_KEPT = 768;
 
 /** The list of pieces of a manifest, checked: `{hash, bytes}` each, lowercase hex SHA-256 and a size in 1..CHUNK_BYTES, at most MAX_CHUNKS, adding up to `whole`. */
 export function checkChunkList(
@@ -276,6 +279,8 @@ export interface PendingRequest {
    * the fleet holds (it could not prove it held the old one). Approving it replaces the key.
    */
   keyChange?: true;
+  /** The head's sequence when the device asked: a signed add for it may take effect from there on. */
+  headSeq?: number;
 }
 
 /** What a member sends to change its key without the operator: the old key's proof (see `keyChangeMessage`). */
