@@ -478,7 +478,11 @@ export class FleetDO implements DurableObject {
     });
     if (kept) {
       await this.storage.delete("fleetName");
+      await this.storage.delete("auditOrphan");
       this.fleetName = "";
+    } else {
+      // Left in the object, and copied by the next ask whether the fleet exists (the gateway's daily sweep makes it) or read.
+      await this.storage.put("auditOrphan", true);
     }
     // A fleet that is deleted is not still paused: the name can be made again.
     await this.storage.delete("meta");
@@ -539,7 +543,8 @@ export class FleetDO implements DurableObject {
     // A delete of a name that is no fleet (a retry, a reap of one already gone) leaves no entry and no file.
     if (await this.exists()) await this.audit(caller, "fleet-deleted", undefined, typeof body.reason === "string" ? { reason: body.reason } : undefined);
     const kept = await this.clear(fleetId);
-    // `auditKept: false`: the log could not be copied to the bucket and stays in the object, to be copied by a later trim.
+    // `auditKept: false`: the log could not be copied to the bucket and stays in the object. It is readable by the operator, and
+    // copied the next time the gateway asks whether the fleet exists (the daily sweep does) or the operator reads it.
     return Response.json({ ok: true, deleted: fleetId, ...(kept ? {} : { auditKept: false }) });
   }
 
@@ -620,10 +625,29 @@ export class FleetDO implements DurableObject {
    * first one held carries the hash of the last that went. `unrecorded` is how many entries could not be stored since
    * the object woke.
    */
+  /**
+   * A deleted fleet whose log could not be copied to the bucket still holds it. Try again; once it is copied the rows are gone
+   * and so is the mark. True while rows are still held.
+   */
+  private async retryOrphanLog(): Promise<boolean> {
+    if ((await this.storage.get<boolean>("auditOrphan")) !== true || (await this.exists())) return false;
+    const kept = await this.auditLog().retire().catch(() => false);
+    if (kept) {
+      await this.storage.delete("fleetName");
+      await this.storage.delete("auditOrphan");
+      this.fleetName = "";
+      return false;
+    }
+    return true;
+  }
+
   private async readAudit(caller: Caller, url: URL): Promise<Response> {
     const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
-    if (!(await this.exists())) return Response.json({ error: "no such fleet" }, { status: 404 });
+    if (!(await this.exists())) {
+      // Only the operator reads what a deleted fleet's log still holds (it could not be copied when the fleet was deleted).
+      if (caller.kind !== "admin" || !(await this.retryOrphanLog())) return Response.json({ error: "no such fleet" }, { status: 404 });
+    }
     const num = (name: string, fallback: number): number => {
       const n = Number(url.searchParams.get(name));
       return Number.isFinite(n) && n >= 0 ? n : fallback;
@@ -1049,6 +1073,7 @@ export class FleetDO implements DurableObject {
       await this.storage.put("created", Date.now());
       await this.storage.put("fleetName", fleetId);
       // A log that was kept when the fleet before it was deleted (the bucket was down then) is carried on, and says so.
+      await this.storage.delete("auditOrphan");
       const carried = await this.auditLog().held();
       await this.audit(caller, carried > 0 ? "fleet-recreated" : "fleet-created", undefined, caller.deviceId ? { for: caller.deviceId } : undefined);
       out = Response.json({ ok: true, fleet: fleetId });
