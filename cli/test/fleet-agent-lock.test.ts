@@ -30,6 +30,9 @@ import {
 } from "../src/fleet-daemon";
 import { applyTestTimeout } from "./setup";
 
+/** A path as it is written in a systemd line outside quotes that undo nothing: a backslash is an escape there. */
+const esc = (path: string): string => path.replace(/\\/g, "\\\\");
+
 applyTestTimeout();
 
 const cleanups: Array<() => void> = [];
@@ -823,7 +826,7 @@ describe("switching the replica mode of a running agent", () => {
     expect(runsProgram([real], link)).toBe(true);
     expect(runsProgram(["/usr/bin/bun", real], real)).toBe(true);
     expect(runsProgram([join(root, "other")], real)).toBe(false);
-    expect(programNamed("ExecStart=" + link + " __fleet-agent", real)).toBe(true);
+    expect(programNamed("ExecStart=" + esc(link) + " __fleet-agent", real)).toBe(true);
     expect(programNamed("ExecStart=/somewhere/else __fleet-agent", real)).toBe(false);
     // What an install writes: quoted, and a path with a blank in it is one word. A definition with no command says nothing.
     const spaced = join(root, "John Doe", "prime");
@@ -836,16 +839,16 @@ describe("switching the replica mode of a running agent", () => {
     expect(programNamed(plist, real)).toBe(false);
     expect(programNamed("[Service]\nRestart=always", real)).toBeUndefined();
     // As a person writes one: single quotes, and an unquoted program with quoted arguments.
-    expect(programNamed("ExecStart='" + spaced + "' __fleet-agent --config /c", spaced)).toBe(true);
-    expect(programNamed("ExecStart=" + real + ' "__fleet-agent" "--config" "/c"', real)).toBe(true);
-    expect(programNamed("ExecStart=-" + real + " __fleet-agent", real)).toBe(true);
+    expect(programNamed("ExecStart='" + esc(spaced) + "' __fleet-agent --config /c", spaced)).toBe(true);
+    expect(programNamed("ExecStart=" + esc(real) + ' "__fleet-agent" "--config" "/c"', real)).toBe(true);
+    expect(programNamed("ExecStart=-" + esc(real) + " __fleet-agent", real)).toBe(true);
     expect(splitExecStart("/a/b 'c d' \"e f\" g%%h i$$j")).toEqual(["/a/b", "c d", "e f", "g%h", "i$j"]);
     // C escapes and the specifiers that can be told: decoded. The rest is "cannot say", not "no".
     expect(splitExecStart("/a/b\\x20c \"d\\ne\" f\\040g h\\sj")).toEqual(["/a/b c", "d\ne", "f g", "h j"]);
     expect(splitExecStart("%h/bin/prime %u")).toEqual([userInfo().homedir + "/bin/prime", userInfo().username]);
     for (const line of ["%t/prime", "/a/%S/b", "$HOME/prime", "${X}/prime", "/a/b\\q", "/a/b\\xZ1", "/a/b\\"]) expect(splitExecStart(line), line).toBeUndefined();
     expect(programNamed("ExecStart=%t/prime __fleet-agent", real)).toBeUndefined();
-    expect(programNamed("ExecStart=" + real + " --config %h/c.yaml", real)).toBe(true);
+    expect(programNamed("ExecStart=" + esc(real) + " --config %h/c.yaml", real)).toBe(true);
     expect(programNamed("ExecStart=/opt/with\\x20space/prime x", "/opt/with space/prime")).toBe(true);
   });
 
