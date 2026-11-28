@@ -10,10 +10,11 @@
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { runPage, type FakeEl } from "./page-script";
+import { port } from "./ports";
 
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
-const PORT = 8819;
+const PORT = port(8819);
 const BASE = `http://127.0.0.1:${PORT}`;
 
 // Small enough that the caps are reachable with a few hundred bytes.
@@ -615,7 +616,7 @@ async function main(): Promise<void> {
   // second instance runs with the real defaults. The body is pushed in odd-sized
   // chunks so they straddle the 5 MiB part boundaries, which is exactly the
   // copying loop in putChunked that a single-part upload never reaches.
-  const BIG_PORT = 8822;
+  const BIG_PORT = port(8822);
   const BIG_BASE = `http://127.0.0.1:${BIG_PORT}`;
   const stopBig = await startWorker(BIG_PORT);
   try {
@@ -726,7 +727,7 @@ async function main(): Promise<void> {
   // The free allowance is excluded here so that a few hundred bytes can reach
   // the cap; otherwise the first 10 GB are free and nothing small is ever
   // refused.
-  const BUDGET_PORT = 8833;
+  const BUDGET_PORT = port(8833);
   const BUDGET_BASE = `http://127.0.0.1:${BUDGET_PORT}`;
   const stopBudget = await startWorker(BUDGET_PORT, [
     "R2_BUDGET_USD_MONTH:0.0000001",

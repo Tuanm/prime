@@ -2,7 +2,7 @@
 // and the admin API that manages them by opaque ref.
 //
 // Two local wrangler instances, started one after the other:
-//   main  (8840) - a registered device + tight limits: device cap 6, 3 creations
+//   main  (8840, shifted: see ports.ts) - a registered device + tight limits: device cap 6, 3 creations
 //                  per IP, 5 relay requests per IP per anonymous device, lock
 //                  after 4 wrong codes
 //   open  (8841) - no registered devices (open mode) and short lifetimes, for
@@ -11,6 +11,7 @@
 // Run: bun test/anonymous.ts
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
+import { port } from "./ports";
 
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
@@ -111,7 +112,7 @@ async function mcp(base: string, id: string, opts: { token?: string; header?: st
 }
 
 const ADMIN_JSON = { "content-type": "application/json" };
-const main = startWorker(8840, [
+const main = startWorker(port(8840), [
   "MAX_DEVICES:6",
   "ANON_CREATE_MAX:3",
   "ANON_RATE_LIMIT_MAX:5",
@@ -121,7 +122,7 @@ const main = startWorker(8840, [
 ]);
 // Started only once the main instance is done: two cold wranglers at once
 // do not reliably both come up on a CI runner.
-const startOpen = () => startWorker(8841, [
+const startOpen = () => startWorker(port(8841), [
   "ANON_UNUSED_TTL_MS:2000",
   "ANON_IDLE_TTL_MS:2000",
   "ONLINE_TTL_MS:150000",
@@ -170,7 +171,7 @@ try {
   check("the id is generated in the anon- namespace", ANON_ID.test(id1), id1);
   check("the code is 25 digits/upper-case letters (129 bits)", CODE.test(tok1), tok1);
   check("connect_url is {gateway}/mcp/{id}?token={code}", a1.body.connect_url === B + "/device/" + id1 + "?token=" + tok1, a1.body.connect_url);
-  check("ws_url points at the device tunnel", a1.body.ws_url === "ws://127.0.0.1:8840/device/ws/" + id1, a1.body.ws_url);
+  check("ws_url points at the device tunnel", a1.body.ws_url === "ws://127.0.0.1:" + port(8840) + "/device/ws/" + id1, a1.body.ws_url);
   check("it reports its lower rate limit", a1.body.rate_limit?.max === 5 && a1.body.rate_limit?.window_ms === 60000, JSON.stringify(a1.body.rate_limit));
   check("the response is not cacheable", a1.headers.get("cache-control") === "no-store");
   check("GET on the registration path -> 405", (await fetch(B + "/api/devices/anonymous")).status === 405);

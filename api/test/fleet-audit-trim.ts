@@ -8,10 +8,11 @@
 
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
+import { port } from "./ports";
 
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
-const PORT = 8843;
+const PORT = port(8843);
 const BASE = "http://127.0.0.1:" + PORT;
 const SLOW_MS = 4000;
 
