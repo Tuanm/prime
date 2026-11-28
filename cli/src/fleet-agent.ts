@@ -1492,12 +1492,12 @@ export async function applyAndRecord(
  * tree only sees the difference. Directories the fleet leaves alone are not
  * mirrored, so they survive untouched.
  */
-export async function applyFetched(paths: MemberPaths, applied: Position, fetched: Position): Promise<void> {
+export async function applyFetched(paths: MemberPaths, applied: Position, fetched: Position, opts: { clean?: boolean } = {}): Promise<void> {
   if (fetched.commit === null) throw new Error("nothing has been fetched to apply");
   const exclude = paths.nested ? paths.nested.get() : findNestedRepos(paths.work);
   // What the fleet's publisher left out as secrets is not the fleet taking the file away: a replica that holds one keeps it.
   const leftOut = await keptOnApply(paths, applied, fetched.commit, readKeptNote(paths.gitDir, fetched.commit));
-  await applyCommit(paths.work, paths.gitDir, fetched.commit, [...exclude, ...leftOut], applied.commit);
+  await applyCommit(paths.work, paths.gitDir, fetched.commit, [...exclude, ...leftOut], applied.commit, opts);
 }
 
 /** Where the paths that the newest fetched snapshot leaves out are kept, beside the store, so that an apply after a restart still knows them. */

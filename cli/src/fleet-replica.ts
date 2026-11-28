@@ -193,7 +193,7 @@ export async function applyReady(
         if (moved.moved > 0) kept = moved;
       }
     }
-    if (!(await workTreeHolds(paths.gitDir, fetched.commit))) await applyFetched(paths, applied, fetched);
+    if (!(await workTreeHolds(paths.gitDir, fetched.commit))) await applyFetched(paths, applied, fetched, { clean: untouched });
     const now: Position = { seq: fetched.seq, commit: fetched.commit, ...(fetched.tree ? { tree: fetched.tree } : {}) };
     // The state is recorded right after the work tree has it, so the next look
     // can tell a change made here from what the fleet gave.

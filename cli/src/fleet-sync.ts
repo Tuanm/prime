@@ -797,7 +797,7 @@ async function alignApplyIndex(
   env: Record<string, string>,
   previous: string | null | undefined,
   keep: string[],
-): Promise<void> {
+): Promise<boolean> {
   const indexFile = join(gitDir, "apply.index");
   const sidecar = join(gitDir, "apply.commit");
   let known = false;
@@ -812,7 +812,7 @@ async function alignApplyIndex(
     // nothing, and nothing is removed.
     rmSync(indexFile, { force: true });
     rmSync(sidecar, { force: true });
-    return;
+    return false;
   }
   let trusted = false;
   trusted = existsSync(indexFile) && readApplySidecar(gitDir)?.commit === previous;
@@ -833,6 +833,7 @@ async function alignApplyIndex(
     );
     if (listed.length > 0) await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, listed);
   }
+  return true;
 }
 
 /**
@@ -870,6 +871,99 @@ export async function ingestPack(
   }
 }
 
+/** More changed files than this are written by read-tree, which walks the whole index anyway. */
+export const MAX_TREE_APPLY = 20_000;
+
+/** The change to a name applied by tree-diff, kill-switched with `PRIME_FLEET_TREE_APPLY=0`. */
+function treeApplyOn(): boolean {
+  return process.env.PRIME_FLEET_TREE_APPLY !== "0";
+}
+
+/** One name that differs between two trees: what happened to it, and what it is in the new tree. */
+export interface TreeChange {
+  status: "A" | "M" | "D" | "T";
+  path: string;
+  /** In the new tree (absent for a name that went). */
+  mode?: string;
+  sha?: string;
+}
+
+/**
+ * The names that differ between two trees, with what each is in the new one. Null when there are more than
+ * `MAX_TREE_APPLY` of them, or the answer does not read: the caller then does what it did before this existed.
+ */
+export async function changesBetween(gitDir: string, env: Record<string, string>, previous: string, commit: string, limit = MAX_TREE_APPLY): Promise<TreeChange[] | null> {
+  const out = (await gitRun(gitDir, ["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev", previous, commit], env)).toString("utf8");
+  // :oldmode newmode oldsha newsha STATUS NUL path NUL
+  const parts = out.split("\u0000");
+  const found: TreeChange[] = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const head = parts[i]!;
+    const path = parts[i + 1]!;
+    const m = /^:(\d{6}) (\d{6}) ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) ([ADMT])$/.exec(head);
+    if (m === null || path === "") return null;
+    const status = m[5] as TreeChange["status"];
+    found.push(status === "D" ? { status, path } : { status, path, mode: m[2]!, sha: m[4]! });
+    if (found.length > limit) return null;
+  }
+  if (parts.length > 1 && parts[parts.length - 1] !== "") return null;
+  return found;
+}
+
+/** The tracked files whose work-tree copy is not what the apply index says was written: changed, replaced or gone. */
+async function notAsWritten(gitDir: string, env: Record<string, string>): Promise<string[]> {
+  // Records what the files look like now, where the stat data was never written or has gone stale; exits non-zero when a
+  // file differs or is missing, which is the answer below, not a failure.
+  await gitRun(gitDir, ["update-index", "-q", "--refresh"], env).catch(() => undefined);
+  return (await gitRun(gitDir, ["diff-files", "--name-only", "-z"], env)).toString("utf8").split("\u0000").filter(Boolean);
+}
+
+/**
+ * Write what changed over the work tree, and make the apply index say it is there. True when it was written and the
+ * index is the new tree; false (with nothing known about how far it got) when read-tree has to do it.
+ */
+async function writeChanged(
+  work: string,
+  gitDir: string,
+  env: Record<string, string>,
+  commit: string,
+  changed: TreeChange[],
+  /** Names that are in the index as they should be, and not in the work tree as they were written. */
+  putBack: string[],
+  verify: boolean,
+  noteGit: (pid: number) => void,
+): Promise<boolean> {
+  try {
+    if (changed.length > 0 || putBack.length > 0) {
+      // A folder that is in the way of a file is the member's own (files of theirs may be in it): it is not for this to
+      // take away, as checkout-index would; read-tree is what decides what happens to it.
+      const writing = [...new Set([...changed.map((c) => c.path), ...putBack])];
+      for (const rel of writing) {
+        try {
+          if (lstatSync(join(work, rel)).isDirectory()) return false;
+        } catch {}
+      }
+      mkdirSync(work, { recursive: true });
+      if (changed.length > 0) {
+        const entries = changed.map((c) => c.mode + " " + c.sha + "\t" + c.path + "\u0000").join("");
+        await gitRun(gitDir, ["update-index", "-z", "--index-info"], env, entries);
+      }
+      const names = writing.map((rel) => rel + "\u0000").join("");
+      await gitRun(gitDir, ["checkout-index", "-u", "-f", "-q", "-z", "--stdin"], env, names, noteGit);
+    }
+    if (verify) {
+      // The index is what the new snapshot says it is, or the whole of it is written again: a check that costs the
+      // names that changed (the cache of trees is kept for the rest).
+      const want = await gitText(gitDir, ["rev-parse", commit + "^{tree}"], env);
+      const have = await gitText(gitDir, ["write-tree"], env);
+      if (want !== have) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Write a snapshot that is already in the store over the work tree.
  *
@@ -891,6 +985,8 @@ export async function applyCommit(
   exclude?: string[],
   /** The commit (or tree) this member held before, so what the fleet dropped can be removed. */
   previous?: string | null,
+  /** `clean`: the work tree was just found to match the apply index (see `workTreeMatchesApply`), so there is nothing to put back. */
+  opts: { clean?: boolean } = {},
 ): Promise<void> {
   mkdirSync(gitDir, { recursive: true });
   const env = gitEnv(gitDir, work, join(gitDir, "apply.index"));
@@ -906,11 +1002,20 @@ export async function applyCommit(
   // that is killed half way leaves files of both snapshots in the work tree, and the
   // next look needs to know that those are the fleet's: see `localChanges`.
   writeFileSync(join(gitDir, "apply.target"), JSON.stringify({ from: previous ?? null, to: commit }));
-  await alignApplyIndex(gitDir, env, previous, keep);
+  const aligned = await alignApplyIndex(gitDir, env, previous, keep);
+  // What the fleet changed since `previous` is the whole of what is written: the index is that tree, so the names that
+  // differ are all there is to look at (see `changesBetween`). Without a tree to compare against, or when the change is
+  // too big to be worth naming, or when anything of it fails, git's own read-tree writes the lot, as it always did.
+  const fold = foldsCase(work);
+  const changes = aligned && previous && treeApplyOn() ? (previous === commit ? [] : await changesBetween(gitDir, env, previous, commit).catch(() => null)) : null;
+  const wanted = changes === null ? null : changes.filter((c) => !isLeftAlone(c.path, keep, fold));
   // What goes is worked out from the two trees, and goes first: git's own
   // order is removals, then writes. A name that only changes case is then
   // removed before the new spelling is written, never after it.
-  const gone = (await removedBetween(gitDir, env, previous, commit)).filter((rel) => !isLeftAlone(rel, keep, foldsCase(work)));
+  // A file of the fleet's that is not in the work tree as the index has it (moved aside, or gone) is written again, as
+  // git's read-tree does for every file that is not as it was written: the fleet's tree is what the work tree is left with.
+  const restore = wanted !== null && opts.clean !== true ? await notAsWritten(gitDir, env) : [];
+  const gone = wanted !== null ? wanted.filter((c) => c.status === "D").map((c) => c.path) : (await removedBetween(gitDir, env, previous, commit)).filter((rel) => !isLeftAlone(rel, keep, fold));
   for (const rel of gone) removeTracked(work, rel);
   if (gone.length > 0) {
     await gitRun(gitDir, ["update-index", "--force-remove", "-z", "--stdin"], env, gone.join("\u0000") + "\u0000");
@@ -921,8 +1026,12 @@ export async function applyCommit(
   // The git that writes the work tree outlives an agent that is killed: its pid is written down so
   // that the next apply can tell a git that is still writing from a lock that nothing holds.
   const pidFile = join(gitDir, "apply.index.lock.pid");
+  const noteGit = (pid: number): void => writeFileSync(pidFile, String(pid));
   try {
-    await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env, (pid) => writeFileSync(pidFile, String(pid)));
+    const goneSet = new Set(gone);
+    const putBack = restore.filter((rel) => !goneSet.has(rel) && !isLeftAlone(rel, keep, fold));
+    const written = wanted !== null && (await writeChanged(work, gitDir, env, commit, wanted.filter((c) => c.status !== "D"), putBack, keep.length === 0, noteGit));
+    if (!written) await gitText(gitDir, ["read-tree", "--reset", "-u", commit], env, noteGit);
   } finally {
     rmSync(pidFile, { force: true });
   }

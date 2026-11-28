@@ -2660,7 +2660,9 @@ describe("staging by name, and a replica that edited nothing", () => {
       expect(done.value!.applied.seq).toBe(4);
       expect(done.value!.kept).toBeUndefined();
       // Before: the work tree was staged and written as a tree, to be compared with the one applied before.
-      expect(done.commands.filter((c) => /^(add|write-tree)/.test(c))).toEqual([]);
+      expect(done.commands.filter((c) => /^add/.test(c))).toEqual([]);
+      // (The one tree written is the apply index, checked against the snapshot that was applied.)
+      expect(done.commands.filter((c) => /^write-tree/.test(c)).length).toBeLessThanOrEqual(1);
       expect(sameTree(fingerprint(w.primaryWork), fingerprint(r.paths.work))).toBe(true);
     } finally {
       finish(w);

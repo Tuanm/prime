@@ -241,6 +241,15 @@ whose size and times are as the last apply wrote them, and no file there that gi
 nothing of its own to keep, and nothing is staged or hashed. Anything else (a changed file, a file of its own,
 a doubt) is looked at as before.
 
+**A snapshot is written by the names that differ, too.** The replica asks git which names differ between the snapshot it
+holds and the one it is bringing in (`diff-tree`), removes the ones that went, and writes the ones that were added or
+changed (`checkout-index`, so modes, links and filters are git's own); the apply index is then the new snapshot, and a
+check of its tree against the snapshot's says so before it is trusted. In a tree of 100 000 files one changed file is
+applied in about 0.2 s, where `read-tree` took 0.9 s. A file of the fleet's that is not in the work tree as it was written
+(moved aside, or deleted) is written again, as it was. Past 20 000 changed names, with a folder of the member's own in the
+way of a file, or when any step fails, git's `read-tree --reset -u` writes the lot, as it always did.
+`PRIME_FLEET_TREE_APPLY=0` turns the by-name write off.
+
 When a snapshot arrives, the replica writes the files it has and removes the
 files the *previous* snapshot had and this one does not: the ones the primary
 deleted. A removal stays inside the work tree (a directory turned into a symlink
