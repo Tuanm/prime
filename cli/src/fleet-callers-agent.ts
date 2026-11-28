@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { CallerEntry } from "./caller-key.ts";
-import { type FleetCallersFile, FLEET_CALLERS_FILE, FLEET_CALLERS_RENEW_MS, FLEET_CALLERS_VERSION, callersOfRoster } from "./fleet-callers.ts";
+import { type FleetCallersFile, FLEET_CALLERS_FILE, FLEET_CALLERS_RENEW_MS, FLEET_ROSTER_KEEP_MS, FLEET_ROSTER_REFRESH_MS, FLEET_CALLERS_VERSION, callersOfRoster } from "./fleet-callers.ts";
 import type { FleetCredentials } from "./fleet-transport.ts";
 import { FleetTrust, RosterRefusedError } from "./fleet-trust.ts";
 import type { VerifiedRoster } from "./fleet-roster.ts";
@@ -23,6 +23,8 @@ export class FleetCallersWriter {
     callers: [],
   };
   private failureSaid = false;
+  /** When the roster was last read (and verified, or refused): a roster that cannot be read is believed for FLEET_ROSTER_KEEP_MS and no longer. */
+  private rosterAt = 0;
 
   constructor(
     private readonly file: string,
@@ -33,6 +35,7 @@ export class FleetCallersWriter {
 
   /** Record what the roster says now (a verified chain, an open roster, or why it was refused). */
   setRoster(v: VerifiedRoster | { open: true } | { refused: string }): void {
+    this.rosterAt = this.now();
     if ("open" in v) {
       this.lastRoster = { roster: "open", note: "the roster of this fleet is not signed: no key is listed", callers: [] };
     } else if ("refused" in v) {
@@ -40,6 +43,11 @@ export class FleetCallersWriter {
     } else {
       this.lastRoster = { roster: "signed", head: { n: v.head.n, hash: v.head.hash }, callers: callersOfRoster(v) };
     }
+  }
+
+  /** Whether the roster is to be read again: when the space has just become the primary, and then every FLEET_ROSTER_REFRESH_MS. */
+  wantsRoster(primary: boolean): boolean {
+    return primary && (!this.wasPrimary || this.now() - this.rosterAt >= FLEET_ROSTER_REFRESH_MS);
   }
 
   /**
@@ -51,6 +59,10 @@ export class FleetCallersWriter {
     const now = this.now();
     if (primary && !this.wasPrimary) this.primarySince = now;
     this.wasPrimary = primary;
+    // A roster that could not be read for a long time is not one to go on believing: nobody is listed from then on.
+    if (this.lastRoster.roster === "signed" && now - this.rosterAt > FLEET_ROSTER_KEEP_MS) {
+      this.lastRoster = { roster: "refused", note: "the roster could not be read for " + Math.round(FLEET_ROSTER_KEEP_MS / 60_000) + " minutes", callers: [] };
+    }
     const content: FleetCallersFile = {
       version: FLEET_CALLERS_VERSION,
       fleet: this.fleet,
@@ -101,7 +113,8 @@ export function fleetCallersFileOf(secretDir: string): string {
 }
 
 /**
- * Write what the space's tool server reads. The roster is fetched (and verified) only while the space is the primary:
+ * Write what the space's tool server reads. The roster is fetched (and verified) only while the space is the primary, and
+ * every FLEET_ROSTER_REFRESH_MS then (a member that is removed from it is out within that and the file's own renewal):
  * a replica refuses every call made for the fleet, whoever the roster lists. A roster that cannot be fetched keeps
  * what was last verified; one that is refused (the gateway's word against what this member pinned) lists nobody.
  */
@@ -109,7 +122,7 @@ export async function refreshFleetCallers(loop: CallersLoop, log: (text: string)
   const dir = loop.space.secret_dir;
   if (!dir) return;
   const writer = (loop.callersWriter ??= new FleetCallersWriter(fleetCallersFileOf(dir), loop.fleet, log));
-  if (loop.primary) {
+  if (writer.wantsRoster(loop.primary)) {
     try {
       const v = await FleetTrust.beside(loop.paths.keyFile).verifiedRoster(loop.creds, loop.fleet);
       writer.setRoster(v ?? { open: true });

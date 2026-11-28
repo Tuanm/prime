@@ -179,6 +179,10 @@ describe("call signature", () => {
     expect(signTarget({ deviceId: "member", fleet: "acme" })).toBe("fleet:acme");
     // A fleet reached by its own name with its fleet token is signed for the fleet, not for a device of that name.
     expect(signTarget({ deviceId: "acme", fleetBuddy: true })).toBe("fleet:acme");
+    // ... and for the one member of it that is to run the call (`""`: the question which member that is)
+    expect(signTarget({ deviceId: "member", fleet: "acme", member: "member-a" })).toBe("fleet:acme@member-a");
+    expect(signTarget({ deviceId: "acme", fleetBuddy: true, member: "" })).toBe("fleet:acme@");
+    expect(signTarget({ deviceId: "laptop", member: "x" })).toBe("device:laptop");
     expect(callTarget("device", "laptop")).toBe(signTarget({ deviceId: "laptop" }));
     expect(callTarget("fleet", "acme")).toBe(signTarget({ deviceId: "acme", fleetBuddy: true }));
   });
@@ -257,10 +261,32 @@ describe("GatewayClient signing", () => {
     const signer = new CallSigner({ path: join(scratch(), "k.pem") });
     await new GatewayClient({ ...target, fleet: "acme" }, { signer }).callTool("bash", {}, { handshake: "never" });
     expect(seen[0]!.url).toContain("fleet=acme");
-    const parsed = parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!;
     const pub = signer.callerKey()!.publicKey;
-    expect(verifyCallSignature(parsed, pub, "fleet:acme", seen[0]!.body)).toBe(true);
-    expect(verifyCallSignature(parsed, pub, "device:laptop", seen[0]!.body)).toBe(false);
+    // The first request asks which member answers (it names no member and calls no real tool). This stub does not answer the question, as a
+    // device that predates fleet callers does not: the call is then signed for the fleet alone, as it was.
+    expect(seen).toHaveLength(2);
+    expect(seen[0]!.body).toContain("prime.fleet-member");
+    expect(verifyCallSignature(parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!, pub, "fleet:acme@", seen[0]!.body)).toBe(true);
+    const parsed = parseCallSig(seen[1]!.headers[CALL_SIG_HEADER])!;
+    expect(verifyCallSignature(parsed, pub, "fleet:acme", seen[1]!.body)).toBe(true);
+    expect(verifyCallSignature(parsed, pub, "device:laptop", seen[1]!.body)).toBe(false);
+  });
+
+  test("a call to a fleet is signed for the member that said it was the one answering", async () => {
+    const seen = stubFetch((n) =>
+      n === 1 ? new Response(JSON.stringify({ jsonrpc: "2.0", id: 0, error: { code: -32001, message: "which", data: { reason: "fleet-member", member: "member-a" } } })) : ok(),
+    );
+    const signer = new CallSigner({ path: join(scratch(), "k.pem") });
+    await new GatewayClient({ ...target, fleet: "acme" }, { signer }).callTool("bash", {}, { handshake: "never" });
+    const pub = signer.callerKey()!.publicKey;
+    expect(seen).toHaveLength(2);
+    const parsed = parseCallSig(seen[1]!.headers[CALL_SIG_HEADER])!;
+    expect(verifyCallSignature(parsed, pub, "fleet:acme@member-a", seen[1]!.body)).toBe(true);
+    expect(verifyCallSignature(parsed, pub, "fleet:acme", seen[1]!.body)).toBe(false);
+    // a member's id that is not an id is not signed for
+    const odd = stubFetch((n) => (n === 1 ? new Response(JSON.stringify({ error: { data: { reason: "fleet-member", member: "a b\nc" } } })) : ok()));
+    await new GatewayClient({ ...target, fleet: "acme" }, { signer }).callTool("bash", {}, { handshake: "never" });
+    expect(verifyCallSignature(parseCallSig(odd[1]!.headers[CALL_SIG_HEADER])!, pub, "fleet:acme", odd[1]!.body)).toBe(true);
   });
 
   test("ping, initialize and tools/list go unsigned, and make no key", async () => {
@@ -297,10 +323,10 @@ describe("GatewayClient signing", () => {
     const signer = new CallSigner({ path: join(scratch(), "k.pem") });
     await new GatewayClient({ ...target, deviceId: "acme", fleetBuddy: true }, { signer }).callTool("bash", {}, { handshake: "never" });
     expect(seen[0]!.url).not.toContain("fleet=");
-    const parsed = parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!;
+    const parsed = parseCallSig(seen[1]!.headers[CALL_SIG_HEADER])!;
     const pub = signer.callerKey()!.publicKey;
-    expect(verifyCallSignature(parsed, pub, "fleet:acme", seen[0]!.body)).toBe(true);
-    expect(verifyCallSignature(parsed, pub, "device:acme", seen[0]!.body)).toBe(false);
+    expect(verifyCallSignature(parsed, pub, "fleet:acme", seen[1]!.body)).toBe(true);
+    expect(verifyCallSignature(parsed, pub, "device:acme", seen[1]!.body)).toBe(false);
   });
 
   test("a key file others can read leaves the call unsigned, names the file and the cure, and is used again after it is fixed", async () => {
@@ -660,14 +686,15 @@ describe("prime (spawned)", () => {
     const key = loadOrCreateCallerKey(join(dir, "caller.pem"));
     const flag = await cli(["tools", "call", "acme.bash", "{}", "--fleet", "--gateway", gw(), "--token", "t", "--handshake", "never"]);
     expect(flag.code).toBe(0);
-    expect(verifyCallSignature(parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!, key.publicKey, "fleet:acme", seen[0]!.body)).toBe(true);
+    // (seen[0] is the question which member answers; the call is seen[1])
+    expect(verifyCallSignature(parseCallSig(seen[1]!.headers[CALL_SIG_HEADER])!, key.publicKey, "fleet:acme", seen[1]!.body)).toBe(true);
     const connected = await cli(["devices", "connect", "acme2", "--fleet", "--no-verify", "--gateway", gw(), "--token", "t"]);
     expect(connected.code).toBe(0);
     expect(readFileSync(join(dir, "config.yaml"), "utf8")).toContain("fleet_token: true");
     seen.length = 0;
     const stored = await cli(["tools", "call", "acme2.bash", "{}", "--handshake", "never", "--gateway", gw()]);
     expect(stored.code).toBe(0);
-    expect(verifyCallSignature(parseCallSig(seen[0]!.headers[CALL_SIG_HEADER])!, key.publicKey, "fleet:acme2", seen[0]!.body)).toBe(true);
+    expect(verifyCallSignature(parseCallSig(seen[1]!.headers[CALL_SIG_HEADER])!, key.publicKey, "fleet:acme2", seen[1]!.body)).toBe(true);
     // A plain device is still signed for the device.
     seen.length = 0;
     await cli(["tools", "call", "laptop.bash", "{}", "--gateway", gw(), "--token", "t", "--handshake", "never"]);

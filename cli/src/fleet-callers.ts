@@ -25,6 +25,16 @@ export const FLEET_CALLERS_VERSION = 1;
 export const FLEET_CALLERS_FRESH_MS = 2 * 60_000;
 /** How often the agent writes the file when nothing changed (so a space can tell its agent is alive). */
 export const FLEET_CALLERS_RENEW_MS = 20_000;
+/** How often the agent reads the roster again while the space is the primary. */
+export const FLEET_ROSTER_REFRESH_MS = 30_000;
+/** How long a roster that was verified is believed when it cannot be read again. */
+export const FLEET_ROSTER_KEEP_MS = 60 * 60_000;
+/**
+ * How far from the device's clock a call made for the fleet may be signed, ahead of it, and how long after the space became the
+ * primary a call must have been signed: a call signed ahead of the clock of the member that ran it could otherwise be played to the
+ * member that takes over, which would have it as newer than its own start. Clocks of the members are taken to agree within this.
+ */
+export const FLEET_CALL_SKEW_MS = 5_000;
 
 export interface FleetCallersFile {
   version: typeof FLEET_CALLERS_VERSION;
