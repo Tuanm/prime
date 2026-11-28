@@ -9,13 +9,14 @@
 // takes the lease. A primary that starts behind the head would fork the
 // fleet.
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write";
 import { readKeyPair, withKeyFileLock } from "./fleet-keyfile";
 import { generateOwnerKey, liveMembers, mayPublishAt } from "./fleet-roster";
-import { applyCommit, findNestedRepos, ingestPack, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
+import { findSecrets, keptForMeta, keptFrom, keptWasCut, readAllow, removedSecrets, secretGateMode, type SecretHit } from "./fleet-secrets";
+import { applyCommit, findNestedRepos, gitEnv, ingestPack, removedBetween, snapshot, withApplyLock, type NestedRepoCache } from "./fleet-sync";
 import { generateEpochKey, generateMemberKeyPair, keyIdOf, openPayload, sealManyForMembers, wrapIdOf, wrappedEntryFor, type MemberKeyPair, type MemberSignKey } from "./fleet-crypto";
 import { epochSettings, epochsToWrapTo, noteEpochTakenIn, tickEpoch } from "./fleet-epoch";
 import { FleetTrust, RosterRefusedError, TamperedSnapshotError, gatewayHasNoIncarnation, noteIncarnationAnswer, metaBindingOf, sealFieldsOf, verifySnapshot } from "./fleet-trust";
@@ -278,6 +279,22 @@ export async function rosterMembers<M extends { deviceId: string; pubkey?: strin
   return { sealFor, skipped, signing };
 }
 
+const warnedSecrets = new Set<string>();
+
+function noteSecrets(fleet: string, hits: SecretHit[], left: boolean): void {
+  const said = fleet + (left ? " out " : " in ") + hits.map((h) => h.path).join("\n");
+  if (warnedSecrets.has(said)) return;
+  warnedSecrets.add(said);
+  const list = hits
+    .slice(0, 8)
+    .map((h) => "  " + h.path + " (" + h.why + ")")
+    .join("\n");
+  process.stderr.write(
+    "prime: fleet " + fleet + ": " + (left ? "left out of the snapshot" : "published although it looks like a secret (PRIME_FLEET_SECRET_GATE=warn)") + ":\n" + list + (hits.length > 8 ? "\n  ... and " + (hits.length - 8) + " more" : "") +
+      "\n  To publish one: prime fleets secrets allow <fleet> --space <space> <path>\n",
+  );
+}
+
 export interface PublishResult {
   seq: number;
   commit: string;
@@ -287,6 +304,8 @@ export interface PublishResult {
   members: number;
   /** The gateway listed these devices (a key the signed roster does not name for them), and the snapshot was not sealed for them. */
   unrostered?: string[];
+  /** The files left out of the snapshot because they look like secrets (see fleet-secrets.ts). */
+  kept?: string[];
   /** The members this snapshot was sealed for (see `rosterOf`). */
   roster: string;
   /** Where the manifest of this snapshot is stored. */
@@ -523,15 +542,29 @@ export async function publish(
   // files would be staged again and come out as the same tree. When they have, or when this publish
   // is not built on what the caller's snapshot was, the work tree is taken again, as it is now.
   const reuse = known !== undefined && !caughtUp && (await treeUnchanged) && (known.quiet?.() ?? true);
+  const taken = { work: paths.work, gitDir: paths.gitDir, base, seq, ...(paths.nested ? { nested: paths.nested } : {}) };
+  // What looks like a secret is left out of the snapshot (see fleet-secrets.ts): the tree is taken first, looked at, and taken
+  // again without those files when there are some; the packs are made from the tree that is kept.
+  const gate = secretGateMode();
+  let tree = reuse && known ? known.tree : undefined;
+  let kept: SecretHit[] = [];
+  if (gate !== "off") {
+    const first = await snapshot({ ...taken, treeOnly: true, ...(tree !== undefined ? { tree } : {}) });
+    const hits = await findSecrets(paths.gitDir, first.tree, readAllow(paths.keyFile));
+    if (hits.length > 0 && gate === "exclude") {
+      kept = hits;
+      tree = (await snapshot({ ...taken, treeOnly: true, exclude: hits.map((h) => h.path) })).tree;
+    } else {
+      tree = first.tree;
+      if (hits.length > 0) noteSecrets(fleet, hits, false);
+    }
+    if (kept.length > 0) noteSecrets(fleet, kept, true);
+  }
   const snap = await snapshot({
-    work: paths.work,
-    gitDir: paths.gitDir,
-    base,
-    seq,
+    ...taken,
     wantFull,
     withDelta,
-    ...(reuse && known ? { tree: known.tree } : {}),
-    ...(paths.nested ? { nested: paths.nested } : {}),
+    ...(tree !== undefined ? { tree } : {}),
   });
   // A member that has an epoch key the fleet can show is signed by its signing key has the snapshot key wrapped to that.
   const epochOf = epochsToWrapTo(members, signing, fleet, incarnation);
@@ -645,6 +678,7 @@ export async function publish(
     tipCommit: manifest.tipCommit,
     tree: manifest.tree,
     roster: manifest.roster,
+    ...(kept.length > 0 ? { kept: keptForMeta(kept.map((h) => h.path)), ...(keptWasCut(kept.map((h) => h.path)) ? { keptCut: true } : {}) } : {}),
   });
   if (hideMeta) {
     manifest.tipCommit = "";
@@ -706,6 +740,7 @@ export async function publish(
     ...(delta ? { deltaBytes: delta.bytes } : {}),
     members: sealed.wrapped.length,
     ...(skipped.length > 0 ? { unrostered: skipped } : {}),
+    ...(kept.length > 0 ? { kept: kept.map((h) => h.path) } : {}),
     roster,
     manifestKey: moved.manifestKey ?? "",
     full: wantFull,
@@ -1327,6 +1362,7 @@ async function ingestRoute(
     trust.save();
     // Taking in a snapshot wrapped to a newer epoch key is what lets go of the older ones (after a short while).
     bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation)?.epoch));
+    if (i === plan.chain.length - 1) writeKeptNote(paths.gitDir, m.tipCommit, m.kept ?? [], m.keptCut === true);
     fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
     await onFetched?.(fetched);
   }
@@ -1372,7 +1408,56 @@ export async function applyAndRecord(
 export async function applyFetched(paths: MemberPaths, applied: Position, fetched: Position): Promise<void> {
   if (fetched.commit === null) throw new Error("nothing has been fetched to apply");
   const exclude = paths.nested ? paths.nested.get() : findNestedRepos(paths.work);
-  await applyCommit(paths.work, paths.gitDir, fetched.commit, exclude, applied.commit);
+  // What the fleet's publisher left out as secrets is not the fleet taking the file away: a replica that holds one keeps it.
+  const leftOut = await keptOnApply(paths, applied, fetched.commit, readKeptNote(paths.gitDir, fetched.commit));
+  await applyCommit(paths.work, paths.gitDir, fetched.commit, [...exclude, ...leftOut], applied.commit);
+}
+
+/** Where the paths that the newest fetched snapshot leaves out are kept, beside the store, so that an apply after a restart still knows them. */
+const KEPT_NOTE = "apply.kept";
+
+function writeKeptNote(gitDir: string, commit: string, kept: string[], cut: boolean): void {
+  try {
+    mkdirSync(gitDir, { recursive: true });
+    writeFileSync(join(gitDir, KEPT_NOTE), JSON.stringify({ commit, kept, ...(cut ? { cut: true } : {}) }));
+  } catch {
+    // A note that cannot be written leaves the path rules (`keptOnApply`) as the guard.
+  }
+}
+
+function readKeptNote(gitDir: string, commit: string): { kept: string[]; cut: boolean } {
+  try {
+    const note = JSON.parse(readFileSync(join(gitDir, KEPT_NOTE), "utf8")) as { commit?: unknown; kept?: unknown; cut?: unknown };
+    return note.commit === commit ? { kept: keptFrom(note.kept), cut: note.cut === true } : { kept: [], cut: false };
+  } catch {
+    return { kept: [], cut: false };
+  }
+}
+
+/**
+ * The paths an apply must leave alone for what the publisher left out: the ones its sealed metadata lists, and - whatever
+ * the metadata says, since it can be absent, cut short, or from a publisher that has no gate - any file this apply would remove that
+ * the secret rules name or whose content they match (read from this member's own store). When the list was cut, or what the rules
+ * need could not be read, every removal is kept: a file the fleet really deleted then stays on a replica until someone removes it,
+ * which is the side to be wrong on.
+ */
+async function keptOnApply(paths: MemberPaths, applied: Position, commit: string, note: { kept: string[]; cut: boolean }): Promise<string[]> {
+  const out = new Set(note.kept);
+  if (applied.commit) {
+    const env = gitEnv(paths.gitDir, paths.work, join(paths.gitDir, "apply.index"));
+    const removed = async (): Promise<string[]> => removedBetween(paths.gitDir, env, applied.commit!, commit);
+    try {
+      if (note.cut) for (const rel of await removed()) out.add(rel);
+      else for (const rel of await removedSecrets(paths.gitDir, applied.commit, commit)) out.add(rel);
+    } catch {
+      try {
+        for (const rel of await removed()) out.add(rel);
+      } catch {
+        // No record to compare with: nothing is removed by this apply either.
+      }
+    }
+  }
+  return [...out];
 }
 
 /**

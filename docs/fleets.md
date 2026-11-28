@@ -692,6 +692,34 @@ prime fleets invite acme --sso      # or PRIME_FLEET_SSO=1 for every fleet comma
 `cloudflared access login` in the browser the first time) and sends it as `cf-access-token`; the operator token is not sent. The gateway records
 the person's email as the actor. The token is not printed or stored by prime.
 
+## Secrets are left out
+
+A snapshot is mirrored to every member and kept by the gateway, and a `.env` or a private key in the work tree is not the work. Each
+publish looks at the tree it is about to publish and leaves out the files that look like secrets: by name (`.env` and `.env.*`, except
+`.example`/`.sample`/`.template`; `id_rsa`, `id_ecdsa`, `id_ed25519` and their kind but not `.pub`; `*.pem`, `*.key`, `*.p12`, `*.pfx`; `.netrc`; `credentials.json`;
+`.aws/credentials`) and by content (a text file of at most 1 MiB that holds a private key block, an AWS key id, a GitHub, Slack or Google token or an `sk-` key, or a long random value assigned to a name such as
+`secret`, `token`, `password` or `api_key`). The files stay where they are on the machine that has them; the agent says which were left out and why, and
+the snapshot records the list in its sealed metadata (`kept`, never in the clear).
+
+```bash
+prime fleets secrets list acme --space work                # what is allowed through
+prime fleets secrets allow acme --space work test/fixtures/** src/.env.test
+prime fleets secrets disallow acme --space work src/.env.test
+PRIME_FLEET_SECRET_GATE=off|warn|exclude                   # exclude is the default; warn publishes and says so
+```
+
+The allow list belongs to the member that publishes (it is kept beside its key). This is a net for accidents: a secret in a file the rules do not
+recognise goes through, and so does anything the operator allowed.
+
+**What a replica does.** A replica that holds a file the gate now leaves out (it received it from a primary that had no gate) keeps it: an apply
+never removes a path in the snapshot's sealed `kept` list, and never removes a file that the name rules above call a secret or whose content they match (read from the replica's own store), whatever the snapshot
+says (a primary of an earlier build). When more files were left out than the sealed list can hold (256 paths, 32 KB), the snapshot says the list was cut, and the replica then keeps every file the apply would remove. The other side of that: a `.env` that the primary really deletes stays on the
+replicas until someone removes it there. A member of an earlier build (before this release) still deletes the file once, so upgrade the replicas
+before the primary.
+
+**What it does not do.** The gate stops future snapshots only. A secret that was in a work tree before the gate was on is in the snapshots the
+gateway still holds (the last 64) and in every member's store: rotate it.
+
 ## Use cases
 
 - **A repository that follows you.** A fleet of three spaces on three machines,
