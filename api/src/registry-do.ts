@@ -26,7 +26,7 @@ import {
   validDeviceId,
   virtualDeviceIds,
 } from "./config";
-import { costOf, HitMeter, monthlyBudget, ZERO_USAGE, type UsageCounts } from "./usage";
+import { bucketBytes, costOf, HitMeter, meterStorage, monthlyBudget, ZERO_USAGE, type UsageCounts } from "./usage";
 import { fingerprint, isVerifier, pepperFrom, pepperMissingResponse, verifierFor, type TokenKind } from "./token-hash";
 
 const ONLINE_TTL_DEFAULT_MS = 150_000; // longer than keepalive timeout; swept on read
@@ -55,6 +55,10 @@ interface AnonRec {
   createdAt: number;
   lastSeenAt: number | null; // null until it first connects
 }
+
+/** How often the bucket is listed to learn how much it holds. */
+const STORAGE_MEASURE_EVERY_MS = 6 * 60 * 60_000;
+const STORAGE_MEASURE_RETRY_MS = 10 * 60_000;
 
 /** Persist an anonymous device's lastSeenAt at most this often (it re-registers every 30s). */
 const ANON_SEEN_PERSIST_MS = 5 * 60_000;
@@ -135,29 +139,29 @@ export class RegistryDO extends DurableObject<Env> {
     // DEVICE_TOKENS secret the first time the object is created.
     this.ctx.blockConcurrencyWhile(async () => {
       try {
-        const savedFleets = (await this.ctx.storage.get<string[]>("fleets")) || [];
+        const savedFleets = (await this.storage.get<string[]>("fleets")) || [];
         for (const id of savedFleets) if (validFleetId(id)) this.fleets.add(id);
       } catch {}
       try {
-        const paused = (await this.ctx.storage.get<string[]>("paused_fleets")) || [];
+        const paused = (await this.storage.get<string[]>("paused_fleets")) || [];
         for (const id of paused) if (validFleetId(id)) this.pausedFleets.add(id);
       } catch {}
       try {
-        const buddies = (await this.ctx.storage.get<Record<string, string>>("fleet_buddies")) || {};
+        const buddies = (await this.storage.get<Record<string, string>>("fleet_buddies")) || {};
         for (const [id, token] of Object.entries(buddies)) {
           if (validFleetId(id) && typeof token === "string" && token.length > 0) this.fleetBuddies.set(id, token);
         }
         if (await this.migrate(this.fleetBuddies, "fleet")) await this.persistFleetBuddies();
       } catch {}
       try {
-        const saved = (await this.ctx.storage.get<string[]>("online")) || [];
+        const saved = (await this.storage.get<string[]>("online")) || [];
         const now = Date.now();
         for (const id of saved) {
           if (validDeviceId(id)) this.online.set(id, { seenAt: now });
         }
       } catch {}
       try {
-        const saved = (await this.ctx.storage.get<Record<string, string>>("device_tokens")) || {};
+        const saved = (await this.storage.get<Record<string, string>>("device_tokens")) || {};
         for (const [id, tok] of Object.entries(saved)) {
           if (validDeviceId(id) && typeof tok === "string" && tok.length > 0) this.tokens.set(id, tok);
         }
@@ -201,12 +205,12 @@ export class RegistryDO extends DurableObject<Env> {
           this.virtual.add(id);
           this.online.set(id, { seenAt: Date.now() });
         }
-        this.blockedIps = new Set((await this.ctx.storage.get<string[]>("blocked-ips")) || []);
-      const savedDisabled = (await this.ctx.storage.get<string[]>("disabled")) || [];
+        this.blockedIps = new Set((await this.storage.get<string[]>("blocked-ips")) || []);
+      const savedDisabled = (await this.storage.get<string[]>("disabled")) || [];
         for (const id of savedDisabled) {
           if (validDeviceId(id)) this.disabled.add(id);
         }
-        const savedBudget = (await this.ctx.storage.get<R2BudgetState>("r2_budget")) || null;
+        const savedBudget = (await this.storage.get<R2BudgetState>("r2_budget")) || null;
         if (savedBudget && typeof savedBudget.month === "string") {
           this.budget = {
             month: savedBudget.month,
@@ -215,12 +219,12 @@ export class RegistryDO extends DurableObject<Env> {
             classB: Math.max(0, Number(savedBudget.classB) || 0),
           };
         }
-        const savedAnon = (await this.ctx.storage.get<Record<string, AnonRec>>("anon_devices")) || {};
+        const savedAnon = (await this.storage.get<Record<string, AnonRec>>("anon_devices")) || {};
         for (const [id, rec] of Object.entries(savedAnon)) {
           // An anonymous record without its token is debris from a partial write.
           if (validDeviceId(id) && this.tokens.has(id) && rec && typeof rec.ref === "string") this.anon.set(id, rec);
         }
-        const savedIndex = (await this.ctx.storage.get<Record<string, FileIndexEntry>>("file_index")) || {};
+        const savedIndex = (await this.storage.get<Record<string, FileIndexEntry>>("file_index")) || {};
         const now = Date.now();
         for (const [fileId, entry] of Object.entries(savedIndex)) {
           if (entry && validDeviceId(entry.deviceId) && entry.expiresAt > now) this.fileIndex.set(fileId, entry);
@@ -233,6 +237,12 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly meter = new HitMeter((add) => {
     this.addUsage(add).catch(() => {});
   });
+
+  /** This object's storage, with the rows it reads and writes counted. */
+  private metered?: DurableObjectStorage;
+  private get storage(): DurableObjectStorage {
+    return (this.metered ??= meterStorage(this.ctx.storage, this.meter));
+  }
 
   async fetch(request: Request): Promise<Response> {
     // The metering routes are the meter itself: counting them would be a tail
@@ -281,7 +291,7 @@ export class RegistryDO extends DurableObject<Env> {
     if (request.method === "POST" && path === "/usage-add") {
       const body = (await request.json().catch(() => ({}))) as Partial<UsageCounts>;
       const add: Partial<UsageCounts> = {};
-      for (const key of ["gatewayRequests", "doRequests", "doActiveMs", "r2Writes", "r2Reads"] as const) {
+      for (const key of ["gatewayRequests", "doRequests", "doActiveMs", "r2Writes", "r2Reads", "doRowsWritten", "doRowsRead"] as const) {
         const value = Number((body as Record<string, unknown>)[key] ?? 0);
         if (Number.isFinite(value) && value > 0) add[key] = Math.floor(value);
       }
@@ -289,6 +299,7 @@ export class RegistryDO extends DurableObject<Env> {
       return Response.json({ ok: true });
     }
     if (request.method === "GET" && path === "/usage") {
+      await this.measureStorage();
       const counts = await this.readUsage(monthKey());
       const cost = costOf(counts);
       const budget = monthlyBudget(this.env as unknown as Record<string, string | undefined>);
@@ -536,7 +547,7 @@ export class RegistryDO extends DurableObject<Env> {
       if (request.method === "POST") this.blockedIps.add(key);
       else if (request.method === "DELETE") this.blockedIps.delete(key);
       else return Response.json({ error: "method not allowed" }, { status: 405 });
-      await this.ctx.storage.put("blocked-ips", [...this.blockedIps]);
+      await this.storage.put("blocked-ips", [...this.blockedIps]);
       return Response.json({ ok: true, key, blocked: this.blockedIps.has(key) });
     }
 
@@ -818,7 +829,7 @@ export class RegistryDO extends DurableObject<Env> {
 
   private async persistAnon(): Promise<void> {
     try {
-      await this.ctx.storage.put("anon_devices", Object.fromEntries(this.anon));
+      await this.storage.put("anon_devices", Object.fromEntries(this.anon));
     } catch {}
   }
 
@@ -837,57 +848,89 @@ export class RegistryDO extends DurableObject<Env> {
 
   private async persist(): Promise<void> {
     try {
-      await this.ctx.storage.put("online", [...this.online.keys()]);
+      await this.storage.put("online", [...this.online.keys()]);
     } catch {}
   }
 
-  /** This month's counts, kept as one small record. */
+  /** This month's counts, kept as one small record, and what the bucket holds as last measured. */
   private async readUsage(month: string): Promise<UsageCounts> {
-    const saved = (await this.ctx.storage.get<Partial<UsageCounts> & { doMinutes?: number }>("usage:" + month)) ?? {};
+    const saved = (await this.storage.get<Partial<UsageCounts> & { doMinutes?: number }>("usage:" + month)) ?? {};
     // Minutes were how busy time was once guessed: a minute with a request in
     // it counted as sixty seconds, many times what is billed. They are dropped.
     const { doMinutes: _minutes, ...counts } = saved;
-    return { ...ZERO_USAGE, ...counts };
+    const stored = await this.storage.get<{ bytes?: number }>("r2storage");
+    return { ...ZERO_USAGE, ...counts, r2StoredBytes: Math.max(0, Number(stored?.bytes) || 0) };
+  }
+
+  /**
+   * What the bucket holds, measured now and then rather than at every change: the bytes go up with a
+   * publish and down with an eviction, in several places, and a count kept in step with all of them
+   * would drift. A listing of the bucket does not, and costs a few Class A calls (counted) a day.
+   */
+  private measuringStorage = false;
+  private measureFailedAt = 0;
+  private async measureStorage(): Promise<void> {
+    const bucket = this.env.BUCKET;
+    if (!bucket || this.measuringStorage) return;
+    const now = Date.now();
+    // A listing that failed is tried again in a few minutes, not by every ask of the guard.
+    if (now >= this.measureFailedAt && now - this.measureFailedAt < STORAGE_MEASURE_RETRY_MS) return;
+    const last = await this.storage.get<{ at?: number }>("r2storage");
+    if (last && typeof last.at === "number" && now - last.at < STORAGE_MEASURE_EVERY_MS) return;
+    this.measuringStorage = true;
+    try {
+      const measured = await bucketBytes(bucket);
+      // Written even when the measure is short (a bucket past the cap): the size is at least this.
+      await this.storage.put("r2storage", { bytes: measured.bytes, at: now, truncated: measured.truncated });
+      await this.addUsage({ r2Writes: measured.calls });
+    } catch {
+      // A bucket that cannot be listed is not measured: the guard keeps the last figure, or none.
+      this.measureFailedAt = now;
+    } finally {
+      this.measuringStorage = false;
+    }
   }
 
   private async addUsage(add: Partial<UsageCounts>): Promise<void> {
     const month = monthKey();
     const counts = await this.readUsage(month);
     for (const key of Object.keys(add) as Array<keyof UsageCounts>) {
+      if (key === "r2StoredBytes") continue; // a measure, kept apart (see `measureStorage`)
       counts[key] = (counts[key] ?? 0) + (add[key] ?? 0);
     }
-    await this.ctx.storage.put("usage:" + month, counts);
+    const { r2StoredBytes: _gauge, ...record } = counts;
+    await this.storage.put("usage:" + month, record);
     // The month that is over is dropped: it cannot be spent against again, and
     // keeping every month for ever would be its own small bill.
     try {
-      const last = await this.ctx.storage.get<number>("usageMonth");
+      const last = await this.storage.get<number>("usageMonth");
       if (last !== undefined && last !== new Date().getUTCMonth()) {
         // Only the previous month is known by name here; prune anything older.
         const keep = new Set([month]);
-        const older = await this.ctx.storage.list<Partial<UsageCounts>>({ prefix: "usage:" });
+        const older = await this.storage.list<Partial<UsageCounts>>({ prefix: "usage:" });
         for (const key of older.keys()) {
-          if (!keep.has(key.slice("usage:".length))) await this.ctx.storage.delete(key);
+          if (!keep.has(key.slice("usage:".length))) await this.storage.delete(key);
         }
       }
-      await this.ctx.storage.put("usageMonth", new Date().getUTCMonth());
+      await this.storage.put("usageMonth", new Date().getUTCMonth());
     } catch {}
   }
 
   private async persistFleetBuddies(): Promise<void> {
     try {
-      await this.ctx.storage.put("fleet_buddies", Object.fromEntries(this.fleetBuddies));
+      await this.storage.put("fleet_buddies", Object.fromEntries(this.fleetBuddies));
     } catch {}
   }
 
   private async persistPaused(): Promise<void> {
     try {
-      await this.ctx.storage.put("paused_fleets", [...this.pausedFleets]);
+      await this.storage.put("paused_fleets", [...this.pausedFleets]);
     } catch {}
   }
 
   private async persistFleets(): Promise<void> {
     try {
-      await this.ctx.storage.put("fleets", [...this.fleets]);
+      await this.storage.put("fleets", [...this.fleets]);
     } catch {}
   }
 
@@ -937,13 +980,13 @@ export class RegistryDO extends DurableObject<Env> {
 
   private async persistTokens(): Promise<void> {
     try {
-      await this.ctx.storage.put("device_tokens", Object.fromEntries(this.tokens));
+      await this.storage.put("device_tokens", Object.fromEntries(this.tokens));
     } catch {}
   }
 
   private async persistDisabled(): Promise<void> {
     try {
-      await this.ctx.storage.put("disabled", [...this.disabled]);
+      await this.storage.put("disabled", [...this.disabled]);
     } catch {}
   }
 
@@ -979,12 +1022,12 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   private async persistBudget(): Promise<void> {
-    await this.ctx.storage.put("r2_budget", this.budget);
+    await this.storage.put("r2_budget", this.budget);
   }
 
   private async persistFileIndex(): Promise<void> {
     try {
-      await this.ctx.storage.put("file_index", Object.fromEntries(this.fileIndex));
+      await this.storage.put("file_index", Object.fromEntries(this.fileIndex));
     } catch {}
   }
 }

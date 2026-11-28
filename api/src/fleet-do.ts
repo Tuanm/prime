@@ -35,7 +35,7 @@ import {
   newInviteCode,
   validFleetId,
 } from "./fleets";
-import { HitMeter, sendUsage } from "./usage";
+import { HitMeter, meterStorage, sendUsage } from "./usage";
 import type { Env } from "./config";
 
 
@@ -132,7 +132,7 @@ const EMPTY_HEAD: Head = { seq: 0, manifestKey: "", manifestHash: "", epoch: 0 }
  * heartbeat to the `ttlMs` this file returns, but an older agent still polls at
  * its own pace, so the lease is set to three of the slowest one.
  */
-const LEASE_TTL_MS = 45_000;
+export const LEASE_TTL_MS = 45_000;
 
 /** How long the first replica to ask for a free lease has to catch up before another may. */
 const CLAIM_MS = 30_000;
@@ -249,7 +249,7 @@ export class FleetDO implements DurableObject {
    */
   private async scheduleLeaseAlarm(expiresAt: number): Promise<void> {
     if (this.sockets().length === 0) return;
-    const s = this.state.storage as unknown as { setAlarm?: (at: number) => Promise<void> };
+    const s = this.storage as unknown as { setAlarm?: (at: number) => Promise<void> };
     try {
       await s.setAlarm?.(expiresAt + 250);
     } catch {}
@@ -261,7 +261,7 @@ export class FleetDO implements DurableObject {
 
   private async onAlarm(): Promise<void> {
     await this.settleStoring().catch(() => undefined);
-    const raw = await this.state.storage.get<Lease>("lease");
+    const raw = await this.storage.get<Lease>("lease");
     if (raw && raw.expiresAt + 250 > Date.now()) {
       await this.scheduleLeaseAlarm(raw.expiresAt);
       return;
@@ -363,7 +363,7 @@ export class FleetDO implements DurableObject {
   // The gateway reads it when a device asks to clear away a fleet it thinks is abandoned (`reap`):
   // one more condition, never the reason to allow a delete.
   private async touch(): Promise<void> {
-    await this.state.storage.put("lastActivity", Date.now());
+    await this.storage.put("lastActivity", Date.now());
   }
 
   // Everything this fleet put in the bucket: the head, and every snapshot's manifest and packs. The
@@ -394,27 +394,27 @@ export class FleetDO implements DurableObject {
   private async clear(fleetId: string): Promise<void> {
     this.hangUp("the fleet is gone");
     // A fleet that is deleted is not still paused: the name can be made again.
-    await this.state.storage.delete("meta");
-    await this.state.storage.delete("members");
-    await this.state.storage.delete("created");
-    await this.state.storage.delete("incarnation");
-    await this.state.storage.delete("left");
-    await this.state.storage.delete("unsealedBar");
-    await this.state.storage.delete("invites");
-    await this.state.storage.delete("pending");
-    await this.state.storage.delete("storing");
-    await this.state.storage.delete("lease");
-    await this.state.storage.delete("epoch");
-    await this.state.storage.delete("applied");
-    await this.state.storage.delete("claim");
-    await this.state.storage.delete("fetched");
-    await this.state.storage.delete("index");
-    await this.state.storage.delete("recent");
-    await this.state.storage.delete("ownerSeenAt");
+    await this.storage.delete("meta");
+    await this.storage.delete("members");
+    await this.storage.delete("created");
+    await this.storage.delete("incarnation");
+    await this.storage.delete("left");
+    await this.storage.delete("unsealedBar");
+    await this.storage.delete("invites");
+    await this.storage.delete("pending");
+    await this.storage.delete("storing");
+    await this.storage.delete("lease");
+    await this.storage.delete("epoch");
+    await this.storage.delete("applied");
+    await this.storage.delete("claim");
+    await this.storage.delete("fetched");
+    await this.storage.delete("index");
+    await this.storage.delete("recent");
+    await this.storage.delete("ownerSeenAt");
     // The next fleet of the name has a key pair of its own for key-change proofs.
-    await this.state.storage.delete("proofKey");
-    await this.state.storage.delete("proofNonces");
-    await this.state.storage.delete("lastActivity");
+    await this.storage.delete("proofKey");
+    await this.storage.delete("proofNonces");
+    await this.storage.delete("lastActivity");
     this.proofKeyMemo = undefined;
     await this.deleteStored(fleetId);
     // The fleet is gone, so the registry should stop listing it.
@@ -459,8 +459,8 @@ export class FleetDO implements DurableObject {
   private async reap(caller: Caller): Promise<Response> {
     if (caller.kind !== "admin") return this.deny();
     const members = await this.members();
-    const lastActivity = (await this.state.storage.get<number>("lastActivity")) ?? 0;
-    const created = (await this.state.storage.get<number>("created")) ?? 0;
+    const lastActivity = (await this.storage.get<number>("lastActivity")) ?? 0;
+    const created = (await this.storage.get<number>("created")) ?? 0;
     const meta = await this.meta();
     return Response.json({ members: Object.keys(members), lastActivity, created, meta });
   }
@@ -513,7 +513,7 @@ export class FleetDO implements DurableObject {
     if (!members[caller.deviceId]) return this.deny();
     const after = Math.max(0, Math.floor(Number(new URL(request.url).searchParams.get("after") ?? 0)) || 0);
     // `sealed: false` is this object's own note (that the manifest was looked at); a member is told of a seal, not of its absence.
-    const entries = ((await this.state.storage.get<IndexEntry[]>("index")) ?? [])
+    const entries = ((await this.storage.get<IndexEntry[]>("index")) ?? [])
       .filter((e) => e.seq > after)
       .map(({ sealed, ...rest }) => (sealed === true ? { ...rest, sealed: true as const } : rest));
     return Response.json({ entries });
@@ -532,8 +532,8 @@ export class FleetDO implements DurableObject {
     if (!held || held.holder !== caller.deviceId) {
       return Response.json({ error: "only the primary may read the members' keys" }, { status: 409 });
     }
-    const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
-    const fetched = (await this.state.storage.get<Record<string, number>>("fetched")) ?? {};
+    const applied = (await this.storage.get<Record<string, number>>("applied")) ?? {};
+    const fetched = (await this.storage.get<Record<string, number>>("fetched")) ?? {};
     return Response.json({
       members: Object.values(members).map((m) => ({
         deviceId: m.deviceId,
@@ -562,19 +562,19 @@ export class FleetDO implements DurableObject {
     if (head === null) return Response.json({ error: "the fleet's head could not be read" }, { status: 503 });
     const upTo = (v: unknown): number | undefined => (typeof v === "number" && v >= 0 ? Math.min(Math.floor(v), head.seq) : undefined);
     const seq = upTo(body.seq) ?? 0;
-    const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+    const applied = (await this.storage.get<Record<string, number>>("applied")) ?? {};
     if (seq > (applied[caller.deviceId] ?? 0)) applied[caller.deviceId] = seq;
-    await this.state.storage.put("applied", applied);
+    await this.storage.put("applied", applied);
     // A replica that fetches ahead says how far it has fetched, which is not
     // how far it has applied: only `applied` gates the lease. Members that do
     // not say have nothing recorded.
     let fetchedSeq: number | undefined;
     const fetchedAsked = upTo(body.fetched);
     if (fetchedAsked !== undefined) {
-      const fetched = (await this.state.storage.get<Record<string, number>>("fetched")) ?? {};
+      const fetched = (await this.storage.get<Record<string, number>>("fetched")) ?? {};
       fetchedSeq = Math.max(fetched[caller.deviceId] ?? 0, fetchedAsked);
       fetched[caller.deviceId] = fetchedSeq;
-      await this.state.storage.put("fetched", fetched);
+      await this.storage.put("fetched", fetched);
     }
     return Response.json({ ok: true, applied: applied[caller.deviceId] ?? 0, ...(fetchedSeq !== undefined ? { fetched: fetchedSeq } : {}) });
   }
@@ -583,12 +583,12 @@ export class FleetDO implements DurableObject {
   private announced = false;
 
   private async members(): Promise<Members> {
-    return (await this.state.storage.get<Members>("members")) ?? {};
+    return (await this.storage.get<Members>("members")) ?? {};
   }
 
   /** What the operator has set about the fleet itself. */
   private async meta(): Promise<FleetMeta> {
-    return (await this.state.storage.get<FleetMeta>("meta")) ?? {};
+    return (await this.storage.get<FleetMeta>("meta")) ?? {};
   }
 
   /** A fleet the operator has paused takes no part in anything. */
@@ -608,7 +608,7 @@ export class FleetDO implements DurableObject {
     }
     const wasPaused = meta.disabled === true;
     if (typeof body.disabled === "boolean") meta.disabled = body.disabled;
-    await this.state.storage.put("meta", meta);
+    await this.storage.put("meta", meta);
     if ((meta.disabled === true) !== wasPaused) this.broadcast({ type: meta.disabled === true ? "paused" : "resumed" });
     return Response.json({ ok: true, meta });
   }
@@ -620,6 +620,12 @@ export class FleetDO implements DurableObject {
   private readonly meter = new HitMeter((add) => {
     sendUsage(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global")), add);
   });
+
+  /** This object's storage, with the rows it reads and writes counted. */
+  private metered?: DurableObjectStorage;
+  private get storage(): DurableObjectStorage {
+    return (this.metered ??= meterStorage(this.state.storage, this.meter));
+  }
 
   async fetch(request: Request): Promise<Response> {
     this.meter.hit();
@@ -758,7 +764,7 @@ export class FleetDO implements DurableObject {
       // The fleet starts empty. The first member the operator admits owns
       // it: a fleet with nobody in it cannot be run by anybody, so the
       // first one in takes it.
-      await this.state.storage.put("created", Date.now());
+      await this.storage.put("created", Date.now());
       out = Response.json({ ok: true, fleet: fleetId });
       // The registry keeps the list of fleets, so the operator can see them.
       await this.registerWithRegistry(fleetId, true);
@@ -780,7 +786,7 @@ export class FleetDO implements DurableObject {
 
   /** Whether this fleet has been created, whether anybody is in it yet or not. */
   private async exists(): Promise<boolean> {
-    if ((await this.state.storage.get<number>("created")) !== undefined) return true;
+    if ((await this.storage.get<number>("created")) !== undefined) return true;
     const members = await this.members();
     return Object.keys(members).length > 0;
   }
@@ -801,12 +807,12 @@ export class FleetDO implements DurableObject {
         return;
       }
       const now = Date.now();
-      const invites = (await this.state.storage.get<Record<string, Invite>>("invites")) ?? {};
+      const invites = (await this.storage.get<Record<string, Invite>>("invites")) ?? {};
       // Drop expired invites while we are here, so storage does not accumulate.
       for (const [hash, inv] of Object.entries(invites)) if (inv.expiresAt <= now) delete invites[hash];
       const invite: Invite = { codeHash, expiresAt: now + ttlMs, createdBy: caller.deviceId, createdAt: now };
       invites[codeHash] = invite;
-      await this.state.storage.put("invites", invites);
+      await this.storage.put("invites", invites);
       out = Response.json({ ok: true, code, expiresAt: invite.expiresAt });
     });
     return out;
@@ -821,7 +827,7 @@ export class FleetDO implements DurableObject {
     const code = typeof body.code === "string" ? body.code : "";
     if (!inviteShape(code)) return Response.json({ ok: false, error: "invalid invite code" }, { status: 400 });
     const codeHash = await hashCode(code);
-    const invites = (await this.state.storage.get<Record<string, Invite>>("invites")) ?? {};
+    const invites = (await this.storage.get<Record<string, Invite>>("invites")) ?? {};
     const invite = invites[codeHash];
     if (!invite) return Response.json({ ok: false, error: "unknown or already-used invite" }, { status: 403 });
     if (invite.expiresAt <= Date.now()) return Response.json({ ok: false, error: "invite expired" }, { status: 403 });
@@ -840,7 +846,7 @@ export class FleetDO implements DurableObject {
     await this.state.blockConcurrencyWhile(async () => {
       const now = Date.now();
       const members = await this.members();
-      const invites = (await this.state.storage.get<Record<string, Invite>>("invites")) ?? {};
+      const invites = (await this.storage.get<Record<string, Invite>>("invites")) ?? {};
 
       const existing = members[caller.deviceId];
       if (existing) {
@@ -858,7 +864,7 @@ export class FleetDO implements DurableObject {
       }
       if (invite.expiresAt <= now) {
         delete invites[codeHash];
-        await this.state.storage.put("invites", invites);
+        await this.storage.put("invites", invites);
         out = Response.json({ error: "invite expired" }, { status: 403 });
         return;
       }
@@ -866,7 +872,7 @@ export class FleetDO implements DurableObject {
       // The invite is consumed by the first device that presents it, whether or
       // not approval follows. One code, one admission attempt.
       delete invites[codeHash];
-      await this.state.storage.put("invites", invites);
+      await this.storage.put("invites", invites);
 
       if (Object.keys(members).length >= MAX_MEMBERS) {
         out = Response.json({ error: "fleet is full" }, { status: 409 });
@@ -910,7 +916,7 @@ export class FleetDO implements DurableObject {
         ...(pubkey ? { pubkey } : {}),
         requestedAt: now,
       };
-      await this.state.storage.put("pending", pending);
+      await this.storage.put("pending", pending);
       out = Response.json({ ok: true, status: "pending", requestedAt: now });
     });
     return out;
@@ -938,7 +944,7 @@ export class FleetDO implements DurableObject {
         const member = members[deviceId];
         if (!member || !request.pubkey) {
           delete pending[deviceId];
-          await this.state.storage.put("pending", pending);
+          await this.storage.put("pending", pending);
           out = Response.json({ error: "no such request" }, { status: 404 });
           return;
         }
@@ -966,7 +972,7 @@ export class FleetDO implements DurableObject {
         }
         delete pending[deviceId];
         await this.replaceKey(members, deviceId, request.pubkey, fleetId);
-        await this.state.storage.put("pending", pending);
+        await this.storage.put("pending", pending);
         out = Response.json({ ok: true, member: members[deviceId], keyChanged: true });
         return;
       }
@@ -987,8 +993,8 @@ export class FleetDO implements DurableObject {
         ...(request.label ? { label: request.label } : {}),
       };
       members[deviceId] = member;
-      await this.state.storage.put("members", members);
-      await this.state.storage.put("pending", pending);
+      await this.storage.put("members", members);
+      await this.storage.put("pending", pending);
       out = Response.json({ ok: true, member });
     });
     return out;
@@ -1015,7 +1021,7 @@ export class FleetDO implements DurableObject {
       if (body.keyChange === true) {
         if (pending[deviceId]?.keyChange && members[deviceId]) {
           delete pending[deviceId];
-          await this.state.storage.put("pending", pending);
+          await this.storage.put("pending", pending);
           out = Response.json({ ok: true, removed: "pending" });
         } else {
           out = Response.json({ error: "no key change waiting" }, { status: 404 });
@@ -1024,14 +1030,14 @@ export class FleetDO implements DurableObject {
       }
       if (pending[deviceId] && !members[deviceId]) {
         delete pending[deviceId];
-        await this.state.storage.put("pending", pending);
+        await this.storage.put("pending", pending);
         out = Response.json({ ok: true, removed: "pending" });
         return;
       }
       // Removing a member takes a request for its key with it.
       if (pending[deviceId]) {
         delete pending[deviceId];
-        await this.state.storage.put("pending", pending);
+        await this.storage.put("pending", pending);
       }
       const member = members[deviceId];
       if (!member) {
@@ -1047,7 +1053,7 @@ export class FleetDO implements DurableObject {
       // somebody who is no longer there.
       const held = await this.lease();
       if (held && held.holder === deviceId) {
-        await this.state.storage.delete("lease");
+        await this.storage.delete("lease");
         freedLease = true;
       }
       // Removing the owner hands the fleet to the member that has been in it
@@ -1067,7 +1073,7 @@ export class FleetDO implements DurableObject {
         out = Response.json({ ok: true, removed: "member", fleet: "gone" });
         return;
       }
-      await this.state.storage.put("members", members);
+      await this.storage.put("members", members);
       out = Response.json({ ok: true, removed: "member" });
     });
     // Told after the decision is made and stored, outside the block that made it:
@@ -1082,8 +1088,8 @@ export class FleetDO implements DurableObject {
     // Invalidate every outstanding invite.
     const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
-    const before = Object.keys((await this.state.storage.get<Record<string, Invite>>("invites")) ?? {}).length;
-    await this.state.storage.put("invites", {});
+    const before = Object.keys((await this.storage.get<Record<string, Invite>>("invites")) ?? {}).length;
+    await this.storage.put("invites", {});
     return Response.json({ ok: true, revoked: before });
   }
 
@@ -1091,8 +1097,8 @@ export class FleetDO implements DurableObject {
     const members = await this.members();
     if (caller.kind === "admin") {
       // The operator also sees how far each member says it has got (informational: only `applied` gates the lease).
-      const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
-      const fetched = (await this.state.storage.get<Record<string, number>>("fetched")) ?? {};
+      const applied = (await this.storage.get<Record<string, number>>("applied")) ?? {};
+      const fetched = (await this.storage.get<Record<string, number>>("fetched")) ?? {};
       const shown = Object.values(members).map((m) => ({
         ...m,
         applied: applied[m.deviceId] ?? 0,
@@ -1131,7 +1137,7 @@ export class FleetDO implements DurableObject {
   }
 
   private async lease(): Promise<Lease | null> {
-    const lease = await this.state.storage.get<Lease>("lease");
+    const lease = await this.storage.get<Lease>("lease");
     if (!lease) return null;
     return lease.expiresAt > Date.now() ? lease : null;
   }
@@ -1181,7 +1187,7 @@ export class FleetDO implements DurableObject {
       // not taken on: the list would then show two spaces that cannot be told apart.
       if (label !== undefined && roster[caller.deviceId]!.label !== label && !findClash(roster, {}, caller.deviceId, label)) {
         roster[caller.deviceId]!.label = label;
-        await this.state.storage.put("members", roster);
+        await this.storage.put("members", roster);
       }
     });
     if (refused) return refused;
@@ -1211,11 +1217,11 @@ export class FleetDO implements DurableObject {
       }
       // A member that published without a seal on a fleet whose snapshots are sealed is not given the
       // lease back for a while: an upgraded member has it (see `advance`). It carries on as a replica.
-      const bar = (await this.state.storage.get<Record<string, number>>("unsealedBar")) ?? {};
+      const bar = (await this.storage.get<Record<string, number>>("unsealedBar")) ?? {};
       // A build that says it seals has been upgraded since: the bar was for the build that refused.
       if (body.seals === true && bar[caller.deviceId] !== undefined) {
         delete bar[caller.deviceId];
-        await this.state.storage.put("unsealedBar", bar);
+        await this.storage.put("unsealedBar", bar);
       }
       if ((bar[caller.deviceId] ?? 0) > now) {
         out = Response.json({
@@ -1240,7 +1246,7 @@ export class FleetDO implements DurableObject {
       // A member that has not applied the head cannot hold the lease: it
       // would block the member that can publish, and it could not publish
       // itself. It catches up first, and takes the lease on a later round.
-      const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+      const applied = (await this.storage.get<Record<string, number>>("applied")) ?? {};
       if (head.seq > 0 && (applied[caller.deviceId] ?? 0) < head.seq) {
         // Every replica that is behind is told the same while the lease is free,
         // and each would write its whole work tree to catch up. The first to ask
@@ -1248,7 +1254,7 @@ export class FleetDO implements DurableObject {
         // the others are told to wait and ask later. The lease itself is decided
         // as ever - by who has applied the head when it asks - so a claim that
         // lapses (its holder died half way) costs the others its length at most.
-        const claim = await this.state.storage.get<Claim>("claim");
+        const claim = await this.storage.get<Claim>("claim");
         const live = claim !== undefined && claim.until > now && members[claim.device] !== undefined;
         const wait = (holder: string, ms: number): Response =>
           Response.json({ ok: true, role: "replica", reason: "claimed", holder, head, epoch: head.epoch, retryAfterMs: Math.max(1000, ms) });
@@ -1261,7 +1267,7 @@ export class FleetDO implements DurableObject {
           if (!mine || mine.by !== by) {
             if (mine) mine.by = by;
             else queue.push({ device: caller.deviceId, at: now, by });
-            await this.state.storage.put("claim", {
+            await this.storage.put("claim", {
               device: claim?.device ?? "",
               since: claim?.since ?? 0,
               until: claim?.until ?? 0,
@@ -1282,7 +1288,7 @@ export class FleetDO implements DurableObject {
           // when that is over the claim lapses, and the holder - behind everyone that
           // is waiting - does not get the next one while there is somebody who is.
           const since = Number.isFinite(claim.since) ? claim.since : claim.until - CLAIM_MS;
-          await this.state.storage.put("claim", {
+          await this.storage.put("claim", {
             device: claim.device,
             since,
             until: Math.min(now + CLAIM_MS, since + CLAIM_MAX_MS),
@@ -1296,7 +1302,7 @@ export class FleetDO implements DurableObject {
             out = await queued(first.device, Math.min(CLAIM_MS, first.by - now));
             return;
           }
-          await this.state.storage.put("claim", {
+          await this.storage.put("claim", {
             device: caller.deviceId,
             since: now,
             until: now + CLAIM_MS,
@@ -1323,11 +1329,11 @@ export class FleetDO implements DurableObject {
       // (The head's epoch is the floor, so a fleet whose object storage was lost does not go back.)
       // A holder that asks again while its lease lives keeps it as it is (its epoch, and since when it has held it):
       // only a grant to another holder, or a new one after the lease lapsed, is a new epoch.
-      const epoch = held && held.holder === caller.deviceId ? held.epoch : Math.max((await this.state.storage.get<number>("epoch")) ?? 0, head.epoch) + 1;
+      const epoch = held && held.holder === caller.deviceId ? held.epoch : Math.max((await this.storage.get<number>("epoch")) ?? 0, head.epoch) + 1;
       const lease: Lease = { holder: caller.deviceId, epoch, expiresAt: now + ttlMs, since: held && held.holder === caller.deviceId ? (held.since ?? now) : now };
-      await this.state.storage.put("lease", lease);
-      await this.state.storage.put("epoch", epoch);
-      await this.state.storage.delete("claim");
+      await this.storage.put("lease", lease);
+      await this.storage.put("epoch", epoch);
+      await this.storage.delete("claim");
       await this.scheduleLeaseAlarm(lease.expiresAt);
       out = Response.json({
         ok: true,
@@ -1353,7 +1359,7 @@ export class FleetDO implements DurableObject {
         return;
       }
       const expiresAt = Date.now() + ttlMs;
-      await this.state.storage.put("lease", { ...held, expiresAt });
+      await this.storage.put("lease", { ...held, expiresAt });
       await this.scheduleLeaseAlarm(expiresAt);
       out = Response.json({ ok: true, epoch: held.epoch });
     });
@@ -1372,7 +1378,7 @@ export class FleetDO implements DurableObject {
     if (!held || held.holder !== deviceId) {
       return Response.json({ ok: true, vacated: false, primary: held ? held.holder : null });
     }
-    await this.state.storage.delete("lease");
+    await this.storage.delete("lease");
     // The caller that asked for the place right after (the Worker, when a member
     // finds the holder gone) is about to give it to that member itself. Telling
     // everyone else the place is free would send all of them after it at once, and
@@ -1385,7 +1391,7 @@ export class FleetDO implements DurableObject {
     if (caller.kind !== "device") return this.deny();
     const held = await this.lease();
     if (!held || held.holder !== caller.deviceId) return Response.json({ error: "not the lease holder" }, { status: 409 });
-    await this.state.storage.delete("lease");
+    await this.storage.delete("lease");
     this.broadcast({ type: "lease-free" });
     return Response.json({ ok: true });
   }
@@ -1436,7 +1442,7 @@ export class FleetDO implements DurableObject {
     // publish those and leave the fleet with no primary that anyone could replace. Its lease is handed
     // on instead (it opens sealed snapshots as it always did, and carries on as a replica), and it is
     // kept from taking the lease back for a while, so that an upgraded member has it.
-    const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    const index = (await this.storage.get<IndexEntry[]>("index")) ?? [];
     const tip = index[index.length - 1];
     if (tip && tip.seq === currentHead.seq && tip.sealed === undefined && meta.sealed !== true) {
       // Written through a gateway that did not record whether it was sealed: its manifest says, once.
@@ -1444,16 +1450,16 @@ export class FleetDO implements DurableObject {
       const sealedTip = await this.manifestIsSealed(tip.manifestKey);
       if (sealedTip !== undefined) {
         tip.sealed = sealedTip;
-        await this.state.storage.put("index", index);
+        await this.storage.put("index", index);
       }
     }
     if (tip && tip.seq === currentHead.seq && tip.sealed === true && meta.sealed !== true) {
-      await this.state.storage.delete("lease");
-      const bar = (await this.state.storage.get<Record<string, number>>("unsealedBar")) ?? {};
+      await this.storage.delete("lease");
+      const bar = (await this.storage.get<Record<string, number>>("unsealedBar")) ?? {};
       const now = Date.now();
       for (const [device, until] of Object.entries(bar)) if (until <= now) delete bar[device];
       bar[caller.deviceId] = now + UNSEALED_BAR_MS;
-      await this.state.storage.put("unsealedBar", bar);
+      await this.storage.put("unsealedBar", bar);
       this.broadcast({ type: "lease-free" }, caller.deviceId);
       return Response.json(
         {
@@ -1468,7 +1474,7 @@ export class FleetDO implements DurableObject {
     // A member that took over has to have applied the state it is about to
     // replace. Without this, a new primary could publish on top of state it
     // never fetched, and the fleet would lose whatever it had missed.
-    const applied = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+    const applied = (await this.storage.get<Record<string, number>>("applied")) ?? {};
     if ((applied[caller.deviceId] ?? 0) < currentHead.seq) {
       return Response.json(
         { error: "catch up first", required: currentHead.seq, applied: applied[caller.deviceId] ?? 0 },
@@ -1503,7 +1509,7 @@ export class FleetDO implements DurableObject {
       // it is a member's up to this one, which the member made while it was one.
       const rostered = await this.members();
       if (!rostered[caller.deviceId]) {
-        const left = (await this.state.storage.get<LeftKey[]>("left")) ?? [];
+        const left = (await this.storage.get<LeftKey[]>("left")) ?? [];
         let raised = false;
         for (const k of left) {
           if (k.device === caller.deviceId && k.until < next.seq) {
@@ -1511,9 +1517,9 @@ export class FleetDO implements DurableObject {
             raised = true;
           }
         }
-        if (raised) await this.state.storage.put("left", left);
+        if (raised) await this.storage.put("left", left);
       }
-      await this.state.storage.put("epoch", next.epoch);
+      await this.storage.put("epoch", next.epoch);
       // The publisher holds the state it has just published: it needs no report to
       // say so. Without this a member whose own report was lost (a timeout, a 503)
       // would be refused its next publish as "catch up first", with nothing it
@@ -1521,9 +1527,9 @@ export class FleetDO implements DurableObject {
       // Read again, with no other I/O between that and the write: the write to R2
       // above gave other requests (a member's report, in particular) room to run, and
       // the map read before it would put their change back as it was.
-      const now_ = (await this.state.storage.get<Record<string, number>>("applied")) ?? {};
+      const now_ = (await this.storage.get<Record<string, number>>("applied")) ?? {};
       now_[caller.deviceId] = Math.max(now_[caller.deviceId] ?? 0, next.seq);
-      await this.state.storage.put("applied", now_);
+      await this.storage.put("applied", now_);
       // The members that listen pull now instead of at their next look; the one that
       // published already has it.
       this.broadcast({ type: "head", seq: next.seq, manifestKey }, caller.deviceId);
@@ -1552,7 +1558,7 @@ export class FleetDO implements DurableObject {
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
     const own = new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/(packs|manifests)/[0-9a-f]{64}$");
     const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, 8) : [];
-    const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
+    const recent = (await this.storage.get<string[]>("recent")) ?? [];
     const kept = new Set([...recent.flatMap((entry) => entry.split("\n")), ...(await this.storingKeys())]);
     return Response.json({ keys: asked.filter((k) => !kept.has(k)) });
   }
@@ -1561,7 +1567,7 @@ export class FleetDO implements DurableObject {
   // publish in flight under this same name, so what is stored may be a list of keys, or have such
   // entries among the requests, and only what has the shape of a request is one.
   private async joinRequests(): Promise<Record<string, PendingRequest>> {
-    const stored = await this.state.storage.get<unknown>("pending");
+    const stored = await this.storage.get<unknown>("pending");
     const out: Record<string, PendingRequest> = {};
     if (!stored || typeof stored !== "object" || Array.isArray(stored)) return out;
     for (const [device, value] of Object.entries(stored as Record<string, unknown>)) {
@@ -1577,25 +1583,25 @@ export class FleetDO implements DurableObject {
   // by the request that made it. An entry whose request died is settled by `settleStoring`.
   private async startStoring(entry: Omit<Storing, "at">): Promise<string> {
     const token = crypto.randomUUID();
-    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
+    const storing = (await this.storage.get<Record<string, Storing>>("storing")) ?? {};
     storing[token] = { ...entry, at: Date.now() };
     const oldest = Object.keys(storing).sort((a, b) => storing[a]!.at - storing[b]!.at);
     for (const k of oldest.slice(0, Math.max(0, oldest.length - STORING_MAX_ENTRIES))) delete storing[k];
-    await this.state.storage.put("storing", storing);
+    await this.storage.put("storing", storing);
     this.live.add(token);
     return token;
   }
 
   private async endStoring(token: string): Promise<void> {
-    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
+    const storing = (await this.storage.get<Record<string, Storing>>("storing")) ?? {};
     if (!(token in storing)) return;
     delete storing[token];
-    if (Object.keys(storing).length === 0) await this.state.storage.delete("storing");
-    else await this.state.storage.put("storing", storing);
+    if (Object.keys(storing).length === 0) await this.storage.delete("storing");
+    else await this.storage.put("storing", storing);
   }
 
   private async storingKeys(): Promise<string[]> {
-    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
+    const storing = (await this.storage.get<Record<string, Storing>>("storing")) ?? {};
     return Object.values(storing).flatMap((v) => v.keys);
   }
 
@@ -1603,18 +1609,18 @@ export class FleetDO implements DurableObject {
   // its entry in the index. Safe to do twice for the same snapshot, which a request that died part way and the
   // settling after it both do.
   private async keepSnapshot(snap: { manifestKey: string; keys: string[]; seq: number; meta: Record<string, unknown> }): Promise<void> {
-    const recent = (await this.state.storage.get<string[]>("recent")) ?? [];
+    const recent = (await this.storage.get<string[]>("recent")) ?? [];
     const already = recent.some((entry) => entry.split("\n")[0] === snap.manifestKey);
     let evicted: string[] = [];
     if (!already) {
       recent.push(snap.keys.join("\n"));
       evicted = recent.splice(0, Math.max(0, recent.length - RECENT_SNAPSHOTS));
-      await this.state.storage.put("recent", recent);
+      await this.storage.put("recent", recent);
     }
-    const kept = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    const kept = (await this.storage.get<IndexEntry[]>("index")) ?? [];
     if (!kept.some((e) => e.manifestKey === snap.manifestKey)) {
       kept.push({ seq: snap.seq, manifestKey: snap.manifestKey, ...snap.meta, sealed: snap.meta.sealed === true } as IndexEntry);
-      await this.state.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
+      await this.storage.put("index", kept.slice(-RECENT_SNAPSHOTS));
     }
     for (const entry of evicted) {
       for (const key of entry.split("\n")) {
@@ -1631,7 +1637,7 @@ export class FleetDO implements DurableObject {
   // the objects the head names are always among the ones kept; when it is not, the write did not happen and the
   // entry is let go. An entry whose head cannot be read stays for the next time.
   private async settleStoring(): Promise<void> {
-    const storing = (await this.state.storage.get<Record<string, Storing>>("storing")) ?? {};
+    const storing = (await this.storage.get<Record<string, Storing>>("storing")) ?? {};
     const now = Date.now();
     // Not a request this object is still running: a slow head write is not a dead one, whatever its age.
     const stale = Object.entries(storing).filter(([token, v]) => now - v.at > STORING_GRACE_MS && !this.live.has(token));
@@ -1672,16 +1678,16 @@ export class FleetDO implements DurableObject {
   // still has those snapshots to take in, and they are made with a key that is no longer on the roster:
   // it is a member's for the snapshots up to there, and for none after.
   private async recordLeft(pubkey: string, fleetId: string, device: string): Promise<void> {
-    const index = (await this.state.storage.get<IndexEntry[]>("index")) ?? [];
+    const index = (await this.storage.get<IndexEntry[]>("index")) ?? [];
     // The index is pushed after the head is written (see `advance`), so the head can be ahead of it.
     const tip = Math.max(index.length > 0 ? index[index.length - 1]!.seq : 0, (await this.readHead(fleetId)).seq);
-    const left = ((await this.state.storage.get<LeftKey[]>("left")) ?? []).filter((k) => k.pubkey !== pubkey && k.until >= tip - 2 * RECENT_SNAPSHOTS);
+    const left = ((await this.storage.get<LeftKey[]>("left")) ?? []).filter((k) => k.pubkey !== pubkey && k.until >= tip - 2 * RECENT_SNAPSHOTS);
     left.push({ pubkey, until: tip, device });
-    await this.state.storage.put("left", left.slice(-LEFT_KEYS_KEPT));
+    await this.storage.put("left", left.slice(-LEFT_KEYS_KEPT));
   }
 
   private async leftKeys(): Promise<{ pubkey: string; until: number }[]> {
-    return ((await this.state.storage.get<LeftKey[]>("left")) ?? []).map(({ pubkey, until }) => ({ pubkey, until }));
+    return ((await this.storage.get<LeftKey[]>("left")) ?? []).map(({ pubkey, until }) => ({ pubkey, until }));
   }
 
   // ---- a member's key ----
@@ -1707,7 +1713,7 @@ export class FleetDO implements DurableObject {
       try {
         // "X25519" is a WebCrypto algorithm in the Workers runtime and in Bun; the lib types predate it.
         const algo = { name: "X25519" } as never;
-        const stored = await this.state.storage.get<{ publicKey: string; privateKey: string }>("proofKey");
+        const stored = await this.storage.get<{ publicKey: string; privateKey: string }>("proofKey");
         const b64 = (b: ArrayBuffer): string => btoa(String.fromCharCode(...new Uint8Array(b)));
         const raw = (t: string): ArrayBuffer => Uint8Array.from(atob(t), (c) => c.charCodeAt(0)).buffer as ArrayBuffer;
         if (stored) {
@@ -1716,7 +1722,7 @@ export class FleetDO implements DurableObject {
         }
         const pair = (await crypto.subtle.generateKey(algo, true, ["deriveBits"])) as CryptoKeyPair;
         const publicKey = b64(await crypto.subtle.exportKey("raw", pair.publicKey));
-        await this.state.storage.put("proofKey", { publicKey, privateKey: b64(await crypto.subtle.exportKey("pkcs8", pair.privateKey)) });
+        await this.storage.put("proofKey", { publicKey, privateKey: b64(await crypto.subtle.exportKey("pkcs8", pair.privateKey)) });
         return { publicKey, privateKey: pair.privateKey };
       } catch {
         return null;
@@ -1735,7 +1741,7 @@ export class FleetDO implements DurableObject {
     try {
       const now = Date.now();
       if (Math.abs(now - proof.ts) > KEY_PROOF_WINDOW_MS) return false;
-      const seen = (await this.state.storage.get<Record<string, number>>("proofNonces")) ?? {};
+      const seen = (await this.storage.get<Record<string, number>>("proofNonces")) ?? {};
       for (const [n, at] of Object.entries(seen)) if (now - at > 2 * KEY_PROOF_WINDOW_MS) delete seen[n];
       if (seen[proof.nonce] !== undefined) return false;
       const mine = await this.proofKey();
@@ -1755,7 +1761,7 @@ export class FleetDO implements DurableObject {
       const ok = await crypto.subtle.verify("HMAC", macKey, unb64(proof.mac), new TextEncoder().encode(keyChangeMessage(newPubkey, fleetId, deviceId, proof.ts, proof.nonce)));
       if (!ok) return false;
       seen[proof.nonce] = now;
-      await this.state.storage.put("proofNonces", seen);
+      await this.storage.put("proofNonces", seen);
       return true;
     } catch {
       return false;
@@ -1767,7 +1773,7 @@ export class FleetDO implements DurableObject {
     const member = members[deviceId]!;
     if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId);
     member.pubkey = pubkey;
-    await this.state.storage.put("members", members);
+    await this.storage.put("members", members);
   }
 
   /**
@@ -1785,7 +1791,7 @@ export class FleetDO implements DurableObject {
       // It is back to the key the fleet holds: a request for another one is moot.
       if (pending[deviceId]?.keyChange) {
         delete pending[deviceId];
-        await this.state.storage.put("pending", pending);
+        await this.storage.put("pending", pending);
       }
       return "same";
     }
@@ -1793,7 +1799,7 @@ export class FleetDO implements DurableObject {
       await this.replaceKey(members, deviceId, pubkey, fleetId);
       if (pending[deviceId]?.keyChange) {
         delete pending[deviceId];
-        await this.state.storage.put("pending", pending);
+        await this.storage.put("pending", pending);
       }
       return "changed";
     }
@@ -1807,7 +1813,7 @@ export class FleetDO implements DurableObject {
         requestedAt: Date.now(),
         keyChange: true,
       };
-      await this.state.storage.put("pending", pending);
+      await this.storage.put("pending", pending);
     }
     return "pending";
   }
@@ -1835,10 +1841,10 @@ export class FleetDO implements DurableObject {
   // replayed snapshot of an earlier fleet does not pass for one of this. Made when first asked
   // (a fleet that predates it gets one then), and gone with the fleet.
   private async incarnation(): Promise<string> {
-    const known = await this.state.storage.get<string>("incarnation");
+    const known = await this.storage.get<string>("incarnation");
     if (known) return known;
     const made = crypto.randomUUID();
-    await this.state.storage.put("incarnation", made);
+    await this.storage.put("incarnation", made);
     return made;
   }
 

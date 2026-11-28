@@ -18,7 +18,7 @@ import { DownloadRelay } from "./download-relay";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
 import { validDeviceId, timingSafeEq, extractToken } from "./config";
-import { HitMeter, sendUsage } from "./usage";
+import { HitMeter, meterStorage, sendUsage } from "./usage";
 import type { TunnelRequest, TunnelMessage } from "./protocol";
 
 // Per-device token lookup (parsed once per DO instance).
@@ -125,6 +125,12 @@ export class DeviceDO extends DurableObject<Env> {
     sendUsage(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global")), add);
   });
 
+  /** This object's storage, with the rows it reads and writes counted. */
+  private metered?: DurableObjectStorage;
+  private get storage(): DurableObjectStorage {
+    return (this.metered ??= meterStorage(this.ctx.storage, this.meter));
+  }
+
   async fetch(request: Request): Promise<Response> {
     this.meter.hit();
     return this.meter.busy(() => this.serve(request));
@@ -147,10 +153,10 @@ export class DeviceDO extends DurableObject<Env> {
       const nonce = request.headers.get("x-ticket-nonce");
       if (nonce) {
         const key = "ticket:" + nonce;
-        if (await this.ctx.storage.get(key)) return Response.json({ error: "ticket already used" }, { status: 401 });
-        await this.ctx.storage.put(key, Date.now() + 60_000);
-        const all = await this.ctx.storage.list<number>({ prefix: "ticket:" });
-        for (const [k, exp] of all) if (exp < Date.now()) await this.ctx.storage.delete(k);
+        if (await this.storage.get(key)) return Response.json({ error: "ticket already used" }, { status: 401 });
+        await this.storage.put(key, Date.now() + 60_000);
+        const all = await this.storage.list<number>({ prefix: "ticket:" });
+        for (const [k, exp] of all) if (exp < Date.now()) await this.storage.delete(k);
       }
       return this.handleUpgrade(request, url, authToken);
     }
@@ -270,7 +276,7 @@ export class DeviceDO extends DurableObject<Env> {
     // nothing is pruned or rewritten, so an entry past pruneSessions' week is
     // still shown for as long as it is stored. Oldest first.
     if (request.method === "GET" && url.pathname === "/sessions") {
-      const stored = await this.ctx.storage.list<unknown>({ prefix: "sess:" });
+      const stored = await this.storage.list<unknown>({ prefix: "sess:" });
       const sessions: Array<{ sid: string; name: string | null; at: number | null; raw?: unknown }> = [];
       for (const [key, value] of stored) {
         const v = value as { name?: unknown; at?: unknown } | null;
@@ -486,8 +492,8 @@ export class DeviceDO extends DurableObject<Env> {
   private clientSalt: string | null = null;
   private async salt(): Promise<string> {
     if (this.clientSalt) return this.clientSalt;
-    let v = await this.ctx.storage.get<string>("client-salt");
-    if (!v) { v = crypto.randomUUID(); await this.ctx.storage.put("client-salt", v); }
+    let v = await this.storage.get<string>("client-salt");
+    if (!v) { v = crypto.randomUUID(); await this.storage.put("client-salt", v); }
     this.clientSalt = v;
     return v;
   }
@@ -511,10 +517,10 @@ export class DeviceDO extends DurableObject<Env> {
     if (sid && given) {
       if (this.sessionNames.size >= 2_000) this.sessionNames.delete(this.sessionNames.keys().next().value!);
       this.sessionNames.set(sid, given);
-      await this.ctx.storage.put("sess:" + sid, { name: given, at: Date.now() });
+      await this.storage.put("sess:" + sid, { name: given, at: Date.now() });
       if (Math.random() < 0.05) await this.pruneSessions();
     } else if (sid && !this.sessionNames.has(sid)) {
-      const stored = await this.ctx.storage.get<{ name: string; at: number }>("sess:" + sid);
+      const stored = await this.storage.get<{ name: string; at: number }>("sess:" + sid);
       if (stored && typeof stored.name === "string") this.sessionNames.set(sid, stored.name);
     }
     const name = (sid && this.sessionNames.get(sid)) || given || this.clients.get(ip)?.name || "client";
@@ -530,9 +536,9 @@ export class DeviceDO extends DurableObject<Env> {
 
   /** Forget session names unused for a week (sessions come and go with clients). */
   private async pruneSessions(): Promise<void> {
-    const all = await this.ctx.storage.list<{ at: number }>({ prefix: "sess:", limit: 2000 });
+    const all = await this.storage.list<{ at: number }>({ prefix: "sess:", limit: 2000 });
     const old = [...all].filter(([, v]) => !v || Date.now() - (v.at || 0) > 7 * 86_400_000).map(([k]) => k);
-    if (old.length) await this.ctx.storage.delete(old.slice(0, 128));
+    if (old.length) await this.storage.delete(old.slice(0, 128));
   }
 
   private recordClient(request: Request, body: unknown): void {
@@ -586,7 +592,7 @@ export class DeviceDO extends DurableObject<Env> {
   // asleep.
   private scheduleKeepaliveCheck(): void {
     const deadline = Date.now() + this.keepaliveTimeoutMs;
-    this.ctx.storage.setAlarm(deadline).catch(() => {});
+    this.storage.setAlarm(deadline).catch(() => {});
   }
 
   async alarm(): Promise<void> {

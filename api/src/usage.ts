@@ -27,6 +27,19 @@ export interface UsageCounts {
   r2Writes: number;
   /** R2 reads (Class B). */
   r2Reads: number;
+  /**
+   * Rows written to Durable Object storage: one for each key put or deleted and one for each alarm
+   * set. Cloudflare bills them, and a fleet that renews its lease every fifteen seconds writes
+   * them all day.
+   */
+  doRowsWritten: number;
+  /** Rows read from Durable Object storage: one for each key asked for. */
+  doRowsRead: number;
+  /**
+   * Bytes the bucket holds right now. Not a count that goes up: the last measurement of a thing
+   * that goes both ways, which is billed by the month it is held for.
+   */
+  r2StoredBytes: number;
 }
 
 export const ZERO_USAGE: UsageCounts = {
@@ -35,6 +48,9 @@ export const ZERO_USAGE: UsageCounts = {
   doActiveMs: 0,
   r2Writes: 0,
   r2Reads: 0,
+  doRowsWritten: 0,
+  doRowsRead: 0,
+  r2StoredBytes: 0,
 };
 
 /** Cloudflare's list prices, per month, in US dollars. */
@@ -59,6 +75,15 @@ export const PRICES = {
   includedR2Writes: 1_000_000,
   perMillionR2Reads: 0.36,
   includedR2Reads: 10_000_000,
+  /** Durable Object SQLite rows (the storage every object here uses). */
+  perMillionRowsWritten: 1,
+  includedRowsWritten: 50_000_000,
+  perMillionRowsRead: 0.001,
+  includedRowsRead: 25_000_000_000,
+  /** R2 storage, per gigabyte-month beyond the included ten. A gigabyte is 10^9 bytes. */
+  perGbR2Storage: 0.015,
+  includedR2StorageGb: 10,
+  bytesPerGb: 1_000_000_000,
 } as const;
 
 export interface UsageCost {
@@ -67,6 +92,10 @@ export interface UsageCost {
   doRequests: number;
   doDuration: number;
   r2: number;
+  /** Rows written and read in the objects' storage. */
+  doRows: number;
+  /** What the bucket holds, at this size for the month. */
+  r2Storage: number;
   total: number;
 }
 
@@ -84,13 +113,21 @@ export function costOf(usage: UsageCounts): UsageCost {
   const r2 =
     (Math.max(0, usage.r2Writes - PRICES.includedR2Writes) / 1_000_000) * PRICES.perMillionR2Writes +
     (Math.max(0, usage.r2Reads - PRICES.includedR2Reads) / 1_000_000) * PRICES.perMillionR2Reads;
-  const total = PRICES.planMonthly + gatewayRequests + doRequests + doDuration + r2;
+  const doRows =
+    (Math.max(0, (usage.doRowsWritten || 0) - PRICES.includedRowsWritten) / 1_000_000) * PRICES.perMillionRowsWritten +
+    (Math.max(0, (usage.doRowsRead || 0) - PRICES.includedRowsRead) / 1_000_000) * PRICES.perMillionRowsRead;
+  // Held at the size it was last measured at: a month at that size is what it would cost.
+  const r2Storage =
+    Math.max(0, (usage.r2StoredBytes || 0) / PRICES.bytesPerGb - PRICES.includedR2StorageGb) * PRICES.perGbR2Storage;
+  const total = PRICES.planMonthly + gatewayRequests + doRequests + doDuration + r2 + doRows + r2Storage;
   return {
     plan: PRICES.planMonthly,
     gatewayRequests: round(gatewayRequests),
     doRequests: round(doRequests),
     doDuration: round(doDuration),
     r2: round(r2),
+    doRows: round(doRows),
+    r2Storage: round(r2Storage),
     total: round(total),
   };
 }
@@ -161,6 +198,8 @@ export class HitMeter {
   private since = 0;
   private r2Writes = 0;
   private r2Reads = 0;
+  private rowsWritten = 0;
+  private rowsRead = 0;
   private at = Date.now();
 
   constructor(private readonly send: (add: Partial<UsageCounts>) => void) {}
@@ -201,6 +240,13 @@ export class HitMeter {
     else this.r2Reads += 1;
   }
 
+  /** Note rows of the object's own storage read or written. */
+  rows(kind: "read" | "write", n = 1): void {
+    if (!(n > 0)) return;
+    if (kind === "write") this.rowsWritten += n;
+    else this.rowsRead += n;
+  }
+
   /** Send what has been counted so far. */
   flush(now = Date.now()): void {
     // Work still in hand is counted up to now, and the rest of it from now.
@@ -208,17 +254,25 @@ export class HitMeter {
       this.activeMs += Math.max(0, now - this.since);
       this.since = now;
     }
-    if (this.requests === 0 && this.activeMs === 0 && this.r2Writes === 0 && this.r2Reads === 0) return;
-    const add = {
+    if (
+      this.requests === 0 && this.activeMs === 0 && this.r2Writes === 0 && this.r2Reads === 0 &&
+      this.rowsWritten === 0 && this.rowsRead === 0
+    ) return;
+    const add: Partial<UsageCounts> = {
       doRequests: this.requests,
       doActiveMs: Math.round(this.activeMs),
       r2Writes: this.r2Writes,
       r2Reads: this.r2Reads,
+      // Left out when there are none, so a meter that does not count rows sends what it always did.
+      ...(this.rowsWritten > 0 ? { doRowsWritten: this.rowsWritten } : {}),
+      ...(this.rowsRead > 0 ? { doRowsRead: this.rowsRead } : {}),
     };
     this.requests = 0;
     this.activeMs = 0;
     this.r2Writes = 0;
     this.r2Reads = 0;
+    this.rowsWritten = 0;
+    this.rowsRead = 0;
     this.at = now;
     // Nothing a meter does may fail a request: an object with no registry bound
     // (a test, a half-configured deployment) simply does not report.
@@ -239,4 +293,86 @@ export function monthProgress(at = Date.now()): number {
   const d = new Date(at);
   const daysInMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
   return Math.min(1, Math.max(0.01, d.getUTCDate() / daysInMonth));
+}
+
+/** The storage calls an object makes that are billed as rows. */
+interface RowStorage {
+  get?: (keyOrKeys: unknown, ...rest: unknown[]) => Promise<unknown>;
+  put?: (keyOrEntries: unknown, ...rest: unknown[]) => Promise<unknown>;
+  delete?: (keyOrKeys: unknown, ...rest: unknown[]) => Promise<unknown>;
+  list?: (...args: unknown[]) => Promise<unknown>;
+  setAlarm?: (...args: unknown[]) => Promise<unknown>;
+  deleteAlarm?: (...args: unknown[]) => Promise<unknown>;
+}
+
+/**
+ * An object's storage, as it was, with every row it reads and writes counted.
+ *
+ * Cloudflare bills a Durable Object's storage by the row: a key put or deleted is a row written
+ * (a delete of a key that is not there too: it is counted, so a call that has nothing to delete
+ * should not be made), an alarm set is one more, a key asked for is a row read. The counts go to
+ * the object's meter, which sends them on with the requests. Methods the storage does not have (a
+ * test's stand-in) are left alone.
+ */
+export function meterStorage<T extends object>(storage: T, meter: HitMeter): T {
+  const count = (name: string, args: unknown[], result: unknown): void => {
+    const first = args[0];
+    switch (name) {
+      case "get":
+        meter.rows("read", Array.isArray(first) ? first.length : first instanceof Map ? first.size : 1);
+        return;
+      case "list":
+        meter.rows("read", Math.max(1, result instanceof Map ? result.size : 1));
+        return;
+      case "put":
+        meter.rows("write", typeof first === "string" ? 1 : first && typeof first === "object" ? Object.keys(first).length : 1);
+        return;
+      case "delete":
+        meter.rows("write", Array.isArray(first) ? first.length : 1);
+        return;
+      case "setAlarm":
+      case "deleteAlarm":
+        meter.rows("write", 1);
+        return;
+    }
+  };
+  const counted = new Set(["get", "list", "put", "delete", "setAlarm", "deleteAlarm"]);
+  return new Proxy(storage, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, target) as unknown;
+      if (typeof prop !== "string" || typeof value !== "function") return value;
+      if (!counted.has(prop)) return (value as (...a: unknown[]) => unknown).bind(target);
+      return async (...args: unknown[]): Promise<unknown> => {
+        const result = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        try {
+          count(prop, args, result);
+        } catch {}
+        return result;
+      };
+    },
+  }) as T;
+}
+
+/**
+ * What a bucket holds, in bytes, by listing it.
+ *
+ * Listing is a Class A call for each page of up to a thousand objects, so the list is walked a few
+ * pages at a time and not often. A bucket with more objects than `maxPages` pages hold is measured
+ * to there and `truncated` says so: the size is then at least that.
+ */
+export async function bucketBytes(
+  bucket: { list: (opts: { cursor?: string; limit?: number }) => Promise<{ objects: Array<{ size?: number }>; truncated: boolean; cursor?: string }> },
+  maxPages = 20,
+): Promise<{ bytes: number; calls: number; truncated: boolean }> {
+  let bytes = 0;
+  let calls = 0;
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await bucket.list({ limit: 1000, ...(cursor ? { cursor } : {}) });
+    calls += 1;
+    for (const o of page.objects) bytes += Number(o.size) || 0;
+    if (!page.truncated || !page.cursor) return { bytes, calls, truncated: false };
+    if (calls >= maxPages) return { bytes, calls, truncated: true };
+    cursor = page.cursor;
+  }
 }

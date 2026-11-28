@@ -1618,6 +1618,10 @@ ${UI_CSS}    </style>
                 c.doDuration.toFixed(2) +
                 " · r2 $" +
                 c.r2.toFixed(2) +
+                " · storage rows $" +
+                Number(c.doRows || 0).toFixed(2) +
+                " · r2 storage $" +
+                Number(c.r2Storage || 0).toFixed(2) +
                 "</div>" +
                 '<div class="usage-counts">' +
                 Number(j.counts?.gatewayRequests || 0).toLocaleString() +
@@ -1625,7 +1629,13 @@ ${UI_CSS}    </style>
                 Number(j.counts?.doRequests || 0).toLocaleString() +
                 " object requests · " +
                 Math.round(Number(j.counts?.doActiveMs || 0) / 1000).toLocaleString() +
-                " object seconds busy</div>" +
+                " object seconds busy · " +
+                Number(j.counts?.doRowsWritten || 0).toLocaleString() +
+                " rows written · " +
+                Number(j.counts?.doRowsRead || 0).toLocaleString() +
+                " rows read · " +
+                (Number(j.counts?.r2StoredBytes || 0) / 1e9).toFixed(2) +
+                " GB in the bucket</div>" +
                 (j.overBudget
                   ? '<div class="usage-over">The fleet budget is spent: the fleets are paused until the month turns over or the budget is raised.</div>'
                   : "");

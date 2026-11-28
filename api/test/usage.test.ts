@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { costOf, HitMeter, monthKey, monthProgress, monthlyBudget, PRICES, ZERO_USAGE, type UsageCounts } from "../src/usage";
+import { bucketBytes, costOf, HitMeter, meterStorage, monthKey, monthProgress, monthlyBudget, PRICES, ZERO_USAGE, type UsageCounts } from "../src/usage";
 
 describe("what a month of the gateway costs", () => {
   test("an idle month costs the plan and nothing else", () => {
@@ -92,5 +92,147 @@ describe("how long an object was busy", () => {
   test("an old month's minutes do not make it into the cost", () => {
     const legacy = { ...ZERO_USAGE, doMinutes: 10_000_000 } as unknown as UsageCounts;
     expect(costOf(legacy).doDuration).toBe(0);
+  });
+});
+
+describe("the rows and the bytes that are billed", () => {
+  test("rows written and read are charged beyond their allowances, at the list price", () => {
+    const inside = costOf({ ...ZERO_USAGE, doRowsWritten: PRICES.includedRowsWritten, doRowsRead: PRICES.includedRowsRead });
+    expect(inside.doRows).toBe(0);
+    // Forty-eight million rows over the fifty included, at a dollar a million.
+    const over = costOf({ ...ZERO_USAGE, doRowsWritten: 98_000_000 });
+    expect(over.doRows).toBe(48);
+    expect(over.total).toBe(PRICES.planMonthly + 48);
+    // Reads are a thousandth of that: ten billion rows over the allowance are ten dollars.
+    expect(costOf({ ...ZERO_USAGE, doRowsRead: PRICES.includedRowsRead + 10_000_000_000 }).doRows).toBe(10);
+  });
+
+  test("the bucket is charged for what it holds beyond ten gigabytes", () => {
+    expect(costOf({ ...ZERO_USAGE, r2StoredBytes: 10 * 1e9 }).r2Storage).toBe(0);
+    // A hundred and ten gigabytes: a hundred over, at a cent and a half.
+    expect(costOf({ ...ZERO_USAGE, r2StoredBytes: 110 * 1e9 }).r2Storage).toBe(1.5);
+  });
+
+  test("a hundred fleets of three, always on, are seen at what they cost, not at the quarter that was counted before", () => {
+    // The month of 100 fleets x 3 members, as the cost model counts it: 98.6M rows written, the rest as listed.
+    const month: UsageCounts = {
+      ...ZERO_USAGE,
+      gatewayRequests: 24_768_600,
+      doRequests: 42_192_800 + 12_384_300 + 1_555_200,
+      doActiveMs: Math.round((136_443 / PRICES.gbPerDo) * 1000),
+      r2Writes: 432_000,
+      r2Reads: 20_736_400,
+      doRowsWritten: 98_640_700,
+      doRowsRead: 117_362_300,
+    };
+    const seen = costOf(month);
+    expect(seen.doRows).toBe(48.64);
+    // Without the rows the guard saw $21.57 of a $70.21 bill; with them, all of it.
+    const before = costOf({ ...month, doRowsWritten: 0, doRowsRead: 0 });
+    expect(before.total).toBeLessThan(22);
+    expect(seen.total).toBeGreaterThan(70);
+    expect(seen.total).toBeLessThan(71);
+  });
+
+  test("a meter sends the rows it was given, and leaves them out when there are none", () => {
+    const sent: Array<Partial<UsageCounts>> = [];
+    const meter = new HitMeter((add) => sent.push(add));
+    meter.rows("write", 5);
+    meter.rows("read", 7);
+    meter.rows("write", 0);
+    meter.rows("read", -3);
+    meter.flush();
+    expect(sent).toEqual([{ doRequests: 0, doActiveMs: 0, r2Writes: 0, r2Reads: 0, doRowsWritten: 5, doRowsRead: 7 }]);
+  });
+});
+
+describe("an object's storage, counted", () => {
+  function counted() {
+    const sent: Array<Partial<UsageCounts>> = [];
+    const meter = new HitMeter((add) => sent.push(add));
+    const data = new Map<string, unknown>();
+    const alarms: number[] = [];
+    const raw = {
+      async get(k: string | string[]) {
+        if (Array.isArray(k)) return new Map(k.filter((x) => data.has(x)).map((x) => [x, data.get(x)]));
+        return data.get(k);
+      },
+      async put(k: string | Record<string, unknown>, v?: unknown) {
+        if (typeof k === "string") data.set(k, v);
+        else for (const [a, b] of Object.entries(k)) data.set(a, b);
+      },
+      async delete(k: string | string[]) {
+        const keys = Array.isArray(k) ? k : [k];
+        for (const x of keys) data.delete(x);
+        return keys.length;
+      },
+      async list() {
+        return new Map(data);
+      },
+      async setAlarm(at: number) {
+        alarms.push(at);
+      },
+      // a method that is not a row: handed through with its own `this`
+      note() {
+        return this === raw ? "mine" : "not mine";
+      },
+    };
+    const storage = meterStorage(raw, meter);
+    const rows = () => {
+      sent.length = 0;
+      meter.flush();
+      return { written: sent[0]?.doRowsWritten ?? 0, read: sent[0]?.doRowsRead ?? 0 };
+    };
+    return { storage, rows, alarms, data };
+  }
+
+  test("each key put or deleted and each alarm set is a row written; each key asked for is a row read", async () => {
+    const { storage, rows, alarms } = counted();
+    await storage.put("a", 1);
+    await storage.put({ b: 2, c: 3 });
+    await storage.delete("a");
+    await storage.delete(["b", "c", "gone"]);
+    await storage.setAlarm(5);
+    await storage.get("x");
+    await storage.get(["x", "y"]);
+    await storage.list();
+    expect(rows()).toEqual({ written: 1 + 2 + 1 + 3 + 1, read: 1 + 2 + 1 });
+    expect(alarms).toEqual([5]);
+  });
+
+  test("it hands back what the storage answered, and other methods keep their own this", async () => {
+    const { storage } = counted();
+    await storage.put("k", { v: 1 });
+    expect(await storage.get("k")).toEqual({ v: 1 });
+    expect(storage.note()).toBe("mine");
+  });
+
+  test("a call that fails is not counted", async () => {
+    const sent: Array<Partial<UsageCounts>> = [];
+    const meter = new HitMeter((add) => sent.push(add));
+    const storage = meterStorage({ async put() { throw new Error("no"); } }, meter);
+    await expect(storage.put()).rejects.toThrow("no");
+    meter.flush();
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("what a bucket holds", () => {
+  const pages = (sizes: number[][]) => {
+    let n = 0;
+    return {
+      async list(opts: { cursor?: string }) {
+        const page = sizes[n++] ?? [];
+        return { objects: page.map((size) => ({ size })), truncated: n < sizes.length, cursor: "c" + n };
+      },
+    };
+  };
+
+  test("the pages are added up, and each is one call", async () => {
+    expect(await bucketBytes(pages([[10, 20], [30], [40]]))).toEqual({ bytes: 100, calls: 3, truncated: false });
+  });
+
+  test("a bucket bigger than the pages it is walked for is measured to there, and says so", async () => {
+    expect(await bucketBytes(pages([[1], [1], [1], [1]]), 2)).toEqual({ bytes: 2, calls: 2, truncated: true });
   });
 });
