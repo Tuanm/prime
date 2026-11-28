@@ -35,6 +35,7 @@ import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fl
 import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, loadOrCreateSignKey, previousKeyPair, publish, PublishPostponed, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
 import { keyFingerprintOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
+import { forkBlocking, lookAtWitness, witnessUrlOf, WITNESS_CHECK_MS } from "./fleet-witness.ts";
 import {
   FETCHED_REPORT_MS,
   SOCKET_HEAD_SAFETY_MS,
@@ -1449,6 +1450,13 @@ export interface SpaceLoop {
    * writes it, so it takes no claim for the lease, does not answer a freed lease, and keeps its work tree as the fleet's.
    */
   viewer?: boolean;
+  /** When the witness was last looked at, and the look that is under way (it never holds a round up). */
+  witnessAt?: number;
+  witnessing?: Promise<unknown>;
+  /** Whether the last look at the witness found something, so that the log says it once. */
+  witnessSaid?: string;
+  /** Whether this member was the primary at the last look (a member that becomes one posts at once). */
+  witnessPrimary?: boolean;
   /** How long the gateway asked to wait before looking at a paused fleet again. */
   retryAfterMs?: number;
   /**
@@ -1555,6 +1563,8 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     return;
   }
 
+  watchWitness(loop, report);
+
   // Take a place in the fleet. The lease is short-lived, so a member that has
   // not spoken for a while has to take it again before it may write.
   // Taking a place renews the lease, and that is a write. It is done often
@@ -1614,6 +1624,10 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // A replica writes the work tree and does not stage it: what the index of the snapshots holds is out of date from here on.
   if (!loop.primary) loop.indexTrusted = false;
   if (loop.primary) {
+    // Two members were shown two histories of this fleet (see fleet-witness.ts): a snapshot made on top of one of them would
+    // be a third. Nothing is published until the operator has looked (`prime fleets witness clear`).
+    const fork = forkBlocking(paths.keyFile);
+    if (fork !== undefined) throw new Error("not publishing: the witness shows two histories of this fleet at snapshot " + fork.seq + " (fork proof " + fork.id + "); look at it with 'prime fleets witness status', then 'prime fleets witness clear'");
     const due = Date.now() - loop.lastCheck > (options.backstopMs ?? 60_000);
     const changed = loop.dirty;
     if (!changed && !due) return;
@@ -1980,6 +1994,42 @@ export const UPGRADE_RETRY_MS = 60_000;
 /** How many publishes may be left for the next round in a row, and for how long, before the next is made whatever is not known. */
 export const POSTPONE_LIMIT = 3;
 export const POSTPONE_MAX_MS = 120_000;
+
+/**
+ * Look at the witness in the background when it is time: what it holds is compared with the gateway's head, and this member's own
+ * checkpoint is posted. It is never waited for, and what it finds is written beside the key file (`prime fleets witness status`)
+ * and said once in the log.
+ */
+export function watchWitness(loop: SpaceLoop, report: (what: string) => void): void {
+  if (loop.witnessing !== undefined) return;
+  const now = Date.now();
+  if (now - (loop.witnessAt ?? 0) < WITNESS_CHECK_MS && !(loop.primary && loop.witnessAt !== undefined && loop.witnessPrimary !== true)) return;
+  if (witnessUrlOf(loop.paths.keyFile) === undefined) return;
+  loop.witnessAt = now;
+  loop.witnessPrimary = loop.primary;
+  const state = readFleetState(loop.configPath, loop.fleet, loop.name);
+  loop.witnessing = lookAtWitness({
+    creds: loop.creds,
+    fleet: loop.fleet,
+    keyFile: loop.paths.keyFile,
+    heldSeq: Math.max(state.seq ?? 0, state.fetchedSeq ?? 0),
+    primary: loop.primary,
+    signKey: () => loadOrCreateSignKey(loop.paths.keyFile),
+  })
+    .then((outcome) => {
+      const said = outcome.status === "alert" || outcome.status === "fork" || outcome.status === "unwitnessed" ? outcome.status : "";
+      if (said !== (loop.witnessSaid ?? "")) {
+        loop.witnessSaid = said;
+        if (outcome.status === "fork") report("the witness holds two histories of this fleet: this member does not publish until the operator has looked ('prime fleets witness status')");
+        else if (outcome.status === "alert") report("the witness shows a member saw a newer snapshot than the gateway shows ('prime fleets witness status')");
+        else if (outcome.status === "unwitnessed") logAgent("space " + loop.name + ": the witness could not be reached or did not take the checkpoint (" + (outcome.error ?? "no reason") + "): unwitnessed");
+      }
+    })
+    .catch((err: unknown) => logAgent("space " + loop.name + ": the look at the witness failed: " + (err instanceof Error ? err.message : String(err))))
+    .finally(() => {
+      loop.witnessing = undefined;
+    });
+}
 
 /** The longest a request for the place may take: under a quarter of the lease. */
 export const PLACE_TIMEOUT_MS = 10_000;

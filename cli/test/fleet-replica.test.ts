@@ -3298,3 +3298,66 @@ describe("a member the fleet admitted as a viewer", () => {
     }
   });
 });
+
+describe("the witness, from the agent's round", () => {
+  async function primary(w: World) {
+    const s = await space(w, "r1");
+    w.gateway.primary = "r1";
+    s.loop.primary = true;
+    s.loop.dirty = true;
+    s.loop.lastBootstrap = Date.now();
+    writeFileSync(join(s.paths.work, "made.txt"), "by the primary\n");
+    return s;
+  }
+
+  test("a witness that cannot be reached, or a fleet with no signed roster, never holds a publish up", async () => {
+    const { updateWitnessState, readWitnessState } = await import("../src/fleet-witness");
+    const w = await world();
+    try {
+      const s = await primary(w);
+      updateWitnessState(s.paths.keyFile, (st) => void (st.url = "http://127.0.0.1:9"));
+      await s.round();
+      expect(s.said).toContain("published 1");
+      await s.loop.witnessing;
+      // This fleet's roster is not signed, so there is nothing the witness could hold it to: said, and nothing else.
+      expect(readWitnessState(s.paths.keyFile).checked?.status).toBe("no-roster");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a fork proof that has not been looked at stops a primary publishing, and says why; clearing it lets the publish go", async () => {
+    const { updateWitnessState } = await import("../src/fleet-witness");
+    const w = await world();
+    try {
+      const s = await primary(w);
+      const cp = ["prime-cp-v1", "A".repeat(43), "x", "inc", 3, "h1", null, 1] as never;
+      const one = { cp, sig: "s", spub: "p" };
+      updateWitnessState(s.paths.keyFile, (st) => {
+        st.fork = { id: "fork:3:h1:h2", seq: 3, a: one, b: { ...one, spub: "q" }, at: 1 };
+      });
+      await expect(s.round()).rejects.toThrow(/not publishing: the witness shows two histories/);
+      expect(w.gateway.head).toBeNull();
+      updateWitnessState(s.paths.keyFile, (st) => void delete st.fork);
+      s.loop.dirty = true;
+      await s.round();
+      expect(s.said).toContain("published 1");
+    } finally {
+      finish(w);
+    }
+  });
+
+  test("a member with no witness set does not even touch the disk for it", async () => {
+    const { witnessStateFile } = await import("../src/fleet-witness");
+    const { existsSync } = await import("node:fs");
+    const w = await world();
+    try {
+      const s = await primary(w);
+      await s.round();
+      expect(s.loop.witnessing).toBeUndefined();
+      expect(existsSync(witnessStateFile(s.paths.keyFile))).toBe(false);
+    } finally {
+      finish(w);
+    }
+  });
+});

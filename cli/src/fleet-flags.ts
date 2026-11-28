@@ -78,6 +78,13 @@ const FLEET_SET_FLAGS: FlagSpec[] = [
   flag("lease", "string", "How long a place in the fleet lasts without being renewed: 30s to 180s (90s, 2m, or seconds), or \"default\" for the gateway's own", { placeholder: "<time>" }),
 ];
 
+const FLEET_WITNESS_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("witness", "string", "With `set`: the witness's address, an https URL", { placeholder: "<url>" }),
+  flag("clear", "boolean", "With `set`: use no witness (a fork proof is cleared with `witness clear`)"),
+  flag("check", "boolean", "With `status`: look at the witness now"),
+];
+
 /** `prime fleets agent ...`: the common flags, and `--force` for `uninstall`. */
 const FLEET_AGENT_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
@@ -94,6 +101,7 @@ export function fleetFlagsFor(sub: string | undefined): FlagSpec[] {
   if (sub === "log") return FLEET_LOG_FLAGS;
   if (sub === "agent") return FLEET_AGENT_FLAGS;
   if (sub === "set") return FLEET_SET_FLAGS;
+  if (sub === "witness") return FLEET_WITNESS_FLAGS;
   if (sub === "roster" || sub === "trust") return FLEET_ROSTER_FLAGS;
   return FLEET_FLAGS;
 }

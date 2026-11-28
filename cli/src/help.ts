@@ -534,6 +534,7 @@ USAGE
   prime fleets pending <fleet-id>                List the requests waiting for approval
   prime fleets approve <fleet-id> --member <id> [--viewer|--role <member|viewer>] [--key <fp> --signing-key <fp>]   Admit a waiting device (as a viewer that only reads, or not), change a member's role, or take a new key
   prime fleets rotate-key <fleet-id> --space <name>   New key pair for a space; the agent proves it is the space's own
+  prime fleets witness set|status|clear <fleet-id> --space <name> [--witness <url>] [--check]   The witness that holds each member's newest checkpoint, outside the gateway
   prime fleets members <fleet-id>                Show the roster
   prime fleets remove <fleet-id> --member <id> [--key-change]  Remove a member (or decline its request for a new key)
   prime fleets leave <fleet-id>                  Leave the fleet
@@ -776,6 +777,7 @@ export function usageLine(topic: string, sub?: string): string {
     if (sub === "approve") return "Usage: prime fleets approve <fleet-id> --member <id> [--viewer | --role <member|viewer>] [--key <fingerprint>] [--signing-key <fingerprint>]";
     if (sub === "remove") return "Usage: prime fleets remove <fleet-id> --member <id> [--key-change]";
     if (sub === "rotate-key") return "Usage: prime fleets rotate-key <fleet-id> --space <name>";
+    if (sub === "witness") return "Usage: prime fleets witness <set|status|clear> <fleet-id> --space <name> [--witness <url> | --clear] [--check]";
     return "Usage: prime fleets <create|invite|join|approve|pending|members|remove|leave|revoke|rotate-key|set|status> [args]";
   }
   if (topic === "devices") {

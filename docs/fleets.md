@@ -696,7 +696,38 @@ checked by the space that runs it against what the signed roster says, not again
 - A member's signing key is listed because it is a member's. Nothing signs tool calls with it today; a key that is a member's and that
   was added with `add-caller` is listed once.
 
-The witness (a second place a member's newest snapshot is recorded) follows in its own package.
+### The witness: a rollback or a fork the gateway cannot hide
+
+The gateway decides which snapshot is the head, so on its own it can show one member an older history than another saw, or two
+members two histories, and neither would know. A **witness** (`api/witness`, a small Worker on its own, outside the gateway) holds
+the newest checkpoint each member signed. A checkpoint is `["prime-cp-v1", fleetKey, fleet, incarnation, seq, manifestHash,
+rosterN, ts]` signed by the member's signing key, the one the signed roster names. Only a fleet whose roster is signed has one.
+
+```
+prime fleets witness set    <fleet> --space <name> --witness <https url>   # or --clear; PRIME_FLEET_WITNESS is the default
+prime fleets witness status <fleet> --space <name> [--check]               # what was posted, what was found; --check looks now
+prime fleets witness clear  <fleet> --space <name>                         # the operator has looked at a fork proof
+```
+
+What the agent does, with no part of it able to hold anything up (the witness being down, slow or refusing is "unwitnessed" in the
+status and one line in the log, and nothing else):
+
+- **Posts** its own checkpoint when it holds the head the gateway shows (published, or taken in and verified): when the head
+  changed and five minutes have passed since the last post, and at once when it takes the lease. It sends the proof the witness asks
+  for (the owner's `add`/`rotate` entry for its key with the genesis, or a `rotate-self` with the key that held the place before).
+- **Reads** what the witness holds every two minutes, **before** it reads the head (the head only goes forward, so a checkpoint ahead
+  of it is not a publish in between), and counts only a checkpoint whose signature is right, that is for this fleet and incarnation,
+  and whose key the roster this member verified names (a viewer's too: it reads, and says what it saw).
+- **Rollback**: a counted checkpoint is for a later snapshot than the head. **Different head**: one is for the head's sequence with
+  another manifest. Both are an alert in `status` and the log, and end when the gateway and the witness agree again.
+- **Fork proof**: two counted checkpoints from two keys for one sequence with different manifests. It is kept (both
+  checkpoints, as signed, so anyone can check them), and **a primary does not publish on top of it** until the operator has looked
+  and run `witness clear`; the same two checkpoints are not raised again afterwards.
+
+What it does not do: a witness can withhold checkpoints (nothing new from anyone is not told from a quiet fleet, so "not held yet"
+and "ok" are all it can say), and a gateway and a witness in one Cloudflare account fall together. The witness sees ids, sequence
+numbers and times, and no content. The state is the file `<key file>.witness.json`.
+
 
 ## Who did it
 

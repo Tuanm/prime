@@ -20,7 +20,7 @@ import { bool, num, str } from "./args.ts";
 import type { Config, SpaceEntry } from "./config.ts";
 import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
-import { bold, dim, green, printJson, table, yellow } from "./output.ts";
+import { bold, dim, green, printJson, red, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -29,6 +29,7 @@ import { positions } from "./fleet-replica.ts";
 import { keyFingerprintOf, keyIdOf as sealingKeyIdOf, openSnapshotMeta } from "./fleet-crypto.ts";
 import { actorFrom, type SnapshotActor } from "./fleet-actor.ts";
 import { FleetTrust, metaBindingOf } from "./fleet-trust.ts";
+import { lookAtWitness, normalizeWitnessUrl, readWitnessState, updateWitnessState, witnessUrlOf } from "./fleet-witness.ts";
 import {
   RosterError,
   checkSigned,
@@ -826,6 +827,101 @@ export async function fleetsStatus(ctx: Ctx): Promise<void> {
   if (res.json.member) ctx.out(dim("role: " + res.json.member.role));
   for (const line of ownKeyLines(ctx, fleetId, t)) ctx.out(line);
 }
+/**
+ * `prime fleets witness set|status|clear <fleet> --space <name>`: the witness a member posts its checkpoints to and reads the others'
+ * from (see fleet-witness.ts), and what it has shown. The address is kept beside the member's key file, as is what the agent found.
+ */
+export async function fleetsWitness(ctx: Ctx): Promise<void> {
+  const what = ctx.parsed.positionals[2] ?? "";
+  const usage = "Usage: prime fleets witness set <fleet-id> --space <name> --witness <url> | --clear\n       prime fleets witness status <fleet-id> --space <name> [--check]\n       prime fleets witness clear <fleet-id> --space <name>";
+  if (what !== "set" && what !== "status" && what !== "clear") throw new UsageError("unknown witness command \"" + what + "\"", usage);
+  const fleetId = requireFleetId(ctx.parsed.positionals[3] ?? "");
+  const spaceName = spaceArg(ctx);
+  if (!spaceName) throw new UsageError("missing --space", "Name the space that belongs to the fleet.");
+  const space = ctx.config.spaces[spaceName];
+  if (!space) throw new UsageError("unknown space \"" + spaceName + "\"", "Run 'prime spaces list' to see the spaces.");
+  if (space.fleet !== fleetId) throw new UsageError("the space \"" + spaceName + "\" is not in the fleet " + fleetId);
+  const keyFile = fleetKeyFile(ctx.configPath, fleetId, spaceName);
+
+  if (what === "set") {
+    if (bool(ctx.parsed, "clear")) {
+      updateWitnessState(keyFile, (s) => void delete s.url);
+      if (ctx.json) printJson({ fleet: fleetId, space: spaceName, witness: null });
+      else ctx.out(green("no witness") + dim(" for " + spaceName + (process.env.PRIME_FLEET_WITNESS ? " (PRIME_FLEET_WITNESS is still set in this environment)" : "")));
+      return;
+    }
+    const given = str(ctx.parsed, "witness");
+    if (!given) throw new UsageError("missing --witness", "The witness's address, an https URL (or --clear).");
+    const url = normalizeWitnessUrl(given);
+    if (url === undefined) throw new UsageError("--witness is not an https URL: " + given, "An https address, like https://witness.example.");
+    updateWitnessState(keyFile, (s) => void (s.url = url));
+    if (ctx.json) printJson({ fleet: fleetId, space: spaceName, witness: url });
+    else ctx.out(green("the witness of " + spaceName + " is " + url) + dim("  the agent posts this member's checkpoint to it and reads the others'; a witness that is down never stops anything"));
+    return;
+  }
+
+  if (what === "clear") {
+    const state = readWitnessState(keyFile);
+    const looked: string[] = [];
+    updateWitnessState(keyFile, (s) => {
+      if (s.fork) {
+        s.acknowledged = [...new Set([...(s.acknowledged ?? []), s.fork.id])].slice(-64);
+        looked.push(s.fork.id);
+        delete s.fork;
+      }
+      delete s.alert;
+    });
+    if (ctx.json) printJson({ fleet: fleetId, space: spaceName, cleared: looked, hadAlert: state.alert !== undefined });
+    else ctx.out(looked.length > 0 ? green("the fork proof was looked at: " + looked.join(", ")) + dim("  this member publishes again; the same fork is not raised twice") : dim("there was no fork proof to clear"));
+    return;
+  }
+
+  // status
+  if (bool(ctx.parsed, "check")) {
+    const gateway = space.gateway;
+    const deviceId = space.gateway_device;
+    const deviceToken = space.remote_token;
+    if (!gateway || !deviceId || !deviceToken) throw new CliError("the space " + spaceName + " has no gateway credentials");
+    const state = readFleetState(ctx.configPath, fleetId, spaceName);
+    const outcome = await lookAtWitness({
+      creds: { gateway, deviceId, deviceToken, timeoutMs: 30_000 },
+      fleet: fleetId,
+      keyFile,
+      heldSeq: Math.max(state.seq ?? 0, state.fetchedSeq ?? 0),
+      primary: false,
+      signKey: () => loadOrCreateSignKey(keyFile),
+    });
+    if (!ctx.json) ctx.out(dim("looked now: " + outcome.status + (outcome.error ? " (" + outcome.error + ")" : "") + (outcome.posted ? ", posted this member's checkpoint" : "")));
+  }
+  const state = readWitnessState(keyFile);
+  const url = witnessUrlOf(keyFile);
+  if (ctx.json) {
+    printJson({ fleet: fleetId, space: spaceName, witness: url ?? null, ...state });
+    return;
+  }
+  ctx.out(bold("witness of " + spaceName) + "  " + (url ?? dim("none: set one with 'prime fleets witness set " + fleetId + " --space " + spaceName + " --witness <url>'")));
+  const when = (t: number): string => new Date(t).toISOString();
+  if (url !== undefined) {
+    if (state.posted) ctx.out("posted    snapshot " + state.posted.seq + dim("  " + state.posted.manifestHash.slice(0, 12) + "  at " + when(state.posted.at)));
+    else ctx.out("posted    " + dim("nothing yet"));
+    if (state.checked) {
+      const word = state.checked.status === "ok" ? green("ok") : state.checked.status === "not-held" ? yellow("not held by the witness yet") : yellow(state.checked.status);
+      ctx.out("looked    " + word + dim("  at " + when(state.checked.at) + (state.checked.counted !== undefined ? "  " + state.checked.counted + " checkpoints counted, " + (state.checked.ignored ?? 0) + " left out" : "") + (state.checked.error ? "  " + state.checked.error : "")));
+    } else ctx.out("looked    " + dim("not yet"));
+  }
+  if (state.alert) {
+    ctx.out(
+      red(state.alert.kind === "rollback" ? "ROLLBACK" : "DIFFERENT HEAD") +
+        "  a member saw snapshot " + state.alert.seq + " (" + state.alert.manifestHash.slice(0, 12) + ") signed by " + ownerFingerprint(state.alert.spub).slice(0, 11) +
+        ", and the gateway shows snapshot " + state.alert.headSeq + " (" + state.alert.headHash.slice(0, 12) + ")",
+    );
+  }
+  if (state.fork) {
+    ctx.out(red("FORK") + "  two members were shown snapshot " + state.fork.seq + " with different manifests: " + state.fork.a.cp[5].slice(0, 12) + " (signed by " + ownerFingerprint(state.fork.a.spub).slice(0, 11) + ") and " + state.fork.b.cp[5].slice(0, 12) + " (" + ownerFingerprint(state.fork.b.spub).slice(0, 11) + ")");
+    ctx.out(dim("  this member does not publish until you have looked: 'prime fleets witness clear " + fleetId + " --space " + spaceName + "'"));
+  }
+}
+
 /** One round of synchronisation: take a place, then publish or pull. */
 export async function syncFleetSpace(
   configPath: string,
