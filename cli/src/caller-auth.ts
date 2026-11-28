@@ -34,6 +34,8 @@ export const CALLER_AUTH_MODES: readonly CallerAuthMode[] = ["off", "warn", "enf
 /** How far a signature's time may be from this device's clock. */
 export const MAX_SKEW_MS = 5 * 60_000;
 const NONCE_LIMIT = 10_000;
+/** How many nonces of signed refusals are kept (see `retired`); when they are all in use, refusals go unsigned. */
+const RETIRED_LIMIT = 10_000;
 const LOG_LIMIT_BYTES = 1024 * 1024;
 
 export const REPLY_SIG_HEADER = "x-prime-reply-sig";
@@ -151,6 +153,15 @@ export class CallerAuth {
    * refused with it.
    */
   private floorTs: number;
+  /**
+   * Nonces that a signed refusal was made for. A refusal that is signed tells its caller "this call did not run", so
+   * that nonce must never run afterwards: a gateway that changed a byte of the header (the key id, a byte of the
+   * signature) gets a signed refusal bound to the caller's own nonce and body, and could then send the real call and
+   * hand back the refusal. Keyed by nonce alone, as the header that carries it is the gateway's to change.
+   */
+  private readonly retired = new Map<string, number>();
+  /** The nonces of calls that ran, by nonce alone (`seen` is by key id and nonce): a refusal is never signed for one. */
+  private readonly ranNonces = new Map<string, number>();
   private logQueue: string[] = [];
   private flushing: Promise<void> | undefined;
   private logFailureSaid = false;
@@ -241,7 +252,14 @@ export class CallerAuth {
     this.record(failure, request, this.mode === "enforce" ? "refused" : "ran", frame);
     if (this.mode !== "enforce") return { action: "run", request, ...(bound ? { reply: bound } : {}) };
     this.counts.refused++;
-    const signable = bound && sig && failure !== "replay" && failure !== "stale" && !this.seen.has(`${sig.keyId}.${sig.nonce}`);
+    const signable =
+      bound !== undefined &&
+      sig !== undefined &&
+      failure !== "replay" &&
+      failure !== "stale" &&
+      sig.ts > this.floorTs &&
+      !this.ranNonces.has(sig.nonce) &&
+      this.retire(sig.nonce, sig.ts);
     return {
       action: "refuse",
       response: {
@@ -251,6 +269,19 @@ export class CallerAuth {
       },
       ...(signable ? { reply: bound } : {}),
     };
+  }
+
+  /** Keep a nonce from ever running, because a refusal for it is to be signed. False when no more can be kept: then the refusal is not signed. */
+  private retire(nonce: string, ts: number): boolean {
+    const now = this.now();
+    for (const [key, at] of this.retired) {
+      if (at + MAX_SKEW_MS >= now) break;
+      this.retired.delete(key);
+    }
+    if (this.retired.has(nonce)) return false;
+    if (this.retired.size >= RETIRED_LIMIT) return false;
+    this.retired.set(nonce, ts);
+    return true;
   }
 
   /** Neither a request nor a body that can be read: there is nothing to run, whatever the mode. */
@@ -265,6 +296,8 @@ export class CallerAuth {
     if (typeof frame.raw !== "string") return { ok: false, failure: "no-raw" };
     const now = this.now();
     if (Math.abs(now - parsed.ts) > MAX_SKEW_MS) return { ok: false, failure: "stale" };
+    // A refusal was signed for this nonce: the call must not run now (see `retired`).
+    if (this.retired.has(parsed.nonce)) return { ok: false, failure: "replay" };
     const callers = this.callers();
     if (!callers.entries) return { ok: false, failure: "callers-unreadable" };
     const entry = callers.entries.find((e) => e.keyId === parsed.keyId);
@@ -290,10 +323,12 @@ export class CallerAuth {
       return { ok: false, failure: "tool-not-allowed" };
     }
     this.seen.set(nonceKey, { ts: parsed.ts });
+    this.ranNonces.set(parsed.nonce, parsed.ts);
     if (this.seen.size > NONCE_LIMIT) {
       const oldest = this.seen.entries().next().value;
       if (oldest !== undefined) {
         this.seen.delete(oldest[0]);
+        this.ranNonces.delete(oldest[0].slice(oldest[0].indexOf(".") + 1));
         // Forgotten, so everything signed up to then is refused from now on: it can be replayed no more.
         this.floorTs = Math.max(this.floorTs, oldest[1].ts);
       }
@@ -306,6 +341,7 @@ export class CallerAuth {
     for (const [key, spent] of this.seen) {
       if (spent.ts + MAX_SKEW_MS >= now) break;
       this.seen.delete(key);
+      this.ranNonces.delete(key.slice(key.indexOf(".") + 1));
     }
   }
 
