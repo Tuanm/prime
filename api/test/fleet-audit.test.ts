@@ -16,7 +16,7 @@ mock.module("cloudflare:workers", () => ({
 mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 
 const { FleetDO } = await import("../src/fleet-do");
-const { default: worker } = await import("../src/index");
+const { default: worker, resetRegistryCache } = await import("../src/index");
 const { verifierFor } = await import("../src/token-hash");
 const A = await import("../src/fleet-audit");
 const { AUDIT_BATCH, AUDIT_HARD, AUDIT_KEEP, AuditLog, GENESIS, actorOf, auditLimits, brokenAt, canonical, cleanDetail, describeCall, entryHash } = A;
@@ -842,7 +842,7 @@ describe("through the gateway", () => {
         },
       }),
     };
-    await new Promise((r) => setTimeout(r, 2_100));
+    resetRegistryCache();
     return { env, device };
   }
 

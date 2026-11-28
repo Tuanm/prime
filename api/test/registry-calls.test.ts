@@ -15,7 +15,7 @@ mock.module("cloudflare:workers", () => ({
 }));
 mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 
-const { default: worker } = await import("../src/index");
+const { default: worker, resetRegistryCache } = await import("../src/index");
 const { verifierFor } = await import("../src/token-hash");
 
 const PEPPER = "test-pepper-0123456789abcdef0123456789";
@@ -64,7 +64,7 @@ function bootstrap(ip = "198.51.100.9") {
 test("a member knocking on a paused fleet costs the registry one ask, and says it is alive once an hour", async () => {
   const { env, asked } = await gateway();
   // Long enough after any earlier test that no isolate cache is warm.
-  await new Promise((r) => setTimeout(r, 2_100));
+  resetRegistryCache();
   const res = await worker.fetch(bootstrap(), env as never);
   expect(res.status).toBe(409);
   expect(((await res.json()) as { paused?: boolean }).paused).toBe(true);
@@ -72,14 +72,14 @@ test("a member knocking on a paused fleet costs the registry one ask, and says i
   expect(asked.filter((p) => p !== "/usage")).toEqual(["/map", "/anon/seen"]);
   // Knocking again costs no second note.
   asked.length = 0;
-  await new Promise((r) => setTimeout(r, 2_100));
+  resetRegistryCache();
   expect((await worker.fetch(bootstrap(), env as never)).status).toBe(409);
   expect(asked).not.toContain("/anon/seen");
 });
 
 test("a blocked address is still refused, read from the same ask", async () => {
   const { env, asked } = await gateway({ blocked: ["ipv4:203.0.113.7"] });
-  await new Promise((r) => setTimeout(r, 2_100));
+  resetRegistryCache();
   const res = await worker.fetch(bootstrap("203.0.113.7"), env as never);
   expect(res.status).toBe(403);
   expect(asked).toEqual(["/map"]);
@@ -87,7 +87,7 @@ test("a blocked address is still refused, read from the same ask", async () => {
 
 test("a disabled device is still refused, read from the same ask", async () => {
   const { env, asked } = await gateway({ disabled: ["dev-1"] });
-  await new Promise((r) => setTimeout(r, 2_100));
+  resetRegistryCache();
   const res = await worker.fetch(bootstrap(), env as never);
   expect(res.status).toBe(403);
   expect(((await res.json()) as { error?: string }).error).toBe("device disabled");

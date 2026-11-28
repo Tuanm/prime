@@ -228,6 +228,15 @@ async function freshSnapshot(env: Env): Promise<RegistrySnapshot> {
   return snap;
 }
 
+/**
+ * Forget what this isolate has read of the registry (the device map and who is online). The next request reads it again.
+ * For tests, which run many gateways one after another in one process and would otherwise be answered from the one before.
+ */
+export function resetRegistryCache(): void {
+  mapCache = null;
+  offlineAt.clear();
+}
+
 export async function effectiveSnapshot(env: Env): Promise<RegistrySnapshot> {
   if (mapCache && Date.now() - mapCache.at < MAP_CACHE_TTL_MS) return mapCache.snap;
   const snap = await freshSnapshot(env);
