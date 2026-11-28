@@ -153,6 +153,8 @@ export interface KnownTree {
 
 export interface PublishOptions {
   known?: KnownTree;
+  /** How the chain of deltas stood after this member's last publish (see `SinceWhole`); asked of the fleet when it is not the head's. */
+  sinceWhole?: SinceWhole;
 }
 
 export interface PublishResult {
@@ -168,6 +170,8 @@ export interface PublishResult {
   manifestKey: string;
   /** True when the pack carries the whole tree rather than only the change. */
   full: boolean;
+  /** How the chain of deltas stands now, for the next publish; absent when it could not be told (the next publish counts by sequence). */
+  sinceWhole?: SinceWhole;
 }
 
 /** What a snapshot's manifest and framing add to its pack, at most, for the check against the gateway's limit. */
@@ -182,15 +186,107 @@ function snapshotTooBigMessage(bytes: number, limit: number): string {
 }
 
 /**
- * How often the fleet publishes a whole tree, in snapshots.
+ * What each step of a route costs besides its pack, in bytes.
  *
- * It is the anchor of the chain of deltas. A member that is far behind does not
- * change what is published: it starts from the newest whole tree and applies
- * the deltas after it, so at most this many snapshots. The gateway keeps twice
- * this many (`RECENT_SNAPSHOTS` in api/src/fleets.ts; a test holds the two
- * together), so that anchor and the deltas after it are always still there.
+ * A step is two round trips (the manifest and the pack), a manifest that carries
+ * a wrapped key for every member (about 4 KB with thirty-two of them), two git
+ * processes and a record of progress. Counting only the bytes of the packs would
+ * send a member forty-one steps and eighty-four requests to save two kilobytes
+ * over one whole tree. Twenty-four kilobytes is about where a round trip over a
+ * poor link and the manifest stop being noise.
  */
-export const FULL_PACK_WINDOW = 32;
+export const ROUTE_STEP_COST = 24 * 1024;
+
+/**
+ * When the fleet publishes a whole tree (a checkpoint).
+ *
+ * It is the anchor of the chain of deltas. A member that is far behind, or that
+ * joins, does not change what is published: it starts from the newest whole tree
+ * and applies the deltas after it. A whole tree is published when the chain
+ * since the last one (at least `minSinceWhole` snapshots) has cost (`chainBytes`:
+ * every change's bytes, and what a step costs besides its pack) as much as that
+ * whole tree, so a member that walks the chain does not download more than a new
+ * one would; and whatever the cost, when
+ * `maxSinceWhole` snapshots have been published since, so the anchor is always
+ * within what the gateway keeps (`RECENT_SNAPSHOTS` in api/src/fleets.ts, which
+ * `RETAINED_SNAPSHOTS` mirrors; a test holds the two together) and within
+ * `WALK_LIMIT` manifests of the head.
+ *
+ * It is a plain object so a test can run a short chain; nothing else changes it.
+ */
+export const checkpointPolicy = {
+  /** Snapshots that may follow a whole tree before the next one. */
+  maxSinceWhole: 56,
+  /** Whether the chain's cost counts, besides the number of snapshots. */
+  byBytes: true,
+  /**
+   * How many snapshots the chain has before its cost counts. A step costs a fixed amount besides its
+   * pack, so a tree smaller than a few steps would otherwise be published whole every time, with a change
+   * pack beside it (one more request), to save the member that walks the chain nothing it would notice.
+   */
+  minSinceWhole: 8,
+  /** What a step costs besides its pack, in bytes. */
+  stepCost: ROUTE_STEP_COST,
+  /**
+   * Publish a whole tree every this many snapshots instead (counted by sequence, as
+   * 26.11.50 does), when the fleet's index is not to be had to say where the last one was. 0: never.
+   */
+  fallbackModulo: 32,
+  /** Count by sequence only, as 26.11.50 does, without asking where the chain stands (for a test of what a checkpoint is, not of when). */
+  bySequence: false,
+};
+
+/** How many snapshots the gateway keeps (`RECENT_SNAPSHOTS` in api/src/fleets.ts). */
+export const RETAINED_SNAPSHOTS = 64;
+
+/** How the chain of deltas since the last whole tree stands. Kept by the publisher, and made again from the fleet's index when it cannot be trusted. */
+export interface SinceWhole {
+  /** The sequence these figures are of: the snapshot they were last updated by. */
+  seq: number;
+  /** The sealed size of the last whole tree. */
+  wholeBytes: number;
+  /** What the snapshots after it cost: their changes' sizes and a step each. */
+  chainBytes: number;
+  /** How many snapshots follow it. */
+  count: number;
+}
+
+/** What a member's recorded state adds to the options of its next publish: how the chain stood after the last one. */
+export function withChain(state: { sinceWhole?: SinceWhole }, options?: PublishOptions): PublishOptions {
+  return state.sinceWhole ? { ...options, sinceWhole: state.sinceWhole } : (options ?? {});
+}
+
+/** Whether `value` (read from a state file) is a chain that can be believed. */
+export function sinceWholeFrom(value: unknown): SinceWhole | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  const ok = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+  if (!ok(v.seq) || !ok(v.wholeBytes) || !ok(v.chainBytes) || !ok(v.count) || v.wholeBytes === 0) return undefined;
+  return { seq: v.seq, wholeBytes: v.wholeBytes, chainBytes: v.chainBytes, count: v.count };
+}
+
+/**
+ * The chain since the last whole tree, from what the gateway's index lists (oldest first, up to the head).
+ * Null when it holds no whole tree, so there is nothing to count from.
+ */
+export function sinceWholeOf(entries: IndexEntry[], stepCost = checkpointPolicy.stepCost): SinceWhole | null {
+  let at = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]!.full && entries[i]!.packBytes !== undefined && entries[i]!.packBytes! > 0) {
+      at = i;
+      break;
+    }
+  }
+  if (at < 0) return null;
+  const after = entries.slice(at + 1);
+  const chainBytes = after.reduce((sum, e) => sum + ((e.full ? e.deltaBytes : e.packBytes) ?? 0) + stepCost, 0);
+  return { seq: entries[entries.length - 1]!.seq, wholeBytes: entries[at]!.packBytes!, chainBytes, count: after.length };
+}
+
+/** Whether the next snapshot is a whole tree because of how long the chain has got. */
+export function chainWantsWhole(chain: SinceWhole, policy = checkpointPolicy): boolean {
+  return chain.count >= policy.maxSinceWhole || (policy.byBytes && chain.count >= policy.minSinceWhole && chain.chainBytes >= chain.wholeBytes);
+}
 
 /**
  *  Publish the current work tree as the fleet's new state.
@@ -259,10 +355,12 @@ export async function publish(
   const membershipChanged = lastRoster !== undefined ? rosterGained(lastRoster, roster) : members.length !== lastMemberCount;
   // A member that is far behind does not make the publish a whole tree. It
   // catches up from the newest whole tree and the deltas after it, and the
-  // checkpoint below guarantees there is one within FULL_PACK_WINDOW snapshots.
-  // Every so often a whole tree is published anyway, so the chain of deltas
-  // has an anchor and cannot grow for ever.
-  const checkpoint = seq % FULL_PACK_WINDOW === 0;
+  // checkpoint below guarantees there is one within `maxSinceWhole` snapshots.
+  // A whole tree is published anyway when the chain of deltas has cost as much
+  // as one (or is as long as it may be), so the chain has an anchor and cannot
+  // grow for ever.
+  const chain = checkpointPolicy.bySequence ? null : await chainBefore(creds, fleet, head, options.sinceWhole);
+  const checkpoint = chain === null ? checkpointPolicy.fallbackModulo > 0 && seq % checkpointPolicy.fallbackModulo === 0 : chainWantsWhole(chain);
   const noBase = base === null;
   // A snapshot built on one that has no seal, none of the tags a sender makes for its members, or no
   // mark of its fleet (an old member took over, or this fleet is mid-upgrade), is a whole tree: a replica that
@@ -408,7 +506,33 @@ export async function publish(
     roster,
     manifestKey: moved.manifestKey ?? "",
     full: wantFull,
+    ...(wantFull
+      ? { sinceWhole: { seq, wholeBytes: main.length, chainBytes: 0, count: 0 } }
+      : chain !== null
+        ? {
+            sinceWhole: {
+              seq,
+              wholeBytes: chain.wholeBytes,
+              chainBytes: chain.chainBytes + main.length + checkpointPolicy.stepCost,
+              count: chain.count + 1,
+            },
+          }
+        : {}),
   };
+}
+
+/**
+ * How the chain of deltas stands before the snapshot after `head`: as this member recorded it when
+ * that snapshot is the one it published last, otherwise (another member published since, or this one has
+ * just taken over) as the fleet's index lists it. Null when neither can say; the caller then counts by sequence.
+ */
+async function chainBefore(creds: FleetCredentials, fleet: string, head: FleetHead | null, recorded?: SinceWhole): Promise<SinceWhole | null> {
+  if (head === null) return null;
+  const known = sinceWholeFrom(recorded);
+  if (known !== undefined && known.seq === head.seq) return known;
+  const entries = await fetchIndex(creds, fleet, 0).catch(() => null);
+  if (entries === null || entries.length === 0 || entries[entries.length - 1]!.seq !== head.seq) return null;
+  return sinceWholeOf(entries);
 }
 
 export interface PullResult {
@@ -448,18 +572,7 @@ export interface CatchUpPlan {
 }
 
 // How many manifests are looked at before giving up on finding a route.
-const WALK_LIMIT = 2 * FULL_PACK_WINDOW + 1;
-/**
- * What each step of a route costs besides its pack, in bytes.
- *
- * A step is two round trips (the manifest and the pack), a manifest that carries
- * a wrapped key for every member (about 4 KB with thirty-two of them), two git
- * processes and a record of progress. Counting only the bytes of the packs would
- * send a member forty-one steps and eighty-four requests to save two kilobytes
- * over one whole tree. Twenty-four kilobytes is about where a round trip over a
- * poor link and the manifest stop being noise.
- */
-export const ROUTE_STEP_COST = 24 * 1024;
+const WALK_LIMIT = RETAINED_SNAPSHOTS + 1;
 
 // A size that is not known (a snapshot published before sizes were recorded):
 // a whole tree is assumed large and a change small.
@@ -737,7 +850,7 @@ async function planByWalking(creds: FleetCredentials, fleet: string, lastSeq: nu
   if (chain === null) {
     const oldest = walked[walked.length - 1]!;
     throw new NoRouteError(
-      "this member is " + (oldest.seq - lastSeq) + " snapshots behind and the fleet no longer has a whole tree to start from; it gets one at the next checkpoint (every " + FULL_PACK_WINDOW + " snapshots) or when a member joins",
+      "this member is " + (oldest.seq - lastSeq) + " snapshots behind and the fleet no longer has a whole tree to start from; it gets one at the next checkpoint (at most every " + (checkpointPolicy.maxSinceWhole + 1) + " snapshots) or when a member joins",
     );
   }
   return { head, chain };

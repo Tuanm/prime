@@ -1,11 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { gitSync } from "./git";
 import { randomBytes } from "node:crypto";
 import { readFileSync as readSource } from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FULL_PACK_WINDOW, ROUTE_STEP_COST, chooseRoute, loadOrCreateKeyPair, manifestIdOf, openStep, publish, pull, rosterGained, type MemberPaths } from "../src/fleet-agent";
+import { RETAINED_SNAPSHOTS, ROUTE_STEP_COST, checkpointPolicy, chooseRoute, loadOrCreateKeyPair, manifestIdOf, openStep, publish, pull, rosterGained, type MemberPaths } from "../src/fleet-agent";
 import { applyPack } from "../src/fleet-sync";
 import type { FleetManifest } from "../src/fleet-transport";
 
@@ -14,7 +14,23 @@ import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
 
+// These tests were written for a whole tree on every 32nd snapshot, whatever the chain cost; they keep that
+// (counted by sequence, as an earlier build does) so they stay about what a checkpoint is. The policy that is the default has
+// its own tests, below.
+const FULL_PACK_WINDOW = 32;
+const DEFAULT_POLICY = { ...checkpointPolicy };
+// (A hook outside a describe applies to every file's tests in the process, so each describe below sets it.)
+function legacyChain(): void {
+  beforeEach(() => {
+    Object.assign(checkpointPolicy, DEFAULT_POLICY, { bySequence: true });
+  });
+  afterEach(() => {
+    Object.assign(checkpointPolicy, DEFAULT_POLICY);
+  });
+}
+
 describe("incremental snapshots", () => {
+  legacyChain();
   test("a change travels as a delta, and the replica still ends up with the same tree", async () => {
     const root = mkdtempSync(join(tmpdir(), "fleet-delta-"));
     const gateway = new FakeGateway();
@@ -412,16 +428,16 @@ function lastPackKey(gateway: FakeGateway): string {
 }
 
 describe("the gateway keeps what the checkpoint interval needs", () => {
-  test("it keeps at least twice FULL_PACK_WINDOW snapshots", () => {
-    // The newest whole tree is at most FULL_PACK_WINDOW back and the deltas after
-    // it are all newer, so a member that fell behind finds its whole route only
-    // if the gateway keeps twice the window (one for the anchor's own interval,
-    // one for the interval being published). The two numbers live in different
-    // packages; this is what holds them together.
+  test("it keeps more snapshots than a whole tree is ever back", () => {
+    // The newest whole tree is at most maxSinceWhole + 1 back and the deltas after
+    // it are all newer, so a member that fell behind finds its whole route if the
+    // gateway keeps that many, with a margin for a publish that is being refused.
+    // The numbers live in different packages; this is what holds them together.
     const source = readSource(join(import.meta.dir, "..", "..", "api", "src", "fleets.ts"), "utf8");
     const kept = Number(/export const RECENT_SNAPSHOTS = (\d+);/.exec(source)?.[1]);
     expect(Number.isInteger(kept)).toBe(true);
-    expect(kept).toBeGreaterThanOrEqual(2 * FULL_PACK_WINDOW);
+    expect(kept).toBe(RETAINED_SNAPSHOTS);
+    expect(kept).toBeGreaterThanOrEqual(DEFAULT_POLICY.maxSinceWhole + 1 + 4);
   });
 });
 
@@ -520,6 +536,7 @@ describe("what a step costs", () => {
 });
 
 describe("a checkpoint carries the change as well as the tree", () => {
+  legacyChain();
   async function fleet(root: string, files = 24) {
     const gateway = new FakeGateway();
     const primaryWork = join(root, "primary");

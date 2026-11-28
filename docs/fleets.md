@@ -253,13 +253,17 @@ than trusting it.
 
 ### A replica that fell behind
 
-Most snapshots carry only what changed. Every 32nd carries the whole tree, as an
-anchor - the tree's own files, not the history before it, so its size follows the
-tree. A replica that was away starts from the newest whole tree and applies the
-changes after it, at most 32 snapshots, however far behind it is. How far behind
-one replica is changes nothing for the others: the space in charge goes on
-publishing small changes. The gateway keeps the last 64 snapshots, twice the
-interval, so the newest whole tree and every change after it are there.
+Most snapshots carry only what changed. A whole tree is published now and then, as
+an anchor - the tree's own files, not the history before it, so its size follows the
+tree: when the changes since the last one have cost as much as that tree (each counted
+with a fixed cost for the step, 24 KB, and only once at least 8 have followed it), and
+in any case after 56 snapshots. A big tree of small edits gets one every 57th snapshot; a
+burst of large changes brings the next one early. A replica that was away starts from
+the newest whole tree and applies the changes after it, at most 57 snapshots, however far
+behind it is. How far behind one replica is changes nothing for the others: the space in
+charge goes on publishing small changes. The gateway keeps the last 64 snapshots, so the
+newest whole tree and every change after it are there. (A member that is not on this
+version still publishes a whole tree every 32nd snapshot; the two mix.)
 
 Each snapshot names the head it was built on, whoever published it, so the chain
 a replica walks stays whole when the space in charge changes hands. A snapshot
@@ -792,7 +796,7 @@ replica that follows every one):
 | | before | now |
 |---|---|---|
 | a snapshot, up | 2.0 KB | 2.0 KB |
-| the checkpoint (every 32nd), up | 1.91 MB | 1.88 MB tree + 2 KB change |
+| the checkpoint (every 57th, or when the changes have cost the tree), up | 1.91 MB | 1.88 MB tree + 2 KB change |
 | the checkpoint, a replica that is up to date, down | 1.91 MB | 2.8 KB |
 | a snapshot while one member is far behind, up | 1.92 MB, each time | 2.0 KB |
 | a member 39 snapshots behind catches up, down | 1.92 MB, 4 requests | 62 KB, 81 requests |
@@ -850,7 +854,7 @@ says; it now means twenty dollars.
 | members per fleet | 32 |
 | invite lifetime | ten minutes by default, one hour at most |
 | lease | forty-five seconds unless the fleet has its own (`prime fleets set <fleet-id> --lease 90s`), renewed every third of it (two storage rows a renewal) |
-| snapshot | a thin delta pack per head; a whole tree every 32nd, and when the members change; one upload is at most 32 MiB, whole snapshot or change pack (the Worker holds a body about three times over while it hashes and stores it, in 128 MB; the member is told the limit and says so before it uploads anything, and the gateway answers 413 with the size too). A work tree whose whole tree is bigger than that stops the fleet at its next whole tree - every 32nd snapshot, and whenever the members change - and nothing more is published until the tree is smaller, so keep what is not the work's out of it with `.gitignore`; the members keep what they have |
+| snapshot | a thin delta pack per head; a whole tree when the changes since the last have cost as much as it and after at most 56 snapshots, and when the members change; one upload is at most 32 MiB, whole snapshot or change pack (the Worker holds a body about three times over while it hashes and stores it, in 128 MB; the member is told the limit and says so before it uploads anything, and the gateway answers 413 with the size too). A work tree whose whole tree is bigger than that stops the fleet at its next whole tree - at the latest every 57th snapshot, and whenever the members change - and nothing more is published until the tree is smaller, so keep what is not the work's out of it with `.gitignore`; the members keep what they have |
 | snapshots kept | the last 64 |
 | a member's object store | collected the first time it passes 32 MB or `PRIME_FLEET_CACHE_MB` (512 by default), and again after it has grown by 64 MB or by half of what the last collection left; it keeps the snapshot the work tree holds, the newest fetched and what its indexes name, so a work tree bigger than the cap leaves it over the cap |
 | `PRIME_FLEET_REPLICA` | `lazy` (the default: fetch ahead, apply when needed) or `mirror` (apply every snapshot as it is fetched) |
