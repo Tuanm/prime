@@ -712,17 +712,29 @@ prime fleets witness clear  <fleet> --space <name>                         # the
 What the agent does, with no part of it able to hold anything up (the witness being down, slow or refusing is "unwitnessed" in the
 status and one line in the log, and nothing else):
 
-- **Posts** its own checkpoint when it holds the head the gateway shows (published, or taken in and verified): when the head
-  changed and five minutes have passed since the last post, and at once when it takes the lease. It sends the proof the witness asks
-  for (the owner's `add`/`rotate` entry for its key with the genesis, or a `rotate-self` with the key that held the place before).
-- **Reads** what the witness holds every two minutes, **before** it reads the head (the head only goes forward, so a checkpoint ahead
-  of it is not a publish in between), and counts only a checkpoint whose signature is right, that is for this fleet and incarnation,
-  and whose key the roster this member verified names (a viewer's too: it reads, and says what it saw).
+- **Posts** a checkpoint for **every snapshot it publishes or takes in** (and verifies), at most one every ten seconds: a snapshot
+  that comes within them waits, and the newest is posted in place of the ones skipped. The checkpoint names the snapshot the member
+  holds and the hash of the manifest it published or took in, not what the gateway shows as the head at that moment. It sends the
+  proof the witness asks for (the owner's `add`/`rotate` entry for its key with the genesis, or a `rotate-self` with the key that
+  held the place before). A fork or a different head can only be seen when two members' checkpoints are for one sequence, which a
+  sample every few minutes would almost never give.
+- **Reads** what the witness holds when the snapshot it holds has changed, but not more than once a minute, and at least every two
+  minutes, **before** it reads the head (the head only goes forward, so a checkpoint ahead of it is not a publish in between). It
+  counts only a checkpoint whose signature is right, that is for this fleet and incarnation, and whose key **held a place in the
+  roster this member verified at that sequence**: a key the owner removed (or replaced by a rotation) counts for what it saw up to the
+  entry that ended its place and for nothing after it, so it cannot make a fork or a rollback out of what it signs later (a viewer's
+  key counts: it reads, and says what it saw).
 - **Rollback**: a counted checkpoint is for a later snapshot than the head. **Different head**: one is for the head's sequence with
   another manifest. Both are an alert in `status` and the log, and end when the gateway and the witness agree again.
 - **Fork proof**: two counted checkpoints from two keys for one sequence with different manifests. It is kept (both
   checkpoints, as signed, so anyone can check them), and **a primary does not publish on top of it** until the operator has looked
   and run `witness clear`; the same two checkpoints are not raised again afterwards.
+- **A refusal that needs a person** is not "unwitnessed": a witness that is full (507: a tier of signers, or the whole witness), that
+  limits this address (429), that does not serve the fleet's owner (403: its `OWNER_KEYS`), or that holds the member's key as replaced
+  or removed (409) is reported once in the log and the status line, and `status` shows it (`REFUSED`, with what it means) until a post
+  goes through. Posting is tried again at the next snapshot.
+
+`status` shows each checkpoint's signed time next to the time this member saw it.
 
 What it does not do: a witness can withhold checkpoints (nothing new from anyone is not told from a quiet fleet, so "not held yet"
 and "ok" are all it can say), and a gateway and a witness in one Cloudflare account fall together. The witness sees ids, sequence

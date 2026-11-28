@@ -11,15 +11,21 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { MemberSignKey } from "./fleet-crypto.ts";
-import { entryBytes, type SignedEntry, type VerifiedRoster } from "./fleet-roster.ts";
+import { entryBytes, mayCheckpointAt, type SignedEntry, type VerifiedRoster } from "./fleet-roster.ts";
 import { FleetTrust } from "./fleet-trust.ts";
 import { fetchHead, type FleetCredentials } from "./fleet-transport.ts";
 
 export const CHECKPOINT_TAG = "prime-cp-v1";
 
-/** How often a member reads what the witness holds, and the least time between two checkpoints it posts. */
+/**
+ * How a member and the witness keep pace (api/witness/README.md, "What a client must do"): a checkpoint is posted for every new
+ * snapshot the member publishes or takes in, at most one per ten seconds (the newest supersedes the ones skipped); the witness is read
+ * when the snapshot the member holds changes, but not more than once a minute, and in any case every two minutes, so a member that
+ * sees nothing change still looks.
+ */
 export const WITNESS_CHECK_MS = 120_000;
-export const WITNESS_POST_MS = 300_000;
+export const WITNESS_READ_MIN_MS = 60_000;
+export const WITNESS_POST_MIN_MS = 10_000;
 /** A request to the witness is cut short after this: it is a side channel, and never holds a round up. */
 export const WITNESS_TIMEOUT_MS = 8_000;
 
@@ -128,6 +134,8 @@ export interface Alert {
   /** What the gateway shows now. */
   headSeq: number;
   headHash: string;
+  /** When that member signed it (its own clock, signed). */
+  ts: number;
 }
 
 export interface Verdict {
@@ -150,12 +158,13 @@ export const forkId = (seq: number, hashes: [string, string]): string => "fork:"
  * - **fork**: two members' checkpoints for one sequence with different manifests (the gateway told two members two stories).
  */
 export function judgeWitness(v: VerifiedRoster, held: WitnessCheckpoint[], head: { seq: number; manifestHash: string }, acknowledged: readonly string[] = []): Verdict {
-  const known = new Set(v.tenures.map((t) => t.spub).filter((k): k is string => k !== null));
   const counted: WitnessCheckpoint[] = [];
   let ignored = 0;
   for (const c of held) {
     const ours = c.cp[1] === v.fleetKey && c.cp[2] === v.fleet && c.cp[3] === v.incarnation;
-    if (ours && known.has(c.spub) && verifyCheckpoint(c)) counted.push(c);
+    // The key must have held a place in the chain at the sequence it vouches for: one that was removed (or replaced) saw nothing
+    // after that, and what it says then is not a member's.
+    if (ours && mayCheckpointAt(v, c.spub, c.cp[4]) && verifyCheckpoint(c)) counted.push(c);
     else ignored++;
   }
   const verdict: Verdict = { counted: counted.length, ignored, forks: [] };
@@ -163,10 +172,10 @@ export function judgeWitness(v: VerifiedRoster, held: WitnessCheckpoint[], head:
   let newest: WitnessCheckpoint | undefined;
   for (const c of counted) if (newest === undefined || c.cp[4] > newest.cp[4]) newest = c;
   if (newest !== undefined && newest.cp[4] > head.seq) {
-    verdict.alert = { kind: "rollback", seq: newest.cp[4], manifestHash: newest.cp[5], spub: newest.spub, headSeq: head.seq, headHash: head.manifestHash };
+    verdict.alert = { kind: "rollback", seq: newest.cp[4], manifestHash: newest.cp[5], spub: newest.spub, headSeq: head.seq, headHash: head.manifestHash, ts: newest.cp[7] };
   } else {
     const other = counted.find((c) => c.cp[4] === head.seq && c.cp[5] !== head.manifestHash);
-    if (other !== undefined) verdict.alert = { kind: "different-head", seq: head.seq, manifestHash: other.cp[5], spub: other.spub, headSeq: head.seq, headHash: head.manifestHash };
+    if (other !== undefined) verdict.alert = { kind: "different-head", seq: head.seq, manifestHash: other.cp[5], spub: other.spub, headSeq: head.seq, headHash: head.manifestHash, ts: other.cp[7] };
   }
 
   const bySeq = new Map<number, WitnessCheckpoint[]>();
@@ -191,8 +200,10 @@ export function judgeWitness(v: VerifiedRoster, held: WitnessCheckpoint[], head:
 /** What the agent last found, kept beside the key file: where the witness is, and what it showed. */
 export interface WitnessState {
   url?: string;
-  /** The last checkpoint this member posted. */
-  posted?: { seq: number; manifestHash: string; at: number; primary?: boolean };
+  /** The last checkpoint this member posted (`ts` is what it signed). */
+  posted?: { seq: number; manifestHash: string; at: number; ts: number };
+  /** The witness is refusing, or is full or limiting this member (not just unreachable): kept until a request goes through. */
+  fault?: { at: number; status: number; what: string };
   /** The last time the witness was read, and how it went. */
   checked?: { at: number; status: "ok" | "unwitnessed" | "not-held" | "no-roster"; counted?: number; ignored?: number; error?: string };
   /** A rollback, or a head that is not the one a member saw: until the witness and the gateway agree again. */
@@ -284,30 +295,102 @@ export async function postCheckpoint(url: string, v: VerifiedRoster, key: Member
   return body.stored !== false;
 }
 
-// ---- one look -----------------------------------------------------------------------------------
+// ---- what a refusal means -------------------------------------------------------------------------
 
-export interface WitnessLook {
+/**
+ * A witness that answers with a refusal that needs a person (it is full, it is limiting, it does not take the fleet's owner, it was told the
+ * key is gone) is not "unwitnessed": the operator has to hear what it means. Anything else that fails is the witness being out of reach.
+ */
+export function faultOf(err: unknown): { status: number; what: string } | undefined {
+  if (!(err instanceof WitnessError) || err.status === undefined) return undefined;
+  const said = err.message;
+  switch (err.status) {
+    case 507:
+      return { status: 507, what: "the witness is full (a tier of signers, or the whole witness): this member's checkpoints are not kept. Whoever runs the witness has to make room (" + said + ")" };
+    case 429:
+      return { status: 429, what: "the witness is limiting requests from this address or for this fleet; checkpoints are posted again as it allows (" + said + ")" };
+    case 403:
+      return { status: 403, what: "the witness does not serve this fleet's owner (the owner key is not in the witness's OWNER_KEYS): nothing of this fleet is kept there (" + said + ")" };
+    case 409:
+      return { status: 409, what: "the witness holds that this member's key was replaced or removed in the roster, so it takes no more checkpoints from it (" + said + ")" };
+    default:
+      return undefined;
+  }
+}
+
+// ---- posting this member's checkpoint -------------------------------------------------------------
+
+/** The snapshot a member holds because it published it or took it in, and the hash of the manifest it is. */
+export interface Held {
+  seq: number;
+  manifestHash: string;
+}
+
+export interface WitnessPost {
   creds: FleetCredentials;
   fleet: string;
   keyFile: string;
-  /** The newest snapshot this member holds (published, or taken in and verified). */
-  heldSeq: number;
-  /** This member is the primary now. */
-  primary: boolean;
+  held: Held;
   signKey: () => MemberSignKey;
   now?: number;
   fetcher?: typeof fetch;
 }
 
 export interface WitnessOutcome {
-  status: "off" | "no-roster" | "unwitnessed" | "not-held" | "ok" | "alert" | "fork";
+  status: "off" | "no-roster" | "unwitnessed" | "fault" | "not-held" | "ok" | "alert" | "fork";
   posted?: boolean;
   error?: string;
 }
 
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
 /**
- * Read what the witness holds, compare it with the gateway's head, and post this member's checkpoint when it is time. Never throws and
- * never blocks anything: a witness that cannot be reached is an answer ("unwitnessed"), and what was found is written beside the key file.
+ * Post the checkpoint of a snapshot this member published or took in, with the hash of the manifest it holds (not what the gateway says
+ * the head is now). Never throws: a witness out of reach is "unwitnessed", and a refusal that needs a person is a fault (`state.fault`).
+ */
+export async function postHeld(post: WitnessPost): Promise<WitnessOutcome> {
+  const url = witnessUrlOf(post.keyFile);
+  if (url === undefined) return { status: "off" };
+  const now = post.now ?? Date.now();
+  const note = (change: (s: WitnessState) => void): void => void updateWitnessState(post.keyFile, change);
+  const last = readWitnessState(post.keyFile).posted;
+  if (last !== undefined && last.seq === post.held.seq && last.manifestHash === post.held.manifestHash) return { status: "ok" };
+  try {
+    const v = await FleetTrust.beside(post.keyFile).verifiedRoster(post.creds, post.fleet);
+    if (v === null) return { status: "no-roster" };
+    const key = post.signKey();
+    if (!v.tenures.some((t) => t.spub === key.publicKey && t.until === null)) throw new WitnessError("this member's signing key is not in the roster");
+    await postCheckpoint(url, v, key, post.held.seq, post.held.manifestHash, now, post.fetcher ?? fetch);
+    note((s) => {
+      s.posted = { seq: post.held.seq, manifestHash: post.held.manifestHash, at: now, ts: now };
+      delete s.fault;
+    });
+    return { status: "ok", posted: true };
+  } catch (err) {
+    const error = messageOf(err);
+    const fault = faultOf(err);
+    if (fault) {
+      note((s) => void (s.fault = { at: now, ...fault }));
+      return { status: "fault", error: fault.what };
+    }
+    note((s) => void (s.checked = { ...(s.checked ?? { at: now, status: "ok" }), status: "unwitnessed", error: "the checkpoint was not posted: " + error }));
+    return { status: "unwitnessed", error };
+  }
+}
+
+// ---- reading what it holds ---------------------------------------------------------------------------
+
+export interface WitnessLook {
+  creds: FleetCredentials;
+  fleet: string;
+  keyFile: string;
+  now?: number;
+  fetcher?: typeof fetch;
+}
+
+/**
+ * Read what the witness holds and compare it with the gateway's head. Never throws and never blocks anything: a witness that cannot be
+ * reached is an answer ("unwitnessed"), and what was found is written beside the key file.
  */
 export async function lookAtWitness(look: WitnessLook): Promise<WitnessOutcome> {
   const url = witnessUrlOf(look.keyFile);
@@ -319,7 +402,7 @@ export async function lookAtWitness(look: WitnessLook): Promise<WitnessOutcome> 
   try {
     v = await FleetTrust.beside(look.keyFile).verifiedRoster(look.creds, look.fleet);
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
+    const error = messageOf(err);
     note((s) => void (s.checked = { at: now, status: "no-roster", error }));
     return { status: "no-roster", error };
   }
@@ -332,9 +415,13 @@ export async function lookAtWitness(look: WitnessLook): Promise<WitnessOutcome> 
   try {
     held = await readWitness(url, v.fleetKey, fetcher);
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    note((s) => void (s.checked = { at: now, status: "unwitnessed", error }));
-    return { status: "unwitnessed", error };
+    const error = messageOf(err);
+    const fault = faultOf(err);
+    note((s) => {
+      s.checked = { at: now, status: "unwitnessed", error };
+      if (fault) s.fault = { at: now, ...fault };
+    });
+    return fault ? { status: "fault", error: fault.what } : { status: "unwitnessed", error };
   }
   let head: { seq: number; manifestHash: string } | undefined;
   try {
@@ -357,26 +444,6 @@ export async function lookAtWitness(look: WitnessLook): Promise<WitnessOutcome> 
   });
   if (verdict?.forks[0] && !before.fork) outcome = { status: "fork" };
   else if (verdict?.alert) outcome = { status: "alert" };
-
-  // Post this member's own checkpoint: what it holds, when that is the head, and not more often than it is useful.
-  if (head !== undefined && look.heldSeq >= head.seq && head.seq > 0) {
-    const last = readWitnessState(look.keyFile).posted;
-    const changed = last === undefined || last.seq !== head.seq || last.manifestHash !== head.manifestHash;
-    const due = last === undefined || now - last.at >= WITNESS_POST_MS || (look.primary && last.primary !== true);
-    if (changed && due) {
-      try {
-        const key = look.signKey();
-        if (!v.tenures.some((t) => t.spub === key.publicKey)) throw new WitnessError("this member's signing key is not in the roster");
-        await postCheckpoint(url, v, key, head.seq, head.manifestHash, now, fetcher);
-        note((s) => void (s.posted = { seq: head!.seq, manifestHash: head!.manifestHash, at: now, ...(look.primary ? { primary: true } : {}) }));
-        outcome.posted = true;
-      } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
-        note((s) => void (s.checked = { ...(s.checked ?? { at: now, status: "ok" }), status: "unwitnessed", error: "the checkpoint was not posted: " + error }));
-        outcome = { ...outcome, status: outcome.status === "fork" || outcome.status === "alert" ? outcome.status : "unwitnessed", error };
-      }
-    }
-  }
   return outcome;
 }
 

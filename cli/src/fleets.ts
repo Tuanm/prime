@@ -882,16 +882,12 @@ export async function fleetsWitness(ctx: Ctx): Promise<void> {
     const deviceId = space.gateway_device;
     const deviceToken = space.remote_token;
     if (!gateway || !deviceId || !deviceToken) throw new CliError("the space " + spaceName + " has no gateway credentials");
-    const state = readFleetState(ctx.configPath, fleetId, spaceName);
     const outcome = await lookAtWitness({
       creds: { gateway, deviceId, deviceToken, timeoutMs: 30_000 },
       fleet: fleetId,
       keyFile,
-      heldSeq: Math.max(state.seq ?? 0, state.fetchedSeq ?? 0),
-      primary: false,
-      signKey: () => loadOrCreateSignKey(keyFile),
     });
-    if (!ctx.json) ctx.out(dim("looked now: " + outcome.status + (outcome.error ? " (" + outcome.error + ")" : "") + (outcome.posted ? ", posted this member's checkpoint" : "")));
+    if (!ctx.json) ctx.out(dim("looked now: " + outcome.status + (outcome.error ? " (" + outcome.error + ")" : "")));
   }
   const state = readWitnessState(keyFile);
   const url = witnessUrlOf(keyFile);
@@ -902,7 +898,7 @@ export async function fleetsWitness(ctx: Ctx): Promise<void> {
   ctx.out(bold("witness of " + spaceName) + "  " + (url ?? dim("none: set one with 'prime fleets witness set " + fleetId + " --space " + spaceName + " --witness <url>'")));
   const when = (t: number): string => new Date(t).toISOString();
   if (url !== undefined) {
-    if (state.posted) ctx.out("posted    snapshot " + state.posted.seq + dim("  " + state.posted.manifestHash.slice(0, 12) + "  at " + when(state.posted.at)));
+    if (state.posted) ctx.out("posted    snapshot " + state.posted.seq + dim("  " + state.posted.manifestHash.slice(0, 12) + "  at " + when(state.posted.at) + ", signed " + when(state.posted.ts)));
     else ctx.out("posted    " + dim("nothing yet"));
     if (state.checked) {
       const word = state.checked.status === "ok" ? green("ok") : state.checked.status === "not-held" ? yellow("not held by the witness yet") : yellow(state.checked.status);
@@ -913,11 +909,14 @@ export async function fleetsWitness(ctx: Ctx): Promise<void> {
     ctx.out(
       red(state.alert.kind === "rollback" ? "ROLLBACK" : "DIFFERENT HEAD") +
         "  a member saw snapshot " + state.alert.seq + " (" + state.alert.manifestHash.slice(0, 12) + ") signed by " + ownerFingerprint(state.alert.spub).slice(0, 11) +
-        ", and the gateway shows snapshot " + state.alert.headSeq + " (" + state.alert.headHash.slice(0, 12) + ")",
+        ", and the gateway shows snapshot " + state.alert.headSeq + " (" + state.alert.headHash.slice(0, 12) + "). Signed " + when(state.alert.ts) + ", seen " + when(state.alert.at),
     );
   }
+  if (state.fault) {
+    ctx.out(red("REFUSED") + "  " + state.fault.what + dim("  (" + state.fault.status + ", " + when(state.fault.at) + ")"));
+  }
   if (state.fork) {
-    ctx.out(red("FORK") + "  two members were shown snapshot " + state.fork.seq + " with different manifests: " + state.fork.a.cp[5].slice(0, 12) + " (signed by " + ownerFingerprint(state.fork.a.spub).slice(0, 11) + ") and " + state.fork.b.cp[5].slice(0, 12) + " (" + ownerFingerprint(state.fork.b.spub).slice(0, 11) + ")");
+    ctx.out(red("FORK") + "  two members were shown snapshot " + state.fork.seq + " with different manifests: " + state.fork.a.cp[5].slice(0, 12) + " (signed by " + ownerFingerprint(state.fork.a.spub).slice(0, 11) + ", " + when(state.fork.a.cp[7]) + ") and " + state.fork.b.cp[5].slice(0, 12) + " (" + ownerFingerprint(state.fork.b.spub).slice(0, 11) + ", " + when(state.fork.b.cp[7]) + ")");
     ctx.out(dim("  this member does not publish until you have looked: 'prime fleets witness clear " + fleetId + " --space " + spaceName + "'"));
   }
 }

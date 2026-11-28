@@ -467,6 +467,15 @@ export function mayPublishAt(v: VerifiedRoster, xpub: string, seq: number): bool
   return v.tenures.some((t) => t.xpub === xpub && t.role !== "viewer" && covers(t, seq));
 }
 
+/**
+ * Whether a checkpoint for snapshot `seq` signed by the signing key `spub` is one the chain stands behind: a tenure of that key
+ * covers `seq`. A key the chain removed (or replaced by a rotation) counts for what it saw up to the entry that ended its
+ * place, and for nothing after it (see the witness contract).
+ */
+export function mayCheckpointAt(v: VerifiedRoster, spub: string, seq: number): boolean {
+  return v.tenures.some((t) => t.spub === spub && covers(t, seq));
+}
+
 /** Who may be sealed for now: the live members of the chain, whatever their role (a viewer reads). */
 export function liveMembers(v: VerifiedRoster): Tenure[] {
   return v.tenures.filter((t) => t.until === null);

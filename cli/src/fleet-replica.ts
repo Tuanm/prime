@@ -75,6 +75,8 @@ export async function prefetch(
   save: (patch: Partial<ReplicaState>, opts?: { rewind?: boolean }) => void,
   /** What the socket said the head is: with it, the gateway is not asked for the head. */
   hint?: HeadHint,
+  /** Told of each snapshot as it is taken into the store (with the hash of its manifest, when that is known). */
+  onTaken?: (p: Position) => void,
 ): Promise<{ head: FleetHead; fetched: Position; steps: number; evicted: number }> {
   let { fetched } = positions(state);
   // What the state says is in the store may not be (a copied state directory, a
@@ -101,6 +103,7 @@ export async function prefetch(
         // one that does.
         fetchedRoster: p.roster ?? "",
       });
+      onTaken?.(p);
     },
     hint,
   );

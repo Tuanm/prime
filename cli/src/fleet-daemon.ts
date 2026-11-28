@@ -32,10 +32,10 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { commandOf, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { acquireStarting, claimSuccessor, clearSuccessor, isSuccessorProcess, mayAskAgainToStop, takeHandoverEnv, readSuccessor, registerSuccessor, requestStop, stopSuccessor, stopWaitingSuccessor as stopWaiting, watchForStop } from "./fleet-agent-handover.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, loadOrCreateSignKey, previousKeyPair, publish, PublishPostponed, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
+import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, loadOrCreateSignKey, manifestIdOf, previousKeyPair, publish, PublishPostponed, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
 import { keyFingerprintOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
-import { forkBlocking, lookAtWitness, witnessUrlOf, WITNESS_CHECK_MS } from "./fleet-witness.ts";
+import { forkBlocking, lookAtWitness, postHeld, witnessUrlOf, WITNESS_CHECK_MS, WITNESS_POST_MIN_MS, WITNESS_READ_MIN_MS, type Held } from "./fleet-witness.ts";
 import {
   FETCHED_REPORT_MS,
   SOCKET_HEAD_SAFETY_MS,
@@ -1450,13 +1450,23 @@ export interface SpaceLoop {
    * writes it, so it takes no claim for the lease, does not answer a freed lease, and keeps its work tree as the fleet's.
    */
   viewer?: boolean;
-  /** When the witness was last looked at, and the look that is under way (it never holds a round up). */
+  /**
+   * The newest snapshot this member published or took in, and the hash of the manifest it holds: what its checkpoint says. In memory
+   * only; a member that has just started has none until the next snapshot (it still reads what the witness holds).
+   */
+  held?: Held;
+  /** When the witness was last read, what was held then, when a checkpoint was last posted and which one, and the work that is under way (it never holds a round up). */
   witnessAt?: number;
+  witnessReadHeld?: string;
+  witnessPostedAt?: number;
+  witnessPosted?: string;
   witnessing?: Promise<unknown>;
+  /** A nudge that is set for when the next post is allowed. */
+  witnessTimer?: ReturnType<typeof setTimeout>;
+  /** What the agent says about a round (the log or the status line), kept for what happens between rounds. */
+  witnessReport?: (what: string) => void;
   /** Whether the last look at the witness found something, so that the log says it once. */
   witnessSaid?: string;
-  /** Whether this member was the primary at the last look (a member that becomes one posts at once). */
-  witnessPrimary?: boolean;
   /** How long the gateway asked to wait before looking at a paused fleet again. */
   retryAfterMs?: number;
   /**
@@ -1765,6 +1775,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       }
       throw err;
     }
+    if (result.manifestKey !== "") noteHeld(loop, result.seq, manifestIdOf(result.manifestKey));
     report("published " + result.seq + (result.full && result.fullBecause !== "no base" ? " (whole tree: " + (result.fullBecause ?? "no reason given") + ")" : ""));
     return;
   }
@@ -1796,7 +1807,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
         takePlace: () => takePlace(loop),
         catchUp: async () => {
           const now = readFleetState(loop.configPath, fleet, loop.name);
-          await prefetch(creds, fleet, paths, now, keep);
+          await prefetch(creds, fleet, paths, now, keep, undefined, (p) => (p.manifestHash !== undefined ? noteHeld(loop, p.seq, p.manifestHash) : undefined));
           const done = await applyReady(creds, fleet, paths, readFleetState(loop.configPath, fleet, loop.name), keep, { report: true });
           if (done?.kept) report("kept " + done.kept.moved + " locally changed path(s) aside in " + done.kept.to);
         },
@@ -1855,7 +1866,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
     loop.knownHeadManifest && loop.knownHeadSeq !== undefined && loop.knownHeadSeq > positions(fetchedState).fetched.seq
       ? { seq: loop.knownHeadSeq, manifestKey: loop.knownHeadManifest }
       : undefined;
-  const got = await prefetch(creds, fleet, paths, fetchedState, keep, hint);
+  const got = await prefetch(creds, fleet, paths, fetchedState, keep, hint, (p) => (p.manifestHash !== undefined ? noteHeld(loop, p.seq, p.manifestHash) : undefined));
   loop.timing.pull = Date.now() - pullBegan;
   if (got.evicted > 0) report("snapshots the catch-up needed were let go by the gateway meanwhile (" + got.evicted + " times): it was planned again");
   if (got.steps > 0) {
@@ -1996,39 +2007,96 @@ export const POSTPONE_LIMIT = 3;
 export const POSTPONE_MAX_MS = 120_000;
 
 /**
- * Look at the witness in the background when it is time: what it holds is compared with the gateway's head, and this member's own
- * checkpoint is posted. It is never waited for, and what it finds is written beside the key file (`prime fleets witness status`)
- * and said once in the log.
+ * Look after the witness in the background (see fleet-witness.ts): post a checkpoint for the snapshot this member published or took
+ * in (at most one every ten seconds, the newest replacing the ones skipped), and read what the witness holds when the snapshot this
+ * member holds has changed (at most once a minute) or two minutes have passed. It is never waited for, and what it finds is written
+ * beside the key file (`prime fleets witness status`).
  */
 export function watchWitness(loop: SpaceLoop, report: (what: string) => void): void {
+  loop.witnessReport = report;
   if (loop.witnessing !== undefined) return;
-  const now = Date.now();
-  if (now - (loop.witnessAt ?? 0) < WITNESS_CHECK_MS && !(loop.primary && loop.witnessAt !== undefined && loop.witnessPrimary !== true)) return;
   if (witnessUrlOf(loop.paths.keyFile) === undefined) return;
-  loop.witnessAt = now;
-  loop.witnessPrimary = loop.primary;
-  const state = readFleetState(loop.configPath, loop.fleet, loop.name);
-  loop.witnessing = lookAtWitness({
-    creds: loop.creds,
-    fleet: loop.fleet,
-    keyFile: loop.paths.keyFile,
-    heldSeq: Math.max(state.seq ?? 0, state.fetchedSeq ?? 0),
-    primary: loop.primary,
-    signKey: () => loadOrCreateSignKey(loop.paths.keyFile),
-  })
-    .then((outcome) => {
-      const said = outcome.status === "alert" || outcome.status === "fork" || outcome.status === "unwitnessed" ? outcome.status : "";
-      if (said !== (loop.witnessSaid ?? "")) {
-        loop.witnessSaid = said;
-        if (outcome.status === "fork") report("the witness holds two histories of this fleet: this member does not publish until the operator has looked ('prime fleets witness status')");
-        else if (outcome.status === "alert") report("the witness shows a member saw a newer snapshot than the gateway shows ('prime fleets witness status')");
-        else if (outcome.status === "unwitnessed") logAgent("space " + loop.name + ": the witness could not be reached or did not take the checkpoint (" + (outcome.error ?? "no reason") + "): unwitnessed");
+  const now = Date.now();
+  const held = loop.held;
+  const heldKey = held === undefined ? undefined : held.seq + ":" + held.manifestHash;
+  const postDue = held !== undefined && heldKey !== loop.witnessPosted;
+  const postWait = Math.max(0, (loop.witnessPostedAt ?? 0) + WITNESS_POST_MIN_MS - now);
+  const readWait = Math.max(0, (loop.witnessAt ?? 0) + ((heldKey ?? "") !== (loop.witnessReadHeld ?? "") ? WITNESS_READ_MIN_MS : WITNESS_CHECK_MS) - now);
+  const doPost = postDue && postWait === 0;
+  const doRead = readWait === 0;
+  if (!doPost && !doRead) {
+    // Nothing is allowed yet: wake up when the earlier of the two is.
+    const wait = Math.min(postDue ? postWait : Infinity, readWait);
+    if (loop.witnessTimer === undefined && Number.isFinite(wait)) {
+      loop.witnessTimer = setTimeout(() => {
+        loop.witnessTimer = undefined;
+        watchWitness(loop, loop.witnessReport ?? report);
+      }, wait + 5);
+      loop.witnessTimer.unref?.();
+    }
+    return;
+  }
+  if (doPost) {
+    loop.witnessPostedAt = now;
+    loop.witnessPosted = heldKey;
+  }
+  if (doRead) {
+    loop.witnessAt = now;
+    loop.witnessReadHeld = heldKey ?? "";
+  }
+  const say = (kind: string, text: string, how: "report" | "log"): void => {
+    if (kind === (loop.witnessSaid ?? "")) return;
+    loop.witnessSaid = kind;
+    if (how === "report") report(text);
+    else logAgent("space " + loop.name + ": " + text);
+  };
+  loop.witnessing = (async () => {
+    let said = "";
+    if (doPost) {
+      const posted = await postHeld({ creds: loop.creds, fleet: loop.fleet, keyFile: loop.paths.keyFile, held: held!, signKey: () => loadOrCreateSignKey(loop.paths.keyFile) });
+      if (posted.status === "fault") {
+        said = "fault";
+        say("fault", "the witness refuses this member's checkpoints, and a person has to look: " + (posted.error ?? "no reason"), "report");
+        loop.witnessPosted = undefined;
+      } else if (posted.status === "unwitnessed") {
+        // Posted again at the next snapshot, or at the next look; nothing else waits for it.
+        loop.witnessPosted = undefined;
+        said = "unwitnessed";
+        say("unwitnessed", "the witness could not be reached or did not take the checkpoint (" + (posted.error ?? "no reason") + "): unwitnessed", "log");
       }
-    })
+    }
+    if (doRead) {
+      const outcome = await lookAtWitness({ creds: loop.creds, fleet: loop.fleet, keyFile: loop.paths.keyFile });
+      if (outcome.status === "fork") {
+        said = "fork";
+        say("fork", "the witness holds two histories of this fleet: this member does not publish until the operator has looked ('prime fleets witness status')", "report");
+      } else if (outcome.status === "alert") {
+        said = "alert";
+        say("alert", "the witness shows a member saw a newer snapshot than the gateway shows ('prime fleets witness status')", "report");
+      } else if (outcome.status === "fault") {
+        said = "fault";
+        say("fault", "the witness refuses this member, and a person has to look: " + (outcome.error ?? "no reason"), "report");
+      } else if (outcome.status === "unwitnessed" && said === "") {
+        said = "unwitnessed";
+        say("unwitnessed", "the witness could not be reached (" + (outcome.error ?? "no reason") + "): unwitnessed", "log");
+      }
+    }
+    if (doRead && said === "") loop.witnessSaid = "";
+  })()
     .catch((err: unknown) => logAgent("space " + loop.name + ": the look at the witness failed: " + (err instanceof Error ? err.message : String(err))))
     .finally(() => {
       loop.witnessing = undefined;
+      // A snapshot that came while this was under way is posted after the pause the pace asks for.
+      const next = loop.held;
+      if (next !== undefined && next.seq + ":" + next.manifestHash !== loop.witnessPosted) watchWitness(loop, loop.witnessReport ?? report);
     });
+}
+
+/** This member published or took in snapshot `seq` (whose manifest has the hash `manifestHash`): its checkpoint is posted, as the pace allows. */
+export function noteHeld(loop: SpaceLoop, seq: number, manifestHash: string): void {
+  if (loop.held !== undefined && loop.held.seq > seq) return;
+  loop.held = { seq, manifestHash };
+  if (loop.witnessReport !== undefined) watchWitness(loop, loop.witnessReport);
 }
 
 /** The longest a request for the place may take: under a quarter of the lease. */

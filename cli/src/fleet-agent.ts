@@ -47,6 +47,7 @@ import {
   type Chunk,
   type FleetHead,
   type FleetManifest,
+  manifestHashOf,
 } from "./fleet-transport";
 
 export interface MemberPaths {
@@ -1302,6 +1303,8 @@ export interface Position {
   tree?: string;
   /** Who the snapshot was sealed for, when it says. */
   roster?: string;
+  /** The hash its manifest was fetched under, when the position was made by taking it in (what a member's checkpoint says). */
+  manifestHash?: string;
 }
 
 // How many packs are downloaded at the same time while earlier ones are taken in.
@@ -1450,7 +1453,8 @@ async function ingestRoute(
     // Taking in a snapshot wrapped to a newer epoch key is what lets go of the older ones (after a short while).
     bookkeeping(() => noteEpochTakenIn(paths.keyFile, wrappedEntryFor(m.wrapped, creds.deviceId, m.incarnation)?.epoch));
     if (i === plan.chain.length - 1) writeKeptNote(paths.gitDir, m.tipCommit, m.kept ?? [], m.keptCut === true);
-    fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}) };
+    const taken = manifestHashOf(m);
+    fetched = { seq: m.seq, commit: m.tipCommit, tree: m.tree, ...(m.roster !== undefined ? { roster: m.roster } : {}), ...(taken !== undefined ? { manifestHash: taken } : {}) };
     await onFetched?.(fetched);
   }
   return fetched;

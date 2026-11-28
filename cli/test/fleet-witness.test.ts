@@ -7,12 +7,12 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadOrCreateKeyPair, loadOrCreateSignKey, publish, type MemberPaths } from "../src/fleet-agent";
+import { loadOrCreateKeyPair, loadOrCreateSignKey, manifestIdOf, publish, type MemberPaths } from "../src/fleet-agent";
 import { generateOwnerKey, makeEntry, entryHash, signEntry, type OwnerKey, type RosterEntry, type SignedEntry, verifyChain, verifyEntry, fleetKeyOf } from "../src/fleet-roster";
+import { noteHeld, watchWitness, type SpaceLoop } from "../src/fleet-daemon";
 import { forgetIncarnationAnswers, forgetRosterAnswers } from "../src/fleet-trust";
 import {
   CHECKPOINT_TAG,
-  WITNESS_POST_MS,
   checkpointOf,
   forkBlocking,
   judgeWitness,
@@ -20,6 +20,7 @@ import {
   normalizeWitnessUrl,
   parseCheckpoint,
   postCheckpoint,
+  postHeld,
   proofFor,
   readWitness,
   readWitnessState,
@@ -28,6 +29,7 @@ import {
   verifyCheckpoint,
   witnessUrlOf,
   type WitnessCheckpoint,
+  type WitnessOutcome,
 } from "../src/fleet-witness";
 
 import { FakeGateway, credsFor, useFakeGateway } from "./fleet-fake-gateway";
@@ -120,7 +122,11 @@ interface World {
   b: Member;
   witness: Witness;
   publishA(content: string): Promise<Awaited<ReturnType<typeof publish>>>;
-  look(m: Member, extra?: { heldSeq?: number; now?: number; primary?: boolean; url?: string }): ReturnType<typeof lookAtWitness>;
+  /**
+   * What the agent does in a round, as one call: post the checkpoint of what `m` holds (`held`; by default the gateway's head, when `heldSeq`
+   * reaches it), then read. The outcome is the read's, unless the post did not go through.
+   */
+  look(m: Member, extra?: { heldSeq?: number; held?: { seq: number; manifestHash: string } | null; now?: number; url?: string }): Promise<WitnessOutcome & { posted?: boolean }>;
 }
 
 function world(): World {
@@ -161,20 +167,22 @@ function world(): World {
       lastPublish.set(gateway, out);
       return out;
     },
-    look(m, extra = {}) {
+    async look(m, extra = {}) {
       forgetRosterAnswers();
       const url = extra.url ?? w.url;
       updateWitnessState(m.paths.keyFile, (s) => void (s.url = url));
-      return lookAtWitness({
-        creds: credsFor(m.id),
-        fleet: "x",
-        keyFile: m.paths.keyFile,
-        heldSeq: extra.heldSeq ?? gateway.head?.seq ?? 0,
-        primary: extra.primary ?? false,
-        signKey: () => loadOrCreateSignKey(m.paths.keyFile),
-        fetcher: real(),
-        ...(extra.now !== undefined ? { now: extra.now } : {}),
-      });
+      const head = gateway.head;
+      const heldSeq = extra.heldSeq ?? head?.seq ?? 0;
+      const held = extra.held === undefined ? (head && heldSeq >= head.seq && head.seq > 0 ? { seq: head.seq, manifestHash: head.manifestHash } : null) : extra.held;
+      const now = extra.now !== undefined ? { now: extra.now } : {};
+      let posted: WitnessOutcome | undefined;
+      if (held !== null) {
+        posted = await postHeld({ creds: credsFor(m.id), fleet: "x", keyFile: m.paths.keyFile, held, signKey: () => loadOrCreateSignKey(m.paths.keyFile), fetcher: real(), ...now });
+        if (posted.status === "unwitnessed" || posted.status === "fault") return posted;
+        if (posted.status === "no-roster") return posted;
+      }
+      const read = await lookAtWitness({ creds: credsFor(m.id), fleet: "x", keyFile: m.paths.keyFile, fetcher: real(), ...now });
+      return { ...read, ...(posted?.posted ? { posted: true } : {}) };
     },
   };
   gateway.primary = a.id;
@@ -247,45 +255,41 @@ function loadOrCreateSignKeyOwner(m: Member): OwnerKey {
 }
 
 describe("posting a checkpoint", () => {
-  test("a member that holds the head posts it, once, and not again until it is time or the head has moved", async () => {
+  test("is the checkpoint of the snapshot a member holds, with the hash of the manifest it published, once", async () => {
     const w = world();
-    await w.publishA("one");
-    const first = await w.look(w.a, { now: 1_000_000 });
+    const one = await w.publishA("one");
+    const held = { seq: one.seq, manifestHash: manifestIdOf(one.manifestKey) };
+    const first = await w.look(w.a, { held, now: 1_000_000 });
     expect(first.posted).toBe(true);
     expect(w.witness.held.length).toBe(1);
     const c = w.witness.held[0]!;
     expect(c.cp[4]).toBe(1);
+    // What the member published, which is the head here (the id of its manifest is the hash of its bytes).
+    expect(c.cp[5]).toBe(held.manifestHash);
     expect(c.cp[5]).toBe(w.gateway.head!.manifestHash);
     expect(c.spub).toBe(w.a.spub);
     expect((w.witness.posts[0] as { proof?: unknown }).proof).toBeDefined();
-    // The same head: nothing to say, however much time has passed.
-    expect((await w.look(w.a, { now: 1_000_000 + 10 * WITNESS_POST_MS })).posted).toBeUndefined();
-    // A newer head, but a checkpoint was posted a moment ago: it waits.
-    await w.publishA("two");
-    expect((await w.look(w.a, { now: 1_000_000 + 1000 })).posted).toBeUndefined();
-    expect((await w.look(w.a, { now: 1_000_000 + WITNESS_POST_MS + 1 })).posted).toBe(true);
+    // The same snapshot again is not posted again.
+    expect((await w.look(w.a, { held, now: 2_000_000 })).posted).toBeUndefined();
+    expect(w.witness.posts.length).toBe(1);
+    // Each new snapshot is: there is no wait of five minutes (the daemon keeps the pace, see "the witness, from the agent's round").
+    const two = await w.publishA("two");
+    expect((await w.look(w.a, { held: { seq: two.seq, manifestHash: manifestIdOf(two.manifestKey) }, now: 2_000_100 })).posted).toBe(true);
     expect(w.witness.held.map((h) => h.cp[4]).sort()).toEqual([1, 2]);
-    expect(readWitnessState(w.a.paths.keyFile).posted?.seq).toBe(2);
+    const state = readWitnessState(w.a.paths.keyFile);
+    expect(state.posted?.seq).toBe(2);
+    expect(state.posted?.ts).toBe(2_000_100);
   });
 
-  test("a member that takes the lease posts at once, whatever it posted a moment ago", async () => {
+  test("says what the member holds, not what the gateway shows now: a member that took in snapshot 1 posts 1 while the head is 2", async () => {
     const w = world();
-    await w.publishA("one");
-    await w.look(w.a, { now: 5_000_000 });
+    const one = await w.publishA("one");
     await w.publishA("two");
-    expect((await w.look(w.a, { now: 5_000_100, primary: true })).posted).toBe(true);
-    await w.publishA("three");
-    // Already posted as the primary: the next waits for its time.
-    expect((await w.look(w.a, { now: 5_000_200, primary: true })).posted).toBeUndefined();
-  });
-
-  test("a member that has not taken in the head posts nothing (it would be saying it saw what it did not)", async () => {
-    const w = world();
-    await w.publishA("one");
-    await w.publishA("two");
-    expect((await w.look(w.b, { heldSeq: 1 })).posted).toBeUndefined();
-    expect(w.witness.held.length).toBe(0);
-    expect((await w.look(w.b, { heldSeq: 2 })).posted).toBe(true);
+    const out = await w.look(w.b, { held: { seq: one.seq, manifestHash: manifestIdOf(one.manifestKey) } });
+    expect(out.posted).toBe(true);
+    expect(w.witness.held.map((h) => [h.cp[4], h.cp[5]])).toEqual([[1, manifestIdOf(one.manifestKey)]]);
+    // A member that holds nothing yet posts nothing.
+    expect((await w.look(w.b, { held: null })).posted).toBeUndefined();
   });
 
   test("a witness that wants the proof sent again gets it, and one that is down leaves the member 'unwitnessed' and nothing else", async () => {
@@ -299,9 +303,29 @@ describe("posting a checkpoint", () => {
     // A refused post is not a crash either.
     w.witness.refuse = [409];
     const refused = await w.look(w.a);
-    expect(refused.status).toBe("unwitnessed");
-    expect(refused.error).toContain("409");
+    expect(refused.status).toBe("fault");
+    expect(refused.error).toContain("replaced or removed");
+    expect(readWitnessState(w.a.paths.keyFile).fault?.status).toBe(409);
+    // A refusal that is not the operator's to read (a 400 or a 500) is the witness being out of reach.
+    w.witness.refuse = [500];
+    expect((await w.look(w.a)).status).toBe("unwitnessed");
     expect((await w.look(w.a)).posted).toBe(true);
+    // A post that goes through ends the fault.
+    expect(readWitnessState(w.a.paths.keyFile).fault).toBeUndefined();
+  });
+
+  test("a witness that is full, limiting or does not serve the owner is a fault the operator reads, not 'unwitnessed'", async () => {
+    const w = world();
+    await w.publishA("one");
+    for (const [status, words] of [[507, "full"], [429, "limiting"], [403, "OWNER_KEYS"]] as const) {
+      w.witness.refuse = [status];
+      const out = await w.look(w.a);
+      expect(out.status).toBe("fault");
+      expect(out.error).toContain(words);
+      const fault = readWitnessState(w.a.paths.keyFile).fault!;
+      expect(fault.status).toBe(status);
+      expect(fault.what).toContain(words);
+    }
   });
 
   test("a member whose signing key the roster does not name posts nothing", async () => {
@@ -329,7 +353,7 @@ describe("a gateway that shows an older head than another member saw", () => {
     await w.look(w.a); // posts snapshot 2
     // The gateway now shows member B the snapshot before.
     w.gateway.head = one;
-    const out = await w.look(w.b, { heldSeq: 1 });
+    const out = await w.look(w.b, { held: null });
     expect(out.status).toBe("alert");
     const state = readWitnessState(w.b.paths.keyFile);
     expect(state.alert?.kind).toBe("rollback");
@@ -365,7 +389,7 @@ describe("a gateway that shows an older head than another member saw", () => {
     await w.look(w.a);
     // The gateway shows B a head of the same sequence, with another manifest.
     w.gateway.head = { ...w.gateway.head!, manifestHash: H(99) };
-    const out = await w.look(w.b, { heldSeq: 1 });
+    const out = await w.look(w.b, { held: null });
     expect(out.status).toBe("alert");
     expect(readWitnessState(w.b.paths.keyFile).alert?.kind).toBe("different-head");
   });
@@ -453,8 +477,9 @@ describe("where the witness is", () => {
   test("no witness set: the look does nothing at all", async () => {
     const w = world();
     const keyFile = w.a.paths.keyFile;
-    const out = await lookAtWitness({ creds: credsFor(w.a.id), fleet: "x", keyFile, heldSeq: 1, primary: false, signKey: () => loadOrCreateSignKey(keyFile) });
+    const out = await lookAtWitness({ creds: credsFor(w.a.id), fleet: "x", keyFile });
     expect(out.status).toBe("off");
+    expect((await postHeld({ creds: credsFor(w.a.id), fleet: "x", keyFile, held: { seq: 1, manifestHash: H(1) }, signKey: () => loadOrCreateSignKey(keyFile) })).status).toBe("off");
     expect(existsSync(keyFile + ".witness.json")).toBe(false);
   });
 
@@ -505,9 +530,9 @@ describe("prime fleets witness", () => {
     expect(witnessUrlOf(await c.keyFile(), {})).toBe("https://w.example");
     const keyFile = await c.keyFile();
     updateWitnessState(keyFile, (s) => {
-      s.posted = { seq: 4, manifestHash: H(4), at: Date.UTC(2026, 0, 1) };
+      s.posted = { seq: 4, manifestHash: H(4), at: Date.UTC(2026, 0, 1), ts: Date.UTC(2026, 0, 1) };
       s.checked = { at: Date.UTC(2026, 0, 1, 0, 5), status: "ok", counted: 3, ignored: 1 };
-      s.alert = { kind: "rollback", seq: 9, manifestHash: H(9), spub: w.b.spub, headSeq: 4, headHash: H(4), at: 1 };
+      s.alert = { kind: "rollback", seq: 9, manifestHash: H(9), spub: w.b.spub, headSeq: 4, headHash: H(4), ts: Date.UTC(2026, 0, 2), at: 1 };
     });
     const status = await c.run("status");
     expect(status).toContain("https://w.example");
@@ -536,5 +561,124 @@ describe("prime fleets witness", () => {
     expect(readWitnessState(keyFile).acknowledged).toEqual(["fork:3:x"]);
     await expect(c.run("clear", {}, "x", "nope")).rejects.toThrow(/unknown space/);
     await expect(c.run("clear", {}, "other")).rejects.toThrow(/not in the fleet/);
+  });
+});
+
+describe("a key the roster no longer names", () => {
+  test("counts for what it saw up to the entry that ended its place, and for nothing after it: it cannot raise a fork or a rollback", () => {
+    const w = world();
+    w.chain.push({ op: "remove", device: w.b.id, seqAt: 5 } as never);
+    const v = roster(w);
+    expect(v.tenures.find((t) => t.spub === w.b.spub)?.until).toBe(5);
+    const verdict = judgeWitness(v, [held(w, w.a, 10, H(10)), held(w, w.b, 10, H(666)), held(w, w.b, 99, H(99))], { seq: 10, manifestHash: H(10) });
+    // Only A's checkpoint is a member's: B was removed at 5, and what it signs for 10 and 99 is not.
+    expect(verdict.counted).toBe(1);
+    expect(verdict.ignored).toBe(2);
+    expect(verdict.alert).toBeUndefined();
+    expect(verdict.forks).toEqual([]);
+    // What it saw before it was removed is still its own.
+    const early = judgeWitness(v, [held(w, w.a, 4, H(4)), held(w, w.b, 4, H(44))], { seq: 4, manifestHash: H(4) });
+    expect(early.counted).toBe(2);
+    expect(early.forks.length).toBe(1);
+  });
+
+  test("the old key of a member whose key was replaced by a rotation is such a key from the rotation on", () => {
+    const w = world();
+    const next = generateOwnerKey();
+    w.chain.push({ op: "rotate", device: w.b.id, xpub: w.b.spub, spub: next.publicKey, role: "member", seqAt: 7 } as never);
+    const v = roster(w);
+    expect(v.tenures.find((t) => t.spub === w.b.spub)?.until).toBe(7);
+    const verdict = judgeWitness(v, [held(w, w.b, 9, H(9)), held(w, w.b, 3, H(3))], { seq: 9, manifestHash: H(9) });
+    expect(verdict.counted).toBe(1);
+    expect(verdict.alert).toBeUndefined();
+  });
+});
+
+describe("the witness, from the agent's loop", () => {
+  const loopOf = (m: Member): SpaceLoop => ({ paths: m.paths, creds: credsFor(m.id), fleet: "x", name: "mine", primary: false }) as unknown as SpaceLoop;
+  /** The fake gateway answers every request: the witness's own are let through to it. */
+  function throughToWitness(w: World): void {
+    const fake = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = ((url: string, init: RequestInit) => (String(url).startsWith(w.witness.url) ? real()(url, init) : (fake as (u: string, i: RequestInit) => Promise<Response>)(url, init))) as typeof fetch;
+  }
+  const settle = async (loop: SpaceLoop): Promise<void> => {
+    await loop.witnessing;
+    if (loop.witnessTimer !== undefined) {
+      clearTimeout(loop.witnessTimer);
+      loop.witnessTimer = undefined;
+    }
+  };
+
+  test("posts the checkpoint of each snapshot the member holds, at most one in ten seconds with the newest in place of the skipped, and reads when the snapshot changed, at most once a minute", async () => {
+    const w = world();
+    throughToWitness(w);
+    updateWitnessState(w.a.paths.keyFile, (s) => void (s.url = w.witness.url));
+    forgetRosterAnswers();
+    await w.publishA("one");
+    const said: string[] = [];
+    const loop = loopOf(w.a);
+    // The first round reads (nothing was read yet), and has nothing to post.
+    watchWitness(loop, (t) => said.push(t));
+    await settle(loop);
+    expect(w.witness.posts.length).toBe(0);
+    expect(readWitnessState(w.a.paths.keyFile).checked?.status).toBe("not-held");
+    // A snapshot taken in is posted at once, with the hash of its manifest.
+    noteHeld(loop, 1, H(1));
+    await settle(loop);
+    expect(w.witness.posts.length).toBe(1);
+    expect(w.witness.held.map((h) => [h.cp[4], h.cp[5]])).toEqual([[1, H(1)]]);
+    // The next two come within the ten seconds: they wait, and only the newest is posted.
+    noteHeld(loop, 2, H(2));
+    noteHeld(loop, 3, H(3));
+    await settle(loop);
+    expect(w.witness.posts.length).toBe(1);
+    loop.witnessPostedAt = Date.now() - 11_000;
+    watchWitness(loop, (t) => said.push(t));
+    await settle(loop);
+    expect(w.witness.posts.length).toBe(2);
+    expect(w.witness.held.map((h) => h.cp[4]).sort()).toEqual([1, 3]);
+    // The witness was read a moment ago: a changed snapshot is not a reason to read again before a minute is out; after it, it is.
+    const readAt = readWitnessState(w.a.paths.keyFile).checked!.at;
+    expect(loop.witnessAt).toBeLessThan(readAt + 5_000);
+    loop.witnessAt = Date.now() - 30_000;
+    loop.witnessReadHeld = "3:" + H(3);
+    watchWitness(loop, (t) => said.push(t));
+    await settle(loop);
+    expect(loop.witnessAt).toBeLessThan(Date.now() - 20_000);
+    noteHeld(loop, 4, H(4));
+    loop.witnessAt = Date.now() - 61_000;
+    loop.witnessPostedAt = Date.now() - 11_000;
+    watchWitness(loop, (t) => said.push(t));
+    await settle(loop);
+    expect(Date.now() - loop.witnessAt!).toBeLessThan(5_000);
+    // With nothing changed, it looks again after two minutes and not before.
+    loop.witnessAt = Date.now() - 100_000;
+    watchWitness(loop, (t) => said.push(t));
+    await settle(loop);
+    expect(Date.now() - loop.witnessAt).toBeGreaterThan(90_000);
+    loop.witnessAt = Date.now() - 121_000;
+    watchWitness(loop, (t) => said.push(t));
+    await settle(loop);
+    expect(Date.now() - loop.witnessAt!).toBeLessThan(5_000);
+  });
+
+  test("a witness that refuses the member for a reason a person has to see is reported, and one that is only out of reach is not", async () => {
+    const w = world();
+    throughToWitness(w);
+    updateWitnessState(w.a.paths.keyFile, (s) => void (s.url = w.witness.url));
+    forgetRosterAnswers();
+    await w.publishA("one");
+    const said: string[] = [];
+    const loop = loopOf(w.a);
+    watchWitness(loop, (t) => said.push(t));
+    await settle(loop);
+    w.witness.refuse = [507];
+    noteHeld(loop, 1, H(1));
+    await settle(loop);
+    expect(said.join("\n")).toContain("refuses this member");
+    expect(said.join("\n")).toContain("full");
+    expect(readWitnessState(w.a.paths.keyFile).fault?.status).toBe(507);
+    // Said once, not on every look; and the checkpoint is tried again.
+    expect(loop.witnessPosted).toBeUndefined();
   });
 });
