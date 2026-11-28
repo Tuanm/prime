@@ -1,6 +1,6 @@
-// The gateway's own reading of the roster chain, against the chain made here. The gateway's code (`api/src/fleet-roster.ts`) is
-// in this repository once the gateway side has landed; until then there is nothing to read, and the test says so and passes. Set
-// PRIME_GATEWAY_ROSTER to a file to read another copy (a branch checked out elsewhere).
+// The gateway's own reading of the roster chain, against the chain made here. The gateway's code is `api/src/fleet-roster.ts` in
+// this repository: a path that moved is a test that must say so, not one that passes without looking. Set PRIME_GATEWAY_ROSTER to a
+// file to read another copy (a branch checked out elsewhere).
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -12,7 +12,6 @@ import { applyTestTimeout } from "./setup";
 applyTestTimeout();
 
 const file = process.env.PRIME_GATEWAY_ROSTER ?? join(import.meta.dir, "..", "..", "api", "src", "fleet-roster.ts");
-const present = existsSync(file);
 
 interface State {
   head: { n: number; hash: string };
@@ -43,8 +42,8 @@ class Maker {
 }
 
 describe("the chain made here, read by the gateway", () => {
-  test(present ? "the gateway takes every kind of entry, agrees on every hash, and its fleet key is ours" : "(the gateway's roster code is not in this checkout: nothing to compare with)", async () => {
-    if (!present) return;
+  test("the gateway takes every kind of entry, agrees on every hash, and its fleet key is ours", async () => {
+    expect(existsSync(file), "the gateway's roster code is at " + file).toBe(true);
     const g = (await import(pathToFileURL(file).href)) as Gateway;
     const owner = generateOwnerKey();
     const m = new Maker(owner);
@@ -74,8 +73,8 @@ describe("the chain made here, read by the gateway", () => {
     expect(v.head.n).toBe(4);
   });
 
-  test(present ? "an entry the gateway refuses is one this side refuses too: a wrong signer, a gap, another fleet" : "(the gateway's roster code is not in this checkout)", async () => {
-    if (!present) return;
+  test("an entry the gateway refuses is one this side refuses too: a wrong signer, a gap, another fleet", async () => {
+    expect(existsSync(file), "the gateway's roster code is at " + file).toBe(true);
     const g = (await import(pathToFileURL(file).href)) as Gateway;
     const owner = generateOwnerKey();
     const intruder = generateOwnerKey();
