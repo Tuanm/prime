@@ -526,4 +526,50 @@ describe("the sweep and the log of a fleet that was deleted while the bucket was
     expect(w.states.get("acme")!.data.get("auditOrphan")).toBeUndefined();
     expect([...w.states.get("acme")!.data.keys()].filter((k) => k.startsWith("audit:"))).toEqual([]);
   });
+
+  test("a fleet made again while the log is being copied keeps its name and its first entry, and the copy stops", async () => {
+    const w = world();
+    await w.fleet("acme");
+    const put = w.bucket.put;
+    w.bucket.put = async (k: string, ...rest: unknown[]) => {
+      if (k.startsWith("audit/")) throw new Error("bucket down");
+      return (put as (...a: unknown[]) => Promise<unknown>)(k, ...rest);
+    };
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      expect((await w.call("acme", "/delete", "admin", "operator")).status).toBe(200);
+    } finally {
+      console.error = quiet;
+    }
+    w.registered.delete("acme");
+    // The bucket is back, but slow: the sweep's question reaches the copy, and waits on the first write.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reached!: () => void;
+    const atPut = new Promise<void>((r) => (reached = r));
+    w.bucket.put = async (k: string, ...rest: unknown[]) => {
+      if (k.startsWith("audit/")) {
+        reached();
+        await gate;
+      }
+      return (put as (...a: unknown[]) => Promise<unknown>)(k, ...rest);
+    };
+    const asked = w.call("acme", "/exists", "admin", "operator", undefined, "GET");
+    await atPut;
+    // The name is made again meanwhile: creating is not made to wait for the copy.
+    const created = await Promise.race([w.call("acme", "/create", "admin", "operator"), Bun.sleep(2000).then(() => "waited" as const)]);
+    expect(created).not.toBe("waited");
+    expect((created as { status: number }).status).toBe(200);
+    w.bucket.put = put;
+    release();
+    await asked;
+    const data = w.states.get("acme")!.data;
+    expect(data.get("fleetName")).toBe("acme");
+    expect(data.get("auditOrphan")).toBeUndefined();
+    // The new fleet's log has its first entry, in the chain it was started in, and goes on.
+    const log = (await w.call("acme", "/audit?tail=50", "admin", "operator", undefined, "GET")).json.entries as Array<{ n: number; action: string }>;
+    expect(log.some((e) => e.action === "fleet-recreated")).toBe(true);
+    expect(log[log.length - 1]!.n).toBeGreaterThan(0);
+  });
 });

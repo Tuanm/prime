@@ -340,12 +340,15 @@ export class AuditLog {
    * deleted, whose record of who did that must outlive it. A copy that cannot be made leaves the entries where they
    * are, and resolves false: a fleet made again under the name carries on from them (see `held`).
    */
-  async retire(): Promise<boolean> {
+  async retire(stillRetiring: () => Promise<boolean> = async () => true): Promise<boolean> {
     const prefix = await this.prefix();
     if (prefix === null) return false;
     for (;;) {
-      // Look at what is oldest; when nothing is left the log is empty, and starts again from the genesis, in this one step.
+      // Look at what is oldest; when nothing is left the log is empty, and starts again from the genesis, in this one step. A copy that
+      // finds the fleet has come back in the meantime (the name was made again while the bucket was being written to) stops: what is
+      // left is the new fleet's log, which goes on from where it is.
       const batch = await this.exclusive(async () => {
+        if (!(await stillRetiring())) return null;
         const rows = [...(await this.store.list<AuditEntry>({ prefix: PREFIX, limit: this.limits.batch })).values()];
         if (rows.length === 0) {
           this.head = { n: 0, hash: GENESIS };
@@ -353,6 +356,7 @@ export class AuditLog {
         }
         return rows;
       });
+      if (batch === null) return false;
       if (batch.length === 0) return true;
       try {
         await this.archive(this.fileName(prefix, batch[0]!), this.lines(batch), { fleet: prefix.split("/")[1] ?? "", first: String(batch[0]!.n), last: String(batch[batch.length - 1]!.n) });

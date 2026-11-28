@@ -655,14 +655,18 @@ export class FleetDO implements DurableObject {
    */
   private async retryOrphanLog(): Promise<boolean> {
     if ((await this.storage.get<boolean>("auditOrphan")) !== true || (await this.exists())) return false;
-    const kept = await this.auditLog().retire().catch(() => false);
-    if (kept) {
+    // The copy waits on the bucket between batches, and the fleet's name may be made again meanwhile: `/create` does not wait for this
+    // (an input gate held behind a network call is the deadlock the audit queue avoids), so the copy looks again before each batch
+    // and stops when the fleet is back, and the name is cleared only if it is still gone when the copy ends.
+    const orphaned = async (): Promise<boolean> => (await this.storage.get<boolean>("auditOrphan")) === true && !(await this.exists());
+    const kept = await this.auditLog().retire(orphaned).catch(() => false);
+    if (kept && (await orphaned())) {
       await this.storage.delete("fleetName");
       await this.storage.delete("auditOrphan");
       this.fleetName = "";
       return false;
     }
-    return true;
+    return (await this.storage.get<boolean>("auditOrphan")) === true;
   }
 
   private async readAudit(caller: Caller, url: URL): Promise<Response> {
