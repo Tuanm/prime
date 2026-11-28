@@ -24,18 +24,24 @@ on:
         required: false
         type: string
 
+# Read-only unless a job says otherwise: the job that runs the tests (and so the project's dependencies) can
+# write nothing. Only the job that builds and publishes has write permissions, and it runs no test and no
+# install script.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: release-cli-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build prime for all platforms
+  test:
+    name: Typecheck and test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -85,6 +91,30 @@ jobs:
         working-directory: cli
         run: bun test
 
+  release:
+    name: Build prime for all platforms
+    needs: test
+    runs-on: ubuntu-latest
+    # The only job that can write: it builds, pushes the image and makes the draft. It runs no test and no
+    # install script of the project's dependencies.
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      - name: Install CLI dependencies without running their scripts
+        working-directory: cli
+        run: bun install --frozen-lockfile --ignore-scripts
+
       # The codespace image that 'prime spaces create' pulls. Built only for a
       # tag: a dispatch run builds the binaries and stops there. It is built
       # BEFORE the release binaries, because the binaries name it by digest
@@ -92,10 +122,16 @@ jobs:
       - name: Set up QEMU
         if: github.ref_type == 'tag'
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          # The emulator image, by digest (the current tonistiigi/binfmt at the time of pinning).
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
 
       - name: Set up Buildx
         if: github.ref_type == 'tag'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          # The builder image, by digest (moby/buildkit:buildx-stable-1 at the time of pinning).
+          driver-opts: image=moby/buildkit@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
 
       - name: Log in to GHCR
         if: github.ref_type == 'tag'
@@ -112,7 +148,7 @@ jobs:
         if: github.ref_type == 'tag'
         working-directory: cli
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p image-bin
@@ -126,7 +162,7 @@ jobs:
         if: github.ref_type == 'tag'
         working-directory: cli
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
@@ -164,21 +200,21 @@ jobs:
       - name: Build every target
         working-directory: cli
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
           # Empty for a dispatch run, which builds no image.
-          SPACE_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          SPACE_IMAGE: ${{ steps.image.outputs.ref }}
         run: |
           set -euo pipefail
           ARGS=(--version "$VERSION")
-          if [ -n "${SPACE_IMAGE_DIGEST:-}" ]; then
-            ARGS+=(--space-image-digest "$SPACE_IMAGE_DIGEST")
+          if [ -n "${SPACE_IMAGE:-}" ]; then
+            ARGS+=(--space-image "$SPACE_IMAGE")
           fi
           bun run build "${ARGS[@]}"
 
       - name: Package artifacts
         working-directory: cli/dist
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
           SPACE_IMAGE_REF: ${{ steps.image.outputs.ref }}
         run: |
           set -euo pipefail
@@ -212,10 +248,22 @@ jobs:
           ls -la
           cat SHA256SUMS RELEASE
 
+      # RELEASE and SHA256SUMS as this run made them, kept apart from the (large) binaries: whoever signs the draft
+      # checks that the draft holds exactly these, so that a draft changed after the build is not signed.
+      - name: Upload the release record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-record-${{ needs.test.outputs.version }}
+          path: |
+            cli/dist/SHA256SUMS
+            cli/dist/RELEASE
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: prime-${{ steps.version.outputs.version }}
+          name: prime-${{ needs.test.outputs.version }}
           path: |
             cli/dist/prime-*
             cli/dist/SHA256SUMS
@@ -228,7 +276,7 @@ jobs:
         working-directory: cli/dist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -282,4 +330,4 @@ jobs:
           # A draft: it is published after RELEASE is signed (RELEASE.sig is uploaded
           # with the signature, then the draft is published). 'prime update' does not
           # see a draft, and refuses a release without a valid signature.
-          gh release create "$TAG" --draft --title "prime $VERSION" --notes-file RELEASE_NOTES.md prime-* SHA256SUMS RELEASE
+          gh release create "$TAG" --draft --verify-tag --title "prime $VERSION" --notes-file RELEASE_NOTES.md prime-* SHA256SUMS RELEASE

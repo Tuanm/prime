@@ -128,7 +128,7 @@ const SPACE_CREATE_FLAGS: FlagSpec[] = [
   flag("name", "string", "Space name (default: a generated device id)", { placeholder: "<name>" }),
   flag("persistent", "boolean", "Keep the state across stop/start"),
   flag("ephemeral", "boolean", "Discard the state on stop (default)"),
-  flag("image", "string", "Image to use (default: the release's ghcr.io/tuanm/prime-space tag)", { placeholder: "<image>" }),
+  flag("image", "string", "Image to use (default: the space image published with this release, by digest)", { placeholder: "<image>" }),
   flag("cpus", "number", "CPUs for the container (default 2)", { placeholder: "<n>" }),
   flag("setup", "string", "Run this script inside the space once it is up", { placeholder: "<file>" }),
   flag("memory", "string", "Memory limit, e.g. 4g (default 4g)", { placeholder: "<size>" }),

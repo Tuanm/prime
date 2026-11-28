@@ -1,6 +1,7 @@
 # A codespace image for "prime spaces": a minimal Linux with the bundled
 # device buddy, already running as a local (no gateway) MCP server on 7777.
-FROM debian:bookworm-slim
+# By digest (debian:bookworm-slim at the time of pinning): a tag that is moved changes nothing here.
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \

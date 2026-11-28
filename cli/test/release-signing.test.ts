@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { RELEASE_KEYS, parseReleaseFile, trustedReleaseKeys, verifyReleaseSignature } from "../src/release-key.ts";
+import { RELEASE_KEYS, SIGNED_SINCE, isDevBuild, parseReleaseFile, trustedReleaseKeys, verifyReleaseSignature } from "../src/release-key.ts";
 import { assetNameFor, runUpdate } from "../src/update.ts";
 import { defaultImage, imageLabel } from "../src/spaces.ts";
 import { applyTestTimeout } from "./setup";
@@ -25,7 +25,7 @@ const SAMPLE = "prime-release-v1\nversion 0.0.0-test\nsha256sums 000000000000000
 const SAMPLE_SIGNED_BY_CURRENT =
   "1JTGeYdS2DmcjIzdg/FHmHYBCIcTS5XdVH6xCdWlZxwe8xMvoB4NiJOni3Xd4oxBmBKBJBz+GJOc1XnPO3scAg==";
 const SAMPLE_SIGNED_BY_NEXT =
-  "crGOtYD4tChduCnDWU5Qgoc4Y9BGaNsrfINrRzDiYLv+avqH2B02lWFD6CIuLxkBp/R54VJfDQRMsUJhJY2LBA==";
+  "DAwuldUC/ClY1RH8MybE6fyNA+LjNvhbmJOk7/HSVGnuMEA5xVSKlfYnKmTexvfR7azkvckcBFRNu/QfQBUZDw==";
 
 describe("the release keys built into the CLI", () => {
   const embedded = RELEASE_KEYS.map((k) => Buffer.from(k, "base64"));
@@ -51,11 +51,21 @@ describe("the release keys built into the CLI", () => {
     expect(verifyReleaseSignature(sample, new Uint8Array(0), embedded)).toBe(false);
   });
 
-  test("MCP_CLI_RELEASE_KEY adds keys to the built-in ones, and ignores what is not a key", () => {
+  test("MCP_CLI_RELEASE_KEY adds keys in a development build, and ignores what is not a key", () => {
     const extra = Buffer.alloc(32, 7).toString("base64");
-    const keys = trustedReleaseKeys({ MCP_CLI_RELEASE_KEY: ` ${extra} , not-a-key ,` });
+    const keys = trustedReleaseKeys({ MCP_CLI_RELEASE_KEY: ` ${extra} , not-a-key ,` }, true);
     expect(keys).toHaveLength(3);
-    expect(trustedReleaseKeys({})).toHaveLength(2);
+    expect(trustedReleaseKeys({}, true)).toHaveLength(2);
+  });
+
+  test("a release build trusts its built-in keys and nothing from the environment", () => {
+    const extra = Buffer.alloc(32, 7).toString("base64");
+    expect(trustedReleaseKeys({ MCP_CLI_RELEASE_KEY: extra }, false)).toHaveLength(2);
+    expect(isDevBuild("26.12.10")).toBe(false);
+    expect(isDevBuild("26.12.10+1")).toBe(false);
+    expect(isDevBuild("26.12.10-dev")).toBe(true);
+    expect(isDevBuild("26.12.10-dev.2")).toBe(true);
+    expect(isDevBuild(undefined)).toBe(true);
   });
 });
 
@@ -216,13 +226,26 @@ describe("prime update checks the signature", () => {
     const { outcome, to } = await update("26.12.5", { version: "26.11.50", force: true });
     expect(outcome.updated).toBe(true);
     expect(outcome.signature).toBe("unsigned");
-    expect(warnings.join("\n")).toMatch(/warning: release 26.11.50 is older than this build and carries no signature/);
+    expect(warnings.join("\n")).toMatch(/warning: release 26.11.50 was made before releases were signed and carries no signature/);
     expect(readFileSync(to, "utf8")).toBe("the real binary");
   });
 
   test("an older release that is signed is checked all the same", async () => {
     serve({ version: "26.12.2", signedVersion: "26.12.1" });
     await expect(update("26.12.5", { version: "26.12.2", force: true })).rejects.toThrow(/signed as version 26.12.1/);
+  });
+
+  test("a release from the first signed version on is never installed unsigned, however far back the rollback goes (even forced)", async () => {
+    expect(SIGNED_SINCE).toMatch(/^\d+\.\d+\.\d+$/);
+    // The signature stripped off a release that was signed: the old path must not take it.
+    for (const version of ["26.12.2", SIGNED_SINCE, SIGNED_SINCE + "+1", "26.11.60"]) {
+      serve({ version, signed: "none" });
+      await expect(update("26.12.20", { version, force: true })).rejects.toThrow(new RegExp("releases from " + SIGNED_SINCE.replaceAll(".", "\\.") + " on are always signed"));
+      expect(existsSync(join(dir, "prime"))).toBe(false);
+    }
+    // Below it, a rollback to what was made before signing still works.
+    serve({ version: "26.11.49", signed: "none" });
+    expect((await update("26.12.20", { version: "26.11.49", force: true })).outcome.signature).toBe("unsigned");
   });
 
   test("an unsigned release is not installed again over the same version", async () => {
@@ -254,32 +277,104 @@ describe("prime update checks the signature", () => {
 // ---- the space image ----------------------------------------------------------------------------
 
 describe("the space image by digest", () => {
-  const digest = "sha256:" + "c".repeat(64);
+  const ref = "ghcr.io/someone/prime-space@sha256:" + "c".repeat(64);
 
-  test("a build with a digest names the image by it; one without names the tag", () => {
-    expect(defaultImage("26.12.10", digest)).toBe(`ghcr.io/tuanm/prime-space@${digest}`);
-    expect(defaultImage("26.12.10", undefined)).toBe("ghcr.io/tuanm/prime-space:26.12.10");
+  test("a build with an image names it, whoever owns it; one without names the tag", () => {
+    expect(defaultImage("26.12.10", ref)).toBe(ref);
+    expect(defaultImage("26.12.10", "")).toBe("ghcr.io/tuanm/prime-space:26.12.10");
     expect(defaultImage("26.12.10+1", undefined)).toBe("ghcr.io/tuanm/prime-space:26.12.10+1");
   });
 
-  test("a development build and a malformed digest use the tag", () => {
-    expect(defaultImage("26.12.10-dev", digest)).toBe("ghcr.io/tuanm/prime-space:26.12.10");
-    expect(defaultImage("26.12.10", "sha256:short")).toBe("ghcr.io/tuanm/prime-space:26.12.10");
-    expect(defaultImage("26.12.10", "latest")).toBe("ghcr.io/tuanm/prime-space:26.12.10");
+  test("a development build and a reference that is not by digest use the tag", () => {
+    expect(defaultImage("26.12.10-dev", ref)).toBe("ghcr.io/tuanm/prime-space:26.12.10");
+    expect(defaultImage("26.12.10", "ghcr.io/tuanm/prime-space@sha256:short")).toBe("ghcr.io/tuanm/prime-space:26.12.10");
+    expect(defaultImage("26.12.10", "ghcr.io/tuanm/prime-space:latest")).toBe("ghcr.io/tuanm/prime-space:26.12.10");
   });
 
   test("a message calls an image by its tag or the start of its digest", () => {
     expect(imageLabel("ghcr.io/tuanm/prime-space:26.11.44")).toBe("26.11.44");
-    expect(imageLabel(`ghcr.io/tuanm/prime-space@${digest}`)).toBe("sha256:cccccccccccc");
+    expect(imageLabel(ref)).toBe("sha256:cccccccccccc");
   });
 
-  test("the build refuses a digest that is not sha256:<64 hex>", () => {
-    const run = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--space-image-digest", "sha256:abc"], {
+  test("the build refuses an image that is not <name>@sha256:<64 hex>", () => {
+    const run = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--space-image", "ghcr.io/x/y@sha256:abc"], {
       stdout: "pipe",
       stderr: "pipe",
     });
     expect(run.exitCode).toBe(1);
-    expect(run.stderr.toString()).toContain("--space-image-digest needs sha256:");
+    expect(run.stderr.toString()).toContain("--space-image needs");
+  });
+
+  test("a release build has the image and the version built in: the environment changes neither", () => {
+    const out = mkdtempSync(join(tmpdir(), "prime-build-"));
+    const build = Bun.spawnSync(
+      ["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--space-image", ref, "--out-dir", out],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(build.stderr.toString()).toBe("");
+    expect(build.exitCode).toBe(0);
+    const bundle = readFileSync(join(out, "prime.js"), "utf8");
+    expect(bundle).toContain(ref);
+    // The image is a literal, not a read of the environment.
+    expect(bundle).not.toContain("process.env.PRIME_SPACE_IMAGE");
+    const bare = Bun.spawnSync(["bun", join(out, "prime.js"), "--version"], { env: { ...process.env, MCP_CLI_VERSION: "9.9.9", PRIME_SPACE_IMAGE: "evil" }, stdout: "pipe" });
+    expect(bare.stdout.toString().trim()).toBe("prime 26.12.10");
+  });
+});
+
+describe("a release build does not trust keys from the environment", () => {
+  test("an update to a release signed by a key only the environment names is refused by the built bundle", async () => {
+    const out = mkdtempSync(join(tmpdir(), "prime-build-"));
+    const build = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--out-dir", out], { stdout: "pipe", stderr: "pipe" });
+    expect(build.exitCode).toBe(0);
+
+    const attacker = generateKeyPairSync("ed25519");
+    const pub = Buffer.from(attacker.publicKey.export({ format: "der", type: "spki" }).subarray(-32)).toString("base64");
+    const version = "26.12.11";
+    const asset = assetNameFor(version, "bundle", process.platform, process.arch);
+    const bytes = "console.log('attacker');";
+    const sums = `${createHash("sha256").update(bytes).digest("hex")}  ${asset}\n`;
+    const release = `prime-release-v1\nversion ${version}\nsha256sums ${createHash("sha256").update(sums).digest("hex")}\n`;
+    const server: ReturnType<typeof Bun.serve> = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, self) {
+        const path = new URL(req.url).pathname;
+        const base = `http://127.0.0.1:${self.port}`;
+        if (path.endsWith("/releases")) {
+          return Response.json([
+            {
+              tag_name: `prime-v${version}`, draft: false, prerelease: false, html_url: "",
+              assets: [
+                { name: asset, browser_download_url: `${base}/asset`, size: bytes.length },
+                { name: "SHA256SUMS", browser_download_url: `${base}/sums`, size: 0 },
+                { name: "RELEASE", browser_download_url: `${base}/release`, size: 0 },
+                { name: "RELEASE.sig", browser_download_url: `${base}/sig`, size: 64 },
+              ],
+            },
+          ]);
+        }
+        if (path === "/asset") return new Response(bytes);
+        if (path === "/sums") return new Response(sums);
+        if (path === "/release") return new Response(release);
+        if (path === "/sig") return new Response(cryptoSign(null, Buffer.from(release), attacker.privateKey));
+        return new Response("nope", { status: 404 });
+      },
+    });
+    try {
+      const target = join(out, "installed.js");
+      const proc = Bun.spawn(["bun", join(out, "prime.js"), "update", "--to", target], {
+        env: { ...process.env, MCP_CLI_API_BASE: `http://127.0.0.1:${server.port}`, MCP_CLI_RELEASE_KEY: pub, PRIME_CONFIG: join(out, "config.yaml"), NO_COLOR: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const err = await new Response(proc.stderr).text();
+      expect(await proc.exited).toBe(1);
+      expect(err).toContain("not signed by the prime release key");
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      server.stop(true);
+    }
   });
 });
 
@@ -327,9 +422,43 @@ describe("the workflows", () => {
   test("the space image is pushed before the binaries that name it are built, and the release is a draft", () => {
     expect(release.indexOf("name: Build and push the space image")).toBeGreaterThan(0);
     expect(release.indexOf("name: Build and push the space image")).toBeLessThan(release.indexOf("name: Build every target"));
-    expect(release).toContain('--space-image-digest "$SPACE_IMAGE_DIGEST"');
+    expect(release).toContain('--space-image "$SPACE_IMAGE"');
     expect(release).toMatch(/gh release create "\$TAG" --draft /);
     expect(release).toContain("prime-* SHA256SUMS RELEASE");
     expect(release).not.toContain(":latest");
+  });
+
+  // The workflow as data: a job that runs the project's code (its install scripts, its tests) must not be the one that can write.
+  type Job = { needs?: string; permissions?: Record<string, string>; steps: { name?: string; run?: string; uses?: string }[] };
+  const workflow = Bun.YAML.parse(release) as { permissions?: Record<string, string>; jobs: Record<string, Job> };
+
+  test("only the job that builds and publishes can write; the one that runs the tests and the install scripts is read-only", () => {
+    expect(workflow.permissions).toEqual({ contents: "read" });
+    const tests = workflow.jobs.test!;
+    const publish = workflow.jobs.release!;
+    expect(tests.permissions).toEqual({ contents: "read" });
+    expect(publish.needs).toBe("test");
+    expect(publish.permissions).toEqual({ contents: "write", packages: "write" });
+    expect(tests.steps.some((step) => /bun test/.test(step.run ?? ""))).toBe(true);
+    // The publishing job runs no test and no script of a dependency.
+    for (const step of publish.steps) {
+      expect(step.run ?? "").not.toMatch(/\bbun test\b/);
+      if (/bun install/.test(step.run ?? "")) expect(step.run).toContain("--ignore-scripts");
+    }
+    expect(publish.steps.some((step) => /bun install/.test(step.run ?? ""))).toBe(true);
+  });
+
+  test("the release record the signer compares with is uploaded by the run, and the release is made on the tag that was built", () => {
+    expect(release).toMatch(/name: release-record-\$\{\{ needs\.test\.outputs\.version \}\}/);
+    expect(release).toContain("cli/dist/SHA256SUMS");
+    expect(release).toContain("cli/dist/RELEASE");
+    expect(release).toContain("--verify-tag");
+  });
+
+  test("the base image and the builders are named by digest", () => {
+    const dockerfile = readFileSync(join(ROOT, "spaces", "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/^FROM debian:bookworm-slim@sha256:[0-9a-f]{64}$/m);
+    expect(release).toMatch(/image: tonistiigi\/binfmt@sha256:[0-9a-f]{64}/);
+    expect(release).toMatch(/image=moby\/buildkit@sha256:[0-9a-f]{64}/);
   });
 });

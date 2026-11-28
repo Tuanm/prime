@@ -341,15 +341,15 @@ function imageExists(runtime: RuntimeInfo, image: string): boolean {
   return runtimeExec(runtime, ["image", "inspect", image], 20_000).code === 0;
 }
 
-const IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const SPACE_IMAGE_RE = /^[a-z0-9][a-z0-9./_-]*@sha256:[0-9a-f]{64}$/;
 
 /**
- * The space image a release uses. A release build has the digest of the image published with it built
- * in (the release is built after its image is pushed), so the image is named by content and a tag
- * that is moved afterwards cannot change what runs; a build without one names the tag.
+ * The space image a release uses. A release build has the image published with it built in, by digest (the release is
+ * built after its image is pushed), so the image is named by content and a tag that is moved afterwards cannot change
+ * what runs; a build without one names the tag. The reference is built in, never read from the environment.
  */
-export function defaultImage(version: string, digest: string | undefined = process.env.PRIME_SPACE_IMAGE_DIGEST): string {
-  if (digest && IMAGE_DIGEST_RE.test(digest) && !/-dev$/.test(version)) return "ghcr.io/tuanm/prime-space@" + digest;
+export function defaultImage(version: string, built: string | undefined = process.env.PRIME_SPACE_IMAGE): string {
+  if (built && SPACE_IMAGE_RE.test(built) && !/-dev$/.test(version)) return built;
   const tag = version.replace(/-dev$/, "");
   return "ghcr.io/tuanm/prime-space:" + tag;
 }
