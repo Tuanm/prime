@@ -21,6 +21,7 @@ import {
   cleanKeyProof,
   cleanLabel,
   cleanPubkey,
+  cleanSpub,
   keyChangeMessage,
   keyFingerprintLong,
   keyFingerprintMatches,
@@ -46,6 +47,7 @@ import {
 } from "./fleets";
 import { AUDIT_PAGE_MAX, AuditLog, type AuditDetail, actorOf, auditLimits } from "./fleet-audit";
 import { HitMeter, meterStorage, sendUsage } from "./usage";
+import { ROSTER_MAX_ENTRIES, RosterRefusal, type SignedEntry, begin, entryHash, extend, foldTrusted, fleetKeyOf, parseSigned } from "./fleet-roster";
 import type { Env } from "./config";
 
 
@@ -502,6 +504,12 @@ export class FleetDO implements DurableObject {
     await this.storage.delete("fetched");
     await this.storage.delete("index");
     await this.storage.delete("recent");
+    // A fleet of the name made again has no chain, and nobody fenced.
+    await this.storage.delete("roster");
+    await this.storage.delete("rosterMode");
+    await this.storage.delete("fence");
+    this.signedMemo = false;
+    this.fenceMemo = {};
     await this.storage.delete("ownerSeenAt");
     // The next fleet of the name has a key pair of its own for key-change proofs.
     await this.storage.delete("proofKey");
@@ -560,7 +568,7 @@ export class FleetDO implements DurableObject {
     const lastActivity = (await this.storage.get<number>("lastActivity")) ?? 0;
     const created = (await this.storage.get<number>("created")) ?? 0;
     const meta = await this.meta();
-    return Response.json({ members: Object.keys(members), lastActivity, created, meta });
+    return Response.json({ members: Object.keys(members), lastActivity, created, meta, rosterSigned: await this.rosterSigned() });
   }
 
   //
@@ -1009,6 +1017,9 @@ export class FleetDO implements DurableObject {
     if (path === "/audit" && request.method === "GET") return this.readAudit(caller, url);
     if (path === "/note" && request.method === "POST") return this.note(caller, body);
     if (path === "/keys" && request.method === "GET") return this.keys(caller);
+    if (path === "/roster" && request.method === "GET") return this.rosterGet(caller, url);
+    if (path === "/roster" && request.method === "POST") return this.rosterPost(caller, body, request);
+    if (path === "/remove-fence" && request.method === "POST") return this.removeFence(caller, body, request);
     if (path === "/vacate" && request.method === "POST") return this.vacate(caller, body);
 
     return Response.json({ error: "not found" }, { status: 404 });
@@ -1153,6 +1164,7 @@ export class FleetDO implements DurableObject {
     if (!inviteShape(code)) return Response.json({ error: "invalid invite code" }, { status: 400 });
     const label = cleanLabel(body.label);
     const pubkey = cleanPubkey(body.pubkey);
+    const spub = cleanSpub(body.spub);
     const codeHash = await hashCode(code);
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
@@ -1165,7 +1177,8 @@ export class FleetDO implements DurableObject {
       if (existing) {
         // Idempotent re-join: already a member is not an error. A key that is not the one the fleet
         // holds does not replace it on the strength of the device's credential: see `changeKey`.
-        const changed = pubkey ? await this.changeKey(caller, members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), request.headers.get("x-prime-fleet") ?? "") : "same";
+        const changed = pubkey ? await this.changeKey(caller, members, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), request.headers.get("x-prime-fleet") ?? "", spub) : "same";
+        if (changed === "same" && (await this.noteSpub(members, caller.deviceId, spub))) await this.storage.put("members", members);
         out = changed === "pending" ? this.keyPending() : changed === "full" ? this.tooManyPending() : Response.json({ ok: true, status: "member", member: members[caller.deviceId] });
         return;
       }
@@ -1227,6 +1240,8 @@ export class FleetDO implements DurableObject {
         deviceId: caller.deviceId,
         ...(label ? { label } : {}),
         ...(pubkey ? { pubkey } : {}),
+        ...(spub ? { spub } : {}),
+        ...(body.role === "viewer" ? { role: "viewer" as const } : {}),
         requestedAt: now,
       };
       await this.storage.put("pending", pending);
@@ -1239,6 +1254,8 @@ export class FleetDO implements DurableObject {
   private async approve(caller: Caller, body: Record<string, unknown>, fleetId: string): Promise<Response> {
     const denied = await this.requireOperatorOrOwner(caller);
     if (denied) return denied;
+    // In a fleet whose roster is signed, a member is admitted, its key replaced and its role changed by an entry the owner key signs.
+    if (await this.rosterSigned()) return this.signedRefusal("approve");
     const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
 
     let out: Response = Response.json({ error: "unreachable" }, { status: 500 });
@@ -1293,7 +1310,7 @@ export class FleetDO implements DurableObject {
           return;
         }
         delete pending[deviceId];
-        await this.replaceKey(members, deviceId, request.pubkey, fleetId, caller, "approved");
+        await this.replaceKey(members, deviceId, request.pubkey, fleetId, caller, "approved", { spub: request.spub });
         await this.storage.put("pending", pending);
         out = Response.json({ ok: true, member: members[deviceId], keyChanged: true });
         return;
@@ -1323,6 +1340,7 @@ export class FleetDO implements DurableObject {
         addedAt: Date.now(),
         addedBy: caller.deviceId,
         ...(request.pubkey ? { pubkey: request.pubkey } : {}),
+        ...(request.spub ? { spub: request.spub } : {}),
         ...(request.label ? { label: request.label } : {}),
       };
       members[deviceId] = member;
@@ -1403,57 +1421,22 @@ export class FleetDO implements DurableObject {
         out = Response.json({ ok: true, removed: "pending" });
         return;
       }
+      // In a fleet whose roster is signed, another's removal is an entry the owner key signs (after a fence). A member
+      // leaving of its own accord only gives something up, and is let go.
+      const leaving = caller.kind === "device" && caller.deviceId === deviceId;
+      if (members[deviceId] && !leaving && (await this.rosterSigned())) {
+        out = this.signedRefusal("remove");
+        return;
+      }
       // Removing a member takes a request for its key with it.
       if (pending[deviceId]) {
         delete pending[deviceId];
         await this.storage.put("pending", pending);
       }
-      const member = members[deviceId];
-      if (!member) {
-        out = Response.json({ error: "no such member" }, { status: 404 });
-        return;
-      }
-      delete members[deviceId];
-      wasMember = true;
-      // What the fleet's snapshots were when this member's key stopped being a member's: it made the
-      // ones up to there, and a member that was away has still to take them in.
-      if (member.pubkey) await this.recordLeft(member.pubkey, request.headers.get("x-prime-fleet") ?? "", deviceId);
-      // A member that leaves gives up the lease, so the fleet is not held by
-      // somebody who is no longer there.
-      const held = await this.lease();
-      if (held && held.holder === deviceId) {
-        await this.storage.delete("lease");
-        freedLease = true;
-      }
-      // Removing the owner hands the fleet to the member that has been in it
-      // the longest. A fleet whose owner is gone and that nobody can take
-      // over is a fleet nobody can run.
-      let ownerTo: string | undefined;
-      if (member.role === "owner") {
-        // A viewer never runs a fleet: if only viewers are left, the fleet has no owner and the operator runs it.
-        const rest = Object.values(members).filter((m) => m.role !== "viewer").sort((a, b) => a.addedAt - b.addedAt);
-        if (rest.length > 0) {
-          const next = rest[0]!;
-          members[next.deviceId] = { ...next, role: "owner" };
-          ownerTo = next.deviceId;
-        }
-      }
-      await this.audit(caller, "member-removed", deviceId, {
-        self: caller.kind === "device" && caller.deviceId === deviceId,
-        wasOwner: member.role === "owner",
-        freedLease,
-        ...(ownerTo ? { ownerTo } : {}),
-      });
-      // A fleet with no members is not a fleet: it goes away with the last
-      // one, rather than sitting there with nobody able to run it.
-      if (Object.keys(members).length === 0) {
-        await this.audit(caller, "fleet-deleted", undefined, { reason: "the last member left" });
-        await this.clear(request.headers.get("x-prime-fleet") ?? "");
-        out = Response.json({ ok: true, removed: "member", fleet: "gone" });
-        return;
-      }
-      await this.storage.put("members", members);
-      out = Response.json({ ok: true, removed: "member" });
+      const dropped = await this.dropMember(caller, members, deviceId, request.headers.get("x-prime-fleet") ?? "");
+      out = dropped.out;
+      wasMember = dropped.wasMember;
+      freedLease = dropped.freedLease;
     });
     // Told after the decision is made and stored, outside the block that made it:
     // a socket closed while the object is held shut is not let go of cleanly.
@@ -1461,6 +1444,63 @@ export class FleetDO implements DurableObject {
     // It is not a member any more, so it has nothing to listen for.
     if (wasMember) this.hangUp("removed", deviceId);
     return out;
+  }
+
+  /**
+   * Take a member out of the fleet (the block that holds the object shut is the caller's). Its key is a former member's key for the
+   * snapshots up to `until` (the head as it is now, unless the owner's entry says); the lease it holds is given up; the fleet is
+   * handed to the longest-standing member that is not a viewer when it was the owner; and the last one to go takes the fleet
+   * with it.
+   */
+  private async dropMember(
+    caller: Caller,
+    members: Members,
+    deviceId: string,
+    fleetId: string,
+    until?: number,
+  ): Promise<{ out: Response; wasMember: boolean; freedLease: boolean }> {
+    const member = members[deviceId];
+    if (!member) return { out: Response.json({ error: "no such member" }, { status: 404 }), wasMember: false, freedLease: false };
+    let freedLease = false;
+    delete members[deviceId];
+    // What the fleet's snapshots were when this member's key stopped being a member's: it made the
+    // ones up to there, and a member that was away has still to take them in.
+    if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId, until);
+    // A member that leaves gives up the lease, so the fleet is not held by
+    // somebody who is no longer there.
+    const held = await this.lease();
+    if (held && held.holder === deviceId) {
+      await this.storage.delete("lease");
+      freedLease = true;
+    }
+    // Removing the owner hands the fleet to the member that has been in it
+    // the longest. A fleet whose owner is gone and that nobody can take
+    // over is a fleet nobody can run.
+    let ownerTo: string | undefined;
+    if (member.role === "owner") {
+      // A viewer never runs a fleet: if only viewers are left, the fleet has no owner and the operator runs it.
+      const rest = Object.values(members).filter((m) => m.role !== "viewer").sort((a, b) => a.addedAt - b.addedAt);
+      if (rest.length > 0) {
+        const next = rest[0]!;
+        members[next.deviceId] = { ...next, role: "owner" };
+        ownerTo = next.deviceId;
+      }
+    }
+    await this.audit(caller, "member-removed", deviceId, {
+      self: caller.kind === "device" && caller.deviceId === deviceId,
+      wasOwner: member.role === "owner",
+      freedLease,
+      ...(ownerTo ? { ownerTo } : {}),
+    });
+    // A fleet with no members is not a fleet: it goes away with the last
+    // one, rather than sitting there with nobody able to run it.
+    if (Object.keys(members).length === 0) {
+      await this.audit(caller, "fleet-deleted", undefined, { reason: "the last member left" });
+      await this.clear(fleetId);
+      return { out: Response.json({ ok: true, removed: "member", fleet: "gone" }), wasMember: true, freedLease };
+    }
+    await this.storage.put("members", members);
+    return { out: Response.json({ ok: true, removed: "member" }), wasMember: true, freedLease };
   }
 
   private async revoke(caller: Caller, body: Record<string, unknown>): Promise<Response> {
@@ -1547,6 +1587,7 @@ export class FleetDO implements DurableObject {
       return Response.json({ error: "the fleet's head could not be read" }, { status: 503 });
     }
     const pubkey = cleanPubkey(body.pubkey);
+    const spub = cleanSpub(body.spub);
     const label = cleanLabel(body.label);
     // What the member can do, as it says it now: a member that says nothing (an earlier build) has nothing, so a
     // member that went back to an earlier build is not kept as if it still could.
@@ -1564,7 +1605,7 @@ export class FleetDO implements DurableObject {
         return;
       }
       if (pubkey) {
-        const changed = await this.changeKey(caller, roster, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), fleetId);
+        const changed = await this.changeKey(caller, roster, caller.deviceId, pubkey, cleanKeyProof(body.keyProof), fleetId, spub);
         if (changed === "pending") refused = this.keyPending();
         if (changed === "full") refused = this.tooManyPending();
         if (refused) return;
@@ -1574,6 +1615,7 @@ export class FleetDO implements DurableObject {
       // stale one is corrected the next time the space takes its place. A name another member already uses is
       // not taken on: the list would then show two spaces that cannot be told apart.
       let changedRoster = false;
+      if (await this.noteSpub(roster, caller.deviceId, spub)) changedRoster = true;
       if (label !== undefined && roster[caller.deviceId]!.label !== label && !findClash(roster, {}, caller.deviceId, label)) {
         roster[caller.deviceId]!.label = label;
         changedRoster = true;
@@ -1603,6 +1645,11 @@ export class FleetDO implements DurableObject {
       // told the same, as it does of any replica.
       if (members[caller.deviceId]!.role === "viewer") {
         out = Response.json({ ok: true, role: "replica", reason: "viewer", head, epoch: head.epoch, ttlMs, retryAfterMs: VIEWER_RETRY_MS });
+        return;
+      }
+      // A member that is being removed takes no place: it is a replica until the owner's entry takes it out.
+      if ((await this.fences())[caller.deviceId]) {
+        out = Response.json({ ok: true, role: "replica", reason: "fenced", head, epoch: head.epoch, ttlMs, retryAfterMs: VIEWER_RETRY_MS });
         return;
       }
       const row = await this.leaseRow();
@@ -1821,7 +1868,26 @@ export class FleetDO implements DurableObject {
   // Advance the head with a conditional write in R2. The condition is the fence:
   // a stale primary's expectedSeq no longer matches, so its write is refused by
   // storage rather than by a check this object could get wrong.
-  private async advance(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+  private advance(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+    // A publish that is running is known to the fence, which waits for it before it says where the head is.
+    const running = this.advanceNow(caller, body, request);
+    if (caller.kind === "device") {
+      const settled = running.then(
+        () => undefined,
+        () => undefined,
+      );
+      const set = this.advancing.get(caller.deviceId) ?? new Set<Promise<void>>();
+      this.advancing.set(caller.deviceId, set);
+      set.add(settled);
+      void settled.then(() => {
+        set.delete(settled);
+        if (set.size === 0 && this.advancing.get(caller.deviceId) === set) this.advancing.delete(caller.deviceId);
+      });
+    }
+    return running;
+  }
+
+  private async advanceNow(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
     if (caller.kind !== "device") return this.deny();
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
     const expectedSeq = typeof body.expectedSeq === "number" ? body.expectedSeq : -1;
@@ -1851,6 +1917,8 @@ export class FleetDO implements DurableObject {
     // Not reachable by a viewer, which is never given the lease; refused all the same, so that a lease it held some
     // other way (a role that changed under it) cannot publish.
     if ((await this.members())[caller.deviceId]?.role === "viewer") return Response.json({ error: "a viewer does not publish" }, { status: 403 });
+    // A member that is being removed (fenced) publishes nothing more: the owner signs its removal with the sequence the fence gave.
+    if ((await this.fences())[caller.deviceId]) return Response.json({ error: "this member is being removed from the fleet", fenced: true }, { status: 409 });
 
     const key = this.headKey(fleetId);
     // A publish whose object died after it wrote the head and before it was kept is made good first.
@@ -2150,10 +2218,11 @@ export class FleetDO implements DurableObject {
   // that was asleep while the primary published and then left (a machine that is retired for another)
   // still has those snapshots to take in, and they are made with a key that is no longer on the roster:
   // it is a member's for the snapshots up to there, and for none after.
-  private async recordLeft(pubkey: string, fleetId: string, device: string): Promise<void> {
+  private async recordLeft(pubkey: string, fleetId: string, device: string, until?: number): Promise<void> {
     const index = (await this.storage.get<IndexEntry[]>("index")) ?? [];
-    // The index is pushed after the head is written (see `advance`), so the head can be ahead of it.
-    const tip = Math.max(index.length > 0 ? index[index.length - 1]!.seq : 0, (await this.readHead(fleetId)).seq);
+    // The index is pushed after the head is written (see `advance`), so the head can be ahead of it. In a fleet whose roster is
+    // signed the owner names the sequence, and the gateway does not move it.
+    const tip = until ?? Math.max(index.length > 0 ? index[index.length - 1]!.seq : 0, (await this.readHead(fleetId)).seq);
     const left = ((await this.storage.get<LeftKey[]>("left")) ?? []).filter((k) => k.pubkey !== pubkey && k.until >= tip - 2 * RECENT_SNAPSHOTS);
     left.push({ pubkey, until: tip, device });
     await this.storage.put("left", left.slice(-LEFT_KEYS_KEPT));
@@ -2161,6 +2230,326 @@ export class FleetDO implements DurableObject {
 
   private async leftKeys(): Promise<{ pubkey: string; until: number }[]> {
     return ((await this.storage.get<LeftKey[]>("left")) ?? []).map(({ pubkey, until }) => ({ pubkey, until }));
+  }
+
+  // ---- the signed roster ----
+  //
+  // A fleet can be put under a chain of entries the owner key signs (see fleet-roster.ts). From the genesis on the object is in
+  // "signed" mode: a member is admitted, its key replaced, its role changed and its removal made by an entry, and the plain routes
+  // that did those (approve, another's removal, a key changed on the old key's proof) are refused with 409 and `rosterSigned`. The
+  // members check the chain themselves; the object checks it too so that what it keeps is a chain they will take, and it applies
+  // each entry to the member list the older members read.
+
+  private signedMemo?: boolean;
+  private fenceMemo?: Record<string, { seqAt: number | null; at: number }>;
+  /** Publishes that are running, by the device that makes them: a fence waits for them to land. */
+  private readonly advancing = new Map<string, Set<Promise<void>>>();
+
+  private async rosterSigned(): Promise<boolean> {
+    if (this.signedMemo === undefined) this.signedMemo = (await this.storage.get<boolean>("rosterMode")) === true;
+    return this.signedMemo;
+  }
+
+  private signedRefusal(what: "approve" | "remove"): Response {
+    return Response.json(
+      {
+        error: "this fleet's roster is signed: " + (what === "approve" ? "admitting a member, replacing its key or changing its role" : "removing a member") + " is an entry the owner key signs",
+        rosterSigned: true,
+        hint:
+          what === "approve"
+            ? "prime fleets approve <fleet> --member <id> --key <fingerprint> --signing-key <fingerprint>, on the machine that holds the owner key (a release that signs rosters)"
+            : "prime fleets remove <fleet> --member <id>, on the machine that holds the owner key (a release that signs rosters)",
+      },
+      { status: 409 },
+    );
+  }
+
+  /** What the object keeps of the fleets it fenced: a member fenced for removal publishes nothing more. */
+  private async fences(): Promise<Record<string, { seqAt: number | null; at: number }>> {
+    if (this.fenceMemo === undefined) this.fenceMemo = (await this.storage.get<Record<string, { seqAt: number | null; at: number }>>("fence")) ?? {};
+    return this.fenceMemo;
+  }
+
+  private async putFences(fences: Record<string, { seqAt: number | null; at: number }>): Promise<void> {
+    this.fenceMemo = fences;
+    if (Object.keys(fences).length === 0) await this.storage.delete("fence");
+    else await this.storage.put("fence", fences);
+  }
+
+  /** A member's signing key, as it says it: kept when the roster is the object's own, and never changed once it is signed. */
+  private async noteSpub(members: Members, deviceId: string, spub: string | undefined): Promise<boolean> {
+    const member = members[deviceId];
+    if (!spub || !member || member.spub === spub) return false;
+    if (await this.rosterSigned()) return false;
+    member.spub = spub;
+    return true;
+  }
+
+  private async rosterGet(caller: Caller, url: URL): Promise<Response> {
+    if (caller.kind !== "admin" && !(await this.members())[caller.deviceId]) return this.deny();
+    const entries = (await this.storage.get<SignedEntry[]>("roster")) ?? [];
+    const afterAsked = url.searchParams.get("after");
+    const after = afterAsked !== null && Number.isSafeInteger(Number(afterAsked)) ? Number(afterAsked) : -1;
+    const incarnation = await this.incarnation();
+    if (entries.length === 0) return Response.json({ ok: true, mode: "open", incarnation, entries: [] });
+    return Response.json({
+      ok: true,
+      mode: "signed",
+      incarnation,
+      fleetKey: await fleetKeyOf(entries[0]!.entry),
+      head: { n: entries.length - 1, hash: await entryHash(entries[entries.length - 1]!) },
+      entries: entries.filter((e) => (e.entry[3] as number) > after),
+    });
+  }
+
+  private async rosterPost(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+    let signed: SignedEntry;
+    try {
+      signed = parseSigned(body);
+    } catch (error) {
+      return Response.json({ error: error instanceof RosterRefusal ? error.message : "malformed entry" }, { status: 400 });
+    }
+    const op = signed.entry[6];
+    // A member changes the signing key it holds its own place with; everything else is the owner key's, sent by the operator or
+    // by the owner device.
+    const self = op === "rotate-self" && caller.kind === "device" && caller.deviceId === signed.entry[7];
+    if (!self) {
+      const denied = await this.requireOperatorOrOwner(caller);
+      if (denied) return denied;
+    }
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
+    let result: { out: Response; freed?: string; left?: string } = { out: Response.json({ error: "unreachable" }, { status: 500 }) };
+    await this.state.blockConcurrencyWhile(async () => {
+      try {
+        result = await this.rosterApply(caller, signed, fleetId);
+      } catch (error) {
+        if (error instanceof RosterRefusal) result = { out: Response.json({ error: error.message }, { status: error.status }) };
+        else throw error;
+      }
+    });
+    if (result.freed) this.broadcast({ type: "lease-free" }, result.freed);
+    if (result.left) this.hangUp("removed", result.left);
+    return result.out;
+  }
+
+  /** Check an entry against the chain and the fleet, apply what it says to the members, and keep it. */
+  private async rosterApply(caller: Caller, signed: SignedEntry, fleetId: string): Promise<{ out: Response; freed?: string; left?: string }> {
+    const entries = (await this.storage.get<SignedEntry[]>("roster")) ?? [];
+    const incarnation = await this.incarnation();
+    const e = signed.entry;
+    const op = e[6] as string;
+
+    if (entries.length === 0) {
+      if (!(await this.exists())) return { out: Response.json({ error: "no such fleet" }, { status: 404 }) };
+      const state = await begin(signed, fleetId, incarnation);
+      await this.storage.put("roster", [signed]);
+      await this.storage.put("rosterMode", true);
+      this.signedMemo = true;
+      await this.audit(caller, "roster-genesis", undefined, { owner: String(e[12]).slice(0, 12) });
+      return { out: Response.json({ ok: true, n: 0, hash: state.head.hash, fleetKey: await fleetKeyOf(e) }) };
+    }
+    if (entries.length >= ROSTER_MAX_ENTRIES) throw new RosterRefusal("the roster has " + ROSTER_MAX_ENTRIES + " entries, which is as long as it may be: put the fleet under a new genesis", 409);
+    const state = await foldTrusted(entries, fleetId, incarnation);
+    if (!state) throw new RosterRefusal("the roster could not be read", 500);
+    // The same entry again (a retry after the answer was lost) is the answer it had.
+    const known = entries[e[3] as number];
+    if (known && known.sig === signed.sig && JSON.stringify(known.entry) === JSON.stringify(e)) {
+      return { out: Response.json({ ok: true, n: e[3], hash: await entryHash(known), again: true }) };
+    }
+    const next = await extend(state, signed);
+
+    let effect: { freed?: string; left?: string } = {};
+    const needsHead = op === "add" || op === "rotate" || op === "rotate-self" || op === "role";
+    if (needsHead) {
+      const head = await this.readHeadOrNull(fleetId);
+      if (head === null) throw new RosterRefusal("the fleet's head could not be read", 503);
+      if ((e[11] as number) > head.seq) throw new RosterRefusal("the entry takes effect from snapshot " + String(e[11]) + ", and the head is at " + head.seq, 409);
+    }
+    switch (op) {
+      case "add":
+        await this.rosterAdd(caller, signed);
+        break;
+      case "rotate":
+        await this.rosterRotate(caller, signed, fleetId);
+        break;
+      case "rotate-self":
+        await this.rosterRotateSelf(signed);
+        break;
+      case "role":
+        effect = await this.rosterRole(caller, signed);
+        break;
+      case "remove": {
+        const removed = await this.rosterRemove(caller, signed, fleetId);
+        effect = removed.effect;
+        // The last member to go takes the fleet, and the chain with it.
+        if (removed.gone) return { out: Response.json({ ok: true, n: e[3], fleet: "gone" }), ...effect };
+        break;
+      }
+      default:
+        break;
+    }
+    entries.push(signed);
+    await this.storage.put("roster", entries);
+    await this.audit(caller, "roster-entry", typeof e[7] === "string" ? e[7] : undefined, { op, n: e[3] as number, ...(typeof e[11] === "number" ? { seqAt: e[11] } : {}) });
+    return { out: Response.json({ ok: true, n: e[3], hash: next.head.hash }), ...effect };
+  }
+
+  private async rosterAdd(caller: Caller, signed: SignedEntry): Promise<void> {
+    const e = signed.entry;
+    const device = e[7] as string;
+    const xpub = e[8] as string;
+    const spub = e[9] as string;
+    const role = e[10] as "owner" | "member" | "viewer";
+    const members = await this.members();
+    const have = members[device];
+    if (have) {
+      // A member the fleet has already (the roster is put over the fleet as it is, or this is a retry): the entry must say what
+      // the fleet holds, so that signing it changes nothing it did not show.
+      if (have.pubkey !== xpub || have.spub !== spub || have.role !== role) {
+        throw new RosterRefusal("the entry does not say what the fleet holds of " + device + " (its key, signing key or role differ)", 409);
+      }
+      return;
+    }
+    const pending = await this.joinRequests();
+    const request = pending[device];
+    if (!request || request.keyChange) throw new RosterRefusal("no request from " + device + " is waiting", 409);
+    if (request.pubkey !== xpub || request.spub !== spub) throw new RosterRefusal("the entry is for another key than the request of " + device + " offers (it was replaced since)", 409);
+    if (Object.keys(members).length >= MAX_MEMBERS) throw new RosterRefusal("fleet is full", 409);
+    const owned = Object.values(members).some((m) => m.role === "owner");
+    if (role === "owner" && owned) throw new RosterRefusal("the fleet has an owner already", 409);
+    delete pending[device];
+    const member: Member = {
+      deviceId: device,
+      // A fleet left with only viewers is owned by the next member that is not one.
+      role: role === "owner" || (role === "member" && !owned) ? "owner" : role,
+      addedAt: Date.now(),
+      addedBy: caller.deviceId || "operator",
+      pubkey: xpub,
+      spub,
+      ...(request.label ? { label: request.label } : {}),
+    };
+    members[device] = member;
+    await this.storage.put("members", members);
+    await this.storage.put("pending", pending);
+    await this.audit(caller, "member-admitted", device, { role: member.role, via: "roster", key: await keyFingerprintLong(xpub) });
+  }
+
+  private async rosterRotate(caller: Caller, signed: SignedEntry, fleetId: string): Promise<void> {
+    const e = signed.entry;
+    const device = e[7] as string;
+    const xpub = e[8] as string;
+    const spub = e[9] as string;
+    const members = await this.members();
+    const member = members[device];
+    if (!member) throw new RosterRefusal(device + " is not a member", 409);
+    const pending = await this.joinRequests();
+    const request = pending[device];
+    if (member.pubkey === xpub && member.spub === spub && !request) return;
+    if (!request?.keyChange || request.pubkey !== xpub || request.spub !== spub) {
+      throw new RosterRefusal("no request from " + device + " for this key and signing key is waiting", 409);
+    }
+    delete pending[device];
+    await this.replaceKey(members, device, xpub, fleetId, caller, "roster", { spub, until: e[11] as number });
+    await this.storage.put("pending", pending);
+  }
+
+  private async rosterRotateSelf(signed: SignedEntry): Promise<void> {
+    const e = signed.entry;
+    const device = e[7] as string;
+    const members = await this.members();
+    const member = members[device];
+    if (!member) throw new RosterRefusal(device + " is not a member", 409);
+    if (e[8] !== null && e[8] !== member.pubkey) throw new RosterRefusal("a rotate-self does not change the key snapshots are sealed for", 409);
+    if (member.spub === e[9]) return;
+    member.spub = e[9] as string;
+    await this.storage.put("members", members);
+  }
+
+  private async rosterRole(caller: Caller, signed: SignedEntry): Promise<{ freed?: string }> {
+    const e = signed.entry;
+    const device = e[7] as string;
+    const role = e[10];
+    if (role !== "member" && role !== "viewer") throw new RosterRefusal("a role entry makes a member or a viewer", 409);
+    if (!(await this.members())[device]) throw new RosterRefusal(device + " is not a member", 409);
+    const changed = await this.changeRole(caller, device, role);
+    if (changed.out.status >= 400) throw new RosterRefusal(((await changed.out.clone().json().catch(() => ({}))) as { error?: string }).error ?? "the role was not changed", changed.out.status);
+    return changed.freedLease ? { freed: device } : {};
+  }
+
+  private async rosterRemove(
+    caller: Caller,
+    signed: SignedEntry,
+    fleetId: string,
+  ): Promise<{ effect: { freed?: string; left?: string }; gone: boolean }> {
+    const e = signed.entry;
+    const device = e[7] as string;
+    const fences = await this.fences();
+    const fence = fences[device];
+    // The sequence of a removal is the one thing in it that has an effect, so it is the one the fence gave: the object took
+    // nothing more from the member from then on, and no publish of its can be above it.
+    if (!fence || fence.seqAt === null) throw new RosterRefusal("fence " + device + " first (POST /remove-fence): the removal is signed with the sequence the fence says", 409);
+    if (fence.seqAt !== e[11]) throw new RosterRefusal("the entry removes " + device + " as of snapshot " + String(e[11]) + ", and the fence says " + fence.seqAt, 409);
+    const members = await this.members();
+    let effect: { freed?: string; left?: string } = {};
+    let gone = false;
+    if (members[device]) {
+      const dropped = await this.dropMember(caller, members, device, fleetId, fence.seqAt);
+      effect = { ...(dropped.freedLease ? { freed: device } : {}), ...(dropped.wasMember ? { left: device } : {}) };
+      gone = !(await this.exists());
+    }
+    if (gone) return { effect, gone };
+    delete fences[device];
+    await this.putFences(fences);
+    const pending = await this.joinRequests();
+    if (pending[device]) {
+      delete pending[device];
+      await this.storage.put("pending", pending);
+    }
+    return { effect, gone };
+  }
+
+  /**
+   * Fence a member for removal: from now on it is given no lease, takes no claim and publishes nothing; the lease it holds is
+   * given up; and what it had in flight is waited for. The answer is the sequence of the head after that, which is the last it
+   * can have published at, and what the owner signs the removal with. Run again it answers a sequence that may be later (other
+   * members publish) and is still above anything the member made. `lift` ends the fence (a removal that was given up).
+   */
+  private async removeFence(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+    const denied = await this.requireOperatorOrOwner(caller);
+    if (denied) return denied;
+    if (!(await this.rosterSigned())) return Response.json({ error: "this fleet's roster is not signed, so there is nothing to fence a removal for" }, { status: 409 });
+    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
+    const members = await this.members();
+    const entries = (await this.storage.get<SignedEntry[]>("roster")) ?? [];
+    const state = await foldTrusted(entries, fleetId, await this.incarnation());
+    if (!members[deviceId] && !state?.live.has(deviceId)) return Response.json({ error: "no such member" }, { status: 404 });
+    const fences = await this.fences();
+    if (body.lift === true) {
+      delete fences[deviceId];
+      await this.putFences(fences);
+      await this.audit(caller, "remove-fence-lifted", deviceId);
+      return Response.json({ ok: true, lifted: true });
+    }
+    // First the mark, so that a publish that starts from here on is refused, and what runs now is waited for.
+    fences[deviceId] = { seqAt: fences[deviceId]?.seqAt ?? null, at: Date.now() };
+    await this.putFences(fences);
+    let freed = false;
+    const held = await this.lease();
+    if (held && held.holder === deviceId) {
+      await this.storage.delete("lease");
+      freed = true;
+    }
+    const claim = await this.storage.get<Claim>("claim");
+    if (claim && claim.device === deviceId) await this.storage.delete("claim");
+    if (freed) this.broadcast({ type: "lease-free" }, deviceId);
+    await Promise.all([...(this.advancing.get(deviceId) ?? [])]);
+    const head = await this.readHeadOrNull(fleetId);
+    if (head === null) return Response.json({ error: "the fleet's head could not be read", fenced: true }, { status: 503 });
+    fences[deviceId] = { seqAt: head.seq, at: Date.now() };
+    await this.putFences(fences);
+    await this.audit(caller, "member-fenced", deviceId, { seqAt: head.seq, freedLease: freed });
+    return Response.json({ ok: true, fenced: deviceId, seqAt: head.seq });
   }
 
   // ---- a member's key ----
@@ -2242,11 +2631,20 @@ export class FleetDO implements DurableObject {
   }
 
   /** Put a member's key in its place. The old key made snapshots a replica may not have taken in yet: it is a member's key up to there. */
-  private async replaceKey(members: Members, deviceId: string, pubkey: string, fleetId: string, caller: Caller, via: "approved" | "proof"): Promise<void> {
+  private async replaceKey(
+    members: Members,
+    deviceId: string,
+    pubkey: string,
+    fleetId: string,
+    caller: Caller,
+    via: "approved" | "proof" | "roster",
+    opts: { spub?: string; until?: number } = {},
+  ): Promise<void> {
     const member = members[deviceId]!;
     const was = member.pubkey;
-    if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId);
+    if (member.pubkey) await this.recordLeft(member.pubkey, fleetId, deviceId, opts.until);
     member.pubkey = pubkey;
+    if (opts.spub) member.spub = opts.spub;
     await this.storage.put("members", members);
     await this.audit(caller, "key-replaced", deviceId, { via, key: await keyFingerprintLong(pubkey), ...(was ? { was: await keyFingerprintLong(was) } : {}) });
   }
@@ -2259,7 +2657,7 @@ export class FleetDO implements DurableObject {
    * member without one) or the proof was missing, stale or wrong: the key waits as a request for the
    * operator or the owner to approve, and the roster is as it was.
    */
-  private async changeKey(caller: Caller, members: Members, deviceId: string, pubkey: string, proof: KeyProof | undefined, fleetId: string): Promise<"same" | "changed" | "pending" | "full"> {
+  private async changeKey(caller: Caller, members: Members, deviceId: string, pubkey: string, proof: KeyProof | undefined, fleetId: string, spub?: string): Promise<"same" | "changed" | "pending" | "full"> {
     const member = members[deviceId]!;
     const pending = await this.joinRequests();
     if (member.pubkey === pubkey) {
@@ -2270,21 +2668,23 @@ export class FleetDO implements DurableObject {
       }
       return "same";
     }
-    if (member.pubkey && proof && (await this.keyProofHolds(member.pubkey, pubkey, fleetId, deviceId, proof))) {
-      await this.replaceKey(members, deviceId, pubkey, fleetId, caller, "proof");
+    // A fleet whose roster is signed changes a key only by an entry the owner key signs: the old key's proof is not enough.
+    if (member.pubkey && proof && !(await this.rosterSigned()) && (await this.keyProofHolds(member.pubkey, pubkey, fleetId, deviceId, proof))) {
+      await this.replaceKey(members, deviceId, pubkey, fleetId, caller, "proof", { spub });
       if (pending[deviceId]?.keyChange) {
         delete pending[deviceId];
         await this.storage.put("pending", pending);
       }
       return "changed";
     }
-    if (pending[deviceId]?.pubkey !== pubkey) {
+    if (pending[deviceId]?.pubkey !== pubkey || (spub !== undefined && pending[deviceId]?.spub !== spub)) {
       // Not recorded, and the member is told so rather than that it waits: nobody would ever see the request.
       if (!pending[deviceId] && Object.keys(pending).length >= MAX_PENDING) return "full";
       pending[deviceId] = {
         deviceId,
         ...(member.label ? { label: member.label } : {}),
         pubkey,
+        ...(spub ? { spub } : {}),
         requestedAt: Date.now(),
         keyChange: true,
       };
@@ -2338,6 +2738,8 @@ export class FleetDO implements DurableObject {
       epoch: held ? held.epoch : 0,
       role: member.role,
       incarnation: await this.incarnation(),
+      // Whether the members of this fleet are what an owner-signed chain says (`GET /roster`), or what the gateway says.
+      rosterSigned: await this.rosterSigned(),
       // What every member of the fleet can do, and the lease the fleet runs on (the heartbeat follows it).
       fleetCaps: commonCaps(Object.values(members).map((m) => m.caps)),
       leaseMs: effectiveLeaseMs((await this.meta()).leaseMs, this.env),

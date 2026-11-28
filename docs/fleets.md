@@ -915,6 +915,63 @@ counts, and names up to 20 of the keys it would delete, so that a dry run can be
 
 A run makes at most 600 calls to the bucket and to the fleets' objects (a Worker may make 1,000 to one invocation); a fifth of them is kept for the names of fleets that are gone. When it runs out it stops, keeps where it stopped (`sweep/cursor` in the bucket), and the next day's run begins at that fleet, so on a gateway with many fleets the ones late in the registry's order are not left out every day; reaching the end of the list ends the round. The fleet's own audit log gets a `bucket-swept` entry, as the gateway's doing, with the number of objects cleared from it.
 
+## The signed roster
+
+Who is in a fleet, with which key and as what, is kept by the gateway, which is the one party a member cannot trust
+with it: left to itself it could add a key of its own so that the primary seals the next snapshot for it, or swap a
+member's key. A fleet can therefore be put under a **chain of entries signed by an owner key** that only the
+operator's machine holds. The members verify the chain themselves (that is what makes the roster theirs); the gateway
+checks it too, so that what it keeps is a chain they will take, and it applies each entry to the member list the older
+members still read. The forms are fixed by `api/witness/README.md` ("Exact forms") and are the same as the CLI's: an
+entry is the 13-element array `["prime-roster-v1", fleet, incarnation, n, prevHash, at, op, device, xpub, spub, role,
+seqAt, extra]`, signed with Ed25519 over `JSON.stringify` of the array; `prevHash` is the SHA-256 of the previous entry
+and its signature.
+
+**Reading it.** `GET /fleets/{fleet}/roster?after=N` answers `{mode, incarnation, entries, head, fleetKey}` to any
+member and to the operator. `mode` is `open` until the genesis is stored, and `signed` from then on (with `entries`
+not empty); `incarnation` is the one `GET /role` says, and the genesis is **bound to it**: a chain made for an earlier
+fleet of the same name is refused, and a fleet made again of a name starts open with a new incarnation. `GET /role` also
+says `rosterSigned`.
+
+**Writing it.** `POST /fleets/{fleet}/roster {entry, sig}` from the operator or the owner device (a member sends its own
+`rotate-self`). The object checks the shape, the position and previous hash, the fleet and incarnation, and the signer
+(the owner key, or for `rotate-self` the device's current signing key), and that the entry does something that can be
+done; then it checks the fleet agrees and applies it:
+
+| entry | the fleet must have | and then |
+| --- | --- | --- |
+| `genesis` (`n` 0, `extra` = the owner key, `seqAt` 0) | a fleet that exists, and no chain | the fleet is in signed mode |
+| `add` | a request waiting from that device for exactly that key and signing key (or, to put the roster over a fleet that is there, a member that is exactly that, with that role) | the request becomes a member, with the role the entry says |
+| `remove` | a fence for the device (below), and `seqAt` the fence's | the member goes; its key is a former member's key for snapshots up to `seqAt` (the gateway no longer chooses it) |
+| `rotate` | a waiting request from that member for exactly that key and signing key | its key is replaced; the old key is a former member's up to `seqAt` |
+| `rotate-self` | the member, signed with the signing key it holds | its signing key changes (never its sealing key) |
+| `role` | a member (not the owner) | member or viewer, in place |
+| `caller`, `caller-remove`, `owner-rotate` | nothing | kept for the members |
+
+`seqAt` of an entry that changes a member may not be above the head. A refusal is 400 for an entry that is not one,
+401 for a signature that does not verify, 409 for one the chain or the fleet does not agree with, with the reason.
+The same entry sent again (the answer was lost) is answered as it was. A chain may hold 1,000 entries; at that a fleet
+is put under a new genesis.
+
+**What a signed fleet refuses.** Admitting a member, replacing its key (including on the old key's proof), changing its
+role and removing another member without an entry answer 409 with `rosterSigned: true` and the command to run. A request
+can still be declined, and a member can still leave of its own accord. The admin page shows a waiting request as
+"awaiting roster signature" and offers no Admit, Make viewer or Remove for such a fleet.
+
+**Removing: the fence.** The one part of a removal that has an effect is the snapshot it takes effect at, and a
+publish that is in flight when the owner signs would otherwise land above it. So the owner first asks
+`POST /fleets/{fleet}/remove-fence {deviceId}`: from then the member is given no lease, takes no claim and publishes
+nothing (409, `fenced`), the lease it held is given up and the others told, the publish it had running is waited for,
+and the answer is `{seqAt}`: the head after that, which is the last it can have published at. The owner signs the
+`remove` with that `seqAt`, and the CLI checks it lies between the head it read before the fence and after it. A fence
+that is not followed by an entry stays until `{deviceId, lift: true}` ends it.
+
+**Not covered.** The gateway cannot be made to keep a roster it does not like: it can drop an entry or refuse to serve
+the chain, which the members notice as a rollback (they pin the head they have seen) but cannot prevent. A 26.11.50
+member ignores the chain, and is exposed as it was until it is upgraded; a 26.11.50 owner device cannot admit in signed
+mode (it is told so). Losing the owner key means a new genesis (a new incarnation), and every member pins the new key
+again.
+
 ## Codes made before the longer ones
 
 An anonymous device's code was six characters until the gateway began issuing 25. Nothing issues a short one

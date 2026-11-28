@@ -188,6 +188,12 @@ export interface Member {
    */
   pubkey?: string;
   /**
+   * The member's Ed25519 key for signing (base64url of the raw 32 bytes), as it said it when it joined or took its place.
+   * The signed roster names it (and the key above) for each member; it is the member's word until the operator has compared
+   * it with what the member's own machine prints and signed it in.
+   */
+  spub?: string;
+  /**
    * What the operator reads in the list: the space's name, as the space itself
    * gives it on every round. It is not an identity - the id is - and a space
    * that was renamed says so the next time it takes its place.
@@ -206,6 +212,10 @@ export interface PendingRequest {
   label?: string;
   /** The member's public key for content encryption, when it offered one. */
   pubkey?: string;
+  /** The member's Ed25519 signing key (see `Member.spub`). */
+  spub?: string;
+  /** Set when the device asks to be a viewer. It is a wish: the one who admits decides. */
+  role?: "viewer";
   requestedAt: number;
   /**
    * Set when the device is already a member and this is the key it asks to have instead of the one
@@ -297,6 +307,13 @@ export function cleanPubkey(raw: unknown): string | undefined {
   const trimmed = raw.trim();
   if (!/^[A-Za-z0-9+/]{43}=$/.test(trimmed)) return undefined;
   return trimmed;
+}
+
+/** A member's Ed25519 signing key as it is told to the gateway: base64url of 32 raw bytes. */
+export function cleanSpub(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return /^[A-Za-z0-9_-]{43}$/.test(trimmed) ? trimmed : undefined;
 }
 
 export function cleanLabel(label: unknown): string | undefined {

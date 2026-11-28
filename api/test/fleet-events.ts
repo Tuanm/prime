@@ -6,6 +6,7 @@
 // ping answered without waking anything. This runs those for real.
 
 import { spawn } from "node:child_process";
+import { createHash, generateKeyPairSync, sign as signEd25519 } from "node:crypto";
 import { rmSync } from "node:fs";
 import { port } from "./ports";
 
@@ -16,6 +17,8 @@ const PORT = port(8842);
 // FLEET_E2E_TOKEN is that gateway's operator token, for the calls only it may make.
 const EXTERNAL = (process.env.FLEET_E2E_BASE ?? "").replace(/\/+$/, "");
 const OPERATOR = process.env.FLEET_E2E_TOKEN ?? "";
+// The operator token of the gateway this test starts: the calls only the fleet operator may make (the signed roster).
+const LOCAL_OPERATOR = "e2e-operator-token-0123456789abcdef";
 const BASE = EXTERNAL || "http://127.0.0.1:" + PORT;
 const WS = BASE.replace(/^http/i, "ws");
 
@@ -39,7 +42,7 @@ async function startWorker(): Promise<{ stop: () => void }> {
   const proc = spawn(
     "node",
     [WRANGLER, "dev", "--local", "-c", ROOT + "/wrangler.dev.toml", "--port", String(PORT), "--ip", "127.0.0.1",
-      "--persist-to", ROOT + "/.wrangler/state-" + PORT, "--var", "RATE_LIMIT_MAX:100000", "--var", "FLEET_LEASE_MIN_MS:1000"],
+      "--persist-to", ROOT + "/.wrangler/state-" + PORT, "--var", "RATE_LIMIT_MAX:100000", "--var", "FLEET_LEASE_MIN_MS:1000", "--var", "FLEET_OPERATOR_TOKEN:" + LOCAL_OPERATOR],
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] },
   );
   const log: string[] = [];
@@ -122,9 +125,22 @@ async function member(path: string, device: string, token: string, body: unknown
   return { status: r.status, json: await r.json().catch(() => ({})), headers: r.headers };
 }
 
+// What the signed roster names of a member beside the key it is sealed for: an Ed25519 key of its own, and a sealing key.
+const SIGNING = new Map<string, { pub: string; sign: (entry: unknown[]) => string }>();
+function signingKeyOf(device: string) {
+  let k = SIGNING.get(device);
+  if (!k) {
+    const pair = generateKeyPairSync("ed25519");
+    k = { pub: String(pair.publicKey.export({ format: "jwk" }).x), sign: (entry) => signEd25519(null, Buffer.from(JSON.stringify(entry)), pair.privateKey).toString("base64url") };
+    SIGNING.set(device, k);
+  }
+  return k;
+}
+const sealingKeyOf = (device: string): string => createHash("sha256").update("sealing:" + device).digest().toString("base64");
+
 async function admit(device: string, token: string): Promise<void> {
   const inv = await admin("/admin/api/fleets/e2e/invite");
-  await member("/fleets/e2e/join", device, token, { code: inv.json.code, label: device, pubkey: PUBKEY });
+  await member("/fleets/e2e/join", device, token, { code: inv.json.code, label: device, pubkey: PUBKEY, spub: signingKeyOf(device).pub });
   await admin("/admin/api/fleets/e2e/approve", { deviceId: device });
 }
 
@@ -270,6 +286,65 @@ try {
   const pongsBefore = a.texts.filter((t) => t === "pong").length;
   await Bun.sleep(1500);
   check("the others are not hung up on", !a.closed && a.texts.filter((t) => t === "pong").length > pongsBefore);
+  // ---- the roster, signed ---------------------------------------------------------------------
+  // Ed25519 is checked by the runtime's own WebCrypto here, which the unit tests (Bun's) cannot show.
+  {
+    const operator = async (path: string, body: unknown, method = "POST"): Promise<{ status: number; json: any }> => {
+      const r = await fetch(BASE + path, { method, headers: { ...JSON_HEADERS, authorization: "Bearer " + (OPERATOR || LOCAL_OPERATOR) }, body: method === "GET" ? undefined : JSON.stringify(body) });
+      return { status: r.status, json: await r.json().catch(() => ({})) };
+    };
+    const open = await operator("/fleets/e2e/roster", undefined, "GET");
+    check("a fleet's roster is open until it is signed, and says which fleet it is", open.status === 200 && open.json.mode === "open" && typeof open.json.incarnation === "string", JSON.stringify(open.json));
+    const ownerPair = generateKeyPairSync("ed25519");
+    const ownerPub = String(ownerPair.publicKey.export({ format: "jwk" }).x);
+    const chain: Array<{ entry: any[]; sig: string }> = [];
+    const hashOfLast = (): string | null => {
+      const last = chain[chain.length - 1];
+      return last ? createHash("sha256").update(Buffer.from(JSON.stringify(last.entry))).update(Buffer.from(last.sig, "base64url")).digest("base64url") : null;
+    };
+    const entry = (op: string, f: { device?: string; xpub?: string; spub?: string; role?: string; seqAt?: number; extra?: string }) => {
+      const e = ["prime-roster-v1", "e2e", open.json.incarnation, chain.length, hashOfLast(), Date.now(), op, f.device ?? null, f.xpub ?? null, f.spub ?? null, f.role ?? null, f.seqAt ?? null, f.extra ?? null];
+      return { entry: e, sig: signEd25519(null, Buffer.from(JSON.stringify(e)), ownerPair.privateKey).toString("base64url") };
+    };
+    const send = async (op: string, f: Parameters<typeof entry>[1]) => {
+      const signed = entry(op, f);
+      const res = await operator("/fleets/e2e/roster", signed);
+      if (res.status === 200) chain.push(signed);
+      return res;
+    };
+    const genesis = await send("genesis", { seqAt: 0, extra: ownerPub });
+    check("the genesis is taken (the runtime verifies the Ed25519 signature)", genesis.status === 200, JSON.stringify(genesis.json));
+    const forged = entry("add", { device: "dev-a", xpub: PUBKEY, spub: signingKeyOf("dev-a").pub, role: "owner", seqAt: 0 });
+    forged.sig = signEd25519(null, Buffer.from(JSON.stringify(forged.entry)), generateKeyPairSync("ed25519").privateKey).toString("base64url");
+    check("an entry signed by another key is refused", (await operator("/fleets/e2e/roster", forged)).status === 401);
+    const members = (await admin("/admin/api/fleets/e2e/members", {}, "GET")).json.members as Array<{ deviceId: string; role: string; pubkey: string; spub?: string }> | undefined;
+    const roster = (await operator("/fleets/e2e/members", undefined, "GET")).json.members as Array<{ deviceId: string; role: string; pubkey: string; spub?: string }>;
+    const here = members ?? roster;
+    for (const m of here) {
+      const added = await send("add", { device: m.deviceId, xpub: m.pubkey, spub: m.spub, role: m.role, seqAt: 0 });
+      check("the member " + m.deviceId + " is put in the roster", added.status === 200, JSON.stringify(added.json));
+    }
+    const signed = await member("/fleets/e2e/roster", "dev-a", "token-a-1234", {}).then(() => fetch(BASE + "/fleets/e2e/roster", { headers: asDevice("dev-a", "token-a-1234") }).then(async (r) => ({ status: r.status, json: (await r.json()) as any })));
+    check("a member reads the chain, signed", signed.status === 200 && signed.json.mode === "signed" && signed.json.entries.length === chain.length, JSON.stringify(signed.json).slice(0, 200));
+    const plain = await admin("/admin/api/fleets/e2e/approve", { deviceId: "dev-c" });
+    check("the plain approval is refused in a signed fleet", plain.status === 409 && plain.json.rosterSigned === true, JSON.stringify(plain.json));
+    // A new member: asks, and the owner key's add is the approval.
+    const inv = await admin("/admin/api/fleets/e2e/invite");
+    await member("/fleets/e2e/join", "dev-c", "token-c-1234", { code: inv.json.code, label: "dev-c", pubkey: sealingKeyOf("dev-c"), spub: signingKeyOf("dev-c").pub });
+    const admitted = await send("add", { device: "dev-c", xpub: sealingKeyOf("dev-c"), spub: signingKeyOf("dev-c").pub, role: "member", seqAt: 0 });
+    check("a request is made a member by the owner's entry", admitted.status === 200, JSON.stringify(admitted.json));
+    const me = await fetch(BASE + "/fleets/e2e/me", { headers: asDevice("dev-c", "token-c-1234") }).then((r) => r.json() as Promise<any>);
+    check("and the member is in", me.status === "member", JSON.stringify(me));
+    // A removal: fenced first, and signed with the sequence the fence says.
+    const noFence = await send("remove", { device: "dev-c", seqAt: 0 });
+    check("a removal without a fence is refused", noFence.status === 409, JSON.stringify(noFence.json));
+    const fence = await operator("/fleets/e2e/remove-fence", { deviceId: "dev-c" });
+    check("the fence answers a sequence", fence.status === 200 && typeof fence.json.seqAt === "number", JSON.stringify(fence.json));
+    const removedC = await send("remove", { device: "dev-c", seqAt: fence.json.seqAt });
+    check("the owner's removal is taken", removedC.status === 200, JSON.stringify(removedC.json));
+    const after = await operator("/fleets/e2e/members", undefined, "GET");
+    check("and the member is gone", !(after.json.members ?? []).some((m: { deviceId: string }) => m.deviceId === "dev-c"), JSON.stringify(after.json).slice(0, 200));
+  }
   // ---- what was done is written down -----------------------------------------------------
   const log = await admin("/admin/api/fleets/e2e/audit?tail=500", {}, "GET");
   const done: string[] = (log.json.entries ?? []).map((e: { action: string }) => e.action);

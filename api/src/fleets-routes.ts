@@ -24,7 +24,7 @@ import type { Env } from "./config";
 // so a new route cannot be reached by a path the object does not implement and
 // an unknown path is a clean 404 rather than a miss.
 // A payload id is a hex digest, so it can never traverse a path.
-const FLEET_PATH = /^\/(?:api\/)?fleets\/([a-z0-9][a-z0-9-]{0,31})(?:\/([a-z]+(?:\/[a-z0-9-]+)?))?$/;
+const FLEET_PATH = /^\/(?:api\/)?fleets\/([a-z0-9][a-z0-9-]{0,31})(?:\/([a-z]+(?:-[a-z]+)?(?:\/[a-z0-9-]+)?))?$/;
 // The first segment of an action. A second segment names the step, as in
 // "head/advance" or "packs/<id>".
 const ALLOWED_ACTIONS = new Set([
@@ -52,8 +52,10 @@ const ALLOWED_ACTIONS = new Set([
   "events",
   "meta",
   "audit",
+  "roster",
+  "remove-fence",
 ]);
-const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys", "index", "audit"]);
+const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys", "index", "audit", "roster"]);
 
 /**
  * The routes a paused fleet does not serve.
@@ -692,6 +694,10 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   // The index is asked from a sequence on.
   if (action === "index") target.search = url.search;
   // The log is read from the entry after `after`, a page at a time.
+  if (action === "roster") {
+    const after = url.searchParams.get("after");
+    if (after !== null) target.searchParams.set("after", after);
+  }
   if (action === "audit") {
     for (const name of ["after", "limit", "tail"]) {
       const v = url.searchParams.get(name);
@@ -702,7 +708,8 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     // GET /fleets/:id is the roster; forward as /members
     target.pathname = "/members";
   }
-  const method = action !== undefined && READ_ACTIONS.has(action) ? "GET" : "POST";
+  // The roster is read and written at one name.
+  const method = action === "roster" ? (request.method === "POST" ? "POST" : "GET") : action !== undefined && READ_ACTIONS.has(action) ? "GET" : "POST";
   // Every route takes a small JSON document; what is bigger is refused here, not handed to the object.
   let body: string | undefined;
   if (method === "POST") {
