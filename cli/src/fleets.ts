@@ -22,7 +22,7 @@ import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { loadOrCreateKeyPair, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, type MemberPaths, type Position } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { keyFingerprintOf } from "./fleet-crypto.ts";
 import { FleetTrust } from "./fleet-trust.ts";
@@ -760,6 +760,7 @@ export async function syncFleetSpace(
       state.seq ?? 0,
       state.memberCount ?? 0,
       state.roster,
+      withChain(state),
     );
     writeFleetState(configPath, fleetId, spaceName, {
       ...state,
@@ -767,6 +768,7 @@ export async function syncFleetSpace(
       seq: result.seq,
       memberCount: result.members,
       roster: result.roster,
+      sinceWhole: result.sinceWhole,
       // Remember the tree, so the next round knows there is nothing to do.
       tree: snap.tree,
     });
@@ -934,6 +936,8 @@ export interface FleetMemberState {
   roster?: string;
   /** The tree of the last publish, so an unchanged workspace is not published again. */
   tree?: string;
+  /** How the chain of deltas since the last whole tree stood after the last publish (see `SinceWhole`). */
+  sinceWhole?: SinceWhole;
   /**
    * A replica that fetches ahead keeps what it has downloaded but not written out:
    * the newest snapshot in its store. Never behind `seq`; see fleet-replica.ts.
@@ -1016,7 +1020,7 @@ export function readFleetState(configPath: string, fleetId: string, spaceName: s
 export function mergeFleetState(disk: FleetMemberState, next: FleetMemberState): FleetMemberState {
   const out: FleetMemberState = { ...next };
   if ((disk.seq ?? 0) > (next.seq ?? 0)) {
-    for (const key of ["seq", "base", "tree", "roster", "memberCount"] as const) {
+    for (const key of ["seq", "base", "tree", "roster", "memberCount", "sinceWhole"] as const) {
       if (disk[key] === undefined) delete out[key];
       else (out as Record<string, unknown>)[key] = disk[key];
     }
