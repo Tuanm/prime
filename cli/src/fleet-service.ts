@@ -5,7 +5,6 @@
 // fleet with no primary until a person notices and starts it again - which is
 // exactly what happened. Installing it is 'prime fleets agent install'.
 
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -14,10 +13,14 @@ import { defaultConfigPath } from "./config.ts";
 import { runsProgram, samePath } from "./fleet-paths.ts";
 import {
   installService,
+  parseLaunchdCommand,
+  parseSystemdCommand,
+  readServiceCommand,
   readServiceDefinition,
   restartService,
   serviceDefinitionPath,
   serviceStatus,
+  startTask,
   stopService,
   uninstallService,
   type Platform,
@@ -57,6 +60,8 @@ export function fleetAgentSpec(configPath: string, platform: Platform = process.
     keepAlive: true,
     // A restart finds the old agent finishing its round (an apply can take minutes): the manager lets it.
     stopTimeoutSec: STOP_TIMEOUT_SEC,
+    // Its git and container commands are not told to stop beside it: the round it finishes needs them.
+    signalMainOnly: true,
   };
 }
 
@@ -138,26 +143,26 @@ export function restartFleetAgentService(gentle = false): boolean {
 }
 
 /**
- * Whether the installed service runs this program (the file `prime update` just replaced): its definition
- * names it. undefined when the definition cannot be read, which is not a "no".
+ * Whether the installed service runs this program (the file `prime update` just replaced): the command its definition
+ * gives names it. undefined when the definition cannot say, which is not a "no".
  */
 export function fleetAgentServiceRuns(target: string): boolean | undefined {
-  const where = serviceDefinitionPath(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
-  if (where === undefined) return undefined;
-  try {
-    const text = readFileSync(where, "utf8");
-    return programNamed(text, target);
-  } catch {
-    return undefined;
-  }
+  const command = readServiceCommand(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+  return command === undefined ? undefined : runsProgram(command, target);
 }
 
-/** Whether a service definition's text runs the program: one of its words is a path to that file. */
-export function programNamed(definition: string, target: string): boolean {
-  return runsProgram(definition.split(/[\s"'<>=]+/), target);
+/** Whether a service definition's text (a unit or a plist) runs the program: one of its words is that file. undefined: no command in it. */
+export function programNamed(definition: string, target: string): boolean | undefined {
+  const command = definition.includes("<plist") ? parseLaunchdCommand(definition) : parseSystemdCommand(definition);
+  return command === undefined ? undefined : runsProgram(command, target);
 }
 
 /** Stop the installed service through its manager (it stays installed). Returns whether the manager did. */
 export function stopFleetAgentService(): boolean {
   return stopService(process.platform as Platform, { name: FLEET_AGENT_NAME, label: FLEET_AGENT_LABEL });
+}
+
+/** Start the fleet agent's Scheduled Task now (Windows). Returns whether Task Scheduler did. */
+export function startFleetAgentTask(): boolean {
+  return startTask({ name: FLEET_AGENT_NAME });
 }

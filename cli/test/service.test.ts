@@ -206,6 +206,9 @@ describe("service definitions", () => {
     const agent = fleetAgentSpec("/home/u/.prime/config.yaml", "linux");
     expect(agent.stopTimeoutSec).toBe(300);
     expect(renderSystemdUnit(agent)).toContain("TimeoutStopSec=300\n");
+    // SIGTERM to the agent alone: its git and container commands go on with the round it finishes.
+    expect(renderSystemdUnit(agent)).toContain("KillMode=mixed\n");
+    expect(renderSystemdUnit(spec)).not.toContain("KillMode");
     expect(renderLaunchdPlist(agent)).toContain("<key>ExitTimeOut</key><integer>300</integer>");
     expect(renderSystemdUnit(spec)).not.toContain("TimeoutStopSec");
     expect(renderLaunchdPlist(spec)).not.toContain("ExitTimeOut");

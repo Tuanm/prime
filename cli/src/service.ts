@@ -67,6 +67,12 @@ export interface ServiceSpec {
    * 20 s): too short for a process that finishes its round of work when it is asked to stop.
    */
   stopTimeoutSec?: number;
+  /**
+   * systemd's KillMode=mixed: SIGTERM goes to the main process only (the rest of the unit's processes are killed when the
+   * stop timeout runs out). The default sends it to every process of the unit at once, including the git and container
+   * commands a round is running, which ends the round a process that is "finishing" it was meant to be allowed to finish.
+   */
+  signalMainOnly?: boolean;
 }
 
 // ---- paths -------------------------------------------------------------------
@@ -185,6 +191,12 @@ export function systemdEnvQuote(assignment: string): string {
 
 /** The `--config` a launchd definition runs its program with. */
 export function parseLaunchdConfig(plist: string): string | undefined {
+  const list = parseLaunchdCommand(plist);
+  return list === undefined ? undefined : configOf(list);
+}
+
+/** The words a launchd definition runs (its ProgramArguments); undefined when it has none. */
+export function parseLaunchdCommand(plist: string): string[] | undefined {
   const unescape = (t: string) =>
     t
       .replace(/&#x([0-9a-fA-F]+);/g, (_m, h: string) => String.fromCodePoint(Number.parseInt(h, 16)))
@@ -196,8 +208,7 @@ export function parseLaunchdConfig(plist: string): string | undefined {
       .replace(/&amp;/g, "&");
   const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1];
   if (args === undefined) return undefined;
-  const list = [...args.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unescape(m[1]!));
-  return configOf(list);
+  return [...args.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unescape(m[1]!));
 }
 
 /** The value of `--config <path>` or `--config=<path>` in an argument list. */
@@ -210,6 +221,15 @@ function configOf(list: string[]): string | undefined {
 
 /** The `--config` a systemd unit's ExecStart runs its program with (see `systemdQuote`). */
 export function parseSystemdConfig(unit: string): string | undefined {
+  const list = parseSystemdCommand(unit);
+  return list === undefined ? undefined : configOf(list);
+}
+
+/**
+ * The words a systemd unit's ExecStart runs: the quoted ones (see `systemdQuote`, which is what an install writes), or,
+ * for a line that was written by hand without quotes, the words as they are told apart by blanks.
+ */
+export function parseSystemdCommand(unit: string): string[] | undefined {
   // As systemd reads it: `ExecStart=` with nothing after it clears what came before, and
   // the last command given is the one that runs (a drop-in's, after the unit's own).
   let line: string | undefined;
@@ -218,8 +238,10 @@ export function parseSystemdConfig(unit: string): string | undefined {
     line = value === "" ? undefined : value;
   }
   if (line === undefined) return undefined;
-  const list = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$"));
-  return configOf(list);
+  const quoted = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$"));
+  if (quoted.length > 0) return quoted;
+  // systemd's own prefixes ("-", "@", ":", "+", "!") are not part of the program.
+  return line.replace(/^[-@:+!]+/, "").split(/\s+/).filter((word) => word !== "");
 }
 
 /**
@@ -308,6 +330,31 @@ export function readServiceDefinition(
   return undefined;
 }
 
+/**
+ * The words a service's definition runs (the program and its arguments), from the definition itself: for the launchd
+ * plist and for the systemd unit with its drop-ins, as `readServiceDefinition` reads them. undefined where they cannot be
+ * told (Windows keeps them in Task Scheduler; a definition that is not there or cannot be read).
+ */
+export function readServiceCommand(
+  platform: Platform,
+  identity: { name?: string; label?: string } = {},
+  home = homedir(),
+  env: Record<string, string | undefined> = process.env,
+  dropInRoots?: string[],
+): string[] | undefined {
+  try {
+    if (platform === "linux") {
+      let text = readFileSync(systemdUnitPath(env, home, identity.name ?? SERVICE_NAME), "utf8");
+      for (const file of systemdDropIns(env, home, identity.name ?? SERVICE_NAME, dropInRoots)) text += "\n" + readFileSync(file, "utf8");
+      return parseSystemdCommand(text);
+    }
+    if (platform === "darwin") return parseLaunchdCommand(readFileSync(launchdPlistPath(home, identity.label ?? LAUNCHD_LABEL), "utf8"));
+  } catch {
+    // Not installed, or not readable.
+  }
+  return undefined;
+}
+
 /** Where a service's definition file lives (the unit, the plist); undefined where there is none (Windows keeps it in Task Scheduler). */
 export function serviceDefinitionPath(
   platform: Platform,
@@ -348,6 +395,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     "Restart=" + (spec.restart ?? "on-failure"),
     "RestartSec=5",
     ...(spec.stopTimeoutSec !== undefined ? ["TimeoutStopSec=" + spec.stopTimeoutSec] : []),
+    ...(spec.signalMainOnly ? ["KillMode=mixed"] : []),
     "",
     "[Install]",
     "WantedBy=default.target",
@@ -769,6 +817,15 @@ export function restartService(
     return existsSync(plist) && run(["launchctl", "bootstrap", "gui/" + uid(), plist]).code === 0;
   }
   return false;
+}
+
+/**
+ * Start the Task Scheduler task of a service now (Windows): the way a service that was stopped gracefully is brought
+ * back at once, instead of at the next tick of its watchdog. Only this task: it is named in full. A task that is
+ * running already is not started again (the task says to ignore a new instance). Returns whether Task Scheduler took it.
+ */
+export function startTask(identity: { name?: string } = {}, shell: Shell = realShell): boolean {
+  return shell.run(["schtasks", "/run", "/tn", TASK_PATH + taskNameOf(identity)], { timeoutMs: 30_000 }).code === 0;
 }
 
 /**
