@@ -9,6 +9,8 @@
 // Run: node --experimental-strip-types test/smoke.ts  (or bun test/smoke.ts)
 
 
+import { port } from "./ports";
+
 let pass = 0,
   fail = 0;
 const failures: string[] = [];
@@ -128,8 +130,8 @@ async function nextSse(h: SseHandle, timeoutMs = 4000): Promise<{ event: string;
 //   wrangler dev --local --port 8801 (no tokens)
 //   wrangler dev --local --port 8802 --var GATEWAY_TOKEN:... --var DEVICE_TOKEN:... --var ADMIN_TOKEN:...
 const RUN_SUFFIX = String(Date.now()).slice(-6);
-const PLAIN_PORT = Number(process.env.GW_PLAIN_PORT || 8801);
-const AUTH_PORT = Number(process.env.GW_AUTH_PORT || 8802);
+const PLAIN_PORT = Number(process.env.GW_PLAIN_PORT || port(8801));
+const AUTH_PORT = Number(process.env.GW_AUTH_PORT || port(8802));
 const plainBase = "http://127.0.0.1:" + PLAIN_PORT;
 const authBase = "http://127.0.0.1:" + AUTH_PORT;
 
@@ -290,7 +292,7 @@ async function s9_body_too_large(): Promise<void> {
 async function s10_pending_budget(): Promise<void> {
   // Dedicated instance with generous timeouts so miniflare DO cold-start and
   // keepalive-alarm quirks cannot interfere with the budget assertion.
-  const g = await startWrangler(8806, ["TIMEOUT_MS=8000", "MAX_PENDING_PER_DEVICE=2", "KEEPALIVE_TIMEOUT_MS=60000"]);
+  const g = await startWrangler(port(8806), ["TIMEOUT_MS=8000", "MAX_PENDING_PER_DEVICE=2", "KEEPALIVE_TIMEOUT_MS=60000"]);
   try {
     const dev = await connectWs(g.base + "/device/ws/s10-dev-" + RUN_SUFFIX);
     await recvJson(dev, (m) => m.type === "registered");
@@ -344,7 +346,7 @@ async function s22_admin_registry(): Promise<void> {
   // Admin UI + device registry CRUD (register -> connect -> delete -> blocked).
   // Dedicated instance so flipping the registry into per-device mode cannot
   // affect the shared-token scenarios on the auth instance.
-  const g = await startWrangler(8807, [
+  const g = await startWrangler(port(8807), [
     "DEVICE_TOKENS=" + JSON.stringify({ "seed-dev": "seed-tok" }),
     "GATEWAY_TOKEN=" + GW,
     "ADMIN_TOKEN=" + ADM,
@@ -492,7 +494,7 @@ async function s22_admin_registry(): Promise<void> {
 async function s23_online_status_persists(): Promise<void> {
   // A live tunnel must stay "online" in the registry past the online TTL.
   // Dedicated instance with a short TTL (4s) and fast re-register (1s).
-  const g = await startWrangler(8808, [
+  const g = await startWrangler(port(8808), [
     "DEVICE_TOKENS=" + JSON.stringify({ "live-dev": "live-tok" }),
     "ONLINE_TTL_MS=4000",
     "REGISTRY_REFRESH_MS=1000",
@@ -527,7 +529,7 @@ async function s23_online_status_persists(): Promise<void> {
 
 async function s24_admin_clients(): Promise<void> {
   // Relay clients are tracked per device and listed via the admin API.
-  const g = await startWrangler(8809, [
+  const g = await startWrangler(port(8809), [
     "DEVICE_TOKENS=" + JSON.stringify({ "client-dev": "client-tok" }),
     "KEEPALIVE_TIMEOUT_MS=5000",
   ]);
@@ -701,7 +703,7 @@ async function s19_devices_hidden_without_admin(): Promise<void> {
 async function s20_per_device_unknown_id_401(): Promise<void> {
   // auth instance runs in PER-DEVICE mode? No - it uses shared DEVICE_TOKEN.
   // For the per-device oracle test we use a dedicated per-device instance.
-  const g = await startWrangler(8804, ["DEVICE_TOKENS=" + JSON.stringify({ "known-dev": "tok-a", "other-dev": "tok-b" }), "GATEWAY_TOKEN=" + GW, "ADMIN_TOKEN=" + ADM]);
+  const g = await startWrangler(port(8804), ["DEVICE_TOKENS=" + JSON.stringify({ "known-dev": "tok-a", "other-dev": "tok-b" }), "GATEWAY_TOKEN=" + GW, "ADMIN_TOKEN=" + ADM]);
   try {
     // Unknown deviceId -> 401 (no existence oracle; no DO created)
     let r = await fetch(g.base + "/device/ghost-dev", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
@@ -730,7 +732,7 @@ async function s35_no_pepper_fails_closed(): Promise<void> {
   // Without a usable TOKEN_PEPPER no token can be checked: every way in is a
   // 503 that names the missing secret - never an open gateway, never a 401
   // that hides why.
-  const g = await startWrangler(8815, ["TOKEN_PEPPER=short", "DEVICE_TOKENS=" + JSON.stringify({ "known-dev": "tok-a" }), "GATEWAY_TOKEN=" + GW]);
+  const g = await startWrangler(port(8815), ["TOKEN_PEPPER=short", "DEVICE_TOKENS=" + JSON.stringify({ "known-dev": "tok-a" }), "GATEWAY_TOKEN=" + GW]);
   try {
     let r = await fetch(g.base + "/device/known-dev?token=tok-a", { method: "POST", body: "{}", headers: { authorization: "Bearer " + GW } });
     let body = await r.text();
@@ -752,7 +754,7 @@ async function s35_no_pepper_fails_closed(): Promise<void> {
 
 async function s21_long_call(): Promise<void> {
   // Long tool calls: TIMEOUT_MS=8000 on a fresh instance; device sleeps 4s then replies.
-  const g = await startWrangler(8805, ["TIMEOUT_MS=8000"]);
+  const g = await startWrangler(port(8805), ["TIMEOUT_MS=8000"]);
   try {
     const dev = await connectWs(g.base + "/device/ws/long-dev");
     await recvJson(dev, (m) => m.type === "registered");
@@ -1025,7 +1027,7 @@ async function s33_blocked_address(): Promise<void> {
   // Blocking is by address: a blocked one reaches nothing (relay, files API,
   // WebSocket upgrade), while another address keeps working and /admin stays
   // reachable so the operator can undo it.
-  const g = await startWrangler(8811, ["ADMIN_TOKEN=" + ADM]);
+  const g = await startWrangler(port(8811), ["ADMIN_TOKEN=" + ADM]);
   try {
     const reg = await fetch(g.base + "/admin/api/devices", {
       method: "POST",
@@ -1081,7 +1083,7 @@ async function s33_blocked_address(): Promise<void> {
 async function s34_admin_access(): Promise<void> {
   // /admin must refuse everything unless Cloudflare Access vouched for the
   // request: no Access JWT, no admin - so a deleted Access app closes it.
-  const enforcing = await startWrangler(8813, ["ADMIN_ACCESS=enforce", "ACCESS_TEAM_DOMAIN=team.example.com", "ACCESS_AUD=aud-1"]);
+  const enforcing = await startWrangler(port(8813), ["ADMIN_ACCESS=enforce", "ACCESS_TEAM_DOMAIN=team.example.com", "ACCESS_AUD=aud-1"]);
   try {
     const page = await fetch(enforcing.base + "/admin");
     if (page.status !== 403) return bad("s34_admin_page_closed", "status=" + page.status);
@@ -1096,7 +1098,7 @@ async function s34_admin_access(): Promise<void> {
   } finally {
     await stopWrangler(enforcing.proc);
   }
-  const open = await startWrangler(8814, ["ADMIN_ACCESS=off"]);
+  const open = await startWrangler(port(8814), ["ADMIN_ACCESS=off"]);
   try {
     if ((await fetch(open.base + "/admin")).status !== 200) return bad("s34_off_page", "not 200");
     if ((await fetch(open.base + "/admin/api/devices")).status !== 200) return bad("s34_off_api", "not 200");

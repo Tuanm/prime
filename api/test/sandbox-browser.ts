@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { port } from "./ports";
 // End-to-end: the Sandbox page (GET /mcp) in Chromium, driven by real MCP
 // clients (the official SDK) through a local gateway - or, with BASE=<url>,
 // a deployed one whose device demo/demo is registered.
@@ -12,7 +13,7 @@ import { join } from "node:path";
 const R = join(import.meta.dir, "..");
 const TMP = mkdtempSync(join(tmpdir(), "sandbox-browser-"));
 const LOCAL = !process.env.BASE;
-const PORT = 8872, B = process.env.BASE || "http://127.0.0.1:" + PORT;
+const PORT = port(8872), B = process.env.BASE || "http://127.0.0.1:" + PORT;
 const ID = "demo", TOKEN = "demo";
 let w = null;
 if (LOCAL) {

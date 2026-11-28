@@ -7,10 +7,11 @@
 
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
+import { port } from "./ports";
 
 const ROOT = import.meta.dir + "/..";
 const WRANGLER = ROOT + "/node_modules/.bin/wrangler";
-const PORT = 8842;
+const PORT = port(8842);
 // FLEET_E2E_BASE points the test at a deployed gateway instead of a local worker;
 // FLEET_E2E_TOKEN is that gateway's operator token, for the calls only it may make.
 const EXTERNAL = (process.env.FLEET_E2E_BASE ?? "").replace(/\/+$/, "");
