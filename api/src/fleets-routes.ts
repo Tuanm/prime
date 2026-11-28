@@ -582,6 +582,11 @@ export interface FleetDeps {
   cfg: GatewayConfig;
   /** prove a device credential; returns the deviceId or null. */
   authorizeDevice: (deviceId: string) => Promise<{ ok: true } | { ok: false; response: Response }>;
+  /**
+   * Whether the request carries the token this fleet answers to under its own name (the buddy token): `ok` only for exactly that
+   * fleet, so the token of one fleet is nothing at another. Not given where fleets are not reached by name.
+   */
+  authorizeFleetToken?: (fleetId: string) => Promise<{ ok: true } | { ok: false; response: Response }>;
   /** whether a device holds a tunnel right now, as the registry sees it. */
   deviceOnline?: (deviceId: string, since?: number) => Promise<boolean>;
   /** whether the operator has paused this fleet, from the registry's copy. */
@@ -698,6 +703,20 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
   let caller: FleetAuth = { admin };
   if (!admin) {
     const claimed = request.headers.get("x-prime-device") ?? url.searchParams.get("device") ?? "";
+    // The fleet itself, under its own name and with its own token, may read the owner-signed roster chain (which is public material:
+    // entries, keys and fingerprints), so that a client that reaches the fleet by that token can check what the fleet says against it.
+    // Nothing else is open to it here: not the members, not a write, not another fleet's roster.
+    if (claimed === fleetId && action === "roster" && request.method === "GET" && deps.authorizeFleetToken) {
+      const proved = await deps.authorizeFleetToken(fleetId);
+      if (!proved.ok) return proved.response;
+      const fleets = env.FLEET;
+      if (!fleets) return Response.json({ error: "fleets are not enabled on this gateway" }, { status: 503 });
+      const rosterUrl = new URL("https://fleet/roster");
+      const after = url.searchParams.get("after");
+      if (after !== null) rosterUrl.searchParams.set("after", after);
+      const rosterHeaders = new Headers({ "x-prime-caller": "admin", "x-prime-actor": "fleet-token", "x-prime-device": "", "x-prime-fleet": fleetId });
+      return await fleets.get(fleets.idFromName(fleetId)).fetch(new Request(rosterUrl, { method: "GET", headers: rosterHeaders }));
+    }
     if (!claimed) {
       // A caller that came with the gateway token and no device is an operator of an earlier gateway: say
       // what changed, instead of a bare "unauthorized".
