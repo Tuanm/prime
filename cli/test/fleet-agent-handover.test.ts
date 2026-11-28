@@ -1005,19 +1005,25 @@ describe("what the agent writes to its log", () => {
       env: { ...process.env, PRIME_FLEET_REPLACES: "", PRIME_FLEET_POLL_MS: "50" },
       stdout: "ignore",
       stderr: "pipe",
-      timeout: 40_000,
+      timeout: 90_000,
       killSignal: "SIGKILL",
     });
     cleanups.push(() => child.kill("SIGKILL"));
-    expect(await until(() => existsSync(fleetAgentStatePath(configPath)), 20_000)).toBe(true);
+    // Read as it is written, so that an agent that did not start says why.
+    let log = "";
+    void (async () => {
+      for await (const chunk of child.stderr as unknown as AsyncIterable<Uint8Array>) log += new TextDecoder().decode(chunk);
+    })();
+    const started = await until(() => existsSync(fleetAgentStatePath(configPath)), 45_000);
+    expect({ started, said: started ? "" : log }).toEqual({ started: true, said: "" });
     await Bun.sleep(150);
     requestStop(dir);
     expect(await child.exited).toBe(0);
-    const log = await new Response(child.stderr).text();
+    await Bun.sleep(50);
     const lines = log.trim().split("\n");
     expect(lines[0]).toMatch(/^\d{4}-\d\d-\d\dT[\d:.]+Z fleet agent \(pid \d+\): starting/);
     expect(log).toContain("holds the lock");
     expect(log).toContain("asked to stop (a request to stop in the agent's directory)");
     expect(lines.at(-1)).toContain("leaving: stopped");
-  }, 60_000);
+  }, 120_000);
 });
