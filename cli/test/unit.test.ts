@@ -5,8 +5,8 @@
 // target precedence, and tool-result rendering.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import { parseArgs, flag } from "../src/args.ts";
@@ -22,6 +22,7 @@ import { splitLabel } from "../src/labels.ts";
 import { renderToolResult, truncate } from "../src/output.ts";
 import { DEFAULT_GATEWAY, normalizeGateway, resolveGateway, resolveTarget, assertDeviceId } from "../src/target.ts";
 import { applyTestTimeout, testTimeoutMs } from "./setup";
+import { isolatedEnv, requireIsolated, spawnBuilt } from "./helpers/built-cli";
 
 applyTestTimeout();
 
@@ -160,16 +161,71 @@ describe("spaces and the image they run", () => {
 });
 
 describe("end-to-end runs", () => {
-  // `prime update` restarts the fleet agent of the configuration it runs with: a run of the built CLI that is not given a
-  // configuration of its own would be about the developer's (and their agent).
-  test("every run of the built CLI in the end-to-end script is given a configuration of its own", () => {
-    const lines = readFileSync(join(import.meta.dir, "e2e.ts"), "utf8").split("\n");
-    const runs = lines.flatMap((line, i) => (/Bun\.spawn(Sync)?\(\[(BIN|selfBin)\b/.test(line) ? [i] : []));
-    expect(runs.length).toBeGreaterThan(2);
-    for (const i of runs) {
-      const call = lines.slice(i, i + 20).join("\n");
-      expect(call, "the run at e2e.ts:" + (i + 1)).toMatch(/PRIME_CONFIG|anonEnv/);
+  // `prime update` restarts the fleet agent of the configuration it runs with, and a service command touches the
+  // machine's services: a run of the built CLI that is not isolated is about the developer's. Every run of it goes through
+  // `spawnBuilt` (helpers/built-cli.ts), which refuses one that has no configuration (and, but for the script about the
+  // real service manager, no home) of its own; here the scripts are read to see that nothing is run another way.
+  const dir = import.meta.dir;
+  const scripts = readdirSync(dir).filter((name) => /e2e\.ts$/.test(name));
+
+  /** The source without its comments (a comment that mentions PRIME_CONFIG satisfies nothing). */
+  const code = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[\s;,(])\/\/.*$/gm, "$1");
+
+  /** The text of the first argument of the call whose "(" is at `open`. */
+  function firstArgument(text: string, open: number): string {
+    let depth = 0;
+    let quote = "";
+    for (let i = open + 1; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+      else if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) {
+        if (depth === 0) return text.slice(open + 1, i);
+        depth--;
+      } else if (ch === "," && depth === 0) return text.slice(open + 1, i);
     }
+    return text.slice(open + 1);
+  }
+
+  const RAW_SPAWN = /(?<![\w.])(?:Bun\.spawn(?:Sync)?|spawn(?:Sync)?|execFile(?:Sync)?|execSync|exec|fork)\s*\(/g;
+
+  test("the scripts are found, and run the built CLI through the helper", () => {
+    expect(scripts).toContain("e2e.ts");
+    expect(scripts).toContain("service-e2e.ts");
+    for (const name of scripts) {
+      expect(code(readFileSync(join(dir, name), "utf8")), name).toContain("spawnBuilt(");
+    }
+  });
+
+  test("no script starts a program from anything but a literal: a command in a variable, an object, or a path could be the built CLI", () => {
+    for (const name of scripts) {
+      const text = code(readFileSync(join(dir, name), "utf8"));
+      for (const found of text.matchAll(RAW_SPAWN)) {
+        const first = firstArgument(text, found.index! + found[0].length - 1).trim();
+        const line = text.slice(0, found.index).split("\n").length;
+        // A program named by a string, or a list that starts with one: ps, bun build, node, powershell.
+        expect(/^(?:\[\s*)?["'`][^"'`]*["'`]/.test(first), name + ":" + line + " starts " + first.slice(0, 60)).toBe(true);
+      }
+      expect(/\bBun\.\$|(?<![\w$])\$`/.test(text), name + " runs a shell command").toBe(false);
+    }
+  });
+
+  test("a run that is not isolated is refused before anything starts", () => {
+    const real = userInfo().homedir;
+    expect(() => requireIsolated({})).toThrow(/PRIME_CONFIG/);
+    expect(() => requireIsolated({ PRIME_CONFIG: join(tmpdir(), "c.yaml") })).toThrow(/HOME of its own/);
+    expect(() => requireIsolated({ PRIME_CONFIG: join(real, ".prime", "config.yaml"), HOME: join(tmpdir(), "h") })).toThrow(/developer's configuration/);
+    expect(() => requireIsolated({ PRIME_CONFIG: join(tmpdir(), "c.yaml"), HOME: real })).toThrow(/developer's home/);
+    expect(() => requireIsolated(isolatedEnv(tmpdir(), join(tmpdir(), "c.yaml")))).not.toThrow();
+    // The one script about the real service manager needs a configuration of its own, and says that it keeps the real home.
+    expect(() => requireIsolated({ PRIME_CONFIG: join(tmpdir(), "c.yaml"), HOME: real }, { realHome: true })).not.toThrow();
+    expect(() => requireIsolated({ HOME: real }, { realHome: true })).toThrow(/PRIME_CONFIG/);
+    expect(() => spawnBuilt(["true"], { env: { HOME: real } })).toThrow(/PRIME_CONFIG/);
   });
 });
 

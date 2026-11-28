@@ -10,6 +10,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isolatedEnv, spawnBuilt } from "./helpers/built-cli.ts";
 
 // fileURLToPath, not URL.pathname: on Windows the latter is "/D:/a/..." -
 // not a path any API accepts.
@@ -26,6 +27,9 @@ const GATEWAY_TOKEN = "gw-e2e-secret";
 const DEVICE_TOKEN = "dev-e2e-secret";
 const CONFIG_DIR = mkdtempSync(join(tmpdir(), "prime-e2e-"));
 const CONFIG = join(CONFIG_DIR, "config.yaml");
+// Every run of the built CLI has a configuration and a home of its own (see helpers/built-cli.ts).
+const ISOLATED = isolatedEnv(CONFIG_DIR, CONFIG);
+mkdirSync(ISOLATED.HOME!, { recursive: true });
 const BIN = join(ROOT, "dist", "prime-e2e" + EXE);
 
 let pass = 0;
@@ -61,8 +65,8 @@ async function cli(
 ): Promise<RunResult> {
   const started = performance.now();
   const command = opts.via === "bundle" ? ["bun", BUNDLE, ...args] : [BIN, ...args];
-  const proc = Bun.spawn(command, {
-    env: { ...process.env, PRIME_CONFIG: CONFIG, NO_COLOR: "1", ...(opts.env ?? {}) },
+  const proc = spawnBuilt(command, {
+    env: { ...process.env, ...ISOLATED, ...(opts.env ?? {}) },
     stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
     stdout: "pipe",
     stderr: "pipe",
@@ -766,16 +770,8 @@ try {
   // configuration and a home of its own: never the developer's (whose agent, if one runs, is theirs).
   const bareHome = join(installDir, "home");
   mkdirSync(bareHome);
-  const bareProc = Bun.spawn([selfBin, "update"], {
-    env: {
-      ...process.env,
-      ...updateEnv,
-      PRIME_CONFIG: join(bareHome, "config.yaml"),
-      HOME: bareHome,
-      USERPROFILE: bareHome,
-      XDG_CONFIG_HOME: join(bareHome, ".config"),
-      NO_COLOR: "1",
-    },
+  const bareProc = spawnBuilt([selfBin, "update"], {
+    env: { ...process.env, ...updateEnv, ...isolatedEnv(installDir, join(bareHome, "config.yaml")) },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -963,8 +959,8 @@ try {
   check("connect without the required gateway token exits 3", noToken.code === 3 && noToken.err.includes("--gateway-token"), `code=${noToken.code} err=${noToken.err}`);
 
   // Foreground run: the binary re-executes itself as "prime code-mcp ...".
-  const runner = Bun.spawn([BIN, "connect", "--gateway", BASE, "--gateway-token", GATEWAY_TOKEN], {
-    env: { ...process.env, ...anonEnv, NO_COLOR: "1" },
+  const runner = spawnBuilt([BIN, "connect", "--gateway", BASE, "--gateway-token", GATEWAY_TOKEN], {
+    env: { ...process.env, ...ISOLATED, ...anonEnv },
     cwd: tmpdir(), // no src/ here: only the embedded code-mcp can run
     stdin: "ignore",
     stdout: "pipe",
@@ -1045,8 +1041,8 @@ try {
 
     // prime serve over Streamable HTTP
     const SERVE_PORT = 8857;
-    const httpServe = Bun.spawn([BIN, "serve", "--port", String(SERVE_PORT)], {
-      env: { ...process.env, ...anonEnv, NO_COLOR: "1" },
+    const httpServe = spawnBuilt([BIN, "serve", "--port", String(SERVE_PORT)], {
+      env: { ...process.env, ...ISOLATED, ...anonEnv },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

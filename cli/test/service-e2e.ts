@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchdPlistPath, systemdUnitPath } from "../src/service.ts";
+import { spawnBuilt } from "./helpers/built-cli.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const IS_WINDOWS = process.platform === "win32";
@@ -37,9 +38,12 @@ function check(name: string, cond: unknown, detail = "") {
 const dir = mkdtempSync(join(tmpdir(), "prime-service-e2e-"));
 const CONFIG = join(dir, "config.yaml");
 const ENV = { ...process.env, PRIME_CONFIG: CONFIG, NO_COLOR: "1" };
+// This script is about the real service manager of the machine, so it keeps the real home (a service's unit lives in
+// it); it still has a configuration of its own, and runs no command that touches a fleet agent.
+const REAL_MANAGER = { realHome: true };
 
 async function prime(args: string[], timeoutMs = 120_000) {
-  const proc = Bun.spawn([BIN, ...args], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const proc = spawnBuilt([BIN, ...args], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" }, REAL_MANAGER);
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
   const code = await proc.exited;
@@ -191,13 +195,13 @@ try {
   check("uninstalling twice is harmless", again.code === 0 && again.out.includes("no code-mcp service"), again.out + again.err);
 
   // ---- with no service, 'prime code-mcp' runs on the config's options ----
-  const fg = Bun.spawn([BIN, "code-mcp"], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const fg = spawnBuilt([BIN, "code-mcp"], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" }, REAL_MANAGER);
   const fgTools = await waitFor(() => listTools(CONFIG_PORT), 30_000);
   check("'prime code-mcp' uses the config's port, token and options", Array.isArray(fgTools) && fgTools.includes("remember"), JSON.stringify(fgTools));
   check("...without the credential on its command line", !processLines().some((l) => l.includes(SECRET)));
   fg.kill();
   await fg.exited;
-  const override = Bun.spawn([BIN, "code-mcp", "--port", OVERRIDE_PORT], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const override = spawnBuilt([BIN, "code-mcp", "--port", OVERRIDE_PORT], { env: ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" }, REAL_MANAGER);
   check("'prime code-mcp --port' overrides the config", Array.isArray(await waitFor(() => listTools(OVERRIDE_PORT), 30_000)));
   override.kill();
   await override.exited;
