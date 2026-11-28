@@ -23,7 +23,13 @@ import { fileURLToPath } from "node:url";
 // not a path any API accepts.
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ENTRY = `${ROOT}src/index.ts`;
-const DIST = `${ROOT}dist`;
+// --out-dir <dir> builds somewhere else (a test builds a release-like bundle without touching dist/).
+const outDirIndex = process.argv.indexOf("--out-dir");
+const DIST = outDirIndex === -1 ? `${ROOT}dist` : (process.argv[outDirIndex + 1] ?? "").replace(/[\\/]+$/, "");
+if (outDirIndex !== -1 && !DIST) {
+  console.error("--out-dir needs a directory");
+  process.exit(1);
+}
 
 interface BuildTarget {
   /** Bun --target value. */
@@ -67,21 +73,25 @@ if (versionProblem) {
   console.error(versionProblem);
   process.exit(1);
 }
-// --space-image-digest sha256:<hex> names the space image published with this release: the build then
-// uses it by digest (spaces.ts defaultImage) rather than by a tag that can be moved afterwards.
-const digestFlagIndex = process.argv.indexOf("--space-image-digest");
-const SPACE_IMAGE_DIGEST = digestFlagIndex === -1 ? undefined : process.argv[digestFlagIndex + 1];
-if (digestFlagIndex !== -1 && !/^sha256:[0-9a-f]{64}$/.test(SPACE_IMAGE_DIGEST ?? "")) {
-  console.error("--space-image-digest needs sha256:<64 hex digits>, the digest of the pushed image");
+// --space-image <ghcr.io/owner/prime-space@sha256:hex> names the space image published with this release:
+// the build then uses it by digest (spaces.ts defaultImage) rather than by a tag that can be moved afterwards.
+// The value is always built in (empty when there is no image), so a release build never reads it from the
+// environment it runs in.
+const imageFlagIndex = process.argv.indexOf("--space-image");
+const SPACE_IMAGE = imageFlagIndex === -1 ? "" : (process.argv[imageFlagIndex + 1] ?? "");
+if (imageFlagIndex !== -1 && !/^[a-z0-9][a-z0-9.\/_-]*@sha256:[0-9a-f]{64}$/.test(SPACE_IMAGE)) {
+  console.error("--space-image needs <registry/name>@sha256:<64 hex digits>, the digest of the pushed image");
   process.exit(1);
 }
 
 // `process.env.MCP_CLI_VERSION` is substituted with the literal at build time,
 // so the artifact reports the version it was built from - not the environment.
-const DEFINES: Record<string, string> = { "process.env.MCP_CLI_VERSION": JSON.stringify(VERSION) };
-if (SPACE_IMAGE_DIGEST) DEFINES["process.env.PRIME_SPACE_IMAGE_DIGEST"] = JSON.stringify(SPACE_IMAGE_DIGEST);
+const DEFINES: Record<string, string> = {
+  "process.env.MCP_CLI_VERSION": JSON.stringify(VERSION),
+  "process.env.PRIME_SPACE_IMAGE": JSON.stringify(SPACE_IMAGE),
+};
 const DEFINE = Object.entries(DEFINES).map(([k, v]) => `--define=${k}=${v}`);
-console.log(`version ${VERSION}${SPACE_IMAGE_DIGEST ? `  space image ${SPACE_IMAGE_DIGEST}` : ""}`);
+console.log(`version ${VERSION}${SPACE_IMAGE ? `  space image ${SPACE_IMAGE}` : ""}`);
 
 /** The bundled code-mcp must be reachable in the artifact, not just in src/. */
 function codeMcpSmoke(command: string[]): string | undefined {

@@ -25,14 +25,28 @@ const publicKeyFromRaw = (raw: Buffer) => createPublicKey({ key: Buffer.concat([
  */
 export const RELEASE_KEYS: readonly string[] = [
   "Ww6UD+ajPCK5MUT4iaNsPIbGIeVYDqab/EjyrmHw1Hk=",
-  "ZLtG/TZ/NE2qtlq6jfMXR0XpyY3QcZUTBJrLyB7pKrk=",
+  "34Usis0Ul+ZziayGpmbB4DVsjsRxJ3MyFVQ2EY+hgUU=",
 ];
 
-/** Extra trusted keys for a test build or a mirror run by the same person: MCP_CLI_RELEASE_KEY, comma separated base64. */
+/**
+ * The first version that ships signed releases. A release at or above it that carries no signature is never
+ * installed, whatever the running version is and even with --force: a release made by someone who can write to the
+ * release page could otherwise have its signature taken off and be installed as one "from before signing".
+ * Every release up to 26.11.50 was made before signing existed, so this is the lowest version a release with this
+ * code can have; a release made later under a higher version is covered too, and the versions in between never existed.
+ */
+export const SIGNED_SINCE = "26.11.51";
+
+/** Extra trusted keys for a test build: MCP_CLI_RELEASE_KEY, comma separated base64. Honoured in development builds only. */
 export const EXTRA_KEY_ENV = "MCP_CLI_RELEASE_KEY";
 
-export function trustedReleaseKeys(env: Record<string, string | undefined> = process.env): Buffer[] {
-  const extra = (env[EXTRA_KEY_ENV] ?? "")
+/** A development build: run from source, or built with a -dev version. A release build has its version built in (the environment cannot change it). */
+export function isDevBuild(version: string | undefined = process.env.MCP_CLI_VERSION): boolean {
+  return version === undefined || /-dev([.+]|$)/.test(version);
+}
+
+export function trustedReleaseKeys(env: Record<string, string | undefined> = process.env, allowExtra: boolean = isDevBuild()): Buffer[] {
+  const extra = (allowExtra ? (env[EXTRA_KEY_ENV] ?? "") : "")
     .split(",")
     .map((k) => k.trim())
     .filter(Boolean);

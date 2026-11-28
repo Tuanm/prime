@@ -19,7 +19,7 @@ import { accessSync, chmodSync, constants, existsSync, renameSync, rmSync, write
 import { dirname } from "node:path";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, yellow } from "./output.ts";
-import { parseReleaseFile, sha256OfBytes, verifyReleaseSignature } from "./release-key.ts";
+import { SIGNED_SINCE, parseReleaseFile, sha256OfBytes, verifyReleaseSignature } from "./release-key.ts";
 import { compareVersions, isValidVersion } from "./version.ts";
 
 export const TAG_PREFIX = "prime-v";
@@ -333,9 +333,9 @@ function installBytes(target: string, bytes: Uint8Array, mode: number): void {
 /**
  * Check that the release's SHA256SUMS is the one the release key signed.
  *
- * A release that is not older than the running build must be signed. An older one (`--version` picked
- * a release from before signing) is installed with a warning, because the running build cannot tell
- * it from one that never was signed; a release with only half of the pair is never accepted.
+ * A release from SIGNED_SINCE on must be signed, whatever the running version is. A release below it may predate
+ * signing and is installed with a warning, if it is older than the running build (a rollback to a release from before
+ * signing); a release with only half of the pair is never accepted.
  */
 export async function verifySignedRelease(
   release: Release,
@@ -351,11 +351,15 @@ export async function verifySignedRelease(
       "A release is signed by its publisher after it is built. If this one was just made, wait for the signature; if not, do not install it.",
     );
   if (!releaseAsset && !signatureAsset) {
-    if (compareVersions(release.version, current) < 0) {
-      say("warning: release " + release.version + " is older than this build and carries no signature; installing it unverified");
+    if (compareVersions(release.version, SIGNED_SINCE) < 0 && compareVersions(release.version, current) < 0) {
+      say("warning: release " + release.version + " was made before releases were signed and carries no signature; installing it unverified");
       return "unsigned";
     }
-    throw refuse("it has no RELEASE and RELEASE.sig");
+    throw refuse(
+      compareVersions(release.version, SIGNED_SINCE) >= 0
+        ? `releases from ${SIGNED_SINCE} on are always signed, and it has no RELEASE and RELEASE.sig`
+        : "it has no RELEASE and RELEASE.sig, and it is not older than this build",
+    );
   }
   if (!releaseAsset || !signatureAsset) throw refuse(`it has ${releaseAsset ? "RELEASE" : "RELEASE.sig"} but not ${releaseAsset ? "RELEASE.sig" : "RELEASE"}`);
 
@@ -486,7 +490,7 @@ export function renderUpdate(outcome: UpdateOutcome): string {
   if (outcome.updated) {
     lines.push(`  installed ${green(outcome.installed_version ?? outcome.latest)} -> ${outcome.target}`);
     if (outcome.kind === "bundle") lines.push(dim("  (run it with: bun " + outcome.target + ")"));
-    if (outcome.signature === "unsigned") lines.push(yellow("  not verified: this release is older than this build and carries no signature"));
+    if (outcome.signature === "unsigned") lines.push(yellow("  not verified: this release was made before releases were signed"));
   } else if (outcome.update_available) {
     lines.push(`  ${yellow("update available")} ${dim("run 'prime update' without --check to install it")}`);
   } else {

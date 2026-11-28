@@ -405,8 +405,8 @@ NOTES
 
 ENVIRONMENT
   GITHUB_TOKEN        Raises the GitHub API rate limit (optional)
-  MCP_CLI_RELEASE_KEY Extra trusted release keys, base64, comma separated (a
-                      mirror or test build of your own)
+  MCP_CLI_RELEASE_KEY Extra trusted release keys, base64, comma separated, for a
+                      build from source or a -dev build (ignored by a release)
   MCP_CLI_REPO        Override the repository, default Tuanm/prime
   MCP_CLI_API_BASE    Override the API base, default https://api.github.com
 `;
@@ -638,7 +638,8 @@ TOP
 OPTIONS (create)
   --name <name>       space name (default: a generated device id)
   --persistent        keep /root/work and the container across stop/start
-  --image <image>     default: ghcr.io/tuanm/prime-space:<version>
+  --image <image>     default: the image published with this release, by
+                      digest (ghcr.io/tuanm/prime-space@sha256:...)
   --cpus <n>          default 2
   --memory <size>     default 4g, e.g. 512m, 2g
   --offline           internal network only (no internet), host still connects
