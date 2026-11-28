@@ -523,6 +523,7 @@ prime fleets trust pin acme --space work --owner <fingerprint>   # pin (or repla
 What is signed is what the operator compared, not what the gateway says at the moment of signing: the gateway is the thing the signature is
 there to defeat.
 
+- `roster init` is the operator's: the gateway takes the genesis only from the operator's credential (`--operator-token` or `PRIME_FLEET_OPERATOR_TOKEN`), never from a device, the owner device included. The entries after it can come from either. A new member's `add` is signed at the head (the gateway refuses a lower place for a new member, and the command signs again when the head moved meanwhile).
 - `roster init` prints each member's key and signing key in full and a digest of those rows; `--yes` is accepted only with that digest
   (`--expect`), and refuses if the gateway lists other keys by then. Compare each key with what that member's own machine prints
   (`prime fleets members`), not through the gateway. The members are put in the roster from the start (snapshot 0): they were members before

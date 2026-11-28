@@ -44,6 +44,7 @@ import {
   signEntry,
   verifyChain,
   type OwnerKey,
+  type RosterEntry,
   type SignedEntry,
   type VerifiedRoster,
 } from "./fleet-roster.ts";
@@ -1257,6 +1258,20 @@ function verifiedForOwner(chain: SignedEntry[], fleetId: string, owner: OwnerKey
 }
 
 /** Sign the next entry of a chain and have the gateway take it; returns the chain's new head. */
+async function postEntry(
+  t: FleetTarget,
+  fleetId: string,
+  owner: OwnerKey,
+  head: { n: number; hash: string } | null,
+  incarnation: string,
+  f: Omit<Parameters<typeof makeEntry>[0], "fleet" | "incarnation" | "n" | "prevHash" | "at">,
+): Promise<{ res: Awaited<ReturnType<typeof call>>; entry: RosterEntry; signed: SignedEntry }> {
+  const entry = makeEntry({ ...f, fleet: fleetId, incarnation, n: head ? head.n + 1 : 0, prevHash: head ? head.hash : null, at: Date.now() });
+  const signed: SignedEntry = { entry, sig: signEntry(entry, owner.privateKeyPem) };
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/roster", signed);
+  return { res, entry, signed };
+}
+
 async function appendEntry(
   t: FleetTarget,
   fleetId: string,
@@ -1265,9 +1280,11 @@ async function appendEntry(
   incarnation: string,
   f: Omit<Parameters<typeof makeEntry>[0], "fleet" | "incarnation" | "n" | "prevHash" | "at">,
 ): Promise<{ n: number; hash: string; signed: SignedEntry }> {
-  const entry = makeEntry({ ...f, fleet: fleetId, incarnation, n: head ? head.n + 1 : 0, prevHash: head ? head.hash : null, at: Date.now() });
-  const signed: SignedEntry = { entry, sig: signEntry(entry, owner.privateKeyPem) };
-  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/roster", signed);
+  const { res, entry, signed } = await postEntry(t, fleetId, owner, head, incarnation, f);
+  // The genesis is the operator's to send (the gateway refuses a device's, even the owner device's).
+  if (res.status === 403 && entry[6] === "genesis") {
+    throw new CliError("the gateway did not take the genesis entry of the roster: only the operator may start a signed roster", "Run this with the operator's credential (--operator-token or PRIME_FLEET_OPERATOR_TOKEN, or --sso), not a device's. The owner key file is kept.");
+  }
   failOn(res.status, res.json, "the gateway did not take the roster entry " + entry[3] + " (" + entry[6] + ")");
   return { n: entry[3], hash: entryHash(signed), signed };
 }
@@ -1320,17 +1337,25 @@ async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId
   }
   if (!live && bool(ctx.parsed, "rotate")) throw new CliError(deviceId + " is not a member of the signed roster: --rotate is for a member's new key");
   // Where the roster says this takes effect: the head, as the gateway says it, twice (it goes forward, and no further than it was).
-  const before = await headSeqOf(t, fleetId);
-  const seqAt = await headSeqOf(t, fleetId);
-  if (seqAt < before) throw new CliError("the gateway's head went back from " + before + " to " + seqAt + " while this was being signed");
-  const done = await appendEntry(t, fleetId, owner, v.head, v.incarnation, {
-    op: live ? "rotate" : "add",
-    device: deviceId,
-    xpub: request.pubkey,
-    spub: request.spub,
-    ...(live ? {} : { role }),
-    seqAt,
-  });
+  // A new member's place begins at the head (the gateway refuses a lower one), and a snapshot published meanwhile moves it: signed again.
+  let seqAt = 0;
+  let done: { n: number; hash: string; signed: SignedEntry } | undefined;
+  for (let attempt = 0; done === undefined; attempt++) {
+    const before = await headSeqOf(t, fleetId);
+    seqAt = await headSeqOf(t, fleetId);
+    if (seqAt < before) throw new CliError("the gateway's head went back from " + before + " to " + seqAt + " while this was being signed");
+    const sent = await postEntry(t, fleetId, owner, v.head, v.incarnation, {
+      op: live ? "rotate" : "add",
+      device: deviceId,
+      xpub: request.pubkey,
+      spub: request.spub,
+      ...(live ? {} : { role }),
+      seqAt,
+    });
+    if (sent.res.status === 409 && /head is at/i.test(String(sent.res.json?.error ?? "")) && attempt < 3) continue;
+    failOn(sent.res.status, sent.res.json, "the gateway did not take the roster entry " + sent.entry[3] + " (" + sent.entry[6] + ")");
+    done = { n: sent.entry[3], hash: entryHash(sent.signed), signed: sent.signed };
+  }
   if (ctx.json) {
     printJson({ fleet: fleetId, member: deviceId, role, entry: done.n, seqAt, ...(live ? { keyChanged: true } : {}) });
     return;

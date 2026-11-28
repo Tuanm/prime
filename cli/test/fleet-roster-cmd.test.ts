@@ -25,6 +25,8 @@ interface Fake {
   /** What /head answers from the second read on (the head moves between the reads). */
   headAfterFence: number | undefined;
   witness: Array<{ path: string; body: any }>;
+  /** What POST /roster answers instead of taking the entry, once each (a gateway that wants another seqAt, or no device's genesis). */
+  refuse: Array<{ status: number; error: string }>;
   members: Array<Record<string, unknown>>;
   pending: Array<Record<string, unknown>>;
   stop(): void;
@@ -37,7 +39,7 @@ const member = (id: string, role = "member") => {
 };
 
 function fakeGateway(): Fake {
-  const state: Fake = { url: "", entries: [], signed: false, fenced: [], head: 7, fenceAt: undefined, headAfterFence: undefined, witness: [], members: [], pending: [], stop: () => undefined };
+  const state: Fake = { url: "", entries: [], signed: false, fenced: [], head: 7, fenceAt: undefined, headAfterFence: undefined, witness: [], refuse: [], members: [], pending: [], stop: () => undefined };
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -46,6 +48,8 @@ function fakeGateway(): Fake {
       const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
       if (p === "/fleets/acme/roster" && req.method === "GET") return Response.json({ mode: state.signed ? "signed" : "open", incarnation: "inc-1", entries: state.entries });
       if (p === "/fleets/acme/roster" && req.method === "POST") {
+        const refused = state.refuse.shift();
+        if (refused) return Response.json({ error: refused.error }, { status: refused.status });
         try {
           const chain = [...state.entries, body as SignedEntry];
           verifyChain(chain, { fleet: "acme", incarnation: "inc-1" });
@@ -198,6 +202,32 @@ describe("the commands that sign a fleet's roster", () => {
     expect(v.tenures.find((t) => t.device === "dev-5")?.spub).toBe(fresh.spub);
     expect(said()).toContain("admitted dev-5");
     expect(said()).toContain("as member");
+  });
+
+  test("approve for a new member is signed again at the head when the gateway says the head moved", async () => {
+    const fresh = member("dev-34");
+    gw.pending = [fresh];
+    gw.head = 40;
+    gw.refuse = [{ status: 409, error: "head is at 41: sign it again at the head" }];
+    const before = gw.entries.length;
+    await fleetsApprove(ctx("approve", ["acme"], { member: "dev-34", key: keyFingerprintOf(fresh.pubkey), "signing-key": ownerFingerprint(fresh.spub) }));
+    expect(gw.entries.length).toBe(before + 1);
+    expect(gw.refuse.length).toBe(0);
+    gw.head = 7;
+  });
+
+  test("the genesis from a device is refused by the gateway, and the operator is told what to do", async () => {
+    const was = { entries: gw.entries, signed: gw.signed };
+    gw.entries = [];
+    gw.signed = false;
+    gw.refuse = [{ status: 403, error: "forbidden" }];
+    try {
+      await expect(fleetsRoster(ctx("roster", ["init", "acme"], { yes: true, expect: (await (async () => { out.length = 0; await fleetsRoster(ctx("roster", ["init", "acme"], { "owner-key": join(dir, "other-owner.pem") })); return digestShown(); })()), "owner-key": join(dir, "other-owner.pem") }))).rejects.toThrow(/only the operator/);
+    } finally {
+      gw.refuse = [];
+      gw.entries = was.entries;
+      gw.signed = was.signed;
+    }
   });
 
   test("approve without --key signs nothing, and says which key the gateway offers", async () => {
