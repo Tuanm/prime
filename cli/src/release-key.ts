@@ -25,7 +25,7 @@ const publicKeyFromRaw = (raw: Buffer) => createPublicKey({ key: Buffer.concat([
  */
 export const RELEASE_KEYS: readonly string[] = [
   "Ww6UD+ajPCK5MUT4iaNsPIbGIeVYDqab/EjyrmHw1Hk=",
-  "34Usis0Ul+ZziayGpmbB4DVsjsRxJ3MyFVQ2EY+hgUU=",
+  "PYbgRXsWUH4FK9y9YsK9X/LwNfZRM1JZPrJVFIwid1k=",
 ];
 
 /**
