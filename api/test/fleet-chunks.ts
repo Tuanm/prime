@@ -18,8 +18,11 @@ const LANES = Math.max(1, Math.min(32, Number(process.env.FLEET_CHUNKS_LANES) ||
 const BASE = EXTERNAL || "http://127.0.0.1:" + PORT;
 // A deployed gateway is shared: the fleet and the device made here have names of their own, and are removed at the end.
 const RUN = Date.now().toString(36);
-const DEV = EXTERNAL ? "chunks-" + RUN : "dev-a";
-const TOKEN = "tok-" + RUN + "-0123456789";
+// The member is a device made the way a real one is: an anonymous device (POST /api/devices/anonymous), which needs no credential of the
+// operator's. An anonymous device the gateway collects itself once it has been offline (a week), so it is not removed here. A gateway
+// lets one address make 5 an hour.
+let DEV = "";
+let TOKEN = "";
 const FLEET = EXTERNAL ? "pieces-" + Date.now().toString(36) : "pieces";
 const MIB = 1024 * 1024;
 const PIECE = 8 * MIB;
@@ -81,7 +84,7 @@ async function startWorker(): Promise<void> {
   wrangler = spawn(
     "node",
     [WRANGLER, "dev", "--local", "-c", ROOT + "/wrangler.dev.toml", "--port", String(PORT), "--ip", "127.0.0.1",
-      "--persist-to", ROOT + "/.wrangler/state-" + PORT, "--var", "RATE_LIMIT_MAX:100000", "--var", "FLEET_OPERATOR_TOKEN:chunks-operator-token-0123456789"],
+      "--persist-to", ROOT + "/.wrangler/state-" + PORT, "--var", "RATE_LIMIT_MAX:100000", "--var", "FLEET_OPERATOR_TOKEN:chunks-operator-token-0123456789", "--var", "ADMIN_ACCESS:enforce", "--var", "TOKEN_PEPPER:chunks-smoke-pepper-0123456789abcdef"],
     { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] },
   );
   const keep = (c: Buffer) => {
@@ -92,7 +95,7 @@ async function startWorker(): Promise<void> {
   wrangler.stderr?.on("data", keep);
   for (let i = 0; i < 1200; i++) {
     try {
-      if ((await fetch(BASE + "/admin/api/devices")).status < 500) return;
+      if ((await fetch(BASE + "/")).status < 500) return;
     } catch {}
     await Bun.sleep(250);
   }
@@ -100,12 +103,14 @@ async function startWorker(): Promise<void> {
   throw new Error("wrangler did not become ready\n" + log.join("").slice(-1200));
 }
 
-const OP = { "content-type": "application/json", authorization: "Bearer " + (EXTERNAL ? EXTERNAL_TOKEN : "chunks-operator-token-0123456789") };
-const dev = (id: string, token: string) => ({ "content-type": "application/json", "x-prime-device": id, "x-device-token": token });
-const admin = async (path: string, body: unknown = {}) => {
-  const r = await fetch(BASE + path, { method: "POST", headers: OP, body: JSON.stringify(body) });
+// The operator's calls go to the fleet's own routes (`/fleets/...`) with the operator token: that is all it needs. `/admin/api/...` is behind
+// Access on a deployed gateway, and the member is an anonymous device it makes for itself, so neither is used.
+const OP = { "content-type": "application/json", authorization: "Bearer " + (EXTERNAL ? EXTERNAL_TOKEN : "chunks-operator-token-0123456789"), "x-prime-device": "" };
+const admin = async (path: string, body: unknown = {}, device = "") => {
+  const r = await fetch(BASE + path, { method: "POST", headers: device ? { ...OP, "x-prime-device": device } : OP, body: JSON.stringify(body) });
   return { status: r.status, json: (await r.json().catch(() => ({}))) as any };
 };
+const dev = (id: string, token: string) => ({ "content-type": "application/json", "x-prime-device": id, "x-device-token": token });
 const member = async (path: string, id: string, token: string, body: unknown = {}, method = "POST") => {
   const r = await fetch(BASE + path, { method, headers: dev(id, token), body: method === "GET" ? undefined : JSON.stringify(body) });
   return { status: r.status, json: (await r.json().catch(() => ({}))) as any };
@@ -115,11 +120,15 @@ const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 try {
   await startWorker();
   const root = wrangler?.pid ?? 0;
-  await admin("/admin/api/devices", { deviceId: DEV, token: TOKEN });
-  check("the fleet is made", (await admin("/admin/api/fleets/" + FLEET + "")).status === 200);
-  const inv = await admin("/admin/api/fleets/" + FLEET + "/invite");
+  const registered = await fetch(BASE + "/api/devices/anonymous", { method: "POST" });
+  const made = (await registered.json().catch(() => ({}))) as { deviceId?: string; token?: string };
+  if (registered.status !== 201 || !made.deviceId || !made.token) throw new Error("the device could not be made: " + registered.status + " " + JSON.stringify(made));
+  DEV = made.deviceId;
+  TOKEN = made.token;
+  check("the fleet is made", (await admin("/fleets/" + FLEET, {}, DEV)).status === 200);
+  const inv = await admin("/fleets/" + FLEET + "/invite");
   await member("/fleets/" + FLEET + "/join", DEV, TOKEN, { code: inv.json.code, label: DEV, pubkey: PUBKEY });
-  await admin("/admin/api/fleets/" + FLEET + "/approve", { deviceId: DEV });
+  await admin("/fleets/" + FLEET + "/approve", { deviceId: DEV });
   const boot = await member("/fleets/" + FLEET + "/bootstrap", DEV, TOKEN, { caps: ["chunks"] });
   check("the member takes the lease", boot.json.role === "primary", JSON.stringify(boot.json));
   const role = await member("/fleets/" + FLEET + "/role", DEV, TOKEN, {}, "GET");
@@ -229,9 +238,8 @@ try {
 } finally {
   wrangler?.kill();
   if (EXTERNAL) {
-    // The deployed gateway is left as it was found: the fleet (and with it every piece it holds) and the device go.
-    await fetch(BASE + "/admin/api/fleets/" + FLEET, { method: "DELETE", headers: OP }).catch(() => {});
-    await fetch(BASE + "/admin/api/devices/" + encodeURIComponent(DEV), { method: "DELETE", headers: OP }).catch(() => {});
+    // The deployed gateway is left as it was found: the fleet and with it every piece it holds go.
+    await admin("/fleets/" + FLEET + "/delete").catch(() => {});
   }
 }
 console.log("\n" + pass + " passed, " + fail + " failed");
