@@ -85,6 +85,7 @@ describe("CallerAuth: the policy", () => {
     if (a.action === "refuse") {
       expect(a.response.error.code).toBe(-32001);
       expect(a.response.error.message).toContain("prime devices allow-caller");
+      expect(a.response.error.message).toContain("if this machine is already allowed, the signature did not reach the device as it was signed: send the call again");
       expect(a.response.id).toBe(1);
     }
     expect(t.auth.counts.refused).toBe(1);

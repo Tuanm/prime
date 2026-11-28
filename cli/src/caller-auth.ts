@@ -469,7 +469,9 @@ export function requiresSignature(request: unknown): boolean {
 }
 
 export function refusalMessage(failure: CallerFailure): string {
-  const base = "this device only runs calls signed by a key it trusts; run 'prime devices allow-caller' on this machine";
+  const base =
+    "this device only runs calls signed by a key it trusts; run 'prime devices allow-caller' on this machine " +
+    "(if this machine is already allowed, the signature did not reach the device as it was signed: send the call again)";
   switch (failure) {
     case "stale":
       return `${base} (the signature's time is more than 5 minutes from this device's clock: check both clocks)`;

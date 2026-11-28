@@ -381,6 +381,13 @@ describe("prime serve: a device that refuses an unsigned call", () => {
     // A fleet is let in by its owner, not by a device's callers file.
     expect(callerRefusedHint(signer, { fleet: true })).not.toContain("prime devices allow-caller");
     expect(callerRefusedHint(signer, { fleet: true })).toContain(signer.callerKey()!.publicKeyB64);
+    // A gateway can make a device refuse a key it trusts (by altering the header), so the hint says what to do then.
+    expect(callerRefusedHint(signer)).toContain("If this machine is already allowed there, the signature may have been altered on the way");
+    expect(callerRefusedHint(signer)).toContain("run the call again");
+    expect(callerRefusedHint(signer, { fleet: true })).toContain("run the call again");
+    // the allow-caller command stays the last word of its own line
+    const line = callerRefusedHint(signer).split("\n").find((l) => l.includes("prime devices allow-caller"))!;
+    expect(line.trim().split(/\s+/).pop()).toBe(signer.callerKey()!.publicKeyB64);
   });
 });
 
