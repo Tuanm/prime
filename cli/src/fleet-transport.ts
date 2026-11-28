@@ -221,8 +221,55 @@ export async function fetchManifest(creds: FleetCredentials, fleet: string, id: 
   return manifest;
 }
 
+// What the socket brought of the newest snapshots: found by the hash of the bytes, which is the id the gateway
+// stores them under (a manifest by the hash of its text, a pack by the hash of the sealed pack), so a part that
+// is asked for by its id is exactly the bytes that hash to it. A few small snapshots, for a few minutes.
+const INLINE_KEEP = 16;
+const INLINE_TTL_MS = 5 * 60_000;
+const inlineHeld = new Map<string, { bytes: Buffer; at: number }>();
+
+/** How many bytes of a manifest or pack are taken from a socket message. */
+const INLINE_BYTES_MAX = 96 * 1024;
+
+/**
+ * Keep the manifest and pack a head event carried, so the next ask for them by id is answered from here.
+ *
+ * Each part is kept under the sha256 of its own bytes, whatever the event says it is, so it can only answer an ask
+ * for exactly those bytes: a manifest or pack that is not the one the head names is never asked for, and one that is
+ * can only be itself. What the snapshot then is gets checked as for any fetched one (seal, sender, key).
+ */
+export function noteInline(fleet: string, inline: { manifest: string; pack: string }, now: number = Date.now()): void {
+  const manifest = Buffer.from(inline.manifest, "utf8");
+  const pack = Buffer.from(inline.pack, "base64");
+  if (manifest.length === 0 || pack.length === 0 || manifest.length > INLINE_BYTES_MAX || pack.length > INLINE_BYTES_MAX) return;
+  for (const [kind, bytes] of [["manifests", manifest], ["packs", pack]] as const) {
+    const key = fleet + "/" + kind + "/" + payloadHash(bytes);
+    inlineHeld.delete(key);
+    inlineHeld.set(key, { bytes, at: now });
+  }
+  while (inlineHeld.size > INLINE_KEEP) inlineHeld.delete(inlineHeld.keys().next().value as string);
+}
+
+/** Forget what the socket brought (a test, or a member that is done with a fleet). */
+export function forgetInline(): void {
+  inlineHeld.clear();
+}
+
+function inlineFor(fleet: string, kind: "packs" | "manifests", id: string, now: number = Date.now()): Buffer | undefined {
+  const key = fleet + "/" + kind + "/" + id;
+  const held = inlineHeld.get(key);
+  if (held === undefined) return undefined;
+  if (now - held.at > INLINE_TTL_MS) {
+    inlineHeld.delete(key);
+    return undefined;
+  }
+  return Buffer.from(held.bytes);
+}
+
 /** Fetch a stored payload. */
 export async function getPayload(creds: FleetCredentials, fleet: string, kind: "packs" | "manifests", id: string): Promise<Buffer> {
+  const brought = inlineFor(fleet, kind, id);
+  if (brought !== undefined) return brought;
   const res = await request(creds, "GET", "/fleets/" + encodeURIComponent(fleet) + "/" + kind + "/" + encodeURIComponent(id));
   if (res.status === 404) throw new PayloadGoneError();
   if (!res.ok) throw new FleetTransportError("could not read the payload: " + res.status);

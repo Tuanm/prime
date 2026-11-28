@@ -11,12 +11,26 @@
 // This class only keeps the socket and reports what it hears. It never throws
 // into its caller, and it holds nothing open once it is stopped.
 
+/**
+ * A small snapshot sent with the news of the head, so a member need not ask for it: the manifest as the
+ * gateway stores it (text) and the sealed pack (base64). Nothing in it is believed on the gateway's word:
+ * what a member keeps of it is found by the hash of its bytes (see `noteInline`), as a fetched one is.
+ */
+export interface InlineSnapshot {
+  manifest: string;
+  pack: string;
+}
+
+/** The most an inline snapshot may be, in characters of each part: a pack of 64 KiB is 88 KiB as base64, a manifest is a few KB. */
+export const INLINE_MANIFEST_MAX = 128 * 1024;
+export const INLINE_PACK_MAX = 128 * 1024;
+
 /** What the gateway can tell a member. */
 export type FleetEvent =
   | { type: "hello"; paused: boolean; leaseHolder: string | null; leaseMs: number }
   | { type: "paused" }
   | { type: "resumed" }
-  | { type: "head"; seq: number; manifestKey?: string }
+  | { type: "head"; seq: number; manifestKey?: string; inline?: InlineSnapshot }
   | { type: "lease-free" }
   /** The operator or the owner changed how long a place lasts. */
   | { type: "lease"; leaseMs: number }
@@ -116,6 +130,15 @@ export function roundSleepMs(input: {
 
 const KNOWN = new Set(["hello", "paused", "resumed", "head", "lease-free", "lease", "bye"]);
 
+// An inline snapshot, when both parts are text and neither is bigger than a small snapshot can be.
+function inlineOf(raw: unknown): { inline: InlineSnapshot } | Record<string, never> {
+  if (!raw || typeof raw !== "object") return {};
+  const { manifest, pack } = raw as Record<string, unknown>;
+  if (typeof manifest !== "string" || typeof pack !== "string") return {};
+  if (manifest.length === 0 || pack.length === 0 || manifest.length > INLINE_MANIFEST_MAX || pack.length > INLINE_PACK_MAX) return {};
+  return { inline: { manifest, pack } };
+}
+
 /** Read one text message. Anything that is not a known event is ignored. */
 export function parseFleetEvent(text: string): FleetEvent | undefined {
   let raw: unknown;
@@ -139,7 +162,12 @@ export function parseFleetEvent(text: string): FleetEvent | undefined {
       return typeof o.leaseMs === "number" && Number.isFinite(o.leaseMs) && o.leaseMs > 0 ? { type: "lease", leaseMs: o.leaseMs } : undefined;
     case "head":
       return typeof o.seq === "number"
-        ? { type: "head", seq: o.seq, ...(typeof o.manifestKey === "string" && o.manifestKey ? { manifestKey: o.manifestKey } : {}) }
+        ? {
+            type: "head",
+            seq: o.seq,
+            ...(typeof o.manifestKey === "string" && o.manifestKey ? { manifestKey: o.manifestKey } : {}),
+            ...inlineOf(o.inline),
+          }
         : undefined;
     case "bye":
       return { type: "bye", reason: typeof o.reason === "string" ? o.reason : "" };

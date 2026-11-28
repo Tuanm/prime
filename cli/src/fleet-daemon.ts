@@ -53,7 +53,7 @@ import { commandRuns, runsProgram } from "./fleet-paths.ts";
 import { cacheLimitMb, collectStore, storeBytes } from "./fleet-store.ts";
 import { IgnoreFilter } from "./fleet-ignore.ts";
 import { NestedRepoCache, SETTLE_QUIET_MS, settle, snapshot, stampTree } from "./fleet-sync.ts";
-import { capsBody, fetchMemberKeys, fetchRole, fetchRoster, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchMemberKeys, fetchRole, fetchRoster, noteInline, releaseLease, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { detectRuntime, spaceContainerRunning, type RuntimeInfo } from "./spaces.ts";
 import { fleetKeyFile, fleetStateDir, hasUnwrittenPosition, readFleetState, recordedPosition, recordPublished, updateFleetState, writeFleetState, type FleetMemberState } from "./fleets.ts";
 
@@ -1318,6 +1318,11 @@ export function holdAfterPublish(
 }
 
 /** One space as the agent keeps it (exported so a round can be driven in a test). */
+/** What a head event carries of the snapshot itself is kept, so the manifest and pack asked for next are answered from it. */
+export function noteHeadInline(fleet: string, event: FleetEvent): void {
+  if (event.type === "head" && event.inline) noteInline(fleet, event.inline);
+}
+
 export interface SpaceLoop {
   configPath: string;
   name: string;
@@ -2284,6 +2289,8 @@ async function runFleetAgentLocked(configPath: string, options: FleetAgentOption
         wake(loop.name, true);
         break;
       case "head":
+        // A small snapshot came with the news: what is asked for next is answered from it.
+        noteHeadInline(loop.fleet, event);
         if (event.seq >= (loop.knownHeadSeq ?? 0)) {
           loop.knownHeadSeq = event.seq;
           if (event.manifestKey) loop.knownHeadManifest = event.manifestKey;
