@@ -734,6 +734,24 @@ try {
     `mode=${(statSync(installTarget).mode & 0o777).toString(8)}`,
   );
 
+  // The fleet's spaces are moved by the build that was installed, not by the one that ran the update: the fake binary answers for itself.
+  if (!IS_WINDOWS) {
+    const spacesCfg = join(installDir, "spaces-config.yaml");
+    writeFileSync(
+      spacesCfg,
+      "devices: {}\nspaces:\n  work:\n    id: space-1\n    runtime: docker\n    image: img\n    mode: ephemeral\n    container: prime-space-1\n    token: t\n    fleet: acme\n",
+    );
+    const handoffTarget = join(installDir, "handoff");
+    const handoff = await cli(["update", "--to", handoffTarget, "--config", spacesCfg], { env: updateEnv });
+    check(
+      "an update that installs makes the new build move the fleet's spaces",
+      handoff.code === 0 && handoff.out.includes(`fake-${FAKE_VERSION}`),
+      handoff.out.trim() + handoff.err.trim(),
+    );
+    const noSpaces = await cli(["update", "--to", join(installDir, "handoff2"), "--no-spaces", "--config", spacesCfg], { env: updateEnv });
+    check("--no-spaces leaves them alone", noSpaces.code === 0 && !noSpaces.out.includes("fake-"), noSpaces.out.trim());
+  }
+
   const upToDate = await cli(["update", "--release-version", CURRENT_VERSION, "--to", installTarget, "--json"], { env: updateEnv });
   check(
     "--release-version equal to the running version is a no-op",

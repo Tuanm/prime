@@ -212,6 +212,8 @@ describe("prime update moves a fleet's spaces with the build it has installed", 
     const base = { target: "/usr/local/bin/prime", updated: true };
     expect(refreshCommandAfterUpdate({ ...base, kind: "binary" }, "/c/config.yaml", "/bin/bun")).toEqual(["/usr/local/bin/prime", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
     expect(refreshCommandAfterUpdate({ ...base, kind: "bundle", target: "/i/prime.js" }, "/c/config.yaml", "/bin/bun")).toEqual(["/bin/bun", "/i/prime.js", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
+    // installed to a .js path by a compiled binary: a bundle, run by the runtime
+    expect(refreshCommandAfterUpdate({ ...base, kind: "binary", target: "/t/prime.js" }, "/c/config.yaml", "/bin/bun")).toEqual(["/bin/bun", "/t/prime.js", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
     expect(refreshCommandAfterUpdate({ ...base, kind: "source" }, "/c/config.yaml", "/bin/bun")).toBeUndefined();
     expect(refreshCommandAfterUpdate({ ...base, kind: "binary", updated: false }, "/c/config.yaml", "/bin/bun")).toBeUndefined();
   });

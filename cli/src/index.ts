@@ -36,7 +36,7 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { isSpaceCommand, spacesCreate, spacesRefreshFleet, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
+import { fleetSpaceNames, isSpaceCommand, spacesCreate, spacesRefreshFleet, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
 import {
   fleetsAgent,
   fleetsApprove,
@@ -536,12 +536,16 @@ async function main(argv: string[]): Promise<void> {
         // The build that has just been installed does this, not this process: the containers are made with the entrypoint
         // of the build that makes them, and this one is the old one.
         if (outcome.updated) {
-          const argv = refreshCommandAfterUpdate(outcome, ctx.configPath, process.execPath);
-          if (!argv) ctx.note("the fleet's spaces were not moved: run 'prime spaces refresh-fleet' with the new build");
-          else {
-            const done = Bun.spawnSync(argv, { stdin: "ignore", stdout: ctx.json ? "pipe" : "inherit", stderr: "inherit", timeout: 30 * 60_000 });
-            if (ctx.json && done.stdout && done.stdout.length > 0) process.stderr.write(done.stdout);
-            if (done.exitCode !== 0) ctx.note("the new build could not move the fleet's spaces (exit " + String(done.exitCode) + "): run 'prime spaces refresh-fleet'; the next 'prime update' also does it");
+          const argv = fleetSpaceNames(ctx.config).length === 0 ? undefined : refreshCommandAfterUpdate(outcome, ctx.configPath, process.execPath);
+          if (fleetSpaceNames(ctx.config).length > 0 && !argv) ctx.note("the fleet's spaces were not moved: run 'prime spaces refresh-fleet' with the new build");
+          else if (argv) {
+            try {
+              const done = Bun.spawnSync(argv, { stdin: "ignore", stdout: ctx.json ? "pipe" : "inherit", stderr: "inherit", timeout: 30 * 60_000 });
+              if (ctx.json && done.stdout && done.stdout.length > 0) process.stderr.write(done.stdout);
+              if (done.exitCode !== 0) ctx.note("the new build could not move the fleet's spaces (exit " + String(done.exitCode) + "): run 'prime spaces refresh-fleet'; the next 'prime update' also does it");
+            } catch (err) {
+              ctx.note("the new build could not be run to move the fleet's spaces (" + (err instanceof Error ? err.message : String(err)) + "): run 'prime spaces refresh-fleet'; the next 'prime update' also does it");
+            }
           }
         } else {
           await spacesRefreshFleet(ctx, outcome.latest);

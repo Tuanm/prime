@@ -495,9 +495,9 @@ export function refreshCommandAfterUpdate(
 ): string[] | undefined {
   if (!outcome.updated) return undefined;
   const tail = ["spaces", "refresh-fleet", "--config", configPath];
-  if (outcome.kind === "binary") return [outcome.target, ...tail];
-  if (outcome.kind === "bundle") return [runtime, outcome.target, ...tail];
-  return undefined;
+  if (outcome.kind === "source") return undefined;
+  // The destination decides, as it does for the asset: `--to prime.js` from a compiled binary installs a bundle.
+  return kindForTarget(outcome.target, outcome.kind) === "bundle" ? [runtime, outcome.target, ...tail] : [outcome.target, ...tail];
 }
 
 /** Human-readable report for the update command. */
