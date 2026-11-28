@@ -235,7 +235,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The suite takes 17 to 18 minutes on the Arm runner (it was 13 to 15 when the limit was set), so 20 cancelled runs that had not failed.
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
