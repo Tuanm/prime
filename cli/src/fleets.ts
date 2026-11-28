@@ -26,7 +26,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { loadOrCreateKeyPair, loadOrCreateSignKey, manifestIdOf, mapLimit, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
-import { keyFingerprintOf, keyIdOf, openSnapshotMeta } from "./fleet-crypto.ts";
+import { keyFingerprintOf, keyIdOf as sealingKeyIdOf, openSnapshotMeta } from "./fleet-crypto.ts";
 import { actorFrom, type SnapshotActor } from "./fleet-actor.ts";
 import { FleetTrust, metaBindingOf } from "./fleet-trust.ts";
 import {
@@ -2118,7 +2118,7 @@ export async function fleetsSnapshots(ctx: Ctx): Promise<void> {
         }
       }
     }
-    rows.push({ seq: m.seq, at: m.createdAt, by: keyIdOf(m.senderPublicKey), ...(actor ? { actor } : {}), opened, fromMember });
+    rows.push({ seq: m.seq, at: m.createdAt, by: sealingKeyIdOf(m.senderPublicKey), ...(actor ? { actor } : {}), opened, fromMember });
   }
   if (ctx.json) {
     printJson({ fleet: fleetId, snapshots: rows });
