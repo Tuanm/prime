@@ -14,6 +14,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
 import { fileLimits, validFileId, validDeviceId } from "./config";
+import { HitMeter, meterStorage, sendUsage } from "./usage";
 
 /** A reservation with no completed upload is dropped after this long. */
 export const PENDING_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -55,7 +56,7 @@ export class FilesDO extends DurableObject<Env> {
     super(ctx, env);
     this.ctx.blockConcurrencyWhile(async () => {
       try {
-        const saved = (await this.ctx.storage.get<Record<string, FileRecord>>(STORAGE_KEY)) ?? {};
+        const saved = (await this.storage.get<Record<string, FileRecord>>(STORAGE_KEY)) ?? {};
         for (const [id, rec] of Object.entries(saved)) {
           if (rec && validFileId(id)) this.files.set(id, rec);
         }
@@ -64,7 +65,23 @@ export class FilesDO extends DurableObject<Env> {
     });
   }
 
+  /** What this object served this month, and the rows it read and wrote, sent on in batches. */
+  private readonly meter = new HitMeter((add) => {
+    sendUsage(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("global")), add);
+  });
+
+  /** This object's storage, with the rows it reads and writes counted. */
+  private metered?: DurableObjectStorage;
+  private get storage(): DurableObjectStorage {
+    return (this.metered ??= meterStorage(this.ctx.storage, this.meter));
+  }
+
   async fetch(request: Request): Promise<Response> {
+    this.meter.hit();
+    return this.meter.busy(() => this.serve(request));
+  }
+
+  private async serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -87,7 +104,9 @@ export class FilesDO extends DurableObject<Env> {
 
   /** Wake hourly at minimum so an idle device still purges expiring files. */
   async alarm(): Promise<void> {
-    await this.reap();
+    await this.meter.busy(async () => {
+      await this.reap();
+    });
   }
 
   // ---- operations ---------------------------------------------------------
@@ -334,14 +353,14 @@ export class FilesDO extends DurableObject<Env> {
     }
     const ceiling = Date.now() + 60 * 60 * 1000;
     try {
-      if (next === Number.POSITIVE_INFINITY) await this.ctx.storage.deleteAlarm();
-      else await this.ctx.storage.setAlarm(Math.min(next, ceiling));
+      if (next === Number.POSITIVE_INFINITY) await this.storage.deleteAlarm();
+      else await this.storage.setAlarm(Math.min(next, ceiling));
     } catch {}
   }
 
   private async persist(): Promise<void> {
     try {
-      await this.ctx.storage.put(STORAGE_KEY, Object.fromEntries(this.files));
+      await this.storage.put(STORAGE_KEY, Object.fromEntries(this.files));
     } catch {}
   }
 }
