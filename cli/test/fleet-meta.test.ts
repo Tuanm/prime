@@ -138,6 +138,27 @@ describe("when every member can read it", () => {
     expect(sameTree(fingerprint(w.work), fingerprint(w.replica.work))).toBe(true);
   });
 
+  test("the keys of the packs stay in the clear, where the gateway's sweep reads them: packKey, and delta.packKey beside a whole tree", async () => {
+    const w = await world([META_CAP]);
+    await w.next("one\n");
+    // A member that joins makes the next snapshot a whole tree, with the change beside it.
+    w.gateway.seed("third-device", loadOrCreateKeyPair(join(roots[0]!, "third.key")).publicKey);
+    const whole = await w.next("two\n");
+    const delta = await w.next("three\n");
+    expect(whole.full).toBe(true);
+    for (const r of [whole, delta]) {
+      const m = w.manifest(r.manifestKey);
+      expect(m.tipCommit).toBe(""); // the sealed form is the one in use
+      expect(m.packKey).toMatch(/^fleets\/x\/packs\/[0-9a-f]{64}$/);
+      expect(m.packHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(w.gateway.payloads.has(m.packKey)).toBe(true);
+      if (r === whole) {
+        expect(m.delta?.packKey).toMatch(/^fleets\/x\/packs\/[0-9a-f]{64}$/);
+        expect(w.gateway.payloads.has(m.delta!.packKey)).toBe(true);
+      }
+    }
+  });
+
   test("a chain of changes is followed, a replica that was away and one that follows each", async () => {
     const w = await world([META_CAP]);
     await w.next("one\n");
