@@ -31,7 +31,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { commandOf, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { acquireStarting, claimSuccessor, clearSuccessor, isSuccessorProcess, mayAskAgainToStop, takeHandoverEnv, readSuccessor, registerSuccessor, requestStop, stopSuccessor, stopWaitingSuccessor as stopWaiting, watchForStop } from "./fleet-agent-handover.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, type MemberPaths } from "./fleet-agent.ts";
+import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, previousKeyPair, publish, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
 import { keyFingerprintOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
 import {
@@ -1540,7 +1540,9 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       // The tree just taken is published as it is when the files are still as they were when it was
       // taken (a snapshot of the same files again would only find the same tree). The watcher having
       // spoken since says they are not, and nothing is then looked at.
-      settled && !settled.racy && !loop.dirty
+      withChain(
+        state,
+        settled && !settled.racy && !loop.dirty
         ? {
             known: {
               tree: snap.tree,
@@ -1556,6 +1558,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
             },
           }
         : undefined,
+      ),
     );
     loop.timing.publish = Date.now() - publishBegan;
     const published: Partial<FleetMemberState> = {
@@ -1565,6 +1568,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       // What the snapshot was sealed for, not what was asked a moment before:
       // a member that joined in between is then still seen as new next round.
       roster: result.roster,
+      sinceWhole: result.sinceWhole,
       tree: snap.tree,
     };
     const publishedAt = Date.now();
