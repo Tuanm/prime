@@ -171,20 +171,36 @@ export class GatewayClient {
     if (!this.signer || !(this.target.fleet || this.target.fleetBuddy) || !methodNeedsSignature(method)) return undefined;
     const now = Date.now();
     if (this.member && now - this.member.at < (this.member.id === null ? FLEET_LEGACY_TTL_MS : FLEET_MEMBER_TTL_MS)) return this.member.id ?? undefined;
+    // A question that was not answered (the network, a 5xx, a 429, a body that is not JSON) is asked once more, and is not remembered:
+    // only a device that has answered that it does not know the question is taken for an old one.
+    for (let asked = 0; asked < 2; asked++) {
+      const answer = await this.askMember(signal);
+      if (answer === "failed") continue;
+      this.member = { at: now, id: answer === "legacy" ? null : answer };
+      return answer === "legacy" ? undefined : answer;
+    }
+    return undefined;
+  }
+
+  /** One question. "legacy": the device answered, and did not know it. "failed": no answer that says either. */
+  private async askMember(signal: AbortSignal): Promise<string | "legacy" | "failed"> {
     const body = JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/call", params: { name: FLEET_PROBE_TOOL, arguments: {} } });
-    const header = this.signer.header("tools/call", { ...this.target, member: "" }, body);
-    if (!header) return undefined;
-    let id: string | null = null;
+    const header = this.signer?.header("tools/call", { ...this.target, member: "" }, body);
+    if (!header) return "failed";
     try {
       const response = await fetch(this.endpoint(), { method: "POST", headers: { ...this.headers("initialize", body), [CALL_SIG_HEADER]: header }, body, signal });
-      const parsed = JSON.parse(await response.text()) as { error?: { data?: { reason?: unknown; member?: unknown } } };
+      if (!response.ok) return "failed";
+      const parsed = JSON.parse(await response.text()) as { jsonrpc?: unknown; error?: { code?: unknown; data?: { reason?: unknown; member?: unknown } } } | null;
+      if (!parsed || typeof parsed !== "object" || parsed.jsonrpc !== "2.0") return "failed";
       const data = parsed.error?.data;
-      if (data?.reason === "fleet-member" && typeof data.member === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(data.member)) id = data.member;
+      if (data?.reason === "fleet-member" && typeof data.member === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(data.member)) return data.member;
+      // Refused for another reason (a key that is not allowed, a clock): the call says so again, and this is not "the device is old".
+      if (parsed.error?.code === CALLER_REFUSED_CODE) return "failed";
+      return "legacy";
     } catch {
       // The question is not the call: whatever went wrong, the call itself says so again.
+      return "failed";
     }
-    this.member = { at: now, id };
-    return id ?? undefined;
   }
 
   /** Forget which member answered: the primary moved. */
@@ -227,7 +243,8 @@ export class GatewayClient {
     this.lastAttempts = 0;
 
     const started = performance.now();
-    const member = await this.fleetMember(method, signal);
+    let member = await this.fleetMember(method, signal);
+    let asked = false;
     for (let attempt = 1; ; attempt++) {
       this.lastAttempts = attempt;
       let response: Response;
@@ -253,12 +270,22 @@ export class GatewayClient {
         await sleep(backoffMs);
         continue;
       }
-      this.checkReply(headers[CALL_SIG_HEADER], body, response.headers.get(REPLY_SIG_HEADER), text);
+      const verified = this.checkReply(headers[CALL_SIG_HEADER], body, response.headers.get(REPLY_SIG_HEADER), text);
       try {
         return this.parseBody(response.status, text);
       } catch (err) {
-        // Refused: the member that was named may not be the one the fleet sends calls to any more, so the next call asks again.
-        if (member !== undefined && err instanceof McpError && err.code === CALLER_REFUSED_CODE) this.forgetMember();
+        if (err instanceof McpError && err.code === CALLER_REFUSED_CODE) {
+          // Refused: the member that was named may not be the one the fleet sends calls to any more, so the next call asks again.
+          this.forgetMember();
+          // A refusal that the device signed, because the call was not made for it (the fleet's primary changed): nothing ran, so
+          // the question is asked again and the call signed again, once. An unsigned refusal may be the gateway's, and is not acted on.
+          const reason = (err.data as { reason?: unknown } | undefined)?.reason;
+          if (verified && !asked && member !== undefined && (reason === "invalid" || reason === "not-primary")) {
+            asked = true;
+            member = await this.fleetMember(method, signal);
+            if (member !== undefined) continue;
+          }
+        }
         throw err;
       }
     }
@@ -271,10 +298,10 @@ export class GatewayClient {
    * may be an older build. A fleet is answered by whichever member holds the lease, so its replies are checked
    * for a good signature only; their keys come from the fleet's roster, not from a first use.
    */
-  private checkReply(callSig: string | undefined, requestBody: string, replySig: string | null, text: string): void {
-    if (!callSig) return;
+  private checkReply(callSig: string | undefined, requestBody: string, replySig: string | null, text: string): boolean {
+    if (!callSig) return false;
     const nonce = parseCallSig(callSig)?.nonce;
-    if (!nonce) return;
+    if (!nonce) return false;
     const { gateway, deviceId: device } = this.target;
     const pooled = Boolean(this.target.fleet || this.target.fleetBuddy);
     let pinned: string | undefined;
@@ -295,21 +322,22 @@ export class GatewayClient {
     };
     if (replySig === null) {
       if (pinned) refuse("answered a signed call without signing its reply, as it has before");
-      return;
+      return false;
     }
     const pub = verifyReplySig(replySig, nonce, requestBody, text);
     if (!pub) {
       if (pinned) refuse("answered with a signature that does not match the reply");
       this.once(`the reply from ${device} carries a signature that does not match it; the gateway may have changed the answer`);
-      return;
+      return false;
     }
-    if (pooled || pinsBroken) return;
+    if (pooled || pinsBroken) return true;
     try {
       if (checkDeviceKey(gateway, device, pub) === "changed") refuse(`answered with a different key (${deviceKeyLabel(pub)}) from the one it first used`);
     } catch (err) {
       if (err instanceof CliError) throw err;
       this.once(`cannot pin the key of ${device}: ${err instanceof Error ? err.message : String(err)}`);
     }
+    return true;
   }
 
   private once(text: string): void {

@@ -14,7 +14,7 @@ import { createHash, sign as cryptoSign, verify as cryptoVerify } from "node:cry
 import { mkdirSync, renameSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { FLEET_CALLERS_FRESH_MS, FLEET_CALL_SKEW_MS, type FleetCallersFile, fleetCallersPathFor, readFleetCallers } from "./fleet-callers.ts";
+import { FLEET_CALLERS_FRESH_MS, FLEET_CALL_SKEW_MS, FLEET_FUTURE_MS, type FleetCallersFile, fleetCallersPathFor, readFleetCallers } from "./fleet-callers.ts";
 import {
   callTarget,
   fleetMemberTarget,
@@ -70,6 +70,7 @@ export type CallerFailure =
   | "before-primary"
   | "fleet-member"
   | "fleet-unbound"
+  | "ahead"
   | "tool-not-allowed";
 
 /** The frame the gateway tunnels in. `raw` and `callerSig` are absent on an unsigned call and from an older gateway. */
@@ -372,7 +373,7 @@ export class CallerAuth {
       if (!f.primary || now - f.writtenAt > FLEET_CALLERS_FRESH_MS || f.writtenAt - now > MAX_SKEW_MS) return { ok: false, failure: "not-primary" };
       // A call made for the fleet is not signed ahead of the clock, and one signed before this space became the primary - or within the
       // skew of the members' clocks of it - may have run on the member that was.
-      if (parsed.ts - now > FLEET_CALL_SKEW_MS) return { ok: false, failure: "stale" };
+      if (parsed.ts - now > FLEET_FUTURE_MS) return { ok: false, failure: "ahead" };
       if (parsed.ts <= f.primarySince + FLEET_CALL_SKEW_MS) return { ok: false, failure: "before-primary" };
     }
     // Signed before this process started, or before a nonce that was forgotten: it may be a call that was run.
@@ -548,8 +549,10 @@ export function refusalMessage(failure: CallerFailure, member?: string): string 
       return "this call was already received, or was signed before this device last started; send it again";
     case "fleet-member":
       return `this is the member ${member ?? ""} of the fleet: this was the question which member it is, and nothing ran`;
+    case "ahead":
+      return "this call was signed more than a minute ahead of this device's clock (the fleet's members and this machine should agree within a minute): check both clocks; it did not run";
     case "fleet-unbound":
-      return "a call for a fleet names the member that is to run it (this prime is too old to say which): update prime on this machine and send the call again; it did not run";
+      return "a call for a fleet names the member that is to run it, and this one did not: either this prime is older than the fleet's (update prime on this machine), or the question which member answers did not get through (send the call again); it did not run";
     case "not-primary":
       return "this space is not the fleet's primary now (or its agent has not said so lately), so it runs no call made for the fleet: the call did not run; the fleet's primary takes it, send it again";
     case "before-primary":

@@ -349,13 +349,21 @@ describe("a space's tool server and a call made for the fleet", () => {
     expect(s.auth.admit({ raw: raw2, callerSig: s.sign(k, BOUND, raw2, 5_000) }).action).toBe("run");
   });
 
-  test("a call for the fleet signed ahead of the clock is refused, so that it cannot outlive a failover (a clock 4 minutes ahead)", () => {
+  test("a call for the fleet signed more than a minute ahead of the clock is refused, with the figure; 50 seconds ahead is a clock that is a little off, and runs", () => {
     const k = callerKey("f4b");
     const s = space({ primary: true }, [k]);
     const raw = body(42);
-    // 4 minutes ahead: inside the 5 minutes a call may be off by, and far past the 30 seconds a call for the fleet may be
     const ahead = s.auth.admit({ raw, callerSig: s.sign(k, BOUND, raw, -240_000) });
-    expect(reason(ahead)).toBe("stale");
+    expect(reason(ahead)).toBe("ahead");
+    if (ahead.action === "refuse") {
+      expect(ahead.response.error.message).toContain("a minute ahead");
+      expect(ahead.response.error.message).not.toContain("5 minutes");
+      expect(ahead.response.error.message).toContain("did not run");
+    }
+    const raw50 = body(421);
+    expect(s.auth.admit({ raw: raw50, callerSig: s.sign(k, BOUND, raw50, -50_000) }).action).toBe("run");
+    const raw70 = body(422);
+    expect(reason(s.auth.admit({ raw: raw70, callerSig: s.sign(k, BOUND, raw70, -70_000) }))).toBe("ahead");
     // a call for the device itself keeps the 5 minutes
     const d = space({ primary: true }, [], [k]);
     const raw2 = body(43);
@@ -569,9 +577,11 @@ describe("the client of a fleet asks which member it is calling, and signs for i
         }
         const a = auth.admit({ raw, ...(sig ? { callerSig: sig } : {}) });
         seen.push({ target: sig ? "signed" : "unsigned", tool: request.params?.name ?? request.method, ran: a.action === "run" });
-        if (a.action === "refuse") return Response.json(a.response);
-        ran.push(request.params?.name ?? request.method);
-        return Response.json({ jsonrpc: "2.0", id: request.id, result: { ok: true } });
+        const answer = a.action === "refuse" ? a.response : { jsonrpc: "2.0", id: request.id, result: { ok: true } };
+        if (a.action === "run") ran.push(request.params?.name ?? request.method);
+        const text = JSON.stringify(answer);
+        const replySig = a.reply ? auth.replySig(a.reply, text) : undefined;
+        return new Response(text, { headers: { "content-type": "application/json", ...(replySig ? { "x-prime-reply-sig": replySig } : {}) } });
       },
     });
     return { url: "http://127.0.0.1:" + server.port, key: k, seen, ran, stop: () => void server.stop(true) };
@@ -612,11 +622,119 @@ describe("the client of a fleet asks which member it is calling, and signs for i
       const c = clientFor(d);
       await expect(c.rpc("tools/call", { name: "bash", arguments: {} })).rejects.toThrow("did not run");
       expect(d.ran).toEqual([]);
-      await expect(c.rpc("tools/call", { name: "bash", arguments: {} })).rejects.toThrow();
-      // asked again after the refusal: two questions, two calls
+      // a refusal that the device signed is answered once by asking again and signing again (here it is refused again): two questions, two calls
       expect(d.seen.map((s) => s.tool)).toEqual([FLEET_PROBE_TOOL, "bash", FLEET_PROBE_TOOL, "bash"]);
+      await expect(c.rpc("tools/call", { name: "bash", arguments: {} })).rejects.toThrow();
+      expect(d.seen).toHaveLength(8);
     } finally {
       d.stop();
+    }
+  });
+});
+
+describe("the client of a fleet when the question fails, and when the primary has moved", () => {
+  /** Two members, a gateway that sends each request to the one that is current, and what goes wrong is chosen by the test. */
+  function pair(options: { signReplies?: boolean } = {}) {
+    const d = scratch();
+    const k = callerKey("client-key");
+    const now = Date.now();
+    const members = ["member-a", "member-b"].map((id) => {
+      const dir = join(d, id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "fleet-callers.json"),
+        JSON.stringify({ version: 1, fleet: "acme", roster: "signed", primary: true, primarySince: now - 120_000, writtenAt: now, callers: [{ pub: k.key.publicKeyB64, label: "x", addedAt: "" }] }),
+      );
+      return { id, auth: new CallerAuth({ mode: "enforce", deviceId: id, callersFile: join(dir, "callers.json"), stateDir: join(dir, "state") }) };
+    });
+    const st = { current: 0, ran: [] as string[], questions: 0, calls: 0, failQuestions: 0, failWith: "503" as "503" | "429" | "text" | "reset" };
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const raw = await req.text();
+        const sig = req.headers.get("x-prime-call-sig") ?? undefined;
+        const request = JSON.parse(raw) as { id: number; params?: { name?: string } };
+        const m = members[st.current]!;
+        if (request.params?.name === FLEET_PROBE_TOOL) {
+          st.questions++;
+          if (st.failQuestions > 0) {
+            st.failQuestions--;
+            if (st.failWith === "503") return new Response("down", { status: 503 });
+            if (st.failWith === "429") return new Response("slow down", { status: 429 });
+            if (st.failWith === "text") return new Response("<html>bad gateway</html>", { status: 200 });
+          }
+        } else st.calls++;
+        const a = m.auth.admit({ raw, ...(sig ? { callerSig: sig } : {}) });
+        const answer = a.action === "refuse" ? a.response : { jsonrpc: "2.0", id: request.id, result: { ok: true } };
+        if (a.action === "run") st.ran.push(m.id + ":" + request.params?.name);
+        const text = JSON.stringify(answer);
+        const replySig = options.signReplies !== false && a.reply ? m.auth.replySig(a.reply, text) : undefined;
+        return new Response(text, { headers: { "content-type": "application/json", ...(replySig ? { "x-prime-reply-sig": replySig } : {}) } });
+      },
+    });
+    const client = () => new GatewayClient({ deviceId: "acme", gateway: "http://127.0.0.1:" + server.port, fleetBuddy: true, timeoutMs: 5000 } as never, { signer: new CallSigner({ path: join(dir, "client-key.pem") }), notice: () => undefined });
+    return { st, client, stop: () => void server.stop(true) };
+  }
+
+  for (const failWith of ["503", "429", "text"] as const) {
+    test(`a question that fails (${failWith}) is asked once more, and the call is made for the member that answers`, async () => {
+      const p = pair();
+      try {
+        p.st.failQuestions = 1;
+        p.st.failWith = failWith;
+        await p.client().rpc("tools/call", { name: "bash", arguments: {} });
+        expect(p.st.questions).toBe(2);
+        expect(p.st.ran).toEqual(["member-a:bash"]);
+      } finally {
+        p.stop();
+      }
+    });
+  }
+
+  test("a question that fails twice is not remembered as 'this device is old': the next call asks again, and is signed for the member", async () => {
+    const p = pair();
+    try {
+      p.st.failQuestions = 2;
+      const c = p.client();
+      // asked twice, no answer: the call goes out the old way, and an enforcing device refuses it saying so, and that it did not run
+      const first = await c.rpc("tools/call", { name: "bash", arguments: {} }).catch((e: Error) => e);
+      expect(String((first as Error).message)).toContain("did not run");
+      expect(String((first as Error).message)).toContain("did not get through");
+      expect(p.st.ran).toEqual([]);
+      // a minute has not passed, and the client asks again at once
+      await c.rpc("tools/call", { name: "bash", arguments: {} });
+      expect(p.st.questions).toBe(3);
+      expect(p.st.ran).toEqual(["member-a:bash"]);
+    } finally {
+      p.stop();
+    }
+  });
+
+  test("the primary moved: a refusal the member signed makes the client ask again and send the call once, and it runs on the new primary only", async () => {
+    const p = pair();
+    try {
+      const c = p.client();
+      await c.rpc("tools/call", { name: "bash", arguments: { n: 1 } });
+      p.st.current = 1; // the fleet's primary is now member-b; the client still has member-a for a few seconds
+      await c.rpc("tools/call", { name: "bash", arguments: { n: 2 } });
+      expect(p.st.ran).toEqual(["member-a:bash", "member-b:bash"]);
+      expect(p.st.calls).toBe(3); // the refused call, and the one made again
+    } finally {
+      p.stop();
+    }
+  });
+
+  test("a refusal that is not signed is not acted on (the gateway may have made it): the call is not sent again", async () => {
+    const p = pair({ signReplies: false });
+    try {
+      const c = p.client();
+      await c.rpc("tools/call", { name: "bash", arguments: { n: 1 } });
+      p.st.current = 1;
+      await expect(c.rpc("tools/call", { name: "bash", arguments: { n: 2 } })).rejects.toThrow("signed by a key it trusts");
+      expect(p.st.calls).toBe(2);
+      expect(p.st.ran).toEqual(["member-a:bash"]);
+    } finally {
+      p.stop();
     }
   });
 });
