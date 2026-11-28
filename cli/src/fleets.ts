@@ -543,6 +543,21 @@ export async function fleetsMembers(ctx: Ctx): Promise<void> {
     return;
   }
   ctx.out(table(["DEVICE", "ROLE", "KEY", "ADDED"], memberRows(members)));
+  for (const line of ownKeyLines(ctx, fleetId, t)) ctx.out(line);
+}
+
+/**
+ * What this machine itself says of its own keys, from its own key file (not from the gateway): the fingerprints an operator compares
+ * with what the gateway lists before signing them into a roster (`prime fleets roster init`, `approve --key`).
+ */
+function ownKeyLines(ctx: Ctx, fleetId: string, t: FleetTarget): string[] {
+  const space = spaceArg(ctx) ?? (t.device ? spaceOfDevice(ctx.config, t.device) : undefined);
+  if (!space) return [];
+  const keyFile = fleetKeyFile(ctx.configPath, fleetId, space);
+  if (!existsSync(keyFile)) return [];
+  const pair = loadOrCreateKeyPair(keyFile);
+  const sign = loadOrCreateSignKey(keyFile);
+  return ["", bold("this machine (" + space + ")") + "  key " + keyFingerprintOf(pair.publicKey) + "  signing key " + ownerFingerprint(sign.publicKey)];
 }
 
 export async function fleetsRemove(ctx: Ctx): Promise<void> {
@@ -760,6 +775,7 @@ export async function fleetsStatus(ctx: Ctx): Promise<void> {
   }
   ctx.out(bold(fleetId) + ": " + res.json.status);
   if (res.json.member) ctx.out(dim("role: " + res.json.member.role));
+  for (const line of ownKeyLines(ctx, fleetId, t)) ctx.out(line);
 }
 /** One round of synchronisation: take a place, then publish or pull. */
 export async function syncFleetSpace(

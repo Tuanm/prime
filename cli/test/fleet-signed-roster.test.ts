@@ -277,3 +277,32 @@ describe("a fleet whose roster is signed", () => {
     expect(existsSync(join(w.replica.work, "file.txt"))).toBe(false);
   });
 });
+
+describe("a viewer reads the fleet and never writes it", () => {
+  test("a snapshot from a viewer's key is refused when the roster is the gateway's (the members list says it is a viewer)", async () => {
+    const w = world({ signed: false });
+    await w.next("one\n");
+    w.gateway.members.get("primary-device")!.role = "viewer";
+    await expect(w.pullReplica(0)).rejects.toBeInstanceOf(TamperedSnapshotError);
+  });
+
+  test("... and when it is signed: the chain says the key is a viewer's, and nothing it published is taken in", async () => {
+    const w = world();
+    await w.next("one\n");
+    // The chain a gateway colluding with a viewer would show: the primary's key as a viewer from the start.
+    const forged = new Chain(w.owner);
+    forged.add("primary-device", loadOrCreateKeyPair(w.primary.keyFile).publicKey, "viewer");
+    forged.add("replica-device", loadOrCreateKeyPair(w.replica.keyFile).publicKey);
+    w.serve(forged.copy());
+    await expect(w.pullReplica(0)).rejects.toBeInstanceOf(TamperedSnapshotError);
+    expect(existsSync(join(w.replica.work, "file.txt"))).toBe(false);
+  });
+
+  test("a member that is a member in the gateway's list still publishes and is taken in", async () => {
+    const w = world({ signed: false });
+    w.gateway.members.get("replica-device")!.role = "viewer"; // the replica is a viewer: it is sealed for, and reads
+    await w.next("one\n");
+    const got = await w.pullReplica(0);
+    expect(got.applied).toBe(true);
+  });
+});

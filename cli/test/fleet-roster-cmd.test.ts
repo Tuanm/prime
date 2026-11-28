@@ -557,3 +557,32 @@ function dir0(): string {
   dirForUnreadable ??= mkdtempSync(join(tmpdir(), "roster-bad-"));
   return dirForUnreadable;
 }
+
+describe("what a member says of its own keys", () => {
+  test("`fleets members --space` prints this machine's key and signing key from its own key file, for the operator to compare", async () => {
+    const { fleetsMembers } = await import("../src/fleets");
+    const { loadOrCreateKeyPair } = await import("../src/fleet-agent");
+    const root = mkdtempSync(join(tmpdir(), "roster-own-"));
+    const real = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json({ ok: true, members: [] });
+    try {
+      const configPath = join(root, "config.yaml");
+      const keyFile = fleetKeyFile(configPath, "acme", "work");
+      const pair = loadOrCreateKeyPair(keyFile);
+      const sign = loadOrCreateSignKey(keyFile);
+      const out: string[] = [];
+      await fleetsMembers({
+        config: { defaults: { gateway: "https://g.example", fleet_operator_token: "op" }, devices: {}, spaces: { work: { fleet: "acme" } }, codeMcp: {} },
+        configPath,
+        json: false,
+        out: (l: string) => out.push(l),
+        parsed: { positionals: ["fleets", "members", "acme"], flags: new Map([["space", "work"]]), help: false },
+      } as never);
+      expect(out.join("\n")).toContain(keyFingerprintOf(pair.publicKey));
+      expect(out.join("\n")).toContain(ownerFingerprint(sign.publicKey));
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = real;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
