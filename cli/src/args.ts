@@ -52,6 +52,8 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
  * positional. Options are a single letter after one dash, so nothing that long is taken for one.
  */
 export const KEY_ID_WORD = /^-[A-Za-z0-9_-]{15,}$/;
+/** A key id that starts with "--" (1 in 4096): 22 characters, so no option of any command (they are words, not 22 characters of base64url). */
+export const KEY_ID_LONG_WORD = /^--[A-Za-z0-9_-]{20}$/;
 
 export function parseArgs(argv: string[], specs: FlagSpec[], options: { keyIdWords?: boolean } = {}): ParsedArgs {
   const byName = new Map<string, FlagSpec>();
@@ -90,6 +92,10 @@ export function parseArgs(argv: string[], specs: FlagSpec[], options: { keyIdWor
     let rawValue: string | undefined;
     let display = token;
 
+    if (token.startsWith("--") && options.keyIdWords && KEY_ID_LONG_WORD.test(token) && !byName.has(token.slice(2))) {
+      positionals.push(token);
+      continue;
+    }
     if (token.startsWith("--")) {
       const eq = token.indexOf("=");
       const name = eq === -1 ? token.slice(2) : token.slice(2, eq);

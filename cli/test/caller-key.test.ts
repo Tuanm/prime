@@ -585,10 +585,10 @@ describe("prime (spawned)", () => {
 
   test("a key id that starts with '-' can be revoked (1 key in 64 has one), by its id and by its public key", async () => {
     const { generateKeyPairSync } = await import("node:crypto");
-    const dashed = (): Buffer => {
+    const dashed = (prefix = "-"): Buffer => {
       for (;;) {
         const pub = Buffer.from(generateKeyPairSync("ed25519").publicKey.export({ format: "der", type: "spki" }).subarray(12));
-        if (keyIdOf(pub).startsWith("-")) return pub;
+        if (keyIdOf(pub).startsWith(prefix)) return pub;
       }
     };
     const callers = join(dir, "callers.json");
@@ -605,6 +605,14 @@ describe("prime (spawned)", () => {
     const byKey = await cli(["devices", "revoke-caller", second.toString("base64")]);
     expect(byKey.code).toBe(0);
     expect(readCallers(callers)).toHaveLength(before - 2);
+    // one that starts with "--" (1 in 4096) is a key id too, not a long option
+    const doubled = dashed("--");
+    addCaller(callers, { pub: doubled });
+    expect(keyIdOf(doubled).startsWith("--")).toBe(true);
+    const byLong = await cli(["devices", "revoke-caller", keyIdOf(doubled)]);
+    expect(byLong.err).toBe("");
+    expect(byLong.code).toBe(0);
+    expect(readCallers(callers).map((c) => c.keyId)).not.toContain(keyIdOf(doubled));
     // a real unknown option is still one
     const bad = await cli(["devices", "revoke-caller", "--nope"]);
     expect(bad.code).toBe(2);
