@@ -5,11 +5,11 @@
 // persistence and stdout discipline are exercised exactly as a user sees them.
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig } from "../src/config.ts";
+import { emptyConfig, loadConfig, parseConfig, saveConfig, serializeConfig, updateConfig } from "../src/config.ts";
 import {
   classifyProbe,
   connectUrlFor,
@@ -832,7 +832,6 @@ describe("prime devices rotate-code (fake gateway)", () => {
   test("a change another command made to the config after this one began is not lost", async () => {
     // updateConfig reads the file again under the lock: a space added after the command's start survives the promotion.
     const { config, device } = await made();
-    const { updateConfig } = await import("../src/config.ts");
     updateConfig(config, (c) => {
       c.spaces.late = { token: "t", gateway_device: device, remote_token: "old" } as never;
     });
@@ -858,5 +857,144 @@ describe("prime devices rotate-code (fake gateway)", () => {
     const missing = await cli(["devices", "rotate-code"], config);
     expect(missing.code).not.toBe(0);
     expect(missing.err).toContain("missing <device-id>");
+  });
+});
+
+// ---- the config is saved by every command through one door ----------------------------------
+
+describe("saving the config: what another command saved meanwhile is kept", () => {
+  const seed = () => {
+    const path = freshConfig();
+    const c = emptyConfig();
+    c.devices.x = { gateway: "https://g.example", token: "X0", note: "first", anonymous: true };
+    c.devices.keep = { gateway: "https://g.example", token: "K0" };
+    c.spaces.s = { token: "st", gateway_device: "x", remote_token: "X0" } as never;
+    saveConfig(path, c);
+    return path;
+  };
+
+  test("two commands that read the config at the same time: neither change is lost, in either order", () => {
+    for (const order of ["ab", "ba"]) {
+      const path = seed();
+      const a = loadConfig(path); // a `prime spaces ...` that began first and is slow
+      const b = loadConfig(path); // a `prime devices connect ...`
+      a.spaces.t = { token: "tt" } as never;
+      b.devices.y = { gateway: "https://g.example", token: "Y0" };
+      for (const who of order) saveConfig(path, who === "a" ? a : b);
+      const after = loadConfig(path);
+      expect(Object.keys(after.devices).sort()).toEqual(["keep", "x", "y"]);
+      expect(Object.keys(after.spaces).sort()).toEqual(["s", "t"]);
+      // The one that saved first is brought up to date in the process that saved second.
+      expect(Object.keys((order === "ab" ? b : a).devices).sort()).toContain("keep");
+    }
+  });
+
+  test("a code that another command saved is not put back by a command that did not touch it", () => {
+    const path = seed();
+    const slow = loadConfig(path);
+    updateConfig(path, (c) => {
+      c.devices.x = { ...c.devices.x!, token: "X1-NEW", pending_token: undefined };
+      c.spaces.s!.remote_token = "X1-NEW";
+    });
+    slow.spaces.late = { token: "l" } as never;
+    saveConfig(path, slow);
+    const after = loadConfig(path);
+    expect(after.devices.x!.token).toBe("X1-NEW");
+    expect(after.spaces.s!.remote_token).toBe("X1-NEW");
+    expect(after.spaces.late).toBeDefined();
+  });
+
+  test("two fields of one entry changed by two commands both stay; one both changed is the later save's", () => {
+    const path = seed();
+    const a = loadConfig(path);
+    const b = loadConfig(path);
+    a.devices.x!.note = "from a";
+    b.devices.x!.token = "X-from-b";
+    saveConfig(path, a);
+    saveConfig(path, b);
+    expect(loadConfig(path).devices.x).toMatchObject({ note: "from a", token: "X-from-b" });
+    const c = loadConfig(path);
+    const d = loadConfig(path);
+    c.devices.x!.note = "c";
+    d.devices.x!.note = "d";
+    saveConfig(path, c);
+    saveConfig(path, d);
+    expect(loadConfig(path).devices.x!.note).toBe("d");
+  });
+
+  test("what a command removed is removed, and what another command added stays", () => {
+    const path = seed();
+    const a = loadConfig(path);
+    const b = loadConfig(path);
+    delete a.devices.x;
+    delete a.spaces.s;
+    b.devices.added = { token: "A0" };
+    saveConfig(path, b);
+    saveConfig(path, a);
+    const after = loadConfig(path);
+    expect(Object.keys(after.devices).sort()).toEqual(["added", "keep"]);
+    expect(after.spaces).toEqual({});
+    expect(Object.keys(a.devices).sort()).toEqual(["added", "keep"]);
+  });
+
+  test("objects the caller holds stay live across a save: a later change to one is saved too", () => {
+    const path = seed();
+    const cfg = loadConfig(path);
+    const space = cfg.spaces.s!;
+    updateConfig(path, (c) => {
+      c.devices.other = { token: "O" };
+    });
+    saveConfig(path, cfg);
+    expect(cfg.spaces.s).toBe(space);
+    expect(cfg.devices.other).toBeDefined();
+    space.remote_token = "X-LATER";
+    saveConfig(path, cfg);
+    expect(loadConfig(path).spaces.s!.remote_token).toBe("X-LATER");
+  });
+
+  test("a config that was not read from the file is written as it is, and the file is private", () => {
+    const path = seed();
+    const fresh = emptyConfig();
+    fresh.devices.only = { token: "O" };
+    saveConfig(path, fresh);
+    expect(Object.keys(loadConfig(path).devices)).toEqual(["only"]);
+    if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  test("no file in the config's directory is left behind but the lock's home", () => {
+    const path = seed();
+    const cfg = loadConfig(path);
+    cfg.devices.z = { token: "Z" };
+    saveConfig(path, cfg);
+    const dir = path.slice(0, path.lastIndexOf("/") > 0 ? path.lastIndexOf("/") : path.lastIndexOf("\\"));
+    expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("no command writes the config file by any road but saveConfig and updateConfig", () => {
+    const src = fileURLToPath(new URL("../src/", import.meta.url));
+    const offenders: string[] = [];
+    for (const file of readdirSync(src).filter((f) => f.endsWith(".ts") && f !== "config.ts")) {
+      const text = readFileSync(join(src, file), "utf8");
+      if (/serializeConfig\(/.test(text)) offenders.push(file + ": serializeConfig");
+      if (/(writeFileSync|writeFileAtomic|renameSync)\([^)]*(configPath|config\.yaml)/.test(text)) offenders.push(file + ": writes the config path");
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("commands that race as processes: every device connected, the one disconnected gone, the code made again kept", async () => {
+    const config = seed();
+    const target = loadConfig(config);
+    target.devices.gone = { gateway: GATEWAY, token: "G" };
+    saveConfig(config, target);
+    const ids = ["r1", "r2", "r3", "r4", "r5", "r6"];
+    const runs = [
+      ...ids.map((id) => cli(["devices", "connect", id, "--gateway", GATEWAY, "--token", "tok-" + id, "--no-verify"], config)),
+      cli(["devices", "disconnect", "gone"], config),
+    ];
+    const results = await Promise.all(runs);
+    for (const r of results) expect(r.code).toBe(0);
+    const after = loadConfig(config);
+    expect(Object.keys(after.devices).sort()).toEqual(["keep", "r1", "r2", "r3", "r4", "r5", "r6", "x"]);
+    for (const id of ids) expect(after.devices[id]!.token).toBe("tok-" + id);
   });
 });

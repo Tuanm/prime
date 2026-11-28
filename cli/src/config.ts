@@ -27,7 +27,7 @@
 // The file holds secrets, so it is created 0600 inside a 0700 directory, and
 // writes are atomic (temp file + rename) so a crash cannot truncate it.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -252,7 +252,7 @@ export function parseConfig(text: string, source: string): Config {
   return config;
 }
 
-export function loadConfig(path: string): Config {
+function readConfigFile(path: string): Config {
   if (!existsSync(path)) return emptyConfig();
   let text: string;
   try {
@@ -376,7 +376,66 @@ export function serializeConfig(config: Config): string {
   return out;
 }
 
-/** Atomic write with restrictive permissions. */
+/** What each config read looked like when it was read, so that a save can tell what its process changed. */
+const baselines = new WeakMap<Config, Config>();
+
+/** A plain copy: what is not set (undefined) is not there. */
+function plain<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/** The config as the file holds it now. The copy is remembered, to be compared with at the save. */
+export function loadConfig(path: string): Config {
+  const config = readConfigFile(path);
+  baselines.set(config, plain(config));
+  return config;
+}
+
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+const isObject = (v: unknown): v is { [key: string]: Json } => typeof v === "object" && v !== null && !Array.isArray(v);
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Three ways: what this process read (`base`), what it holds now (`mine`), what the file holds now (`theirs`).
+ * What this process left alone is the file's; what it changed is its own; objects are taken field by field, so
+ * that it changing one field of a device and another process changing another field of it both stay. A field
+ * both changed is this process's (it is the later of the two to be saved).
+ */
+function merge(base: Json | undefined, mine: Json | undefined, theirs: Json | undefined): Json | undefined {
+  if (same(mine, base)) return theirs;
+  if (same(theirs, base) || same(mine, theirs)) return mine;
+  if (isObject(mine) && isObject(theirs)) {
+    const b = isObject(base) ? base : {};
+    const out: { [key: string]: Json } = {};
+    for (const key of new Set([...Object.keys(mine), ...Object.keys(theirs), ...Object.keys(b)])) {
+      const v = merge(b[key], mine[key], theirs[key]);
+      if (v !== undefined) out[key] = v;
+    }
+    return out;
+  }
+  return mine;
+}
+
+/** Make `target` hold what `source` does, keeping the objects that are already in it (callers hold them). */
+function assignInPlace(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const key of Object.keys(target)) if (!(key in source)) delete target[key];
+  for (const [key, value] of Object.entries(source)) {
+    const held = target[key];
+    if (isObject(value) && held && typeof held === "object" && !Array.isArray(held)) assignInPlace(held as Record<string, unknown>, value);
+    else target[key] = value;
+  }
+}
+
+/**
+ * Save the config. Every writer of the file comes through here (or `updateConfig`).
+ *
+ * Under a lock of its own beside the file, the file is read again, what THIS process changed since it read
+ * the config (compared with the copy made then) is applied to it, and the result is written to disk before
+ * the name moves (fsync + rename). What another command saved in the meantime stays: a `prime spaces start`
+ * that takes a minute does not put back the device a `prime devices connect` saved during it. The config
+ * the caller holds is brought up to date in place. A config that was not read from the file (a new one) is
+ * written as it is.
+ */
 export function saveConfig(path: string, config: Config): void {
   const dir = dirname(path);
   try {
@@ -384,32 +443,48 @@ export function saveConfig(path: string, config: Config): void {
   } catch (err) {
     throw new CliError(`cannot create ${dir}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const tmp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, serializeConfig(config), { mode: 0o600 });
-    renameSync(tmp, path);
-  } catch (err) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {}
-    throw new CliError(`cannot write ${path}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  // rename() preserves the temp file mode, but an existing target could have had
-  // looser permissions from a previous tool - enforce 0600 on the final path.
-  try {
-    chmodSync(path, 0o600);
-  } catch {}
+  const base = baselines.get(config);
+  withDirLockSync(
+    path + ".lock",
+    () => {
+      let text: string;
+      let merged: Config | undefined;
+      if (base) {
+        const theirs = plain(readConfigFile(path));
+        merged = merge(plain(base) as unknown as Json, plain(config) as unknown as Json, theirs as unknown as Json) as unknown as Config;
+        // A section nobody has anything in is still a section.
+        const m = merged as Partial<Config>;
+        merged = { defaults: m.defaults ?? {}, devices: m.devices ?? {}, spaces: m.spaces ?? {}, codeMcp: m.codeMcp ?? {} };
+        text = serializeConfig(merged);
+      } else {
+        text = serializeConfig(config);
+      }
+      try {
+        writeFileAtomic(path, text, 0o600, { durable: true });
+        // rename() keeps the temp file's mode, but an existing target could have had looser permissions
+        // from a previous tool: enforce 0600 on the final path.
+        try {
+          chmodSync(path, 0o600);
+        } catch {}
+      } catch (err) {
+        throw new CliError(`cannot write ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (merged) {
+        assignInPlace(config as unknown as Record<string, unknown>, merged as unknown as Record<string, unknown>);
+        baselines.set(config, plain(merged));
+      }
+    },
+    { waitMs: 5000, staleMs: 30_000 },
+  );
 }
 
 /**
  * Change the config as it is on disk right now, and keep the change.
  *
- * The file is read again under a lock of its own (a directory next to it), changed by `change`, and
- * written so that it is on disk before the name moves (fsync), for what is not to be lost: a code
- * that exists nowhere else. Commands that read the config at their start and write all of it back
- * later (most of them) do not take this lock; what this guards is the change itself, against
- * another that makes it at the same moment, and against a change made in the time since this process
- * began.
+ * The file is read again under the lock beside it (the one `saveConfig` takes), changed by `change`, and
+ * written so that it is on disk before the name moves (fsync), for what is not to be lost: a code that
+ * exists nowhere else. For a change that is made in a moment, on the file as it is; `saveConfig` is for the
+ * commands that hold the config for a while and say what they changed by changing it.
  */
 export function updateConfig<T>(path: string, change: (config: Config) => T): T {
   const dir = dirname(path);
@@ -421,7 +496,7 @@ export function updateConfig<T>(path: string, change: (config: Config) => T): T 
   return withDirLockSync(
     path + ".lock",
     () => {
-      const config = loadConfig(path);
+      const config = readConfigFile(path);
       const result = change(config);
       try {
         writeFileAtomic(path, serializeConfig(config), 0o600, { durable: true });
