@@ -2,6 +2,8 @@
 // neither the manifest nor the pack, and what it was told is held to the same checks as what it asked for.
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,6 +103,41 @@ describe("what the socket brought", () => {
     // an older head is noted for nothing but the look at the fleet
     applyHeadEvent(loop, { type: "head", seq: 1 });
     expect(loop.knownHeadSeq).toBe(f.edit.seq);
+  });
+
+  test("the gateway's own check lets through exactly the bytes a publish stored, and the member takes them in with no ask", async () => {
+    const f = await fleet();
+    const gatewaySide = join(import.meta.dir, "..", "..", "api", "src", "fleets.ts");
+    // The gateway is in this repository: a path that moved is a test that must say so, not one that passes without looking.
+    expect(existsSync(gatewaySide)).toBe(true);
+    const { checkedInline, INLINE_CAP } = (await import(pathToFileURL(gatewaySide).href)) as {
+      checkedInline(asked: unknown, manifestKey: string, manifestHash: string, fleetId: string, full: boolean): Promise<{ manifest: string; pack: string } | undefined>;
+      INLINE_CAP: string;
+    };
+    const { MEMBER_CAPS } = await import("../src/fleet-transport");
+    expect(MEMBER_CAPS).toContain(INLINE_CAP);
+    const asked = { manifest: f.manifestText.toString("utf8"), pack: f.pack.toString("base64") };
+    const hash = f.edit.manifestKey.split("/").pop()!;
+    const answered = await checkedInline(asked, f.edit.manifestKey, hash, "x", false);
+    // the manifest text that goes in the event is the stored manifest, byte for byte
+    expect(answered?.manifest).toBe(f.gateway.payloads.get(f.edit.manifestKey)!.toString("utf8"));
+    expect(sha(Buffer.from(answered!.manifest, "utf8"))).toBe(hash);
+    // what comes out of the gateway's check is an event this side parses and takes in
+    const event = parseFleetEvent(JSON.stringify({ type: "head", seq: f.edit.seq, manifestKey: f.edit.manifestKey, inline: answered }));
+    expect(event).toMatchObject({ type: "head", inline: { manifest: asked.manifest } });
+    const loop = { fleet: "x", knownHeadSeq: f.got.seq, knownHeadManifest: undefined as string | undefined, headDirty: false };
+    applyHeadEvent(loop, event as never);
+    const manifests = f.count("manifests");
+    const packs = f.count("packs");
+    const { fetchAhead } = await import("../src/fleet-agent");
+    const got = await fetchAhead(credsFor("replica-device"), "x", f.replica, { seq: f.got.seq, commit: f.got.commit }, undefined, { seq: loop.knownHeadSeq, manifestKey: loop.knownHeadManifest! });
+    expect(got.fetched.seq).toBe(2);
+    expect(f.count("manifests") - manifests).toBe(0);
+    expect(f.count("packs") - packs).toBe(0);
+    // and the gateway refuses what this side would refuse: a pack that is not the one the manifest names
+    const wrong = Buffer.from(f.pack);
+    wrong[0] = wrong[0]! ^ 0xff;
+    expect(await checkedInline({ manifest: asked.manifest, pack: wrong.toString("base64") }, f.edit.manifestKey, hash, "x", false)).toBeUndefined();
   });
 
   test("is asked for twice without it (the control)", async () => {
