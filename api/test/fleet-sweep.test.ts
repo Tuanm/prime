@@ -13,6 +13,8 @@ mock.module("cloudflare:workers", () => ({
 }));
 mock.module("@cloudflare/containers", () => ({ Container: class {} }));
 
+import { deleteRows, listRows } from "./fake-list";
+
 const { FleetDO } = await import("../src/fleet-do");
 const { sweepFleets, SWEEP_MIN_AGE_MS, SWEEP_ORPHAN_AGE_MS, SWEEP_PER_FLEET } = await import("../src/fleet-sweep");
 const { default: worker } = await import("../src/index");
@@ -82,8 +84,11 @@ function fakeState() {
       async put(key: string, value: unknown): Promise<void> {
         data.set(key, JSON.parse(JSON.stringify(value)));
       },
-      async delete(key: string): Promise<boolean> {
-        return data.delete(key);
+      async delete(key: string | string[]): Promise<boolean | number> {
+        return Array.isArray(key) ? deleteRows(data, key) : data.delete(key);
+      },
+      async list(o: { prefix?: string; start?: string; limit?: number; reverse?: boolean }) {
+        return listRows(data, o);
       },
     },
     async blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
@@ -189,6 +194,26 @@ describe("the sweep of a fleet that exists", () => {
     // An hour later the young one is an orphan too.
     expect((await sweepFleets(w.env, { now: T0 + 2 * HOUR })).orphans).toBe(1);
     expect(keysOf(w.bucket)).not.toContain(orphanYoung);
+  });
+
+  test("says in the fleet's log how many objects it cleared, and says nothing when it cleared none or only counted", async () => {
+    const w = world();
+    await w.fleet("acme");
+    await w.publish("acme", 1, "a");
+    const swept = async () => ((await w.call("acme", "/audit?tail=100", "admin", "operator", undefined, "GET")).json.entries as Array<{ action: string; actor: { kind: string }; detail?: { objects?: number } }>).filter((e) => e.action === "bucket-swept");
+    w.bucket.seed("fleets/acme/packs/" + hex("1"), 5 * HOUR);
+    w.bucket.seed("fleets/acme/manifests/" + hex("2"), 5 * HOUR);
+    await sweepFleets(w.env, { now: T0, dryRun: true });
+    expect(await swept()).toEqual([]);
+    await sweepFleets(w.env, { now: T0 });
+    const [entry] = await swept();
+    expect(entry).toMatchObject({ actor: { kind: "gateway" }, detail: { objects: 2 } });
+    await sweepFleets(w.env, { now: T0 });
+    expect((await swept()).length).toBe(1);
+    // Only the gateway may write the note, and only with a count.
+    expect((await w.call("acme", "/note", "device", "dev-a", { action: "bucket-swept", count: 3 })).status).toBe(403);
+    expect((await w.call("acme", "/note", "admin", "operator", { action: "bucket-swept", count: "many" })).status).toBe(400);
+    expect((await w.call("acme", "/note", "admin", "operator", { action: "bucket-swept" })).status).toBe(400);
   });
 
   test("keeps what is old and still named: every snapshot the fleet keeps, and the change pack of a checkpoint", async () => {

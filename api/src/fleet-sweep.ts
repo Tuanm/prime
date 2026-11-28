@@ -125,7 +125,15 @@ export async function sweepFleets(env: Env, options: SweepOptions = {}): Promise
       }
       const take = doomed.slice(0, Math.min(SWEEP_PER_FLEET, budget));
       if (take.length < doomed.length) report.capped = true;
-      if (!dryRun) await remove(take);
+      if (!dryRun) {
+        await remove(take);
+        // The fleet's own log says what was cleared from it. Best effort: the objects are gone either way.
+        if (take.length > 0) {
+          const headers = adminHeaders(fleetId);
+          headers.set("x-prime-actor", "gateway");
+          await stub.fetch("https://fleet/note", { method: "POST", headers, body: JSON.stringify({ action: "bucket-swept", count: take.length }) }).catch(() => undefined);
+        }
+      }
       report.orphans += take.length;
       budget -= take.length;
     } catch (error) {

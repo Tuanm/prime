@@ -640,9 +640,12 @@ export class FleetDO implements DurableObject {
   private async note(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     if (caller.kind !== "admin") return this.deny();
     const what = body.action;
-    if (what !== "fleet-token-set" && what !== "fleet-token-cleared") return Response.json({ error: "not a note" }, { status: 400 });
+    if (what !== "fleet-token-set" && what !== "fleet-token-cleared" && what !== "bucket-swept") return Response.json({ error: "not a note" }, { status: 400 });
     if (!(await this.exists())) return Response.json({ error: "no such fleet" }, { status: 404 });
-    await this.audit(caller, what);
+    // The daily sweep says how many objects of the fleet it deleted, and nothing else about them.
+    const count = what === "bucket-swept" && typeof body.count === "number" && Number.isSafeInteger(body.count) && body.count > 0 ? body.count : undefined;
+    if (what === "bucket-swept" && count === undefined) return Response.json({ error: "not a note" }, { status: 400 });
+    await this.audit(caller, what, undefined, count !== undefined ? { objects: count } : undefined);
     return Response.json({ ok: true });
   }
 
