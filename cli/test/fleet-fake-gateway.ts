@@ -58,6 +58,16 @@ export class FakeGateway {
   stripKeyIds = false;
   /** How many of the next /applied reports fail with a 503. */
   failApplied = 0;
+  /** How many of the next reads of a manifest fail with a 503. */
+  failManifestReads = 0;
+  /** How many of the next asks for the member's role fail with a 503 (the answer a gateway that does not know the route gives is not one: it is a 404 with a body). */
+  failRoleReads = 0;
+  /** Every read of a manifest is answered with this status (for good), when set. */
+  manifestStatus: number | undefined = undefined;
+  /** Every ask for the role is answered with this status (for good), when set. */
+  roleStatus: number | undefined = undefined;
+  /** A manifest is answered with other bytes than the ones it is stored under. */
+  corruptManifests = false;
   /** Like the real gateway now: a publish makes the publisher applied. */
   advanceMarksApplied = false;
   /** How many times a member asked for its place. */
@@ -186,6 +196,17 @@ export class FakeGateway {
       this.claim = null;
       this.primary = creds.deviceId;
       return Response.json({ ok: true, role: "primary", ttlMs: 45_000, ...(current > 0 ? { catchUpTo: current } : {}) });
+    }
+    if (kind === "role" && method === "GET" && this.roleStatus !== undefined) return new Response("{}", { status: this.roleStatus });
+    if (kind === "manifests" && method === "GET" && this.manifestStatus !== undefined) return new Response("{}", { status: this.manifestStatus });
+    if (kind === "manifests" && method === "GET" && this.corruptManifests) return new Response("{\"seq\": 0, \"not\": \"the manifest\"}");
+    if (kind === "role" && method === "GET" && this.failRoleReads > 0) {
+      this.failRoleReads--;
+      throw new TypeError("fetch failed");
+    }
+    if (kind === "manifests" && method === "GET" && this.failManifestReads > 0) {
+      this.failManifestReads--;
+      throw new TypeError("fetch failed");
     }
     if (kind === "role" && method === "GET") {
       const member = this.members.has(creds.deviceId);

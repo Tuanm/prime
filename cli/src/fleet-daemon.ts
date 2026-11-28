@@ -32,7 +32,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { commandOf, isFleetAgentProcess } from "./fleet-agent-lock.ts";
 import { acquireStarting, claimSuccessor, clearSuccessor, isSuccessorProcess, mayAskAgainToStop, takeHandoverEnv, readSuccessor, registerSuccessor, requestStop, stopSuccessor, stopWaitingSuccessor as stopWaiting, watchForStop } from "./fleet-agent-handover.ts";
 import { FAILING_MAX_MS, FleetEvents, roundSleepMs, type FleetEvent } from "./fleet-events.ts";
-import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, loadOrCreateSignKey, previousKeyPair, publish, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
+import { NotSealedError, NotSealedYetError, dropPreviousKey, loadOrCreateKeyPair, loadOrCreateSignKey, previousKeyPair, publish, PublishPostponed, rosterOf, withChain, type MemberPaths } from "./fleet-agent.ts";
 import { keyFingerprintOf, proveKeyChange, type KeyProof } from "./fleet-crypto.ts";
 import { TamperedSnapshotError } from "./fleet-trust.ts";
 import {
@@ -1446,6 +1446,8 @@ export interface SpaceLoop {
    * place and the head is not fetched. `hint` is what the fleet says to do; asked again after `retryAfterMs`.
    */
   upgrade?: { need: string; hint: string };
+  /** Publishes that were left for the next round, in a row, and since when (see `PublishPostponed`). */
+  postponed?: { count: number; since: number };
   /** How long the gateway asked to be left alone after it refused the last request for the place. */
   refusedForMs?: number;
   /** The held connection that tells this space what happened. */
@@ -1653,7 +1655,10 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       return;
     }
     const publishBegan = Date.now();
-    const result = await publish(
+    // A publish that has been left for the next round this many times in a row, or for this long, is not waiting out a hiccup:
+    // it is made with what is known (a whole tree for a head that cannot be read), or the fleet would never move.
+    const giveUp = loop.postponed !== undefined && (loop.postponed.count >= POSTPONE_LIMIT || Date.now() - loop.postponed.since >= POSTPONE_MAX_MS) ? loop.postponed.count : undefined;
+    const publishing = publish(
       creds,
       fleet,
       paths,
@@ -1664,9 +1669,8 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       // The tree just taken is published as it is when the files are still as they were when it was
       // taken (a snapshot of the same files again would only find the same tree). The watcher having
       // spoken since says they are not, and nothing is then looked at.
-      withChain(
-        state,
-        settled && !settled.racy && !loop.dirty
+      withChain(state, {
+        ...(settled && !settled.racy && !loop.dirty
         ? {
             known: {
               tree: snap.tree,
@@ -1681,9 +1685,32 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
               },
             },
           }
-        : undefined,
-      ),
+        : {}),
+        ...(giveUp !== undefined ? { giveUp } : {}),
+      }),
     );
+    // A publish that could not find out what it needs (a request that did not answer, twice) was not made, and what was
+    // taken stays pending: the next round makes it, instead of waiting for the backstop, and names the same paths again, so
+    // that it stages those and not the whole tree.
+    const result = await publishing.catch((err: unknown) => {
+      if (err instanceof PublishPostponed) {
+        loop.dirty = true;
+        if (named === undefined) loop.changedAll = true;
+        else for (const path of named) noteChangedPath(loop, path);
+        const was = loop.postponed;
+        loop.postponed = { count: (was?.count ?? 0) + 1, since: was?.since ?? Date.now() };
+        if (was === undefined) logAgent("space " + loop.name + ": " + err.message);
+      } else {
+        // A publish that failed for another reason says nothing of the wait that was going on: it does not count towards the limit.
+        loop.postponed = undefined;
+      }
+      throw err;
+    });
+    if (loop.postponed) {
+      logAgent("space " + loop.name + ": published " + result.seq + " after " + loop.postponed.count + " rounds that left it for the next" + (giveUp !== undefined ? " (given up waiting: " + (result.fullBecause ?? "no reason given") + ")" : ""));
+      loop.postponed = undefined;
+    }
+    if (result.full) logAgent("space " + loop.name + ": published a whole tree (seq " + result.seq + "): " + (result.fullBecause ?? "no reason given"));
     loop.timing.publish = Date.now() - publishBegan;
     const published: Partial<FleetMemberState> = {
       base: result.commit,
@@ -1714,7 +1741,7 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
       }
       throw err;
     }
-    report("published " + result.seq);
+    report("published " + result.seq + (result.full && result.fullBecause !== "no base" ? " (whole tree: " + (result.fullBecause ?? "no reason given") + ")" : ""));
     return;
   }
 
@@ -1723,6 +1750,9 @@ export async function round(loop: SpaceLoop, options: FleetAgentOptions, report:
   // who wants the mirror current asks (`prime fleets sync`), or sets
   // PRIME_FLEET_REPLICA=mirror to have every snapshot written as it arrives.
   loop.primary = false;
+  // A replica publishes nothing, so no publish is being left for the next round: whatever ended this member's turn as primary
+  // (the lease freed or lost, a pause, a stop) ends the count with it.
+  loop.postponed = undefined;
   const mode = replicaMode();
   const keep = (patch: Partial<FleetMemberState>, opts?: { rewind?: boolean }): void => {
     updateFleetState(loop.configPath, fleet, loop.name, patch, opts);
@@ -1937,6 +1967,9 @@ function upgradeOf(loop: Pick<SpaceLoop, "upgrade">): SpaceLoop["upgrade"] {
 
 /** How long to wait before asking a fleet again that said this build must be updated, when it did not say. */
 export const UPGRADE_RETRY_MS = 60_000;
+/** How many publishes may be left for the next round in a row, and for how long, before the next is made whatever is not known. */
+export const POSTPONE_LIMIT = 3;
+export const POSTPONE_MAX_MS = 120_000;
 
 /** The longest a request for the place may take: under a quarter of the lease. */
 export const PLACE_TIMEOUT_MS = 10_000;
@@ -2051,6 +2084,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     if (placed.paused) {
       loop.paused = true;
       loop.primary = false;
+      loop.postponed = undefined;
       loop.retryAfterMs = placed.retryAfterMs;
       loop.refusedForMs = undefined;
       return { primary: false, paused: true };
@@ -2064,6 +2098,7 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
       if (loop.primary) await releaseLease(creds, loop.fleet).catch(() => false);
       loop.upgrade = { need: placed.need ?? "", hint: placed.hint ?? "this build cannot read the fleet's newest snapshot: update prime" };
       loop.primary = false;
+      loop.postponed = undefined;
       loop.claim = false;
       loop.refusedForMs = undefined;
       loop.paused = false;
@@ -2082,6 +2117,8 @@ async function takePlace(loop: SpaceLoop): Promise<PlaceAnswer> {
     // The index of the snapshots is not what it was when the member was last primary: a replica writes the work tree.
     if (placed.primary !== loop.primary) loop.indexTrusted = false;
     loop.primary = placed.primary;
+    // A member that is not the primary has no publish that is being left for the next round.
+    if (!placed.primary) loop.postponed = undefined;
     // What the fleet says a place lasts. An agent that renews at its own pace
     // against a lease it never asked about is how a live primary loses it.
     adoptLease(loop, placed.ttlMs);
