@@ -243,6 +243,16 @@ describe("the commands that sign a fleet's roster", () => {
     gw.head = 7;
   });
 
+  test("a role is not changed along with a request for a new key: the key is approved first, and nothing is signed", async () => {
+    const was = gw.entries.length;
+    const next = member("dev-40");
+    gw.pending = [{ ...next, keyChange: true }];
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-40", viewer: true, key: keyFingerprintOf(next.pubkey), "signing-key": ownerFingerprint(next.spub), rotate: true }))).rejects.toThrow(/not changed together with a key/);
+    await expect(fleetsApprove(ctx("approve", ["acme"], { member: "dev-40", role: "member" }))).rejects.toThrow(/Approve the key first|new key waiting/);
+    expect(gw.entries.length).toBe(was);
+    gw.pending = [];
+  });
+
   test("approve for a new member is signed again at the head when the gateway says the head moved", async () => {
     const fresh = member("dev-34");
     gw.pending = [fresh];
