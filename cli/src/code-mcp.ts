@@ -6294,8 +6294,11 @@ if (gatewayDomain) {
           return;
         }
         // The reply to a signed call is signed too, so its sender can tell this device answered.
-        const replySig = admission.nonce !== undefined ? callerAuth.replySig(admission.nonce, JSON.stringify(resp)) : undefined;
-        ws.send(JSON.stringify({ id: msg.id, response: resp, ...(replySig ? { replySig } : {}) }));
+        // `responseText` is the exact text that was signed: the gateway sends it as the body as it is, so what the
+        // caller receives is what the signature covers, however the gateway would have written `response`.
+        const responseText = JSON.stringify(resp);
+        const replySig = admission.nonce !== undefined ? callerAuth.replySig(admission.nonce, responseText) : undefined;
+        ws.send(JSON.stringify({ id: msg.id, response: resp, ...(replySig ? { replySig, responseText } : {}) }));
       } catch (err) {
         console.error(`[${deviceId}] handle error:`, err);
         // A frame rejected before parsing has no trustworthy correlation ID.
