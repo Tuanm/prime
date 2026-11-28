@@ -55,6 +55,13 @@ import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
 import { ensureFleetAgent, fleetAgentStatus, installFleetAgent, resetAgentSettings, stopFleetAgentManaged, uninstallFleetAgent } from "./fleet-daemon.ts";
 import { DEFAULT_GATEWAY, ENV, normalizeGateway } from "./target.ts";
+import { accessToken, defaultAccessRunner, type AccessRunner } from "./access-login.ts";
+
+/** How the Access token is fetched; tests replace it. */
+let accessRunner: AccessRunner = defaultAccessRunner;
+export function useAccessRunner(run: AccessRunner | undefined): void {
+  accessRunner = run ?? defaultAccessRunner;
+}
 
 const FLEET_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -67,6 +74,8 @@ export interface FleetTarget {
   /** Device token this call speaks as. */
   deviceToken?: string;
   timeoutMs: number;
+  /** Speak as the person Cloudflare Access knows (`--sso`): the call carries their Access token, not the operator token. */
+  sso?: boolean;
 }
 
 export interface FleetTargetFlags {
@@ -144,7 +153,9 @@ async function call(
   body?: unknown,
 ): Promise<{ status: number; json: any }> {
   const headers: Record<string, string> = {};
-  if (target.operatorToken) headers["authorization"] = "Bearer " + target.operatorToken;
+  // With --sso the call is the person's: their Access token says who, and the shared operator token is left out.
+  if (target.sso) headers["cf-access-token"] = await accessToken(target.gateway, accessRunner);
+  else if (target.operatorToken) headers["authorization"] = "Bearer " + target.operatorToken;
   if (target.device) headers["x-prime-device"] = target.device;
   if (target.deviceToken) headers["x-device-token"] = target.deviceToken;
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -198,6 +209,8 @@ function target(ctx: Ctx, spaceName?: string): FleetTarget {
     },
     spaceName,
   );
+  const sso = bool(ctx.parsed, "sso") || process.env.PRIME_FLEET_SSO === "1";
+  if (sso) return { ...t, sso: true };
   // A fleet command speaks for a device. Without its credential the gateway
   // cannot tell who is asking, and the answer would be a bare
   // "unauthorized" that says nothing about what to do.
@@ -1663,4 +1676,199 @@ async function rosterWitness(ctx: Ctx, fleetId: string): Promise<void> {
     for (const f of failed) ctx.out(yellow("not taken: " + f));
   }
   if (failed.length > 0) throw new CliError("the witness did not take " + failed.length + " removal(s)");
+}
+
+// ---- the audit log (see docs/fleets.md, "Who did it") ----------------------------------------------------
+
+/** What the fleet's audit log holds for one entry (the gateway's `AuditEntry`). */
+export interface AuditRow {
+  n: number;
+  prev: string;
+  at: number;
+  actor: { kind: string; id?: string; email?: string };
+  action: string;
+  target?: string;
+  detail?: Record<string, string | number | boolean | null>;
+}
+
+/** The `prev` of the first entry of a log. */
+export const AUDIT_GENESIS = "0".repeat(64);
+
+/** JSON with its keys in order and nothing undefined: the bytes the gateway hashes an entry as. */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return "[" + value.map((v) => canonicalJson(v)).join(",") + "]";
+  const parts: string[] = [];
+  for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+    const v = (value as Record<string, unknown>)[k];
+    if (v === undefined) continue;
+    parts.push(JSON.stringify(k) + ":" + canonicalJson(v));
+  }
+  return "{" + parts.join(",") + "}";
+}
+
+/** The hash the next entry carries as its `prev`. */
+export function auditEntryHash(entry: AuditRow): string {
+  return createHash("sha256").update(canonicalJson(entry), "utf8").digest("hex");
+}
+
+/**
+ * Whether these entries, in order, are a chain, and where it breaks: the number of the first entry whose number or `prev`
+ * does not follow the one before. `prev` is what the first is expected to carry; null leaves the first unchecked (a page
+ * from the middle of a log). The hash the last entry's successor will carry is returned for the next page.
+ */
+export function checkAuditChain(entries: AuditRow[], prev: string | null): { brokenAt: number | null; last: string | null } {
+  let expect = prev;
+  let n: number | undefined;
+  for (const e of entries) {
+    if ((expect !== null && e.prev !== expect) || (n !== undefined && e.n !== n + 1)) return { brokenAt: e.n, last: null };
+    expect = auditEntryHash(e);
+    n = e.n;
+  }
+  return { brokenAt: null, last: expect };
+}
+
+const isAuditRow = (v: unknown): v is AuditRow => {
+  const e = v as AuditRow;
+  return (
+    !!e &&
+    typeof e === "object" &&
+    Number.isSafeInteger(e.n) &&
+    e.n > 0 &&
+    typeof e.prev === "string" &&
+    typeof e.at === "number" &&
+    typeof e.action === "string" &&
+    !!e.actor &&
+    typeof e.actor.kind === "string"
+  );
+};
+
+const actorText = (a: AuditRow["actor"]): string => (a.email ?? a.id ?? "") ? a.kind + ":" + (a.email ?? a.id) : a.kind;
+const detailText = (d: AuditRow["detail"]): string =>
+  d
+    ? Object.entries(d)
+        .map(([k, v]) => k + "=" + String(v))
+        .join(" ")
+    : "";
+
+/** The head of the log this machine last checked, kept so that a later read can tell a log that was cut back or rewritten. */
+function auditPinFile(ctx: Ctx, gateway: string, fleetId: string): string {
+  let host = "gateway";
+  try {
+    host = new URL(gateway).host;
+  } catch {
+    // not a URL: the name below is only a file name
+  }
+  return join(dirname(ctx.configPath), "fleet-audit", host.replace(/[^A-Za-z0-9._-]/g, "_") + "-" + fleetId + ".json");
+}
+
+function readAuditPin(file: string): { n: number; hash: string } | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as { n?: unknown; hash?: unknown };
+    return Number.isSafeInteger(raw.n) && (raw.n as number) > 0 && typeof raw.hash === "string" && /^[0-9a-f]{64}$/.test(raw.hash) ? { n: raw.n as number, hash: raw.hash } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `prime fleets log <fleet-id> [--after <n>] [--limit <n>] [--tail [<n>]] [--all]`
+ *
+ * What was done to the fleet, by whom, from the gateway's hash-chained log. Every entry names the hash of the one before, so
+ * an entry removed, changed or moved shows at the next one, and the command says where the chain breaks (and fails). It also
+ * remembers the head it last checked: a log that is shorter than that, or whose entry at that number is another, was cut back
+ * or rewritten, and that is said too.
+ */
+export async function fleetsLog(ctx: Ctx): Promise<void> {
+  const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
+  const t = target(ctx, spaceArg(ctx));
+  const all = bool(ctx.parsed, "all");
+  const wantAfter = num(ctx.parsed, "after");
+  const limit = num(ctx.parsed, "limit");
+  const tail = num(ctx.parsed, "tail") ?? 50;
+  const base = "/fleets/" + encodeURIComponent(fleetId) + "/audit";
+  const page = async (query: string): Promise<{ entries: AuditRow[]; head: { n: number; hash: string }; first: number; unrecorded?: number; pageMax: number }> => {
+    const res = await call(t, "GET", base + query);
+    if (res.status === 404) throw new CliError("this gateway has no audit log", "It predates the log; the operator deploys a newer gateway.");
+    failOn(res.status, res.json, "could not read the log");
+    const rows = Array.isArray(res.json?.entries) ? (res.json.entries as unknown[]) : [];
+    if (!rows.every(isAuditRow)) throw new CliError("the gateway sent a log entry that is not one");
+    const head = res.json?.head;
+    if (!head || !Number.isSafeInteger(head.n) || typeof head.hash !== "string") throw new CliError("the gateway sent a log without its head");
+    return { entries: rows, head, first: Number(res.json.first) || 0, ...(typeof res.json.unrecorded === "number" ? { unrecorded: res.json.unrecorded } : {}), pageMax: Number(res.json.limit) || 500 };
+  };
+
+  let entries: AuditRow[] = [];
+  let head: { n: number; hash: string } | undefined;
+  let first = 0;
+  let unrecorded: number | undefined;
+  if (all) {
+    let after = wantAfter ?? 0;
+    for (;;) {
+      const got = await page("?after=" + after + "&limit=500");
+      head = got.head;
+      first = got.first;
+      unrecorded = got.unrecorded;
+      entries.push(...got.entries);
+      if (got.entries.length === 0 || got.entries[got.entries.length - 1]!.n >= got.head.n) break;
+      after = got.entries[got.entries.length - 1]!.n;
+    }
+  } else {
+    // Without a position the newest entries; with one, the page after it.
+    const got = wantAfter !== undefined ? await page("?after=" + wantAfter + (limit !== undefined ? "&limit=" + limit : "")) : await page("?tail=" + tail);
+    entries = got.entries;
+    head = got.head;
+    first = got.first;
+    unrecorded = got.unrecorded;
+  }
+  if (!head) throw new CliError("the gateway sent no log");
+
+  // The chain inside what was read; the first entry is checked against the genesis only when it is the log's first.
+  const firstRow = entries[0];
+  const inside = checkAuditChain(entries, firstRow && firstRow.n === 1 ? AUDIT_GENESIS : null);
+  let problem: string | null = inside.brokenAt !== null ? "the chain breaks at entry " + inside.brokenAt + ": an entry before it was removed, changed or moved" : null;
+  // The newest entry is the head the gateway says it has.
+  const lastRow = entries[entries.length - 1];
+  if (!problem && lastRow && lastRow.n === head.n && inside.last !== head.hash) problem = "the head the gateway reports (entry " + head.n + ") is not the hash of its last entry";
+  if (!problem && lastRow && lastRow.n > head.n) problem = "the log has entries past the head the gateway reports";
+
+  // What this machine saw of the log before.
+  const pinFile = auditPinFile(ctx, t.gateway, fleetId);
+  const pinned = readAuditPin(pinFile);
+  if (!problem && pinned) {
+    if (head.n < pinned.n) problem = "the log is shorter than when it was last checked here (entry " + pinned.n + "): it was cut back";
+    else {
+      const same = entries.find((e) => e.n === pinned.n);
+      const next = entries.find((e) => e.n === pinned.n + 1);
+      if (same && auditEntryHash(same) !== pinned.hash) problem = "entry " + pinned.n + " is not the one this machine checked before: the log was rewritten";
+      else if (next && next.prev !== pinned.hash) problem = "entry " + next.n + " does not follow the entry " + pinned.n + " this machine checked before: the log was rewritten";
+    }
+  }
+  if (!problem && inside.last !== null && lastRow && lastRow.n === head.n && (!pinned || head.n >= pinned.n)) {
+    try {
+      mkdirSync(dirname(pinFile), { recursive: true, mode: 0o700 });
+      writeFileAtomic(pinFile, JSON.stringify({ n: head.n, hash: head.hash }) + "\n", 0o600);
+    } catch {
+      // Not being able to keep it only means the next read has nothing to compare with.
+    }
+  }
+
+  if (ctx.json) {
+    printJson({ fleet: fleetId, head, first, entries, verified: problem === null, ...(problem ? { problem } : {}), ...(unrecorded ? { unrecorded } : {}) });
+  } else {
+    if (entries.length === 0) ctx.out(dim("no entries" + (wantAfter !== undefined ? " after " + wantAfter : "")));
+    else {
+      ctx.out(
+        table(
+          ["N", "TIME", "ACTOR", "ACTION", "TARGET", "DETAIL"],
+          entries.map((e) => [String(e.n), new Date(e.at).toISOString(), actorText(e.actor), e.action, e.target ?? "", detailText(e.detail)]),
+        ),
+      );
+    }
+    ctx.out(dim("head " + head.n + " " + head.hash.slice(0, 16) + (first > 1 ? "  (entries before " + first + " are in the gateway's archive)" : "")));
+    if (unrecorded) ctx.out(yellow(unrecorded + " action(s) could not be written to the log"));
+    if (!problem) ctx.out(green("chain intact") + dim(entries.length > 0 ? " over the " + entries.length + " entries shown" : ""));
+    else ctx.out(yellow("BROKEN: " + problem));
+  }
+  if (problem) throw new CliError("the audit log does not verify: " + problem, "The gateway (or whoever holds it) changed the log. Do not rely on it.");
 }

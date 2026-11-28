@@ -10,6 +10,15 @@ const FLEET_FLAGS: FlagSpec[] = [
   flag("token", "string", "Device token (X-Device-Token)", { placeholder: "<token>" }),
   flag("space", "string", "Take the device credentials from this space", { placeholder: "<name>" }),
   flag("timeout", "number", "Per-request timeout in milliseconds", { placeholder: "<ms>" }),
+  flag("sso", "boolean", "Speak as yourself: sign in through Cloudflare Access (cloudflared) instead of using the operator token (PRIME_FLEET_SSO=1 does it always)"),
+];
+
+const FLEET_LOG_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  flag("after", "number", "Entries after this number", { placeholder: "<n>" }),
+  flag("limit", "number", "At most this many entries (the gateway's page is 500)", { placeholder: "<n>" }),
+  flag("tail", "number", "The newest entries (default 50)", { placeholder: "<n>" }),
+  flag("all", "boolean", "Every entry the gateway holds, page by page"),
 ];
 
 /** The owner key of a fleet's signed roster: where this machine keeps it. */
@@ -79,6 +88,7 @@ export function fleetFlagsFor(sub: string | undefined): FlagSpec[] {
   if (sub === "approve") return FLEET_APPROVE_FLAGS;
   if (sub === "remove") return FLEET_REMOVE_FLAGS;
   if (sub === "sync") return FLEET_SYNC_FLAGS;
+  if (sub === "log") return FLEET_LOG_FLAGS;
   if (sub === "agent") return FLEET_AGENT_FLAGS;
   if (sub === "set") return FLEET_SET_FLAGS;
   if (sub === "roster" || sub === "trust") return FLEET_ROSTER_FLAGS;
