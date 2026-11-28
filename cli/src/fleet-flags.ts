@@ -12,8 +12,19 @@ const FLEET_FLAGS: FlagSpec[] = [
   flag("timeout", "number", "Per-request timeout in milliseconds", { placeholder: "<ms>" }),
 ];
 
+/** The owner key of a fleet's signed roster: where this machine keeps it. */
+const OWNER_KEY_FLAG = flag("owner-key", "string", "The file holding the fleet's owner key (default: PRIME_FLEET_OWNER_KEY, or ~/.prime/fleet-owner/)", { placeholder: "<file>" });
+
+const FLEET_ROSTER_FLAGS: FlagSpec[] = [
+  ...FLEET_FLAGS,
+  OWNER_KEY_FLAG,
+  flag("owner", "string", "The fingerprint of the owner key to pin", { placeholder: "<fingerprint>" }),
+  flag("yes", "boolean", "Sign and send; without it `roster init` only shows what it would do"),
+];
+
 const FLEET_INVITE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
+  OWNER_KEY_FLAG,
   flag("ttl", "number", "How long the invite stays valid, in seconds", { placeholder: "<s>" }),
 ];
 
@@ -25,12 +36,14 @@ const FLEET_JOIN_FLAGS: FlagSpec[] = [
 
 const FLEET_APPROVE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
+  OWNER_KEY_FLAG,
   flag("member", "string", "The member to approve", { placeholder: "<id>" }),
   flag("key", "string", "For a member's request for a new key: the fingerprint of the key approved (the KEY of `prime fleets pending`)", { placeholder: "<fingerprint>" }),
 ];
 
 const FLEET_REMOVE_FLAGS: FlagSpec[] = [
   ...FLEET_FLAGS,
+  OWNER_KEY_FLAG,
   flag("member", "string", "The member to remove", { placeholder: "<id>" }),
   flag("key-change", "boolean", "Decline the member's request for a new key, and keep the member"),
 ];
@@ -63,5 +76,6 @@ export function fleetFlagsFor(sub: string | undefined): FlagSpec[] {
   if (sub === "sync") return FLEET_SYNC_FLAGS;
   if (sub === "agent") return FLEET_AGENT_FLAGS;
   if (sub === "set") return FLEET_SET_FLAGS;
+  if (sub === "roster" || sub === "trust") return FLEET_ROSTER_FLAGS;
   return FLEET_FLAGS;
 }

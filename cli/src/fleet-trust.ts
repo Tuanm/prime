@@ -33,6 +33,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { isFingerprint, normalizeFingerprint } from "./fleet-roster";
 import { keyFingerprintOf, knownSealKind, wrappedEntryFor, type MetaBinding, type OpenedPayload, type SealFields } from "./fleet-crypto";
 import { fetchRole, fetchRoster, manifestCopy, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
@@ -63,6 +64,8 @@ function protectionOf(m: FleetManifest, memberId: string): 0 | 1 | 2 {
 }
 
 interface TrustFile {
+  ownerFp?: string;
+  rosterHead?: { n: number; hash: string };
   sealedFrom?: number;
   macFrom?: number;
   incarnation?: string;
@@ -112,6 +115,14 @@ export class FleetTrust {
    * snapshot: nothing else is let through by it, and no bound above is changed.
    */
   readonly accepted = new Set<string>();
+  /**
+   * The fingerprint of the owner key this member pinned (see fleet-roster.ts): the fleet's roster is only
+   * believed when its genesis names that key. Pinned at join, from the invite the operator printed, or by
+   * `prime fleets trust pin`; undefined until then.
+   */
+  ownerFp: string | undefined;
+  /** The newest entry of the signed roster this member verified: a chain that does not contain it is a rollback or a fork. */
+  rosterHead: { n: number; hash: string } | undefined;
   /** Whether the gateway says it refuses to move the head from a sealed snapshot to one that is not; undefined until asked (see `learnGate`). */
   gated: boolean | undefined;
   /**
@@ -134,6 +145,8 @@ export class FleetTrust {
         macFrom?: unknown;
         incarnation?: unknown;
         incarnationFrom?: unknown;
+        ownerFp?: unknown;
+        rosterHead?: unknown;
         accepted?: unknown;
         boundSeq?: unknown;
         peers?: unknown;
@@ -147,7 +160,10 @@ export class FleetTrust {
       } else if (raw.peers && typeof raw.peers === "object") {
         for (const [key, seq] of Object.entries(raw.peers)) if (typeof seq === "number" && seq >= 0) peers.set(key, seq);
       }
+      const head = raw.rosterHead as { n?: unknown; hash?: unknown } | undefined;
       return {
+        ...(typeof raw.ownerFp === "string" && isFingerprint(raw.ownerFp) ? { ownerFp: normalizeFingerprint(raw.ownerFp) } : {}),
+        ...(head && typeof head.n === "number" && Number.isSafeInteger(head.n) && head.n >= 0 && typeof head.hash === "string" && head.hash.length <= 64 ? { rosterHead: { n: head.n, hash: head.hash } } : {}),
         ...(typeof from === "number" && from >= 0 ? { sealedFrom: from } : {}),
         ...(typeof raw.macFrom === "number" && raw.macFrom >= 0 ? { macFrom: raw.macFrom } : {}),
         ...(typeof raw.incarnation === "string" && raw.incarnation ? { incarnation: raw.incarnation } : {}),
@@ -163,6 +179,10 @@ export class FleetTrust {
   }
 
   private merge(other: TrustFile): void {
+    // The pin on disk fills one that is not known here, never replaces it (a command that means to replace it sets it first).
+    this.ownerFp ??= other.ownerFp;
+    // The newest roster entry seen by either: a member never goes back to an older one.
+    if (other.rosterHead !== undefined && (this.rosterHead === undefined || other.rosterHead.n > this.rosterHead.n)) this.rosterHead = other.rosterHead;
     if (other.sealedFrom !== undefined && (this.sealedFrom === undefined || other.sealedFrom < this.sealedFrom)) this.sealedFrom = other.sealedFrom;
     if (other.macFrom !== undefined && (this.macFrom === undefined || other.macFrom < this.macFrom)) this.macFrom = other.macFrom;
     // What is on disk was learnt of the fleet this member is in: it fills in what is not known, never replaces it.
@@ -303,6 +323,8 @@ export class FleetTrust {
     writeFileSync(
       tmp,
       JSON.stringify({
+        ...(this.ownerFp !== undefined ? { ownerFp: this.ownerFp } : {}),
+        ...(this.rosterHead !== undefined ? { rosterHead: this.rosterHead } : {}),
         ...(this.sealedFrom !== undefined ? { sealedFrom: this.sealedFrom } : {}),
         ...(this.macFrom !== undefined ? { macFrom: this.macFrom } : {}),
         ...(this.incarnation !== undefined ? { incarnation: this.incarnation } : {}),
@@ -313,6 +335,31 @@ export class FleetTrust {
       { mode: 0o600 },
     );
     renameSync(tmp, this.file);
+  }
+
+  /**
+   * Pin the owner key of the fleet's roster by its fingerprint. A pin made at join (`replace` false) never replaces one
+   * that is there; the operator's own command (`prime fleets trust pin`) does, and says what it replaced. Returns the
+   * fingerprint that was pinned before, if it was another.
+   */
+  static pinOwner(keyFile: string, fingerprint: string, replace = false): { replaced?: string } {
+    if (!isFingerprint(fingerprint)) throw new Error("an owner key fingerprint is 26 letters and digits, as 'prime fleets roster show' prints it");
+    const fp = normalizeFingerprint(fingerprint);
+    const trust = FleetTrust.beside(keyFile);
+    if (trust.ownerFp === fp) return {};
+    if (trust.ownerFp !== undefined && !replace) {
+      throw new Error("this member pinned another owner key for this fleet (" + trust.ownerFp + "); 'prime fleets trust pin ... --owner <fingerprint>' replaces it, once you know the new one is the operator's");
+    }
+    const before = trust.ownerFp;
+    trust.ownerFp = fp;
+    trust.dirty = true;
+    trust.save();
+    return before !== undefined ? { replaced: before } : {};
+  }
+
+  /** The owner key fingerprint pinned beside this key file, if any. */
+  static ownerPinned(keyFile: string): string | undefined {
+    return FleetTrust.beside(keyFile).ownerFp;
   }
 
   /**

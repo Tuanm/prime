@@ -21,11 +21,30 @@ import type { Ctx } from "./context.ts";
 import { CliError, UsageError } from "./errors.ts";
 import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { loadOrCreateKeyPair, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { keyFingerprintOf } from "./fleet-crypto.ts";
 import { FleetTrust } from "./fleet-trust.ts";
+import {
+  RosterError,
+  checkSigned,
+  createOwnerKeyFile,
+  entryHash,
+  inviteWithOwner,
+  isFingerprint,
+  liveMembers,
+  makeEntry,
+  ownerFingerprint,
+  parseInviteCode,
+  readOwnerKey,
+  signEntry,
+  verifyChain,
+  type OwnerKey,
+  type SignedEntry,
+  type VerifiedRoster,
+} from "./fleet-roster.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
 import { capsBody, fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -356,19 +375,30 @@ export async function fleetsInvite(ctx: Ctx): Promise<void> {
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/invite", { ttlMs });
   failOn(res.status, res.json, "could not mint an invite");
   const invite = res.json as FleetInvite;
+  // The operator that holds this fleet's owner key hands out its fingerprint with the code, so a new member
+  // pins the key it is told of by the operator and not by whatever the gateway says later.
+  const owner = ownerKeyIfAny(ctx, fleetId, t.gateway);
   if (ctx.json) {
-    printJson({ fleet: fleetId, invite });
+    printJson({ fleet: fleetId, invite, ...(owner ? { ownerFingerprint: ownerFingerprint(owner.publicKey), inviteWithOwner: inviteWithOwner(invite.code, owner.publicKey) } : {}) });
     return;
   }
   ctx.out(yellow("invite code (single use, expires in " + Math.round((invite.expiresAt - Date.now()) / 1000) + "s)"));
   ctx.out("  " + bold(invite.code));
   ctx.out(dim("the device that presents this code still waits for the operator to admit it"));
+  if (owner) {
+    ctx.out("");
+    ctx.out("owner key " + bold(ownerFingerprint(owner.publicKey)) + dim("  (the key that signs this fleet's roster)"));
+    ctx.out("give the joining machine this, so it pins that key:");
+    ctx.out("  " + bold(inviteWithOwner(invite.code, owner.publicKey)));
+  }
 }
 
 export async function fleetsJoin(ctx: Ctx): Promise<void> {
   const fleetId = requireFleetId(ctx.parsed.positionals[2] ?? "");
-  const code = str(ctx.parsed, "code");
-  if (!code) throw new UsageError("missing --code", "Run 'prime fleets invite <fleet>' on the operator's machine and pass the code it prints.");
+  const given = str(ctx.parsed, "code");
+  if (!given) throw new UsageError("missing --code", "Run 'prime fleets invite <fleet>' on the operator's machine and pass the code it prints.");
+  // The code may carry the fingerprint of the fleet's owner key after a "~": it is pinned, and never sent to the gateway.
+  const { code, ownerFp } = parseInvite(given);
   const t = target(ctx, spaceArg(ctx));
 
   // The member's key. The fleet seals every snapshot for the keys its
@@ -385,10 +415,11 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   const keyFile = fleetKeyFile(ctx.configPath, fleetId, spaceName ?? t.device ?? "device");
   const keys = loadOrCreateKeyPair(keyFile);
   const label = str(ctx.parsed, "label") ?? spaceName ?? "";
-
   // Joining again as a member is not a new membership: what it has learnt of the fleet stays.
   const before = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/me");
   const wasMember = before.status === 200 && before.json?.status === "member";
+  // A member that pinned another owner key does not take an invite that names a different one as if it had not.
+  if (ownerFp !== undefined && wasMember) refuseOtherPin(keyFile, ownerFp);
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/join", {
     code,
     ...(label ? { label } : {}),
@@ -398,6 +429,7 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
   // A new membership starts knowing nothing of the fleet: what an earlier one under this name left
   // beside the key is not this fleet's. Only once it has been made: a join that failed changes nothing.
   if (!wasMember) FleetTrust.forget(keyFile);
+  if (ownerFp !== undefined) FleetTrust.pinOwner(keyFile, ownerFp);
   // (Which fleet of this name it is, is learnt when the space is set up, once the member is in: a first
   // join always waits for the operator, so there is nothing to learn from the gateway here.)
   if (ctx.json) {
@@ -422,6 +454,8 @@ export async function fleetsApprove(ctx: Ctx): Promise<void> {
   // a request that was replaced since is not approved by mistake.
   const key = str(ctx.parsed, "key");
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/approve", { deviceId, ...(key ? { key } : {}) });
+  // A fleet whose roster is signed takes an approval only as an entry the owner key signed.
+  if (res.status === 409 && res.json?.rosterSigned === true) return approveSigned(ctx, t, fleetId, deviceId, key);
   failOn(res.status, res.json, "could not approve the request");
   if (ctx.json) {
     printJson({ fleet: fleetId, member: res.json.member, ...(res.json.keyChanged ? { keyChanged: true } : {}) });
@@ -499,6 +533,7 @@ export async function fleetsRemove(ctx: Ctx): Promise<void> {
   // `--key-change` declines a member's request for another key and keeps the member.
   const keyChange = bool(ctx.parsed, "key-change");
   const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/remove", { deviceId, ...(keyChange ? { keyChange: true } : {}) });
+  if (res.status === 409 && res.json?.rosterSigned === true) return removeSigned(ctx, t, fleetId, deviceId);
   failOn(res.status, res.json, keyChange ? "could not decline the new key" : "could not remove the member");
   if (ctx.json) {
     printJson({ fleet: fleetId, ...(keyChange ? { declined: deviceId } : { removed: res.json.removed }) });
@@ -671,7 +706,13 @@ export async function fleetsRevoke(ctx: Ctx): Promise<void> {
  */
 export async function fleetsTrust(ctx: Ctx): Promise<void> {
   const what = ctx.parsed.positionals[2] ?? "";
-  if (what !== "accept") throw new UsageError("unknown trust command \"" + what + "\"", "Usage: prime fleets trust accept <fleet-id> --space <name> --manifest <hash>");
+  if (what === "pin") return fleetsTrustPin(ctx, ctx.parsed.positionals[3] ?? "");
+  if (what !== "accept") {
+    throw new UsageError(
+      "unknown trust command \"" + what + "\"",
+      "Usage: prime fleets trust accept <fleet-id> --space <name> --manifest <hash>\n       prime fleets trust pin <fleet-id> --space <name> --owner <fingerprint>",
+    );
+  }
   const fleetId = requireFleetId(ctx.parsed.positionals[3] ?? "");
   const spaceName = spaceArg(ctx);
   if (!spaceName) throw new UsageError("missing --space", "Name the space that belongs to the fleet.");
@@ -1102,4 +1143,361 @@ export function writeFleetState(configPath: string, fleetId: string, spaceName: 
     writeFileAtomic(file, JSON.stringify(next, null, 2), 0o600, { durable: true });
     dropPublishedCoveredBy(dir, next);
   });
+}
+
+// ---- the signed roster (see fleet-roster.ts and docs/fleets.md, "The signed roster") ----------------------
+
+/** Where this machine keeps the owner key of a fleet: --owner-key, PRIME_FLEET_OWNER_KEY, or ~/.prime/fleet-owner/<gateway host>/<fleet>.ed25519.pem. */
+export function ownerKeyPath(ctx: Ctx, fleetId: string, gateway: string): string {
+  const given = str(ctx.parsed, "owner-key") ?? process.env.PRIME_FLEET_OWNER_KEY;
+  if (given) return resolve(given);
+  let host = "gateway";
+  try {
+    host = new URL(gateway).host;
+  } catch {
+    // a gateway that is not a URL has no host to name the directory by
+  }
+  return join(homedir(), ".prime", "fleet-owner", host.replace(/[^A-Za-z0-9._-]/g, "_"), fleetId + ".ed25519.pem");
+}
+
+/** The owner key of this fleet if this machine has one; a file that is there but is not a key is an error, not "none". */
+function ownerKeyIfAny(ctx: Ctx, fleetId: string, gateway: string): OwnerKey | undefined {
+  const file = ownerKeyPath(ctx, fleetId, gateway);
+  return existsSync(file) ? readOwnerKey(file) : undefined;
+}
+
+/** Read the owner key this command needs, saying where it looked and what to do when it is not there. */
+function requireOwnerKey(ctx: Ctx, fleetId: string, gateway: string): OwnerKey {
+  try {
+    return readOwnerKey(ownerKeyPath(ctx, fleetId, gateway));
+  } catch (err) {
+    if (err instanceof RosterError) throw new CliError(err.message, "The roster of " + fleetId + " is signed: it is changed only where its owner key is.");
+    throw err;
+  }
+}
+
+function parseInvite(text: string): { code: string; ownerFp?: string } {
+  try {
+    return parseInviteCode(text);
+  } catch (err) {
+    if (err instanceof RosterError) throw new UsageError(err.message, "Pass the code as 'prime fleets invite' printed it.");
+    throw err;
+  }
+}
+
+/** A member that pinned another owner key for this fleet does not take an invite that names a different one. */
+function refuseOtherPin(keyFile: string, ownerFp: string): void {
+  const pinned = FleetTrust.ownerPinned(keyFile);
+  if (pinned !== undefined && pinned !== ownerFp.replace(/[\s-]/g, "").toUpperCase()) {
+    throw new CliError(
+      "this machine pinned another owner key for this fleet (" + pinned + "), and the invite names " + ownerFp,
+      "If the operator really made a new key, pin it first: prime fleets trust pin <fleet> --space <name> --owner <fingerprint>.",
+    );
+  }
+}
+
+interface RosterState {
+  mode: "open" | "signed";
+  incarnation?: string;
+  entries: SignedEntry[];
+}
+
+/** The roster as the gateway keeps it. A gateway that has none says 404: the roster is then open, as it always was. */
+async function getRosterState(t: FleetTarget, fleetId: string, after?: number): Promise<RosterState> {
+  const res = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/roster" + (after !== undefined ? "?after=" + after : ""));
+  if (res.status === 404 || res.status === 405) return { mode: "open", entries: [] };
+  failOn(res.status, res.json, "could not read the roster");
+  const entries: SignedEntry[] = [];
+  for (const raw of Array.isArray(res.json?.entries) ? res.json.entries : []) {
+    try {
+      entries.push(checkSigned(raw));
+    } catch (err) {
+      throw new CliError("the gateway sent a roster entry that is not one: " + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+  return {
+    mode: res.json?.mode === "signed" ? "signed" : "open",
+    ...(typeof res.json?.incarnation === "string" ? { incarnation: res.json.incarnation } : {}),
+    entries,
+  };
+}
+
+async function headSeqOf(t: FleetTarget, fleetId: string): Promise<number> {
+  const res = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/head");
+  if (res.status === 404) return 0;
+  failOn(res.status, res.json, "could not read the head");
+  const seq = res.json?.head?.seq;
+  return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0 ? seq : 0;
+}
+
+/** Check a chain the gateway sent, as the operator: it must be the fleet's, and signed from the key this machine holds. */
+function verifiedForOwner(chain: SignedEntry[], fleetId: string, owner: OwnerKey, incarnation?: string): VerifiedRoster {
+  let v: VerifiedRoster;
+  try {
+    v = verifyChain(chain, { fleet: fleetId, ...(incarnation !== undefined ? { incarnation } : {}) });
+  } catch (err) {
+    if (err instanceof RosterError) throw new CliError("the roster the gateway keeps is not valid: " + err.message);
+    throw err;
+  }
+  if (v.owner !== owner.publicKey) {
+    throw new CliError(
+      "this fleet's roster is signed by the owner key " + ownerFingerprint(v.owner) + ", and the key on this machine is " + ownerFingerprint(owner.publicKey),
+      "Use the machine that holds the key, or --owner-key <file>.",
+    );
+  }
+  return v;
+}
+
+/** Sign the next entry of a chain and have the gateway take it; returns the chain's new head. */
+async function appendEntry(
+  t: FleetTarget,
+  fleetId: string,
+  owner: OwnerKey,
+  head: { n: number; hash: string } | null,
+  incarnation: string,
+  f: Omit<Parameters<typeof makeEntry>[0], "fleet" | "incarnation" | "n" | "prevHash" | "at">,
+): Promise<{ n: number; hash: string; signed: SignedEntry }> {
+  const entry = makeEntry({ ...f, fleet: fleetId, incarnation, n: head ? head.n + 1 : 0, prevHash: head ? head.hash : null, at: Date.now() });
+  const signed: SignedEntry = { entry, sig: signEntry(entry, owner.privateKeyPem) };
+  const res = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/roster", signed);
+  failOn(res.status, res.json, "the gateway did not take the roster entry " + entry[3] + " (" + entry[6] + ")");
+  return { n: entry[3], hash: entryHash(signed), signed };
+}
+
+const shortKey = (b64u: string | null | undefined): string => (b64u ? ownerFingerprint(b64u).slice(0, 11) : "-");
+
+/** Approve a request in a fleet whose roster is signed: the operator's approval is an `add` (or, for a new key, a `rotate`) entry. */
+async function approveSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId: string, key: string | undefined): Promise<void> {
+  const owner = requireOwnerKey(ctx, fleetId, t.gateway);
+  const state = await getRosterState(t, fleetId);
+  const v = verifiedForOwner(state.entries, fleetId, owner, state.incarnation);
+  const pendingRes = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/pending");
+  failOn(pendingRes.status, pendingRes.json, "could not list the requests");
+  const request = ((pendingRes.json.pending ?? []) as Array<{ deviceId: string; pubkey?: string; spub?: string; role?: string; keyChange?: boolean }>).find((p) => p.deviceId === deviceId);
+  if (!request) throw new CliError("no request from " + deviceId + " is waiting", "'prime fleets pending " + fleetId + "' lists them.");
+  if (!request.pubkey) throw new CliError("the request of " + deviceId + " offers no key to seal snapshots for");
+  if (!request.spub) {
+    throw new CliError(
+      "the request of " + deviceId + " offers no signing key",
+      "The roster names each member's signing key. Upgrade prime on that machine to a release that makes one, and ask again.",
+    );
+  }
+  const fp = keyFingerprintOf(request.pubkey);
+  if (key !== undefined && key !== fp && key !== fp.split(".")[0]) throw new CliError("the key of the request is " + fp + ", not " + key + ": it was replaced since it was read");
+  const live = liveMembers(v).find((m) => m.device === deviceId);
+  const seqAt = await headSeqOf(t, fleetId);
+  const role = request.role === "viewer" ? "viewer" : "member";
+  const done = await appendEntry(t, fleetId, owner, v.head, v.incarnation, {
+    op: live ? "rotate" : "add",
+    device: deviceId,
+    xpub: request.pubkey,
+    spub: request.spub,
+    ...(live ? {} : { role }),
+    seqAt,
+  });
+  if (ctx.json) {
+    printJson({ fleet: fleetId, member: deviceId, entry: done.n, ...(live ? { keyChanged: true } : {}) });
+    return;
+  }
+  ctx.out(green(live ? "replaced the key of" : "admitted") + " " + deviceId + dim("  entry " + done.n + " of the roster, signed with the owner key " + shortKey(owner.publicKey) + "; its key " + fp));
+}
+
+/** Remove a member from a fleet whose roster is signed: the fleet is asked to fence it first, and the entry is signed with the sequence it says. */
+async function removeSigned(ctx: Ctx, t: FleetTarget, fleetId: string, deviceId: string): Promise<void> {
+  const owner = requireOwnerKey(ctx, fleetId, t.gateway);
+  const state = await getRosterState(t, fleetId);
+  const v = verifiedForOwner(state.entries, fleetId, owner, state.incarnation);
+  if (!liveMembers(v).some((m) => m.device === deviceId)) throw new CliError(deviceId + " is not a member in the signed roster of " + fleetId);
+  // From the fence on, the fleet takes nothing more from that member, so the sequence it answers is the last it can publish at.
+  const fenced = await call(t, "POST", "/fleets/" + encodeURIComponent(fleetId) + "/remove-fence", { deviceId });
+  failOn(fenced.status, fenced.json, "could not fence the member");
+  const seqAt = fenced.json?.seqAt;
+  if (typeof seqAt !== "number" || !Number.isSafeInteger(seqAt) || seqAt < 0) throw new CliError("the gateway did not say at which sequence the member was fenced");
+  const done = await appendEntry(t, fleetId, owner, v.head, v.incarnation, { op: "remove", device: deviceId, seqAt });
+  if (ctx.json) {
+    printJson({ fleet: fleetId, removed: deviceId, entry: done.n, seqAt });
+    return;
+  }
+  ctx.out(green("removed") + " " + deviceId + " from " + fleetId + dim("  entry " + done.n + " of the roster, as of snapshot " + seqAt));
+}
+
+/** `prime fleets trust pin <fleet> --space <name> --owner <fingerprint>`: the owner key this member believes the roster of the fleet is signed by. */
+async function fleetsTrustPin(ctx: Ctx, rawFleet: string): Promise<void> {
+  const fleetId = requireFleetId(rawFleet);
+  const spaceName = spaceArg(ctx);
+  if (!spaceName) throw new UsageError("missing --space", "Name the space that belongs to the fleet.");
+  const fp = str(ctx.parsed, "owner");
+  if (!fp || !isFingerprint(fp)) {
+    throw new UsageError("missing or malformed --owner", "The owner key's fingerprint, as 'prime fleets roster show' or 'prime fleets invite' prints it on the operator's machine (26 letters and digits).");
+  }
+  const space = ctx.config.spaces[spaceName];
+  if (!space) throw new UsageError("unknown space \"" + spaceName + "\"", "Run 'prime spaces list' to see the spaces.");
+  if (space.fleet !== fleetId) throw new UsageError("the space \"" + spaceName + "\" is not in the fleet " + fleetId);
+  const { replaced } = FleetTrust.pinOwner(fleetKeyFile(ctx.configPath, fleetId, spaceName), fp, true);
+  if (ctx.json) {
+    printJson({ fleet: fleetId, space: spaceName, owner: fp.replace(/[\s-]/g, "").toUpperCase(), ...(replaced ? { replaced } : {}) });
+    return;
+  }
+  ctx.out(green("this member believes the roster of " + fleetId + " only when it is signed by the owner key ") + bold(fp.toUpperCase()));
+  if (replaced) ctx.out(yellow("it had pinned " + replaced + " before"));
+}
+
+const ROSTER_USAGE =
+  "Usage: prime fleets roster init <fleet-id> [--owner-key <file>] [--yes]\n" +
+  "       prime fleets roster show <fleet-id> [--space <name>]\n" +
+  "       prime fleets roster pin <fleet-id> --space <name> --owner <fingerprint>";
+
+/** `prime fleets roster init|show|pin` */
+export async function fleetsRoster(ctx: Ctx): Promise<void> {
+  const what = ctx.parsed.positionals[2] ?? "";
+  const rawFleet = ctx.parsed.positionals[3] ?? "";
+  switch (what) {
+    case "init":
+      return rosterInit(ctx, requireFleetId(rawFleet));
+    case "show":
+      return rosterShow(ctx, requireFleetId(rawFleet));
+    case "pin":
+      return fleetsTrustPin(ctx, rawFleet);
+    default:
+      throw new UsageError("unknown roster command \"" + what + "\"", ROSTER_USAGE);
+  }
+}
+
+interface MemberRow {
+  deviceId: string;
+  role?: string;
+  pubkey?: string;
+  spub?: string;
+  label?: string;
+}
+
+/**
+ * Put a fleet's roster under the owner key: a genesis entry that names the key, and an `add` for each member the gateway lists
+ * now (what the operator has compared, one by one, with what each member's own machine prints). Without `--yes` nothing is signed
+ * or sent: it shows what would be. Run again after a failure it goes on from where the gateway's chain ends.
+ */
+async function rosterInit(ctx: Ctx, fleetId: string): Promise<void> {
+  const t = target(ctx, spaceArg(ctx));
+  const yes = bool(ctx.parsed, "yes");
+  const file = ownerKeyPath(ctx, fleetId, t.gateway);
+  const state = await getRosterState(t, fleetId);
+  const membersRes = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/members");
+  failOn(membersRes.status, membersRes.json, "could not read the members");
+  const members = (membersRes.json.members ?? []) as MemberRow[];
+  if (members.length === 0) throw new CliError("the fleet has no members to put in a roster");
+  let incarnation = state.incarnation ?? (typeof membersRes.json.incarnation === "string" ? membersRes.json.incarnation : undefined);
+  if (incarnation === undefined) {
+    // The gateway names which fleet of this name this is on /role, too.
+    const role = await call(t, "GET", "/fleets/" + encodeURIComponent(fleetId) + "/role");
+    if (role.status === 200 && typeof role.json?.incarnation === "string" && role.json.incarnation) incarnation = role.json.incarnation;
+  }
+  if (incarnation === undefined) throw new CliError("the gateway does not say which fleet of this name this is (it has no signed roster yet): deploy a gateway that has one first");
+
+  const unsigned = members.filter((m) => !m.pubkey || !m.spub);
+  if (unsigned.length > 0) {
+    throw new CliError(
+      "these members have not told the gateway their keys: " + unsigned.map((m) => m.deviceId).join(", "),
+      "The roster names each member's signing key. Upgrade prime on those machines to a release that makes one and let their agents run.",
+    );
+  }
+
+  // What is already there decides where this goes on from: a roster of another owner key is not ours to extend.
+  let owner: OwnerKey | undefined = existsSync(file) ? readOwnerKey(file) : undefined;
+  let head: { n: number; hash: string } | null = null;
+  let known = new Set<string>();
+  if (state.mode === "signed") {
+    if (!owner) throw new CliError("this fleet's roster is already signed, and there is no owner key at " + file, "Use the machine that holds the key, or --owner-key <file>.");
+    const v = verifiedForOwner(state.entries, fleetId, owner, state.incarnation);
+    head = v.head;
+    known = new Set(liveMembers(v).map((m) => m.device));
+  }
+  const todo = members.filter((m) => !known.has(m.deviceId));
+  const ownerFp = owner ? ownerFingerprint(owner.publicKey) : undefined;
+
+  if (!ctx.json) {
+    ctx.out(bold("roster of " + fleetId) + dim("  incarnation " + incarnation));
+    ctx.out(ownerFp ? "owner key " + bold(ownerFp) : "owner key " + dim("(will be made at " + file + ")"));
+    ctx.out(table(["DEVICE", "ROLE", "KEY", "SIGNING KEY", ""], members.map((m) => [m.deviceId, m.role ?? "member", keyFingerprintOf(m.pubkey!), shortKey(m.spub), known.has(m.deviceId) ? "in the roster" : "to add"])));
+  }
+  if (todo.length === 0 && head !== null) {
+    if (ctx.json) printJson({ fleet: fleetId, ownerFingerprint: ownerFp, entries: head.n + 1, added: [] });
+    else ctx.out(dim("every member is in the roster already"));
+    return;
+  }
+  if (!yes) {
+    if (ctx.json) printJson({ fleet: fleetId, ownerFingerprint: ownerFp ?? null, wouldAdd: todo.map((m) => m.deviceId), signed: false });
+    else {
+      ctx.out("");
+      ctx.out(yellow("nothing was signed or sent."));
+      ctx.out("Compare each KEY with what 'prime fleets members " + fleetId + "' prints on that member's own machine, then run this again with --yes.");
+    }
+    return;
+  }
+
+  if (!owner) owner = createOwnerKeyFile(file);
+  const seqAt = await headSeqOf(t, fleetId);
+  if (head === null) {
+    const g = await appendEntry(t, fleetId, owner, null, incarnation, { op: "genesis", seqAt, extra: owner.publicKey });
+    head = { n: g.n, hash: g.hash };
+  }
+  const added: string[] = [];
+  for (const m of todo) {
+    const done = await appendEntry(t, fleetId, owner, head, incarnation, {
+      op: "add",
+      device: m.deviceId,
+      xpub: m.pubkey!,
+      spub: m.spub!,
+      role: m.role === "owner" || m.role === "viewer" ? m.role : "member",
+      seqAt,
+    });
+    head = { n: done.n, hash: done.hash };
+    added.push(m.deviceId);
+  }
+  if (ctx.json) {
+    printJson({ fleet: fleetId, ownerFingerprint: ownerFingerprint(owner.publicKey), entries: head.n + 1, added });
+    return;
+  }
+  ctx.out("");
+  ctx.out(green("the roster of " + fleetId + " is signed") + dim("  " + (head.n + 1) + " entries, " + added.length + " member(s) added"));
+  ctx.out("Every member pins the owner key with: prime fleets trust pin " + fleetId + " --space <name> --owner " + ownerFingerprint(owner.publicKey));
+}
+
+/** Print the roster as the gateway keeps it, after checking it: the owner key, the head, who is in it. */
+async function rosterShow(ctx: Ctx, fleetId: string): Promise<void> {
+  const spaceName = spaceArg(ctx);
+  const t = target(ctx, spaceName);
+  const state = await getRosterState(t, fleetId);
+  if (state.mode !== "signed") {
+    if (ctx.json) printJson({ fleet: fleetId, mode: "open" });
+    else ctx.out("the roster of " + fleetId + " is not signed: the gateway keeps it, and a member takes its word");
+    return;
+  }
+  // A member shows it against what it pinned and what it has seen.
+  const keyFile = spaceName ? fleetKeyFile(ctx.configPath, fleetId, spaceName) : undefined;
+  const pinned = keyFile ? FleetTrust.ownerPinned(keyFile) : undefined;
+  let v: VerifiedRoster;
+  try {
+    v = verifyChain(state.entries, { fleet: fleetId, ...(pinned ? { ownerFp: pinned } : {}) });
+  } catch (err) {
+    if (err instanceof RosterError) throw new CliError("the roster the gateway keeps is not valid: " + err.message);
+    throw err;
+  }
+  const live = liveMembers(v);
+  if (ctx.json) {
+    printJson({
+      fleet: fleetId,
+      mode: "signed",
+      ownerFingerprint: ownerFingerprint(v.owner),
+      pinned: pinned !== undefined,
+      fleetKey: v.fleetKey,
+      head: v.head,
+      members: live.map((m) => ({ device: m.device, role: m.role, key: m.xpub ? keyFingerprintOf(m.xpub) : null, since: m.from })),
+      callers: v.callers,
+    });
+    return;
+  }
+  ctx.out(bold(fleetId) + dim("  signed roster, " + v.entries.length + " entries, head " + v.head.hash.slice(0, 12)));
+  ctx.out("owner key " + bold(ownerFingerprint(v.owner)) + (pinned ? green("  (the one this member pinned)") : dim("  (not pinned on this machine: compare it with the operator's)")));
+  ctx.out(table(["DEVICE", "ROLE", "KEY", "SINCE SNAPSHOT"], live.map((m) => [m.device, m.role, m.xpub ? keyFingerprintOf(m.xpub) : "-", String(m.from)])));
+  if (v.callers.length > 0) ctx.out(dim("caller keys: " + v.callers.map((c) => c.label || shortKey(c.spub)).join(", ")));
 }

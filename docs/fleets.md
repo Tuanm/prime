@@ -502,6 +502,33 @@ The invite makes the admission deliberate:
 
 A space that asks to join waits. Its agent keeps asking until it is let in.
 
+### The signed roster
+
+By default the gateway keeps the roster, so a gateway that is taken over can add a member of its own and have every
+snapshot sealed for it. A fleet can take that from the gateway: its roster becomes a chain of entries signed with an
+**owner key** that only the operator's machine holds. The gateway stores and serves the chain; it cannot add to it.
+
+```bash
+prime fleets roster init acme                 # shows what would be signed; nothing is sent
+prime fleets roster init acme --yes           # makes the owner key, signs the genesis and an add for each member
+prime fleets invite acme                      # prints the code, and the code with the owner key's fingerprint after "~"
+prime fleets join acme --code p1_...~ABCDE-...   # the member pins that fingerprint; the gateway is sent the code alone
+prime fleets approve acme --member <id>       # in a signed fleet: an `add` entry signed with the owner key
+prime fleets remove acme --member <id>        # fences the member at the gateway, then signs a `remove` at the sequence it names
+prime fleets roster show acme --space work    # checks the chain; says whether the owner key is the one this member pinned
+prime fleets trust pin acme --space work --owner <fingerprint>   # pin (or replace the pin) by hand
+```
+
+The owner key is written to `~/.prime/fleet-owner/<gateway host>/<fleet>.ed25519.pem` (mode 600), or where `--owner-key`
+or `PRIME_FLEET_OWNER_KEY` says. It is never printed. A copy kept elsewhere is the operator's decision: without the
+file, nobody can add or remove a member of a signed fleet.
+
+An entry is a thirteen-place array (`prime-roster-v1`, fleet, incarnation, n, prevHash, at, op, device, xpub, spub, role,
+seqAt, extra) signed as its JSON text; `prevHash` is the hash of the entry before it together with its signature. The
+fingerprint is 26 letters and digits of the owner key's hash. A member pins it at join (from the invite) and never
+accepts a chain whose genesis names another key. The member's own check of the chain and the witness follow in the
+member-side packages; this one covers what the operator does.
+
 ## Use cases
 
 - **A repository that follows you.** A fleet of three spaces on three machines,

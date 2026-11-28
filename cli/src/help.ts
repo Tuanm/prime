@@ -540,6 +540,9 @@ USAGE
   prime fleets agent install                    Run the agent as a login service (it starts at login)
   prime fleets status <fleet-id>                 Show this device's standing in the fleet
   prime fleets trust accept <fleet-id> --space <name> --manifest <hash>  Take one snapshot that has no seal (see docs/fleets.md)
+  prime fleets trust pin <fleet-id> --space <name> --owner <fingerprint>  The owner key this member believes the roster is signed by
+  prime fleets roster init <fleet-id> [--yes]    Sign the fleet's roster with an owner key made on this machine (shows first)
+  prime fleets roster show <fleet-id> [--space <name>]  Check the signed roster and print who is in it
 
 The agent holds the fleet's lease while it runs, so it belongs in a service:
 'prime fleets agent install' is what keeps a member a member across a reboot.
