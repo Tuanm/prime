@@ -17,7 +17,7 @@
 // sealed with it, and the key is wrapped separately for each member. The
 // gateway sees ciphertext and wrapped keys it cannot open.
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, sep } from "node:path";
 
@@ -72,11 +72,29 @@ export interface SnapshotOptions {
   tree?: string;
   /** Remembered nested repositories of this work tree, to spare the walk. */
   nested?: NestedRepoCache;
+  /**
+   * The only paths (relative to the work tree, `/`-separated) that can differ from the last time the work tree was staged
+   * in this store, because the watcher saw them change and nothing else: only those are staged, and the work tree is not
+   * walked. The caller promises that the store's index was brought up to date by a snapshot before the first of these
+   * changes (and has not been touched by anything else since), so that the rest of the index is still right. Anything git
+   * cannot do with them (a path that is ignored, a git older than 2.25) is a full staging, as when no paths are given.
+   */
+  paths?: string[];
 }
 
 export function gitEnv(gitDir: string, work: string, indexFile: string): Record<string, string> {
+  // The user's own git configuration may start a file-system monitor on their work tree or trust a cache of untracked files
+  // (`core.fsmonitor`, `core.untrackedCache`); a snapshot reads the files' times itself and trusts neither. Added after any
+  // setting of the same kind already in the environment (git 2.31 and later; an older git keeps the user's).
+  const already = Number(process.env.GIT_CONFIG_COUNT);
+  const n = Number.isInteger(already) && already >= 0 ? already : 0;
   return {
-    ...process.env,
+    ...(process.env as Record<string, string>),
+    GIT_CONFIG_COUNT: String(n + 2),
+    [`GIT_CONFIG_KEY_${n}`]: "core.fsmonitor",
+    [`GIT_CONFIG_VALUE_${n}`]: "false",
+    [`GIT_CONFIG_KEY_${n + 1}`]: "core.untrackedCache",
+    [`GIT_CONFIG_VALUE_${n + 1}`]: "false",
     GIT_DIR: gitDir,
     GIT_WORK_TREE: work,
     GIT_INDEX_FILE: indexFile,
@@ -459,6 +477,84 @@ export function hasFiles(work: string): boolean {
   return false;
 }
 
+let pathspecFileSupport: boolean | undefined;
+
+/** Whether this git can read pathspecs from a file (`add --pathspec-from-file`: git 2.25 and later). */
+async function canReadPathspecFile(): Promise<boolean> {
+  if (pathspecFileSupport !== undefined) return pathspecFileSupport;
+  try {
+    const out = await new Promise<string>((resolve, reject) =>
+      execFile("git", ["--version"], { env: process.env, timeout: 10_000 }, (err, stdout) => (err ? reject(err) : resolve(String(stdout)))),
+    );
+    const m = /git version (\d+)\.(\d+)/.exec(out);
+    pathspecFileSupport = m !== null && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 25));
+  } catch {
+    pathspecFileSupport = false;
+  }
+  return pathspecFileSupport;
+}
+
+/**
+ * The most paths staged or looked at one by one: git matches every named path against every entry of the index, so the cost
+ * is paths times files, and past a few hundred (at 100 000 files: 3000 paths took 14 s against 2.7 s for the whole tree) the
+ * whole tree is cheaper. Measured break-even: 150 to 300 paths at 100 000 files, under 100 at 10 000.
+ */
+export const MAX_STAGED_PATHS = 256;
+
+/** The most bytes of names put on a command line (Windows allows 32 767 characters in all, macOS about 1 MiB). */
+export const MAX_NAMED_BYTES = 24_000;
+
+/** Whether this many names of this many bytes are worth naming (and fit on a command line). */
+export function worthNaming(paths: readonly string[]): boolean {
+  if (paths.length > MAX_STAGED_PATHS) return false;
+  let bytes = 0;
+  for (const p of paths) bytes += Buffer.byteLength(p) + 12;
+  return bytes <= MAX_NAMED_BYTES;
+}
+
+/**
+ * Stage only the named paths: what exists is added (a directory with everything in it that is not ignored, deletions
+ * inside it included), and what is gone is taken out of the index, with everything below it. Returns false when it did
+ * not (or could not) do it, so that the caller stages the whole tree instead; the index is then still brought right by
+ * that, since staging only ever adds what is true of the work tree.
+ */
+async function stagePaths(gitDir: string, work: string, env: Record<string, string>, paths: string[], left: string[]): Promise<boolean> {
+  if (!worthNaming(paths) || !(await canReadPathspecFile())) return false;
+  const present: string[] = [];
+  const absent: string[] = [];
+  const fold = foldsCase(work);
+  for (const rel of new Set(paths)) {
+    if (rel === "" || rel === "." || rel.split("/").includes(".git") || isLeftAlone(rel, left, fold)) continue;
+    // git on macOS keeps names precomposed (NFC) while the file system and the watcher say what the name was made with:
+    // a path that is gone is named both ways (what matches nothing is left alone: `--ignore-unmatch`), one that is there as
+    // the precomposed one. Elsewhere a name is what it is.
+    const nfc = process.platform === "darwin" ? rel.normalize("NFC") : rel;
+    try {
+      lstatSync(join(work, rel));
+      present.push(nfc);
+    } catch {
+      absent.push(rel);
+      if (nfc !== rel) absent.push(nfc);
+    }
+  }
+  // Names are taken as they are: `:x` and `*` are files here, not pathspecs.
+  const literal = { ...env, GIT_LITERAL_PATHSPECS: "1" };
+  const list = (names: string[]): string => names.join("\u0000") + "\u0000";
+  try {
+    if (absent.length > 0) {
+      await gitRun(gitDir, ["rm", "-r", "-f", "--cached", "-q", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul"], literal, list(absent));
+    }
+    if (present.length > 0) {
+      await gitRun(gitDir, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], literal, list(present));
+    }
+    return true;
+  } catch {
+    // A path that is ignored (git will not add it by name), one that went between looking and adding, anything else:
+    // the whole tree is staged, which is what is done without paths.
+    return false;
+  }
+}
+
 // Take a snapshot of the work tree.
 //
 // The index is a temporary file, so the user's index, refs, HEAD and working
@@ -488,6 +584,7 @@ export async function snapshot(opts: SnapshotOptions): Promise<Snapshot> {
       if (left.length > 0) {
         await gitText(gitDir, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--"].concat(left.map((p) => ":(literal)" + p)), env);
       }
+      if (opts.paths !== undefined && (await stagePaths(gitDir, work, env, opts.paths, left))) return;
       await gitText(gitDir, ["add", "-A", "--", "."].concat(left.map((p) => ":(exclude)" + p)), env);
     };
     try {
@@ -834,6 +931,43 @@ export function readApplySidecar(gitDir: string): { commit: string; from: string
 }
 
 /**
+ * Whether the work tree is, as far as git can tell without hashing a file that has not changed, exactly what the last
+ * apply wrote: no tracked file changed or gone, and no file in it that git would add and the apply did not write.
+ *
+ * It is the question a replica asks before it writes a newer snapshot over the work tree, to know whether anything of the
+ * member's own is there to keep. The apply index holds the tree of that apply, with what the files looked like when they
+ * were written, so the answer is the work tree's stat against it (git's own racy-timestamp rules included: a file whose time
+ * cannot tell is read) and a look for files it does not hold. A walk and no hashing, where a snapshot of the whole work
+ * tree stages every file that looks different. False means "look closer": it is never an answer that a change is there.
+ */
+export async function workTreeMatchesApply(work: string, gitDir: string, commit: string | null | undefined, left?: string[]): Promise<boolean> {
+  if (!commit || !OBJECT_ID.test(commit)) return false;
+  try {
+    // The apply index is the tree of this commit only when the last finished apply wrote this commit.
+    if (readApplySidecar(gitDir)?.commit !== commit) return false;
+    const indexFile = join(gitDir, "apply.index");
+    if (!existsSync(indexFile) || existsSync(join(gitDir, "apply.target")) || existsSync(indexFile + ".lock")) return false;
+    const env = gitEnv(gitDir, work, indexFile);
+    await ensureStore(gitDir, work, env);
+    // Records what the files look like now, where the stat data was never written or has gone stale; exits non-zero when a
+    // file differs or is missing, which is the answer below, not a failure.
+    await gitRun(gitDir, ["update-index", "-q", "--refresh"], env).catch(() => undefined);
+    if ((await gitRun(gitDir, ["diff-files", "--name-only", "-z"], env)).length > 0) return false;
+    // Files git would add that the apply did not write. The nested repositories (the caller's list of them, or a walk) are
+    // left alone, as they are by a snapshot.
+    const excluded = [...new Set(left ?? findNestedRepos(work))];
+    const extra = await gitRun(
+      gitDir,
+      ["ls-files", "-o", "--exclude-standard", "-z", "--no-empty-directory", "--", "."].concat(excluded.map((p) => ":(exclude)" + p)),
+      env,
+    );
+    return extra.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The snapshot the work tree holds when a finished apply has not been recorded.
  *
  * An apply writes the work tree, then the sidecar, and only after that does the member save its
@@ -974,18 +1108,31 @@ export interface SettleOptions {
   gitDir?: string;
   /** Directories the fleet leaves alone (nested repositories among them): nothing in them is waited for. */
   left?: string[];
+  /**
+   * Only these paths (a file, or a directory with all that is in it) are looked at, as the watcher said they were what
+   * changed: the work tree is not walked. A function is asked at every look, so that a path that is noted while the wait
+   * is on is waited for too.
+   */
+  only?: string[] | (() => string[]);
 }
 
 // The files a snapshot of this work tree would take, as git names them: what is tracked in the last
 // snapshot's index and what is untracked and not ignored, without the directories that are left alone.
 // git does not descend into an ignored directory, so a `node_modules` costs nothing. null: git could
 // not say (no store yet), and the caller looks at everything.
-async function capturedFiles(work: string, gitDir: string, left: string[]): Promise<string[] | null> {
+async function capturedFiles(work: string, gitDir: string, left: string[], only?: string[]): Promise<string[] | null> {
   try {
     const env = gitEnv(gitDir, work, join(gitDir, "snapshot.index"));
+    // `only`: the named paths, each as a name and not as a pathspec (`:x` and `*` are files here). A name with `.git` in it,
+    // or one the fleet leaves alone, is not looked at.
+    const fold = foldsCase(work);
+    // Too many names (or too long) to put on a command line, and slower than the whole tree besides: look at all of it.
+    const asked = only !== undefined && worthNaming(only) ? only : undefined;
+    const named = asked?.filter((p) => p !== "" && p !== "." && !p.split("/").includes(".git") && !isLeftAlone(p, left, fold)).map((p) => ":(literal)" + p);
+    if (named !== undefined && named.length === 0) return [];
     const out = await gitRun(
       gitDir,
-      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."].concat(left.map((p) => ":(exclude)" + p)),
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"].concat(named ?? ["."], left.map((p) => ":(exclude)" + p)),
       env,
     );
     return out.toString("utf8").split("\u0000").filter((p) => p !== "");
@@ -1050,8 +1197,9 @@ export async function stampTree(
   gitDir: string,
   left: string[] = [],
   stat: (path: string) => StatTimes = lstatSync,
+  only?: string[],
 ): Promise<TreeStamp | null> {
-  const files = await capturedFiles(work, gitDir, left);
+  const files = await capturedFiles(work, gitDir, left, only);
   if (files === null) return null;
   const now = Date.now();
   const parts: string[] = [];
@@ -1115,7 +1263,8 @@ export async function settle(work: string, settleMs = SETTLE_QUIET_MS, opts: Set
   const left = opts.left ?? [];
   // `stamp` is what a snapshot would see, when git can say; `key` alone otherwise.
   const look = async (): Promise<{ key: string; newest: number; stamp: TreeStamp | null }> => {
-    const taken = opts.gitDir ? await stampTree(work, opts.gitDir, left, stat) : null;
+    const only = typeof opts.only === "function" ? opts.only() : opts.only;
+    const taken = opts.gitDir ? await stampTree(work, opts.gitDir, left, stat, only) : null;
     return taken ? { key: taken.key, newest: taken.newest, stamp: taken } : { key: walked(), newest: 0, stamp: null };
   };
   const deadline = Date.now() + SETTLE_LIMIT_MS;
