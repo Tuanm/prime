@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fleetKeyFile, fleetsApprove, fleetsInvite, fleetsJoin, fleetsRemove, fleetsRoster, fleetsTrust } from "../src/fleets";
 import { keyFingerprintOf } from "../src/fleet-crypto";
 import { fleetKeyOf, generateOwnerKey, ownerFingerprint, parseInviteCode, readOwnerKey, verifyChain, type SignedEntry } from "../src/fleet-roster";
+import { loadOrCreateSignKey } from "../src/fleet-agent";
 import { FleetTrust } from "../src/fleet-trust";
 import { applyTestTimeout } from "./setup";
 
@@ -438,6 +439,8 @@ describe("the commands that sign a fleet's roster", () => {
       (globalThis as { fetch: unknown }).fetch = real;
     }
     expect(sent[0]!.code).toBe("c0de");
+    // ... and tells the fleet the key it signs with, so the operator can put it in the roster
+    expect(sent[0]!.spub).toBe(loadOrCreateSignKey(fleetKeyFile(cfg, "acme", "dev-9")).publicKey);
     expect(JSON.stringify(sent)).not.toContain(fp);
     expect(FleetTrust.ownerPinned(fleetKeyFile(cfg, "acme", "dev-9"))).toBe(fp.replace(/-/g, ""));
   });

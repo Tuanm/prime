@@ -22,7 +22,7 @@ import { join } from "node:path";
 
 import type { Ctx } from "./context.ts";
 import { CliError } from "./errors.ts";
-import { loadOrCreateKeyPair, pull, publish, type MemberPaths } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, loadOrCreateSignKey, pull, publish, type MemberPaths } from "./fleet-agent.ts";
 import { FleetTrust } from "./fleet-trust.ts";
 import { capsBody, fetchRole, type FleetCredentials } from "./fleet-transport.ts";
 import { fleetKeyFile, fleetStateDir, readFleetState, recordedPosition, resetFleetState, writeFleetState } from "./fleets.ts";
@@ -103,6 +103,7 @@ export async function setupFleetSpace(ctx: Ctx, opts: FleetSpaceOptions): Promis
     if (opts.create) {
       const created = await fleetCall(creds, "POST", "/fleets/" + encodeURIComponent(opts.fleet), {
         pubkey: keys.publicKey,
+        spub: loadOrCreateSignKey(paths.keyFile).publicKey,
       });
       if (created.status === 403) {
         throw new CliError(
@@ -243,6 +244,7 @@ async function joinFleet(ctx: Ctx, creds: FleetCredentials, opts: FleetSpaceOpti
     code: opts.code,
     label: opts.spaceName,
     pubkey: keys.publicKey,
+    spub: loadOrCreateSignKey(fleetKeyFile(ctx.configPath, opts.fleet, opts.spaceName)).publicKey,
   });
   if (joined.status >= 400) {
     throw new CliError(

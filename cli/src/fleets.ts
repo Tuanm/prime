@@ -24,7 +24,7 @@ import { bold, dim, green, printJson, table, yellow } from "./output.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { loadOrCreateKeyPair, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
+import { loadOrCreateKeyPair, loadOrCreateSignKey, previousKeyPair, pull, publish, rosterOf, rotateKeyPair, withChain, type MemberPaths, type Position, type SinceWhole } from "./fleet-agent.ts";
 import { positions } from "./fleet-replica.ts";
 import { keyFingerprintOf } from "./fleet-crypto.ts";
 import { FleetTrust } from "./fleet-trust.ts";
@@ -433,6 +433,7 @@ export async function fleetsJoin(ctx: Ctx): Promise<void> {
     code,
     ...(label ? { label } : {}),
     pubkey: keys.publicKey,
+    spub: loadOrCreateSignKey(keyFile).publicKey,
   });
   failOn(res.status, res.json, "could not join the fleet");
   // A new membership starts knowing nothing of the fleet: what an earlier one under this name left

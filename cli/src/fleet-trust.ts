@@ -33,9 +33,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { isFingerprint, normalizeFingerprint } from "./fleet-roster";
+import { RosterError, isFingerprint, mayPublishAt, normalizeFingerprint, ownerFingerprint, verifyChain, type VerifiedRoster } from "./fleet-roster";
 import { keyFingerprintOf, knownSealKind, wrappedEntryFor, type MetaBinding, type OpenedPayload, type SealFields } from "./fleet-crypto";
-import { fetchRole, fetchRoster, manifestCopy, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
+import { fetchRole, fetchRosterChain, fetchRoster, manifestCopy, manifestHashOf, payloadHash, type FleetCredentials, type FleetManifest } from "./fleet-transport";
 
 /** A snapshot that is not what its manifest says it is, or is not from a member. */
 export class TamperedSnapshotError extends Error {
@@ -52,6 +52,23 @@ export class TamperedSnapshotError extends Error {
   ) {
     super("snapshot " + seq + " was refused: " + reason);
   }
+}
+
+/** The fleet's signed roster is not one this member accepts: it is not from its owner, or goes back, or was given up. */
+export class RosterRefusedError extends Error {
+  constructor(reason: string) {
+    super("the fleet's roster was refused: " + reason);
+  }
+}
+
+/**
+ * What a gateway said of a fleet's roster, kept for a few seconds so that the snapshots of one pull, and a publish
+ * that follows it, do not each ask. Keyed by gateway, device and fleet. `forgetRosterAnswers` empties it.
+ */
+const ROSTER_TTL_MS = 5_000;
+const rosterAnswers = new Map<string, { at: number; chain: Promise<{ mode: "open" | "signed"; entries: unknown[] }> }>();
+export function forgetRosterAnswers(): void {
+  rosterAnswers.clear();
 }
 
 // How many snapshots back a key that has left the roster is kept: the gateway keeps no more.
@@ -463,13 +480,87 @@ export class FleetTrust {
   private roster: Promise<{ keys: Set<string>; left: Map<string, number> }> | undefined;
 
   /**
+   * The fleet's roster, verified, or null when the fleet's roster is still the gateway's own.
+   *
+   * A signed roster is believed only when its genesis names the owner key this member pinned, every entry is signed
+   * by the key it needs, and it contains the newest entry this member has seen (so a gateway that serves an older
+   * chain, or another one, is refused). A member that pinned nothing and sees a signed chain for the first time
+   * pins its owner key then (the fingerprint is printed: compare it with the operator's), the way it takes the
+   * fleet's incarnation. A gateway that says the roster is open to a member that pinned a key or saw a signed
+   * chain is refused too: it would be the way back to a roster the gateway writes.
+   */
+  async verifiedRoster(creds: FleetCredentials, fleet: string): Promise<VerifiedRoster | null> {
+    const cacheKey = creds.gateway + "\n" + creds.deviceId + "\n" + fleet;
+    let cached = rosterAnswers.get(cacheKey);
+    if (!cached || Date.now() - cached.at > ROSTER_TTL_MS) {
+      const chain = fetchRosterChain(creds, fleet);
+      cached = { at: Date.now(), chain };
+      rosterAnswers.set(cacheKey, cached);
+      chain.catch(() => rosterAnswers.delete(cacheKey));
+    }
+    const { mode, entries } = await cached.chain;
+    if (mode !== "signed" || entries.length === 0) {
+      if (this.ownerFp !== undefined || this.rosterHead !== undefined) {
+        throw new RosterRefusedError(
+          "this member pinned the owner key " + (this.ownerFp ?? "") + " (or saw a signed roster), and the gateway now says the roster is not signed. Only the operator can take a roster out of signed mode, and no gateway can say it for them",
+        );
+      }
+      return null;
+    }
+    let v: VerifiedRoster;
+    try {
+      v = verifyChain(entries, {
+        fleet,
+        ...(this.ownerFp !== undefined ? { ownerFp: this.ownerFp } : {}),
+        ...(this.rosterHead !== undefined ? { pinned: this.rosterHead } : {}),
+      });
+    } catch (err) {
+      if (err instanceof RosterError) throw new RosterRefusedError(err.message);
+      throw err;
+    }
+    let changed = false;
+    if (this.ownerFp === undefined) {
+      this.ownerFp = normalizeFingerprint(ownerFingerprint(v.genesisOwner));
+      changed = true;
+      process.stderr.write(
+        "prime: fleet " + fleet + ": this member saw its signed roster for the first time and pinned the owner key " + ownerFingerprint(v.genesisOwner) + ". Check that it is the one the operator's 'prime fleets roster show' prints\n",
+      );
+    }
+    if (this.rosterHead === undefined || v.head.n > this.rosterHead.n) {
+      this.rosterHead = { n: v.head.n, hash: v.head.hash };
+      changed = true;
+    }
+    if (changed) {
+      this.dirty = true;
+      this.save();
+    }
+    return v;
+  }
+
+  /**
+   * Whether the signed roster lets this key's snapshot `seq` be taken in: the key was a member's, not a viewer's,
+   * at that sequence (from its `add` to its `remove`, both signed with the sequence they take effect at). null when
+   * the roster is not signed and the caller goes on as it did.
+   */
+  async rosterAllows(creds: FleetCredentials, fleet: string, key: string, seq: number): Promise<boolean | null> {
+    const v = await this.verifiedRoster(creds, fleet);
+    return v === null ? null : mayPublishAt(v, key, seq);
+  }
+
+  /**
    * Make sure a snapshot at `seq` may be from `key`, reading the roster when what is kept does not
    * say so (packs are opened side by side, and a route is taken in one go: they share one read). A
    * key that is on the roster is known for the sequence of the snapshot that was checked with it, and
    * no further: nothing credits a key for snapshots that have not been looked at. A key that has left
    * is known up to where the fleet says the head was when it did.
+    *
+   * A fleet whose roster is signed is asked of the chain instead (see `rosterAllows`).
    */
   async ensureTrusts(creds: FleetCredentials, fleet: string, key: string, seq: number): Promise<boolean> {
+    // A signed roster decides, and what an open one let through earlier does not: a key the gateway listed once
+    // is not a member's for that.
+    const signed = await this.rosterAllows(creds, fleet, key, seq);
+    if (signed !== null) return signed;
     if (this.trusts(key, seq)) return true;
     this.roster ??= fetchRoster(creds, fleet).then(
       ({ keys, left }) => ({ keys: new Set(keys), left: new Map(left.map((k) => [k.pubkey, k.until])) }),
@@ -573,10 +664,21 @@ export async function verifySnapshot(
   trust: FleetTrust | undefined,
 ): Promise<FleetManifest> {
   if (m.fleet !== fleet) throw new TamperedSnapshotError(m.seq, "it belongs to fleet " + m.fleet + ", not " + fleet);
+  // A signed roster names the fleet it is of, and no gateway can change that: it is what tells this fleet from an
+  // earlier one of the same name, where an open roster has only what the member learnt the first time.
+  let signedRoster: VerifiedRoster | null = null;
+  if (trust) {
+    try {
+      signedRoster = await trust.verifiedRoster(creds, fleet);
+    } catch (err) {
+      if (err instanceof RosterRefusedError) throw new TamperedSnapshotError(m.seq, err.message);
+      throw err;
+    }
+  }
   if (trust && m.seal !== undefined) {
     // A fleet that is deleted frees its name, and a snapshot of the one that had it is sealed and
     // sent by members all the same: which fleet of the name this member is in is what tells them apart.
-    const mine = await trust.ensureIncarnation(creds, fleet);
+    const mine = signedRoster !== null ? signedRoster.incarnation : await trust.ensureIncarnation(creds, fleet);
     if (mine !== undefined && m.incarnation !== undefined && m.incarnation !== mine) {
       throw new TamperedSnapshotError(m.seq, "it belongs to an earlier fleet that had the name " + fleet + ", not to this one");
     }
