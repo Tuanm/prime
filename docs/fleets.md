@@ -30,7 +30,7 @@ charge is packed, sealed, and carried to the others.
 At any moment exactly one space holds the lease. That one writes. The others are
 **replicas**: they keep a copy ready, and they never write.
 
-The lease is short - forty-five seconds - and the one holding it renews every fifteen
+The lease is short - forty-five seconds unless the operator sets another for the fleet (see below) - and the one holding it renews every fifteen
 (a third of it), on a beat of its own, whatever its rounds are doing: a primary whose
 snapshots keep failing (a file it cannot read, a pack the gateway refuses) still holds its
 place. A renewal that is lost on the way is tried again two seconds later, and a request for
@@ -44,6 +44,41 @@ seconds - about a minute from the holder's last renewal. A request that fails wh
 is taking over is asked again after a short wait that doubles (three seconds, six, twelve, ...),
 not after the replica's usual rest, so one failure costs seconds; a replica that is behind first
 has to catch up (see below).
+
+**The lease is the fleet's, and the operator sets it.** The gateway's `FLEET_LEASE_MS` is the default for fleets
+that have none of their own (45 seconds when unset), and a fleet's own is set with `POST /fleets/{fleet}/meta`
+`{"leaseMs": 90000}` by the operator's token or the fleet's owner, or by `POST /admin/api/fleets/{fleet}/meta`
+from the admin page (`null` goes back to the gateway's). It is held between **30 seconds and 3 minutes**, and a
+value outside that is refused, not clamped, so nobody believes a fleet runs on a lease it does not. The holder
+does not choose its own: a renewal that asks for a longer time gets the fleet's (it used to get what it asked, up
+to five minutes). A change reaches the holder at its next renewal, and the members that listen are told over their socket
+(`{"type":"lease","leaseMs":...}`) and in every bootstrap answer (`ttlMs`, replicas' too); a member of an earlier build only
+reads the lease at its first hello, so it picks up a change when it restarts. The fleet's owner may set the lease, and the
+operator can set it over the owner's; only the operator can go below 30 seconds (`FLEET_LEASE_MIN_MS`, for tests). What the choice trades:
+
+| lease | renewals each primary makes (once the agent beats at a third of it) | cost of renewals, per fleet-month | a dead primary is replaced within |
+|---|---|---|---|
+| 30 s | every 10 s | about $0.46 | about 45 s |
+| **45 s (default)** | every 15 s | about $0.31 | about 1 min |
+| 90 s | every 30 s | about $0.15 | about 1 min 45 s |
+| 180 s | every 60 s | about $0.08 | about 3 min 15 s |
+
+(The cost is a renewal's storage rows - one and a third on average - and its two requests, at list prices and
+before the free allowances; the failover is the lease plus about fifteen seconds for the alarm and the take-over.)
+Below 30 seconds an agent of an earlier build, which renews every fifteen at most, would have fewer than two
+renewals in a lease and could lose the place to one late one; above three minutes a crashed primary leaves the
+fleet without one for too long to be a failover. **An agent that is not yet a build that follows the lease still
+renews every fifteen seconds** (at most), so a longer lease saves its cost only once members are on that build.
+A paused or quiet fleet costs nothing either way.
+
+**What each member can do** is said in its bootstrap (`caps`, a short list of lowercase names, sorted and without
+repeats), kept in the roster and written only when it changes, handed to the primary with the members' keys, and
+answered as `fleetCaps` (what every member can do) by `/role`. `fleetCaps` is advisory: it is what the members *say*, and the gateway does not check it, so it may only choose between formats
+that are all safe to read. A feature that protects something (a ratchet, a signature rule) is enforced by a floor in the
+member's own code, never by `fleetCaps` alone. A format that not every member can read is used only
+when every member lists it; an earlier build says nothing, so the fleet's list is then empty. The gateway only
+relays what a member says: one that lies can keep the older format in use or make a member that cannot read a
+newer one fail to open it, which it can already do by withholding it.
 
 ```mermaid
 sequenceDiagram

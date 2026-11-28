@@ -50,6 +50,7 @@ const ALLOWED_ACTIONS = new Set([
   "keys",
   "index",
   "events",
+  "meta",
 ]);
 const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys", "index"]);
 
@@ -693,6 +694,19 @@ export async function handleFleetRoutes(deps: FleetDeps): Promise<Response | nul
     const read = await readBoundedText(request, fleetBodyMax(env));
     if (read instanceof Response) return read;
     body = read;
+  }
+  // The one thing set through the fleet routes is the lease. The label and the pause are the admin page's: the
+  // registry that answers for a paused fleet without waking it is told there, and would not be told here.
+  if (action === "meta") {
+    let asked: unknown;
+    try {
+      asked = JSON.parse(body ?? "{}");
+    } catch {
+      return Response.json({ error: "invalid json" }, { status: 400 });
+    }
+    const leaseMs = (asked as { leaseMs?: unknown } | null)?.leaseMs;
+    if (leaseMs === undefined) return Response.json({ error: "leaseMs is what is set here (a number of milliseconds, or null for the gateway's)" }, { status: 400 });
+    body = JSON.stringify({ leaseMs });
   }
 
   let response = await stub.fetch(target.toString(), { method, headers, body });

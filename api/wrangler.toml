@@ -150,6 +150,10 @@ FILES_MAX_TOTAL_BYTES = "524288000" # 500 MiB per device
 # that would push the projection past it are refused with 507.
 R2_BUDGET_USD_MONTH = "5"
 
+# The lease of a fleet that has none of its own set: how long a place lasts without a renewal (30000 to 180000).
+# A longer lease costs less and fails over more slowly; see docs/fleets.md.
+# FLEET_LEASE_MS = "45000"
+
 # Fleet routes: what one client address may ask in a minute (src/fleet-limits.ts), and the largest body a
 # fleet route forwards. 0 turns a limit off.
 FLEET_INVITE_RATE_MAX = "30"

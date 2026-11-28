@@ -25,6 +25,69 @@ export const INVITE_PREFIX = "pf1_";
 export const INVITE_DEFAULT_TTL_MS = 10 * 60 * 1000;
 export const INVITE_MAX_TTL_MS = 60 * 60 * 1000;
 export const MAX_MEMBERS = 32;
+
+/**
+ * How long a place in a fleet lasts without being renewed, and the bounds an operator may move it between.
+ *
+ * The default is forty-five seconds: comfortably more than the slowest agent's heartbeat (an agent renews
+ * every third of the lease, at most every fifteen seconds), so a live primary never loses the place between two
+ * renewals. A longer lease makes the fleet cheaper (each renewal is a request and storage rows) and its
+ * failover slower (a primary that dies is replaced when the lease runs out, so up to one lease later); a
+ * shorter one the other way round. Below thirty seconds an agent of the earlier builds, renewing at fifteen,
+ * would have fewer than two renewals in a lease and could lose the place to a single late one; above three
+ * minutes a crashed primary leaves the fleet without one for too long to be a failover at all.
+ */
+export const LEASE_DEFAULT_MS = 45_000;
+export const LEASE_MIN_MS = 30_000;
+export const LEASE_MAX_MS = 180_000;
+
+/** The smallest the floor may be set to (FLEET_LEASE_MIN_MS, for a test that must see a lease run out in seconds). */
+const LEASE_MIN_FLOOR_MS = 1_000;
+
+/** The bounds in force: the constants, with the floor lowered by FLEET_LEASE_MIN_MS where it is set. */
+export function leaseBounds(env: { FLEET_LEASE_MIN_MS?: string }): { min: number; max: number } {
+  const asked = Number(env.FLEET_LEASE_MIN_MS);
+  const min = Number.isFinite(asked) && asked >= LEASE_MIN_FLOOR_MS && asked <= LEASE_MIN_MS ? Math.floor(asked) : LEASE_MIN_MS;
+  return { min, max: LEASE_MAX_MS };
+}
+
+/**
+ * The lease a fleet is run with: what its operator set (`meta.leaseMs`), else the gateway's FLEET_LEASE_MS,
+ * else forty-five seconds, held between the bounds. A value that is not a number is not used.
+ */
+export function effectiveLeaseMs(fleetMs: number | undefined, env: { FLEET_LEASE_MS?: string; FLEET_LEASE_MIN_MS?: string }): number {
+  const { min, max } = leaseBounds(env);
+  const fromEnv = Number(env.FLEET_LEASE_MS);
+  const chosen = typeof fleetMs === "number" && Number.isFinite(fleetMs) ? fleetMs : Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : LEASE_DEFAULT_MS;
+  return Math.min(max, Math.max(min, Math.round(chosen)));
+}
+
+/**
+ * What a member says it can do (`caps` in its bootstrap): a short list of lowercase names, so that a format
+ * is used only when every member can read it. A malformed entry is dropped, the list is cut at sixteen, and
+ * it is sorted and without repeats, so that two lists that say the same thing are equal.
+ */
+export const MAX_CAPS = 16;
+export function cleanCaps(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out = new Set<string>();
+  for (const c of raw) {
+    if (typeof c === "string" && /^[a-z0-9][a-z0-9-]{0,23}$/.test(c)) out.add(c);
+    if (out.size >= MAX_CAPS) break;
+  }
+  return [...out].sort();
+}
+
+/** What every one of the lists has: a member that says nothing has nothing, so the answer is then empty. */
+export function commonCaps(lists: Array<readonly string[] | undefined>): string[] {
+  if (lists.length === 0) return [];
+  let common = new Set(lists[0] ?? []);
+  for (const list of lists.slice(1)) {
+    const have = new Set(list ?? []);
+    common = new Set([...common].filter((c) => have.has(c)));
+  }
+  return [...common].sort();
+}
 export const MAX_PENDING = 32;
 /**
  * How long a fleet must have been untouched before it can be cleared away as abandoned (see `reap`).
@@ -122,6 +185,12 @@ export interface Member {
    * that was renamed says so the next time it takes its place.
    */
   label?: string;
+  /**
+   * What the member can do, as it said in its last bootstrap (see `cleanCaps`). Absent for a member that
+   * says nothing (an earlier build). It is the member's word: a gateway that lies about it can only keep
+   * the older format in use or make a member that cannot read a newer one fail to open it.
+   */
+  caps?: string[];
 }
 
 export interface PendingRequest {
