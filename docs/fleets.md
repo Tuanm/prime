@@ -652,7 +652,9 @@ The rows are what a running fleet writes most of. A primary that renews its leas
 fifteen seconds writes a row and a third a time on average (the lease, and a third of the alarm that tells
 the members when it lapses: an alarm that is already set for the time or an earlier one is left as it is, and
 when it fires early it finds the lease alive and sets the next from it, so the call that the place is free is
-never late; it was five rows before the activity stamp, the epoch, the claim that was not there and the
+never late; the alarm fires about once a lease period, about every 45 seconds, while a holder renews, which is
+one more request to the object and its busy time for each lease and each fleet with a listener, a fraction of
+what the rows saved are worth; it was five rows before the activity stamp, the epoch, the claim that was not there and the
 alarm stopped being written again), and a row written is a millionth of a dollar beyond the first
 fifty million a month.
 
@@ -732,14 +734,38 @@ now. What is left of the old ones:
 
 ### Making a code again
 
-`prime devices rotate-code <device-id>` gives an anonymous device a new 25-character code. The device shows the
-code it has to `POST /api/devices/anonymous/rotate`; the gateway makes the new code, and the old one **keeps
-working for 24 hours**, so that what holds it can be given the new one without a gap. The command saves the new
-code (the device's entry in the config, and the `remote_token` of each space published as that device); a
-running space, buddy or fleet agent holds the old code and has to be restarted within the day (`prime spaces
-stop` and `start` for a space: the start writes the new code in). After the day the old code is refused, and the
-device is counted as having a long one. It is not done on its own at a bootstrap: a space reads its code from a
-file at its start, so a code replaced behind its back would stop it at its next reconnect.
+`prime devices rotate-code <device-id>` gives an anonymous device a new 25-character code. The code is **made
+by the CLI and saved first** as `pending_token` in the device's entry of the config (durably, under the
+config's lock, the file read again at that moment). Then it is sent to `POST /api/devices/anonymous/rotate`
+along with the code the device has now, which is how the gateway knows the caller is the device. The gateway
+takes the proposal as the device's code, and the code it replaced **keeps working for 24 hours**, so that what
+holds it can be given the new one without a gap. When the gateway confirms, the CLI makes `pending_token` the
+device's `token`, and the `remote_token` of each space published as that device. Anything running holds the old
+code and has to be restarted within the day (`prime spaces stop` and `start` for a space: the start writes the
+new code in). After the day the old code is refused, and the device is counted as having a long one. It is not
+done on its own at a bootstrap: a space reads its code from a file at its start, so a code replaced behind its
+back would stop it at its next reconnect.
+
+- **Only the device's current code may ask.** The code it replaced works for the day, but cannot rotate: if it
+  could, whoever kept the old six-character code could take the device, and the owner's new code would stop
+  working when the day ended. The answer to it is 409.
+- **A call that is repeated is not a second rotation.** If the answer is lost (a timeout, a crash between the call
+  and the save), running the command again sends the same code. The gateway sees that this code is already the
+  device's, and says it is done, from the current code or the one it replaced, without changing anything: the
+  original code's day is not restarted, and no second code is made. A config that lost the promotion (an older
+  command wrote the whole file back from before it) is found again the same way: the command presents the
+  proposal itself if the old code is refused.
+- **The operator can make the code again for a device that is locked, or whose code is lost or replaced**:
+  `prime devices rotate-code <device-id> --operator` (with `--operator-token`, or `PRIME_FLEET_OPERATOR_TOKEN`, or
+  `defaults.fleet_operator_token`) calls `POST /api/devices/anonymous/<id>/rotate` with `FLEET_OPERATOR_TOKEN`; the
+  admin page's route `POST /admin/api/anonymous/<ref>/rotate`, behind Access, does the same and answers the code
+  once. Neither needs a code of the device, a lock on the device does not stop them, and they clear the device's
+  locks, so the new code works at once. An operator whose machine does not hold the device is shown the code and
+  nothing is saved.
+- **The config.** The change is made under a lock next to the file, on the file as it is at that moment, so two
+  `rotate-code`s cannot lose one another's. A command that read the config at its start and writes all of it later
+  (`prime spaces ...`) does not take that lock, and can put back what it read: if that is this code, the pending
+  code is still in the file it read (or the operator makes the code again).
 
 Deploy the gateway before the CLI: an older gateway has no such route, and the command says so. The members that
 still hold six-character codes are the ones to run it for.

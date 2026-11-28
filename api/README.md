@@ -47,7 +47,9 @@ Every endpoint is a URL the gateway answers. The paths below are the ones to use
 | Endpoint | Needs | What it does |
 | --- | --- | --- |
 | `POST /api/devices/anonymous` | gateway token if set | Create a throwaway buddy. The answer carries its id, its code and a connect URL. |
-| `POST /api/devices/anonymous/rotate` | gateway token if set, and the buddy's id (`X-Prime-Device`) and code | Give an anonymous buddy a new 25-character code; the old one keeps working for 24 hours. `prime devices rotate-code` calls it. |
+| `POST /api/devices/anonymous/rotate` | gateway token if set, and the buddy's id (`X-Prime-Device`) and current code | Give an anonymous buddy a new 25-character code, which it proposes in the body (`{"proposed": ...}`); the same proposal repeated is answered as done. The code it replaced works for 24 hours, but cannot ask. `prime devices rotate-code` calls it. |
+| `POST /api/devices/anonymous/{id}/rotate` | `FLEET_OPERATOR_TOKEN` | The operator's: no code of the buddy is needed and a lock does not stop it (the locks are cleared). `prime devices rotate-code --operator`. |
+| `POST /admin/api/anonymous/{ref}/rotate` | Access | The same, from the admin side; the new code is answered once. |
 | `WS /device/ws/{deviceId}` | the buddy's token, or a one-use ticket | Open the tunnel the gateway keeps. |
 | `POST /device/{deviceId}` | gateway token and the buddy's token | Carry one JSON-RPC call and return the answer. |
 | `GET /device/sse/{deviceId}` | gateway token and the buddy's token | Open an event stream. The first event names the URL for posting calls. |
