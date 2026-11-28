@@ -241,3 +241,15 @@ describe("prime fleets secrets", () => {
     }
   });
 });
+
+describe("the left-out list in the metadata", () => {
+  test("is the paths that fit: no more than the count, and no more than the text a reader will take", async () => {
+    const { keptForMeta, KEPT_MAX } = await import("../src/fleet-secrets");
+    expect(keptForMeta([".env", "a/b"])).toEqual([".env", "a/b"]);
+    expect(keptForMeta(Array.from({ length: KEPT_MAX + 50 }, (_, i) => "f" + i)).length).toBe(KEPT_MAX);
+    const long = Array.from({ length: 400 }, (_, i) => "d" + i + "/" + "p".repeat(300));
+    const fits = keptForMeta(long);
+    expect(fits.length).toBeLessThan(120);
+    expect(Buffer.byteLength(JSON.stringify(fits))).toBeLessThan(40 * 1024);
+  });
+});
