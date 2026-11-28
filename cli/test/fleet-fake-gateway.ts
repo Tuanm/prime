@@ -92,6 +92,8 @@ export class FakeGateway {
   epochPosts: unknown[][] = [];
   /** The next this many pack uploads are answered as the gateway does when a body broke off on the way (a 400), and keep nothing. */
   breakOffPacks = 0;
+  /** Whether that answer carries the code the gateway gives it. */
+  breakOffCode = true;
   /** What each pack upload said its hash was (`x-prime-sha256`), in order. */
   packHashHeaders: Array<string | undefined> = [];
   /** Requests of each kind, by route. */
@@ -326,7 +328,8 @@ export class FakeGateway {
       if (creds.deviceId !== this.primary) return Response.json({ error: "not the primary" }, { status: 409 });
       if (kind === "packs" && this.breakOffPacks > 0) {
         this.breakOffPacks--;
-        return Response.json({ error: "the body broke off before its length" }, { status: 400 });
+        // The gateway's own sentence and code (`streamedPack` in api/src/fleets-routes.ts); a gateway from before the code says only the sentence.
+        return Response.json({ error: "the body is not the pack whose hash was named, or not as long as it said: upload it again", ...(this.breakOffCode ? { code: "body-mismatch" } : {}) }, { status: 400 });
       }
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
       if (kind === "packs" && this.snapshotLimit !== undefined && bytes.length > this.snapshotLimit) {
