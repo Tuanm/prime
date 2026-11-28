@@ -590,6 +590,9 @@ export function openPayload(
       // Wrapped to an epoch key: opened with that epoch's private half, which is gone once it has been deleted.
       const held = epochs?.keys.find((k) => k.n === entry.epoch);
       if (!held || typeof epochs?.epk !== "string") return null;
+      // The epoch key opens it whichever long-term key the caller holds, but the tag that says who made the snapshot is made with the long-term key the entry
+      // names: it is opened with that one (a member that rotated its key tries its new key and then its old one, and only one of them is the entry's).
+      if (entry.keyId !== undefined && keyIdOf(publicKeyBytes(createPublicKey(createPrivateKey({ key: memberPrivateKeyPem, format: "pem", type: "pkcs8" }))).toString("base64")) !== entry.keyId) return null;
       unwrapKey = epochUnwrapKey(held.privateKey, epochs.epk, senderPublicKeyB64);
     }
     const unwrapper = createDecipheriv("aes-256-gcm", unwrapKey, wrapIv);
