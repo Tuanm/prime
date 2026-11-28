@@ -788,6 +788,11 @@ PRIME_FLEET_SECRET_GATE=off|warn|exclude                   # exclude is the defa
 The allow list belongs to the member that publishes (it is kept beside its key). This is a net for accidents: a secret in a file the rules do not
 recognise goes through, and so does anything the operator allowed.
 
+**What is published is what was looked at.** The tree that was taken is the one that is scanned, and the files left out are taken out of that tree in an index of its own,
+not out of the work tree staged again: a file written between the scan and a second staging cannot get into the snapshot unscanned, and the work tree is not read twice.
+The index the snapshots are made in still holds the files, so every later snapshot contains them in its tree, the scan finds them again, and each snapshot lists them as left
+out for as long as they are (a replica that jumps over one snapshot is told by the newest). A file you have just allowed is published by the next snapshot.
+
 **What a replica does.** A replica that holds a file the gate now leaves out (it received it from a primary that had no gate) keeps it: an apply
 never removes a path in the snapshot's sealed `kept` list, and never removes a file that the name rules above call a secret or whose content they match (read from the replica's own store), whatever the snapshot
 says (a primary of an earlier build). When more files were left out than the sealed list can hold (256 paths, 32 KB), the snapshot says the list was cut, and the replica then keeps every file the apply would remove. The other side of that: a `.env` that the primary really deletes stays on the

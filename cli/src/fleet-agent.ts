@@ -633,7 +633,8 @@ export async function publish(
     const hits = await findSecrets(paths.gitDir, first.tree, readAllow(paths.keyFile));
     if (hits.length > 0 && gate === "exclude") {
       kept = hits;
-      tree = (await snapshot({ ...taken, treeOnly: true, exclude: hits.map((h) => h.path) })).tree;
+      // Made from the tree just taken, less the files: the work tree is not staged a second time, and the index still holds them (so the next snapshot lists them again).
+      tree = (await snapshot({ ...taken, treeOnly: true, tree: first.tree, drop: hits.map((h) => h.path) })).tree;
     } else {
       tree = first.tree;
       if (hits.length > 0) noteSecrets(fleet, hits, false);
