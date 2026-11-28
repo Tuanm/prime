@@ -43,6 +43,8 @@ export class RosterRefusal extends Error {
   constructor(
     message: string,
     readonly status = 400,
+    /** A code a member reads instead of the words, and what goes with it (`head`, ...). */
+    readonly extra?: { code: string } & Record<string, string | number>,
   ) {
     super(message);
   }

@@ -419,7 +419,10 @@ describe("admitting a member with a signed add", () => {
     expect((await post(w, other)).status).toBe(400);
     // After the head: the entry a member has not been asked for yet.
     const ahead = chain.make("add", { ...body, seqAt: 5 });
-    expect((await post(w, ahead)).json.error).toMatch(/head is at 0/);
+    const ahead409 = await post(w, ahead);
+    expect(ahead409.json.error).toMatch(/head is at 0/);
+    expect(ahead409.status).toBe(409);
+    expect(ahead409.json).toMatchObject({ code: "ahead-of-head", head: 0 });
   });
 
   test("a new member's add names the head as it was when the member asked, or a later snapshot, never an earlier one", async () => {
@@ -436,6 +439,8 @@ describe("admitting a member with a signed add", () => {
       const early = await post(w, chain.make("add", { ...body, seqAt }));
       expect(early.status).toBe(409);
       expect(early.json.error).toMatch(/was snapshot 2/);
+      // A code a member reads instead of the words: the head now, and the one the request was made at.
+      expect(early.json).toMatchObject({ code: "head-moved", head: 4, floor: 2 });
     }
     // Signed when the head was 2, and sent when it is 4: still taken.
     const add = chain.make("add", { ...body, seqAt: 2 });
