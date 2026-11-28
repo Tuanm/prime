@@ -445,13 +445,18 @@ What a credential on its own can no longer do, and what the gateway still can.
 
 What the gateway can still do, whatever a member checks:
 
-- **Run commands on any connected space.** The tunnel of a space executes whatever call the gateway sends
-  it, with no check on the space's side of who sent it, so the gateway (or whoever controls its deployment or
-  its Cloudflare account) can call any tool - `bash` included - on any space that is connected to it. The
-  calls a client makes and what they return pass through the gateway in the clear as well, so what a
-  space is asked to read or run is visible to it. This does not depend on fleets or on the roster, and nothing a
-  member checks of a snapshot protects it. A gateway you do not trust with the machines on it is a gateway
-  those machines should not be connected to.
+- **Run commands on any connected space, unless the space checks who sent the call.** A device or space
+  runs the calls the gateway tunnels to it. Each call that `prime serve` and `prime tools call` make is signed
+  with the machine's caller key (`prime devices allow-caller` on the device's machine lists the keys it trusts),
+  and a device that has a key in its callers file refuses a call that none of them signed, a replay of a
+  signed call, a signed call that was meant for another device, and a call whose body the gateway changed
+  (error -32001). A space made with `prime spaces create` starts with the creating machine's key allowed. What
+  stays open: a device with no key in its callers file runs every call (and logs the unsigned ones), as does
+  one started with `--caller-auth warn` or `off`; a client that cannot sign (a raw gateway URL as its MCP
+  address) is refused by a device that checks; an older prime on the device does not check; and what a
+  call asks and what it returns still pass through the gateway in the clear, so what a space is asked to read
+  or run is visible to it. A gateway you do not trust with the machines on it is a gateway those machines
+  should not be connected to, and a machine that does not check signatures is one it can send anything to.
 - **Read the work tree through a lying roster**, not only author it (see above): a key it adds is sealed for
   by the primary.
 - **Say who the primary is**: the lease is the gateway's word, so it can tell two members that each holds the place, send a call to the
@@ -669,6 +674,24 @@ checked by the space that runs it against what the signed roster says, not again
   the roster lists is a caller of the fleet only; it does not run calls for the device itself, whose callers file is the machine's own.
 - A member's signing key is listed because it is a member's. Nothing signs tool calls with it today; a key that is a member's and that
   was added with `add-caller` is listed once.
+
+**Turning it on for a fleet (the order matters).** A space of a fleet checks calls only once its member has taken the fleet's signed roster into account, so nothing changes until then:
+
+1. Every member runs a prime that has this, and its spaces are on it: `prime update` installs the new build, and *that build* recreates the fleet's spaces (a space made with an older
+   entrypoint is recreated even when its image did not change; `prime spaces refresh-fleet` does the same by hand). A space of a fleet that is not recreated has no way to check anything and runs as before. After updating from a build that is older than the one that has `prime spaces refresh-fleet`, run it once by hand: that update was driven by the old build's code.
+   This release is not to be installed on a device that has not been through the previous one: the order is the release that carries the roster's callers (B4) on every device, then the roster, then this.
+2. `prime fleets roster init <fleet>` (on the operator's machine) signs the roster. A member that pins the owner (at join, or `prime fleets trust pin`) or sees a signed roster then **enforces
+   for good**: its agent writes `enforce` into the file the space reads, from the member's own trust file, which the gateway cannot write. A gateway that later says the roster is open, serves an
+   older one or another owner's chain, or cannot be reached, makes the list empty - nobody may call - and never lets an unsigned call run. A replica enforces too. Pinning the owner early (an invite that names the owner, before `roster init`) makes the member enforce against a roster that is still open: nobody may call it until the roster is signed and the callers are added, so do those two steps straight after the invite, or pin after `roster init`. Only the operator undoes it:
+   `prime fleets trust pin <fleet> --space <name> --clear`.
+3. In the same sitting, for each machine that calls the fleet with `prime tools call --fleet` or through `prime serve`: `prime fleets roster add-caller <fleet> --key <public-key> --label <name>` (the machine's
+   key is printed by `prime devices callers`, and by a refused call). Until then that machine's calls are refused with that command.
+4. This machine's own calls straight to a fleet's space (`prime tools call --device <the space's id>`, not `--fleet`) are `device:` calls, checked against the space's own callers file, which a fleet space
+   does not have until it is given one: `prime devices allow-caller --space <name> --self`. The fleet's agent talks to its space by the local token and is not affected.
+5. A space that was made before it can be put back for a while with `--caller-auth warn` on its device. A fleet space on an image whose `fleet-callers.json` is of an older version than the one the agent writes
+   (or the other way round) reads it as unreadable, and refuses every call until both are the same build: update every member.
+
+A space that is not in a fleet gets this machine's key when it is made (`prime spaces create`) and enforces from the start; another machine is let in with `prime devices allow-caller <key> --space <name>`.
 
 The witness (a second place a member's newest snapshot is recorded) follows in its own package.
 
@@ -1352,9 +1375,11 @@ What is deliberately not done, so that nobody has to find it out:
   its own to compare it with, the first time or any later one. Only a fingerprint checked
   outside the gateway (`prime fleets members` on each machine prints it; the admin page shows the same
   one) would close it, and nothing in the product can check it for the operator.
-- **A tool call to a space is the gateway's to make.** See "Run commands on any connected space" above: a
-  space does not check who sent the call it runs. Closing it would take a key that the caller proves it
-  holds to the space itself, and that is not built.
+- **A tool call to a device that does not check is the gateway's to make.** See "Run commands on any
+  connected space" above. A device checks once a key is allowed on it (and only for the keys of its own
+  callers file: the gateway writes none of it). The key of a caller is as good as the machine that holds it,
+  and the first time a client sees a device's reply key it takes it as it is: compare it with what
+  `prime devices callers` prints on the device (`prime devices callers --device <id>` on the client).
 - **A request for a new key is as good as its fingerprint.** A member that cannot prove it holds its old key
   has one request waiting for the operator, and a later request from the same device replaces it. An operator
   that approves without comparing the fingerprint with the one the member's own machine prints (`prime fleets

@@ -613,6 +613,9 @@ describe("prime (spawned)", () => {
     const allowed = await cli(["devices", "allow-caller", arg, "--label", "my laptop", "--tools", "bash,read"]);
     expect(allowed.code).toBe(0);
     expect(allowed.out).toContain(key.keyId);
+    // the first key changes what the device does with a call that is not signed: the command says so
+    expect(allowed.err).toContain("this was the first key");
+    expect(allowed.err).toContain("refuses a call that is not signed");
     const file = readCallers(join(dir, "callers.json"));
     expect(file).toHaveLength(1);
     expect(file[0]).toMatchObject({ keyId: key.keyId, label: "my laptop", tools: ["bash", "read"] });
@@ -664,6 +667,8 @@ describe("prime (spawned)", () => {
     expect(listed.this_machine?.key_id).toBe(listed.callers[0]!.key_id);
     const revoked = await cli(["devices", "revoke-caller", listed.callers[0]!.key_id]);
     expect(revoked.code).toBe(0);
+    expect(revoked.err).toContain("no key is allowed now");
+    expect(revoked.err).toContain("--caller-auth enforce");
     expect(readCallers(join(dir, "callers.json"))).toEqual([]);
     const missing = await cli(["devices", "revoke-caller", "nope", "--json"]);
     expect(JSON.parse(missing.out)).toMatchObject({ removed: false });

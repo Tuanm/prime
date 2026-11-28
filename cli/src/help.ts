@@ -161,6 +161,13 @@ ${bold("allow-caller, callers, revoke-caller")}
     revoke-caller <key-id>      Stop trusting a key (its id, or its public key).
   The file is {"version": 1, "callers": [...]}. A file that is empty or damaged is an
   error, never "no callers".
+  What a device does with a call that is not signed by one of those keys depends on
+  the file: with no key in it the device runs every call and logs the unsigned ones;
+  once a key is allowed it refuses them (error -32001), and so it does when the file
+  cannot be read. --caller-auth warn|enforce|off on the device decides it instead. A
+  space made with 'prime spaces create' starts with this machine's key allowed.
+  A client that cannot sign (a raw gateway URL as its MCP address) is refused by a
+  device that checks: make 'prime serve' its MCP command.
   A fleet reached with its fleet token is addressed by 'prime devices connect <id>
   --fleet' (or --fleet on 'prime tools'), so its calls are signed for the fleet.
   Such a call is checked against the fleet's signed roster, not against the callers
@@ -338,10 +345,12 @@ OPTIONS FROM THE CONFIG
 
   Signed calls: the tool calls that come through the gateway can be signed by
   the machine that makes them ('prime devices allow-caller'). --caller-auth
-  warn (the default) runs a call that is not signed by a key in the callers file
-  and writes it to caller-auth/caller-auth.log beside the file; enforce refuses
-  it (JSON-RPC error -32001); off checks nothing. A callers file that cannot be
-  read refuses every signed call under enforce (under warn they run and are logged).
+  warn runs a call that is not signed by a key in the callers file and writes it
+  to caller-auth/caller-auth.log beside the file (--caller-state for another place);
+  enforce refuses it (JSON-RPC error -32001); off checks nothing. Without the
+  option a device enforces once its callers file lists a key and warns until then.
+  A callers file that cannot be read refuses every signed call under enforce (under
+  warn they run and are logged).
   Listing tools, ping and initialize never need a signature.
 
   --activity-log <file> keeps a journal of the tool calls: one JSON line with

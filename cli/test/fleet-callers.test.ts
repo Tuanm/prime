@@ -10,7 +10,7 @@ import { CallerAuth } from "../src/caller-auth.ts";
 import { GatewayClient } from "../src/client.ts";
 import { CallSigner, FLEET_PROBE_TOOL, callTarget, fleetMemberTarget, loadOrCreateCallerKey, parseCallSig, signCall } from "../src/caller-key.ts";
 import { FLEET_CALLERS_FRESH_MS, callersOfRoster, readFleetCallers } from "../src/fleet-callers.ts";
-import { forgetRosterAnswers } from "../src/fleet-trust.ts";
+import { FleetTrust, forgetRosterAnswers } from "../src/fleet-trust.ts";
 import { FleetCallersWriter, refreshFleetCallers, startFleetCallers, type CallersLoop } from "../src/fleet-callers-agent.ts";
 import { fleetsRoster } from "../src/fleets.ts";
 import {
@@ -550,6 +550,45 @@ describe("prime fleets roster add-caller and remove-caller", () => {
   });
 });
 
+describe("a space in a fleet takes its mode from the fleet's roster", () => {
+  const unsigned = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: { command: "id" } } });
+  function fleetSpace(roster: "signed" | "open", callers: number) {
+    const d = scratch();
+    const k = callerKey("mode-" + roster + callers);
+    const logs: string[] = [];
+    const file = join(d, "fleet-callers.json");
+    const write = (r: string, n: number) =>
+      writeFileSync(file, JSON.stringify({ version: 1, fleet: "acme", roster: r, primary: true, primarySince: 1, writtenAt: Date.now(), callers: n > 0 ? [{ pub: k.key.publicKeyB64, label: "x", addedAt: "" }] : [] }));
+    write(roster, callers);
+    // no callers file of the device at all: nobody was allowed on the machine
+    const auth = new CallerAuth({ deviceId: "space-1", callersFile: join(d, "callers.json"), stateDir: join(d, "st"), log: (t) => logs.push(t) });
+    return { auth, logs, write };
+  }
+
+  test("a member that has no owner pinned and has seen no roster: warns while the roster lists nobody, enforces once a signed roster lists callers, and says when it changes", () => {
+    const s = fleetSpace("open", 0);
+    expect(s.auth.mode).toBe("warn");
+    expect(s.auth.admit({ raw: unsigned }).action).toBe("run");
+    s.write("signed", 1);
+    expect(s.auth.mode).toBe("enforce");
+    expect(s.auth.admit({ raw: unsigned }).action).toBe("refuse");
+    expect(s.logs.join("\n")).toContain("now enforce");
+    // the roster is the gateway's again (or lists nobody): back to warn, and it says so
+    s.write("open", 0);
+    expect(s.auth.mode).toBe("warn");
+    expect(s.logs.join("\n")).toContain("now warn");
+    // a roster that is open lists nobody whatever the file says
+    const open = fleetSpace("open", 1);
+    expect(open.auth.mode).toBe("warn");
+  });
+
+  test("a file the agent wrote that cannot be read counts as one that lists callers", () => {
+    const s = fleetSpace("signed", 1);
+    writeFileSync(join(dirname(s.auth["opts"].callersFile), "fleet-callers.json"), "{ nope");
+    expect(s.auth.mode).toBe("enforce");
+  });
+});
+
 describe("the client of a fleet asks which member it is calling, and signs for it", () => {
   /** A gateway that sends every call to one device, as the gateway does for a fleet: the device is a CallerAuth over a fleet-callers file. */
   function device(options: { legacy?: boolean; primary?: boolean } = {}) {
@@ -759,6 +798,130 @@ describe("the client of a fleet when the question fails, and when the primary ha
       expect(ran).toEqual(["bash"]);
     } finally {
       server.stop(true);
+    }
+  });
+});
+
+describe("a member that has taken a signed roster into account enforces, whatever the gateway says afterwards", () => {
+  const unsigned = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: { command: "id" } } });
+  const again = (n: number) => unsigned.replace('"id":1', `"id":${n}`);
+
+  function gateway(owner: OwnerKey, laptop: ReturnType<typeof callerKey>) {
+    const signed = chain(owner, [{ device: "dev-a", role: "member", spub: callerKey("enf-m").spub }], (add) => add({ op: "caller", spub: laptop.spub, extra: "laptop" }));
+    const st = { mode: "signed" as "signed" | "open" };
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req) => (new URL(req.url).pathname === "/fleets/acme/roster" ? Response.json(st.mode === "signed" ? { mode: "signed", entries: signed } : { mode: "open", entries: [] }) : Response.json({ error: "no" }, { status: 404 })),
+    });
+    return { st, url: "http://127.0.0.1:" + server.port, stop: () => void server.stop(true) };
+  }
+  const loopOf = (secret: string, url: string, primary: boolean) =>
+    ({ fleet: "acme", creds: { gateway: url, deviceId: "d", deviceToken: "t", timeoutMs: 2000 }, primary, paths: { keyFile: join(secret, "key") }, space: { secret_dir: secret } }) as unknown as CallersLoop;
+  const authOf = (secret: string) => new CallerAuth({ deviceId: "space-1", callersFile: join(secret, "callers.json"), stateDir: join(secret, "st") });
+
+  test("a gateway that stops serving the signed roster (open, an older prefix, another owner's chain) does not turn enforcement off", async () => {
+    const secret = scratch();
+    const g = gateway(generateOwnerKey(), callerKey("enf-laptop"));
+    try {
+      const loop = loopOf(secret, g.url, true);
+      forgetRosterAnswers();
+      await refreshFleetCallers(loop);
+      const auth = authOf(secret);
+      expect(auth.mode).toBe("enforce");
+      expect(auth.admit({ raw: unsigned }).action).toBe("refuse");
+      g.st.mode = "open";
+      forgetRosterAnswers();
+      loop.callersWriter!["rosterAt"] = 0;
+      loop.callersWriter!["wasPrimary"] = true;
+      await refreshFleetCallers(loop);
+      const file = readFleetCallers(join(secret, "fleet-callers.json")).file!;
+      expect(file.roster).toBe("refused");
+      expect(file.callers).toEqual([]);
+      expect(file.enforce).toBe(true);
+      expect(auth.mode).toBe("enforce");
+      expect(auth.admit({ raw: again(2) }).action).toBe("refuse");
+    } finally {
+      g.stop();
+    }
+  });
+
+  test("a replica enforces too, and a former primary does, after the roster has been forgotten", async () => {
+    const primary = scratch();
+    const replica = scratch();
+    const g = gateway(generateOwnerKey(), callerKey("enf-laptop2"));
+    try {
+      forgetRosterAnswers();
+      await refreshFleetCallers(loopOf(primary, g.url, true));
+      // a replica of the same member (its trust file is the one the primary's agent made), and the gateway is not asked at all
+      FleetTrust.beside(join(primary, "key"));
+      const trust = FleetTrust.beside(join(primary, "key"));
+      expect(trust.ownerFp).toBeDefined();
+      const loop = loopOf(primary, "http://127.0.0.1:9", false);
+      loop.space.secret_dir = replica;
+      await refreshFleetCallers(loop);
+      const auth = authOf(replica);
+      expect(readFleetCallers(join(replica, "fleet-callers.json")).file).toMatchObject({ primary: false, roster: "refused", enforce: true });
+      expect(auth.mode).toBe("enforce");
+      expect(auth.admit({ raw: unsigned }).action).toBe("refuse");
+    } finally {
+      g.stop();
+    }
+  });
+
+  test("a member with nothing pinned and no roster seen does not enforce (nothing changes until the roster is signed)", async () => {
+    const secret = scratch();
+    const g = gateway(generateOwnerKey(), callerKey("enf-laptop3"));
+    try {
+      g.st.mode = "open";
+      forgetRosterAnswers();
+      await refreshFleetCallers(loopOf(secret, g.url, true));
+      expect(readFleetCallers(join(secret, "fleet-callers.json")).file?.enforce).toBeUndefined();
+      expect(authOf(secret).mode).toBe("warn");
+    } finally {
+      g.stop();
+    }
+  });
+
+  test("a trust file that cannot be parsed does not turn enforcement off; one that is unpinned does, and the agent says so", async () => {
+    const secret = scratch();
+    const g = gateway(generateOwnerKey(), callerKey("enf-laptop5"));
+    const logs: string[] = [];
+    try {
+      forgetRosterAnswers();
+      const loop = loopOf(secret, g.url, true);
+      await refreshFleetCallers(loop, (t) => logs.push(t));
+      expect(readFleetCallers(join(secret, "fleet-callers.json")).file?.enforce).toBe(true);
+      // the file is damaged: it says nothing, and the flag stays
+      writeFileSync(join(secret, "key.trust.json"), "{ not json");
+      loop.callersWriter!["lastWrite"] = 0;
+      await refreshFleetCallers(loop, (t) => logs.push(t));
+      expect(readFleetCallers(join(secret, "fleet-callers.json")).file?.enforce).toBe(true);
+      expect(logs.join("\n")).not.toContain("no longer enforces");
+      // a file that parses and pins nobody: the operator's unpin; it is written, and said
+      writeFileSync(join(secret, "key.trust.json"), "{}");
+      loop.callersWriter!["lastWrite"] = 0;
+      await refreshFleetCallers(loop, (t) => logs.push(t));
+      expect(readFleetCallers(join(secret, "fleet-callers.json")).file?.enforce).toBeUndefined();
+      expect(logs.join("\n")).toContain("no longer enforces");
+    } finally {
+      g.stop();
+    }
+  });
+
+  test("only the operator's unpin clears it", async () => {
+    const secret = scratch();
+    const g = gateway(generateOwnerKey(), callerKey("enf-laptop4"));
+    try {
+      forgetRosterAnswers();
+      const loop = loopOf(secret, g.url, true);
+      await refreshFleetCallers(loop);
+      expect(readFleetCallers(join(secret, "fleet-callers.json")).file?.enforce).toBe(true);
+      FleetTrust.unpinOwner(join(secret, "key"));
+      loop.callersWriter!["lastWrite"] = 0;
+      await refreshFleetCallers(loop);
+      expect(readFleetCallers(join(secret, "fleet-callers.json")).file?.enforce).toBeUndefined();
+    } finally {
+      g.stop();
     }
   });
 });

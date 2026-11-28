@@ -1,7 +1,7 @@
 // The agent's side of fleet-callers.ts: what it writes for a space's tool server, from the roster it verified and the
 // lease it holds.
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -28,6 +28,8 @@ export class FleetCallersWriter {
   private failureSaid = false;
   /** The member's certificate for this space's reply key (see fleet-reply-cert.ts). */
   private replyCert: FleetCallersFile["replyCert"];
+  /** Whether this member has an owner pinned or has seen a signed roster (see FleetCallersFile.enforce). */
+  private enforce = false;
   /** When the roster was last read (and verified, or refused): a roster that cannot be read is believed for FLEET_ROSTER_KEEP_MS and no longer. */
   private rosterAt = 0;
 
@@ -59,6 +61,14 @@ export class FleetCallersWriter {
     this.replyCert = cert;
   }
 
+  /** Say whether this member's trust file has an owner pinned or a roster head. Once true it is written true until the trust file says otherwise. */
+  setEnforce(enforce: boolean | undefined): void {
+    // undefined: the trust file exists and cannot be read now. It says nothing, so what was known stays.
+    if (enforce === undefined) return;
+    if (this.enforce && !enforce) this.log("fleet callers: this member no longer has an owner pinned or a roster seen, so its space no longer enforces (an operator's unpin, or a trust file that was removed)");
+    this.enforce = enforce;
+  }
+
   /** Whether the roster is to be read again: when the space has just become the primary, and then every FLEET_ROSTER_REFRESH_MS. */
   wantsRoster(primary: boolean): boolean {
     return primary && (!this.wasPrimary || this.now() - this.rosterAt >= FLEET_ROSTER_REFRESH_MS);
@@ -81,6 +91,7 @@ export class FleetCallersWriter {
       version: FLEET_CALLERS_VERSION,
       fleet: this.fleet,
       roster: this.lastRoster.roster,
+      ...(this.enforce ? { enforce: true } : {}),
       ...(this.lastRoster.note ? { note: this.lastRoster.note } : {}),
       primary,
       primarySince: this.primarySince,
@@ -122,6 +133,18 @@ export interface CallersLoop {
   callersWriter?: FleetCallersWriter;
 }
 
+/** Is there no trust file, or one that parses? (`FleetTrust` takes one that does not parse for one that says nothing; that must not turn enforcement off.) */
+function trustFileReadable(keyFile: string): boolean {
+  const file = keyFile + ".trust.json";
+  if (!existsSync(file)) return true;
+  try {
+    JSON.parse(readFileSync(file, "utf8"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The file of a space (it is in the space's secret directory, which the space can read and not write). */
 export function fleetCallersFileOf(secretDir: string): string {
   return join(secretDir, FLEET_CALLERS_FILE);
@@ -147,6 +170,14 @@ export async function refreshFleetCallers(loop: CallersLoop, log: (text: string)
     }
   }
   issueReplyCert(loop, writer, dir, log);
+  // Every member says it, a replica too: what is read here is this member's own pin and the head it has seen, not the gateway's word.
+  try {
+    const trust = FleetTrust.beside(loop.paths.keyFile);
+    writer.setEnforce(trustFileReadable(loop.paths.keyFile) ? trust.ownerFp !== undefined || trust.rosterHead !== undefined : undefined);
+  } catch (err) {
+    // A trust file that cannot be read says nothing: what was known stays.
+    log(`cannot read the trust file beside ${loop.paths.keyFile}: ${err instanceof Error ? err.message : String(err)}`);
+  }
   writer.update(loop.primary);
 }
 
