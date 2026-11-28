@@ -1409,7 +1409,7 @@ export async function refreshSpaceImage(
   }
   space.image = image;
   saveConfig(ctx.configPath, ctx.config);
-  await startSpace(ctx, name);
+  await startSpace(ctx, name, { recreate: true });
   return { changed: true, from };
 }
 
@@ -1422,6 +1422,15 @@ export async function refreshSpaceImage(
  * space outside a fleet is left alone - its image is the person's choice, and
  * nothing in it goes stale.
  */
+/**
+ * May a start make a container that is not there? An ephemeral space always; a persistent one keeps its work in the container's volume, which a
+ * lost container leaves for the person to decide about, except a space of a fleet whose container was removed on purpose to move it to a new image:
+ * its work tree is a directory of the host.
+ */
+export function mayMakeContainerAgain(space: Pick<SpaceEntry, "mode" | "fleet">, recreate: boolean): boolean {
+  return space.mode !== "persistent" || (recreate && Boolean(space.fleet));
+}
+
 /** Is this space on another image than `image`, or was its container made with an older entrypoint than this build's? */
 export function spaceNeedsRefresh(space: SpaceEntry, image: string): boolean {
   return space.image !== image || space.entrypoint !== ENTRYPOINT_VERSION;
@@ -1462,7 +1471,7 @@ export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promis
 }
 
 /** Start the named space, whatever the command that asked for it. */
-async function startSpace(ctx: Ctx, name: string): Promise<void> {
+async function startSpace(ctx: Ctx, name: string, options: { recreate?: boolean } = {}): Promise<void> {
   const space = requireSpace(ctx.config, name);
   const runtime = await runtimeFor(space.runtime, bool(ctx.parsed, "allow-rootful"));
   const allowNoLimits = bool(ctx.parsed, "allow-no-limits");
@@ -1498,7 +1507,9 @@ async function startSpace(ctx: Ctx, name: string): Promise<void> {
   try {
     started = Date.now();
   if (existing.state === "missing") {
-    if (space.mode === "persistent") {
+    // A space in a fleet keeps its work tree in a host directory, so a container that was removed on purpose (a move to a new image) is made
+    // again from it; another persistent space keeps its work in the container's volume and is not.
+    if (!mayMakeContainerAgain(space, options.recreate === true)) {
       fail('the persistent container for space "' + name + '" is gone', "Its volume still exists. Delete the space and create it again to start over.");
     }
     const run = runContainer(runtime, space, space.image, space.secret_dir, allowNoLimits, (text) => ctx.note(text));

@@ -240,6 +240,8 @@ const UPDATE_FLAGS: FlagSpec[] = [
   flag("check", "boolean", "Only report whether a newer release exists"),
   flag("force", "boolean", "Reinstall even when the version is already current"),
   flag("no-spaces", "boolean", "Leave the spaces on the image they have"),
+  flag("allow-rootful", "boolean", "Permit rootful docker when the fleet's spaces are moved"),
+  flag("allow-no-limits", "boolean", "Start the fleet's spaces even if cpu/memory limits cannot be enforced"),
   flag("to", "string", "Install to this path instead of replacing the running binary", { placeholder: "<path>" }),
   flag("release-version", "string", "Install this specific version instead of the newest", { placeholder: "<version>" }),
 ];
@@ -536,11 +538,17 @@ async function main(argv: string[]): Promise<void> {
         // The build that has just been installed does this, not this process: the containers are made with the entrypoint
         // of the build that makes them, and this one is the old one.
         if (outcome.updated) {
-          const argv = fleetSpaceNames(ctx.config).length === 0 ? undefined : refreshCommandAfterUpdate(outcome, ctx.configPath, process.execPath);
-          if (fleetSpaceNames(ctx.config).length > 0 && !argv) ctx.note("the fleet's spaces were not moved: run 'prime spaces refresh-fleet' with the new build");
-          else if (argv) {
+          const command =
+            fleetSpaceNames(ctx.config).length === 0
+              ? undefined
+              : refreshCommandAfterUpdate(outcome, ctx.configPath, process.execPath, {
+                  compiled: Bun.main.startsWith("/$bunfs/") || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(Bun.main),
+                  flags: [...(bool(ctx.parsed, "allow-rootful") ? ["--allow-rootful"] : []), ...(bool(ctx.parsed, "allow-no-limits") ? ["--allow-no-limits"] : [])],
+                });
+          if (fleetSpaceNames(ctx.config).length > 0 && !command) ctx.note("the fleet's spaces were not moved: run 'prime spaces refresh-fleet' with the new build");
+          else if (command) {
             try {
-              const done = Bun.spawnSync(argv, { stdin: "ignore", stdout: ctx.json ? "pipe" : "inherit", stderr: "inherit", timeout: 30 * 60_000 });
+              const done = Bun.spawnSync(command.argv, { env: { ...process.env, ...command.env }, stdin: "ignore", stdout: ctx.json ? "pipe" : "inherit", stderr: "inherit", timeout: 30 * 60_000 });
               if (ctx.json && done.stdout && done.stdout.length > 0) process.stderr.write(done.stdout);
               if (done.exitCode !== 0) ctx.note("the new build could not move the fleet's spaces (exit " + String(done.exitCode) + "): run 'prime spaces refresh-fleet'; the next 'prime update' also does it");
             } catch (err) {

@@ -492,12 +492,15 @@ export function refreshCommandAfterUpdate(
   outcome: Pick<UpdateOutcome, "kind" | "target" | "updated">,
   configPath: string,
   runtime: string,
-): string[] | undefined {
+  options: { compiled?: boolean; flags?: string[] } = {},
+): { argv: string[]; env: Record<string, string> } | undefined {
   if (!outcome.updated) return undefined;
-  const tail = ["spaces", "refresh-fleet", "--config", configPath];
+  const tail = ["spaces", "refresh-fleet", "--config", configPath, ...(options.flags ?? [])];
   if (outcome.kind === "source") return undefined;
   // The destination decides, as it does for the asset: `--to prime.js` from a compiled binary installs a bundle.
-  return kindForTarget(outcome.target, outcome.kind) === "bundle" ? [runtime, outcome.target, ...tail] : [outcome.target, ...tail];
+  if (kindForTarget(outcome.target, outcome.kind) !== "bundle") return { argv: [outcome.target, ...tail], env: {} };
+  // A compiled binary that installs a bundle has no runtime of its own to run it with but itself, which is one when asked to be (BUN_BE_BUN).
+  return { argv: [runtime, outcome.target, ...tail], env: options.compiled ? { BUN_BE_BUN: "1" } : {} };
 }
 
 /** Human-readable report for the update command. */

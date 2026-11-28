@@ -14,7 +14,7 @@ import type { Ctx } from "../src/context.ts";
 import type { SpaceEntry } from "../src/config.ts";
 import { refreshCommandAfterUpdate } from "../src/update.ts";
 import { devicesAllowCaller, devicesCallers, devicesRevokeCaller } from "../src/devices.ts";
-import { ENTRYPOINT_VERSION, containerArgs, ensureSpaceAuth, entrypointScript, spaceNeedsRefresh, spaceActivityFile, spaceCallersFile, spaceStateDir } from "../src/spaces.ts";
+import { ENTRYPOINT_VERSION, containerArgs, ensureSpaceAuth, entrypointScript, mayMakeContainerAgain, spaceNeedsRefresh, spaceActivityFile, spaceCallersFile, spaceStateDir } from "../src/spaces.ts";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -208,14 +208,26 @@ describe("prime update moves a fleet's spaces with the build it has installed", 
     expect(spaceNeedsRefresh(space({ image: "old", entrypoint: ENTRYPOINT_VERSION }), "img")).toBe(true);
   });
 
-  test("the command is the installed build's, never this process's own", () => {
+  test("the command is the installed build's, never this process's own; a compiled binary installing a bundle runs it as bun", () => {
     const base = { target: "/usr/local/bin/prime", updated: true };
-    expect(refreshCommandAfterUpdate({ ...base, kind: "binary" }, "/c/config.yaml", "/bin/bun")).toEqual(["/usr/local/bin/prime", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
-    expect(refreshCommandAfterUpdate({ ...base, kind: "bundle", target: "/i/prime.js" }, "/c/config.yaml", "/bin/bun")).toEqual(["/bin/bun", "/i/prime.js", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
-    // installed to a .js path by a compiled binary: a bundle, run by the runtime
-    expect(refreshCommandAfterUpdate({ ...base, kind: "binary", target: "/t/prime.js" }, "/c/config.yaml", "/bin/bun")).toEqual(["/bin/bun", "/t/prime.js", "spaces", "refresh-fleet", "--config", "/c/config.yaml"]);
+    expect(refreshCommandAfterUpdate({ ...base, kind: "binary" }, "/c/config.yaml", "/bin/bun")).toEqual({ argv: ["/usr/local/bin/prime", "spaces", "refresh-fleet", "--config", "/c/config.yaml"], env: {} });
+    expect(refreshCommandAfterUpdate({ ...base, kind: "bundle", target: "/i/prime.js" }, "/c/config.yaml", "/bin/bun")).toEqual({ argv: ["/bin/bun", "/i/prime.js", "spaces", "refresh-fleet", "--config", "/c/config.yaml"], env: {} });
+    // a compiled binary (process.execPath is prime itself) that installs a .js: it is asked to be bun
+    expect(refreshCommandAfterUpdate({ ...base, kind: "binary", target: "/t/prime.js" }, "/c/config.yaml", "/opt/prime", { compiled: true })).toEqual({
+      argv: ["/opt/prime", "/t/prime.js", "spaces", "refresh-fleet", "--config", "/c/config.yaml"],
+      env: { BUN_BE_BUN: "1" },
+    });
+    // the flags that decide how a space is run are passed on
+    expect(refreshCommandAfterUpdate({ ...base, kind: "binary" }, "/c/config.yaml", "/bin/bun", { flags: ["--allow-rootful", "--allow-no-limits"] })?.argv).toEqual(["/usr/local/bin/prime", "spaces", "refresh-fleet", "--config", "/c/config.yaml", "--allow-rootful", "--allow-no-limits"]);
     expect(refreshCommandAfterUpdate({ ...base, kind: "source" }, "/c/config.yaml", "/bin/bun")).toBeUndefined();
     expect(refreshCommandAfterUpdate({ ...base, kind: "binary", updated: false }, "/c/config.yaml", "/bin/bun")).toBeUndefined();
+  });
+
+  test("a persistent space of a fleet is made again when its container was removed to move it; any other persistent space is not", () => {
+    expect(mayMakeContainerAgain({ mode: "persistent", fleet: "acme" }, true)).toBe(true);
+    expect(mayMakeContainerAgain({ mode: "persistent", fleet: "acme" }, false)).toBe(false); // a container that went missing by itself
+    expect(mayMakeContainerAgain({ mode: "persistent" }, true)).toBe(false);
+    expect(mayMakeContainerAgain({ mode: "ephemeral" }, false)).toBe(true);
   });
 
   test("'prime spaces refresh-fleet' is a command of the build, and with no fleet space it has nothing to do", () => {

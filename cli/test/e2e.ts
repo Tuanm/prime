@@ -734,6 +734,14 @@ try {
     `mode=${(statSync(installTarget).mode & 0o777).toString(8)}`,
   );
 
+  // A compiled prime asked to be bun (BUN_BE_BUN) runs a script: what `prime update` relies on to run a bundle it installed with a compiled binary.
+  {
+    const script = join(installDir, "bun-be-bun.js");
+    writeFileSync(script, "console.log('ran-' + (20 + 22));\n");
+    const r = await cli([script], { env: { BUN_BE_BUN: "1" } });
+    check("a compiled build with BUN_BE_BUN runs a script", r.code === 0 && r.out.includes("ran-42"), r.out.trim() + r.err.trim());
+  }
+
   // The fleet's spaces are moved by the build that was installed, not by the one that ran the update: the fake binary answers for itself.
   if (!IS_WINDOWS) {
     const spacesCfg = join(installDir, "spaces-config.yaml");
