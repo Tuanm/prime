@@ -1,3 +1,4 @@
 .env
 .memo.jsonl
 dist/
+*.orig
