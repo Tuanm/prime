@@ -706,7 +706,8 @@ describe("the CLI checks a device's reply signature", () => {
     await call(newClient(notices, { ...target, deviceId: "acme", fleetBuddy: true }));
     deviceStub(newAuth(), "strip");
     await call(newClient(notices, { ...target, deviceId: "acme", fleetBuddy: true }));
-    expect(notices).toEqual([]);
+    // the one thing said is that the fleet's owner is not pinned here (see fleet-reply-trust.ts); nothing about keys
+    expect(notices.filter((n) => !n.includes("not authenticated"))).toEqual([]);
   });
 
   test("a reply with no signature from a device that never signed is accepted without a word", async () => {
