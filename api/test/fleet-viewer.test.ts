@@ -226,6 +226,21 @@ describe("a fleet that is left with only viewers", () => {
   });
 });
 
+describe("a viewer made a member in a fleet that has no owner", () => {
+  test("owns it, and the log says so; with an owner it is a member", async () => {
+    const w = await fleetOf([], ["watcher", "second-eye"]);
+    await call(w, "/remove", "operator", "admin", { deviceId: "owner" });
+    const made = await call(w, "/approve", "operator", "admin", { deviceId: "watcher", role: "member" });
+    expect(made.json.member.role).toBe("owner");
+    // The next one is a member: the fleet has an owner now.
+    expect((await call(w, "/approve", "operator", "admin", { deviceId: "second-eye", role: "member" })).json.member.role).toBe("member");
+    // ...and it can run the fleet, which with no owner nobody could.
+    expect((await call(w, "/invite", "watcher", "device")).status).toBe(200);
+    const log = (await call(w, "/audit?tail=50", "", "admin", {}, "GET")).json.entries as Array<{ action: string; detail?: Record<string, unknown> }>;
+    expect(log.find((e) => e.action === "role-changed")!.detail).toMatchObject({ from: "viewer", to: "owner", owner: true });
+  });
+});
+
 describe("changing a role in place", () => {
   const roles = async (w: World) => Object.fromEntries(((await call(w, "/members", "", "admin", {}, "GET")).json.members as Array<{ deviceId: string; role: string }>).map((m) => [m.deviceId, m.role]));
 
