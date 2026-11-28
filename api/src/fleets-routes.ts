@@ -54,6 +54,7 @@ const ALLOWED_ACTIONS = new Set([
   "audit",
   "roster",
   "remove-fence",
+  "epoch-key",
 ]);
 const READ_ACTIONS = new Set(["members", "pending", "me", "role", "head", "keys", "index", "audit", "roster"]);
 

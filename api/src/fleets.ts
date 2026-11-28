@@ -254,6 +254,11 @@ export interface Member {
    * the older format in use or make a member that cannot read a newer one fail to open it.
    */
   caps?: string[];
+  /**
+   * The newest epoch key the member has published (see `fleet-epoch.ts`): signed by its signing key, so a gateway cannot make one
+   * up. Snapshot keys are wrapped to it by publishers that read it. It goes with the signing key it was signed by.
+   */
+  epochKey?: { n: number; pub: string; notAfter: number; sig: string; at: number };
 }
 
 export interface PendingRequest {
