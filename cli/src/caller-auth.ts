@@ -9,6 +9,10 @@
 //   off      nothing is checked
 //   warn     a call that is not signed by a trusted key still runs, and is logged
 //   enforce  such a call is refused with JSON-RPC error -32001
+//
+// With no mode given (the default) a device enforces as soon as its callers file lists a key, and warns while it
+// lists none: a device that nobody has enrolled a key on keeps working, and one that has been told whom to trust
+// does not run what anybody else sends.
 
 import { createHash, sign as cryptoSign, verify as cryptoVerify } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
@@ -125,7 +129,8 @@ export type Admission =
     };
 
 export interface CallerAuthOptions {
-  mode: CallerAuthMode;
+  /** Absent: enforce while the callers file lists a key (or cannot be read), warn otherwise. */
+  mode?: CallerAuthMode;
   /** The id the device is registered as: the target a signature must name. */
   deviceId: string;
   callersFile: string;
@@ -168,7 +173,6 @@ interface CallersCache {
 }
 
 export class CallerAuth {
-  readonly mode: CallerAuthMode;
   readonly counts = { signed: 0, unsigned: 0, invalid: 0, refused: 0 };
   private readonly opts: CallerAuthOptions;
   private readonly seen = new Map<string, Spent>();
@@ -197,13 +201,13 @@ export class CallerAuth {
   private retiredLines = 0;
   private cache: CallersCache | undefined;
   private fleetCache: FleetCache | undefined;
+  private modeSeen: CallerAuthMode | undefined;
   private replyKey: CallerKey | undefined;
   private readonly said = new Set<string>();
   private readonly stateDir: string;
 
   constructor(opts: CallerAuthOptions) {
     this.opts = opts;
-    this.mode = opts.mode;
     this.stateDir = opts.stateDir ?? join(dirname(opts.callersFile), "caller-auth");
     this.floorTs = (opts.now ?? Date.now)() - 1;
     if (opts.mode !== "off") this.loadRetired();
@@ -250,10 +254,40 @@ export class CallerAuth {
     return this.fleetCache;
   }
 
-  /** Does the callers file hold any caller? (Used to decide a default; an unreadable file counts as yes.) */
+  /** The mode in force now: the one that was asked for, or what the callers file says (see the top of this file). */
+  get mode(): CallerAuthMode {
+    if (this.opts.mode) return this.opts.mode;
+    const mode: CallerAuthMode = this.hasCallers() ? "enforce" : "warn";
+    // A device whose mode follows its files says when it changes (a key was allowed, or the last one revoked, or a roster signed).
+    if (this.modeSeen !== undefined && this.modeSeen !== mode) {
+      this.opts.log?.(
+        mode === "enforce"
+          ? "caller-auth: now enforce (a key is allowed here, or the fleet's signed roster lists callers): a call that none of them signed is refused"
+          : "caller-auth: now warn (no key is allowed here any more): every call runs, and the unsigned ones are logged",
+      );
+    }
+    this.modeSeen = mode;
+    return mode;
+  }
+
+  /** One line for the service log at start: the mode, and why it is that one. */
+  describeMode(): string {
+    const mode = this.mode;
+    if (this.opts.mode) return `caller-auth: ${mode} (--caller-auth)`;
+    return mode === "enforce"
+      ? "caller-auth: enforce (the callers file, or the fleet's signed roster, lists keys: a call that none of them signed is refused; --caller-auth warn runs such calls and logs them)"
+      : "caller-auth: warn (no key is allowed yet, so every call runs and the unsigned ones are logged; once 'prime devices allow-caller' has allowed a key, unsigned calls are refused)";
+  }
+
+  /** Does the callers file, or the fleet's signed roster, name any caller? (Used to decide a default; an unreadable file counts as yes.) */
   hasCallers(): boolean {
     const c = this.callers();
-    return c.entries ? c.entries.length > 0 : true;
+    if (!c.entries || c.entries.length > 0) return true;
+    // A space in a fleet is let in by the fleet's signed roster: once its agent says the member has taken a signed roster into
+    // account (`enforce`: an owner is pinned, or a roster was seen) the space enforces whatever the list holds, so that a roster the gateway
+    // makes empty or refused cannot turn it off. A file the agent wrote that cannot be read counts as one that lists callers.
+    const fleet = this.fleetCallers();
+    return fleet.error !== undefined || fleet.file?.enforce === true || (fleet.file?.roster === "signed" && fleet.file.callers.length > 0);
   }
 
   /**
@@ -275,7 +309,8 @@ export class CallerAuth {
     const fromRaw = binding ? parseBody(frame.raw, parse) : undefined;
     const request = fromRaw !== undefined ? fromRaw : Object.hasOwn(frame, "request") ? frame.request : parseBody(frame.raw, parse);
 
-    if (this.mode === "off") {
+    const mode = this.mode;
+    if (mode === "off") {
       if (request === undefined) return this.unreadable(frame);
       return { action: "run", request, ...(binding && fromRaw !== undefined ? { reply: binding } : {}) };
     }
@@ -302,9 +337,9 @@ export class CallerAuth {
     failure ??= "unsigned";
     if (failure === "unsigned") this.counts.unsigned++;
     else this.counts.invalid++;
-    this.record(failure, request, this.mode === "enforce" ? "refused" : "ran", frame);
+    this.record(failure, request, mode === "enforce" ? "refused" : "ran", frame, mode);
     // The question which member this is is never run, whatever the mode: it is not a call.
-    if (this.mode !== "enforce" && failure !== "fleet-member") return { action: "run", request, ...(bound ? { reply: bound } : {}) };
+    if (mode !== "enforce" && failure !== "fleet-member") return { action: "run", request, ...(bound ? { reply: bound } : {}) };
     this.counts.refused++;
     const signable =
       bound !== undefined &&
@@ -517,13 +552,13 @@ export class CallerAuth {
     }
   }
 
-  private record(failure: CallerFailure, request: unknown, outcome: "ran" | "refused", frame: TunnelFrame): void {
+  private record(failure: CallerFailure, request: unknown, outcome: "ran" | "refused", frame: TunnelFrame, mode: CallerAuthMode = this.mode): void {
     const method = isRecord(request) && typeof request.method === "string" ? request.method : "?";
     const tool = isToolCall(request) ? toolName(request) : undefined;
     const keyId = typeof frame.callerSig === "string" ? parseCallSig(frame.callerSig)?.keyId : undefined;
     const line = JSON.stringify({
       ts: new Date(this.now()).toISOString(),
-      mode: this.mode,
+      mode: mode,
       reason: failure,
       outcome,
       method,
@@ -537,7 +572,7 @@ export class CallerAuth {
     if (!this.said.has(said)) {
       this.said.add(said);
       this.opts.log?.(
-        `caller-auth (${this.mode}): ${outcome === "refused" ? "refused" : "ran"} a ${printable(method)}${tool ? ` ${printable(tool)}` : ""} call: ${failure}${
+        `caller-auth (${mode}): ${outcome === "refused" ? "refused" : "ran"} a ${printable(method)}${tool ? ` ${printable(tool)}` : ""} call: ${failure}${
           failure === "stale" ? " (this device's clock and the caller's differ by more than 5 minutes)" : ""
         }; details in ${join(this.stateDir, "caller-auth.log")}`,
       );

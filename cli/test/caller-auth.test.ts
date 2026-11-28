@@ -29,12 +29,12 @@ const NONCE = "bm9uY2Vub25jZW5vbmNlMQ"; // 22 characters, as a real one is
 const BASH = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: { command: "id" } } });
 const LIST = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" });
 
-function setup(mode: CallerAuthMode, options: { now?: () => number } = {}) {
+function setup(mode: CallerAuthMode | undefined, options: { now?: () => number } = {}) {
   const dir = scratch();
   const callers = join(dir, "callers.json");
   const key = loadOrCreateCallerKey(join(dir, "me.pem"));
   const logs: string[] = [];
-  const auth = new CallerAuth({ mode, deviceId: "laptop", callersFile: callers, log: (t) => logs.push(t), ...options });
+  const auth = new CallerAuth({ ...(mode ? { mode } : {}), deviceId: "laptop", callersFile: callers, log: (t) => logs.push(t), ...options });
   const sign = (raw: string, target = "device:laptop", o: { now?: number; nonce?: string } = {}) => signCall(key, target, raw, o);
   const frame = (raw: string, sig?: string) => ({ request: JSON.parse(raw), ...(sig ? { raw, callerSig: sig } : {}) });
   const logFile = join(dir, "caller-auth", "caller-auth.log");
@@ -93,6 +93,35 @@ describe("CallerAuth: the policy", () => {
     expect(t.auth.admit(t.frame(LIST)).action).toBe("run");
     expect(t.auth.admit({ request: { jsonrpc: "2.0", id: 3, method: "ping" } }).action).toBe("run");
     expect(t.auth.admit({ request: { jsonrpc: "2.0", id: 4, method: "notifications/initialized" } }).action).toBe("run");
+  });
+
+  test("without a mode the device warns while no key is allowed and enforces once one is (U4)", () => {
+    const t = setup(undefined);
+    expect(t.auth.mode).toBe("warn");
+    expect(t.auth.describeMode()).toContain("warn (no key is allowed yet");
+    expect(t.auth.admit(t.frame(BASH)).action).toBe("run");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    expect(t.auth.mode).toBe("enforce");
+    expect(t.auth.describeMode()).toContain("enforce (the callers file, or the fleet's signed roster, lists keys");
+    // an unsigned call is refused, a signed one runs
+    expect(refusedWith(t.auth.admit(t.frame(BASH)))).toBe("unsigned");
+    expect(t.auth.admit(t.frame(BASH, t.sign(BASH))).action).toBe("run");
+    // the last key revoked: back to warn
+    removeCaller(t.callers, t.key.keyId);
+    expect(t.auth.mode).toBe("warn");
+    expect(t.auth.admit(t.frame(LIST)).action).toBe("run");
+  });
+
+  test("without a mode a callers file that cannot be read enforces; a mode that is given is kept", () => {
+    const t = setup(undefined);
+    writeFileSync(t.callers, "{ nope");
+    expect(t.auth.mode).toBe("enforce");
+    expect(refusedWith(t.auth.admit(t.frame(BASH, t.sign(BASH))))).toBe("callers-unreadable");
+    const warn = setup("warn");
+    addCaller(warn.callers, { pub: warn.key.publicKey });
+    expect(warn.auth.mode).toBe("warn");
+    expect(warn.auth.describeMode()).toBe("caller-auth: warn (--caller-auth)");
+    expect(warn.auth.admit(warn.frame(BASH)).action).toBe("run");
   });
 
   test("enforce refuses everything that needs a signature when no key is trusted at all", () => {
@@ -872,7 +901,7 @@ describe("code-mcp behind a gateway that sends frames", () => {
     const port = free.port;
     free.stop(true);
     const proc = Bun.spawn(
-      ["bun", join(ROOT, "src", "code-mcp.ts"), "--gateway", `ws://127.0.0.1:${gw.port}`, "--id", "laptop", "--port", String(port), "--bind", "127.0.0.1", "--caller-auth", mode, "--callers", callers, "--token", "t", ...extra],
+      ["bun", join(ROOT, "src", "code-mcp.ts"), "--gateway", `ws://127.0.0.1:${gw.port}`, "--id", "laptop", "--port", String(port), "--bind", "127.0.0.1", ...(mode === "default" ? [] : ["--caller-auth", mode]), "--callers", callers, "--token", "t", ...extra],
       { cwd: scratch(), env: { ...process.env, HOME: scratch() }, stdout: "ignore", stderr: "pipe" },
     );
     procs.push(proc);
@@ -1114,6 +1143,46 @@ describe("code-mcp behind a gateway that sends frames", () => {
       expect(existsSync(join(state, "device-ed25519.pem"))).toBe(true);
       expect(existsSync(join(state, "caller-auth.log"))).toBe(true);
       expect(existsSync(join(dir, "caller-auth"))).toBe(false);
+    } finally {
+      r.stop();
+    }
+  });
+
+  test("with no --caller-auth the device warns until a key is allowed, then refuses what is not signed", async () => {
+    const dir = scratch();
+    const callers = join(dir, "callers.json");
+    const call = (n: number) => ({ jsonrpc: "2.0", id: n, method: "tools/call", params: { name: "write", arguments: { cwd: dir, path: join(dir, `d${n}.txt`), content: "x" } } });
+    const r = await run("default", callers);
+    try {
+      // nobody is allowed yet: the call runs (and is logged)
+      const first = await r.send({ request: call(1) });
+      expect(first.response.error).toBeUndefined();
+      expect(existsSync(join(dir, "d1.txt"))).toBe(true);
+      // a key is allowed, while the device runs: the same unsigned call is refused from then on
+      const key = loadOrCreateCallerKey(join(dir, "me.pem"));
+      addCaller(callers, { pub: key.publicKey, label: "me" });
+      const second = await r.send({ request: call(2) });
+      expect(second.response.error.code).toBe(-32001);
+      expect(existsSync(join(dir, "d2.txt"))).toBe(false);
+      // ... and one signed by that key runs
+      const raw = JSON.stringify(call(3));
+      const signed = await r.send({ raw, callerSig: signCall(key, "device:laptop", raw) });
+      expect(JSON.parse(signed.responseText ?? JSON.stringify(signed.response)).error).toBeUndefined();
+      expect(existsSync(join(dir, "d3.txt"))).toBe(true);
+    } finally {
+      r.stop();
+    }
+  });
+
+  test("with no --caller-auth a callers file that cannot be read refuses the call, it does not open the device", async () => {
+    const dir = scratch();
+    const callers = join(dir, "callers.json");
+    writeFileSync(callers, "{ not json");
+    const r = await run("default", callers);
+    try {
+      const out = await r.send({ request: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "write", arguments: { cwd: dir, path: join(dir, "x.txt"), content: "x" } } } });
+      expect(out.response.error.code).toBe(-32001);
+      expect(existsSync(join(dir, "x.txt"))).toBe(false);
     } finally {
       r.stop();
     }

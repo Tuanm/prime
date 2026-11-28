@@ -137,7 +137,7 @@ describe("a space's callers file", () => {
     const secret = join(dir, "spaces", "c");
     mkdirSync(secret, { recursive: true });
     ensureSpaceAuth(ctx, secret);
-    const auth = new CallerAuth({ mode: "enforce", deviceId: "anon-1", callersFile: spaceCallersFile(secret), stateDir: join(spaceStateDir(secret), "caller-auth") });
+    const auth = new CallerAuth({ deviceId: "anon-1", callersFile: spaceCallersFile(secret), stateDir: join(spaceStateDir(secret), "caller-auth") });
     const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash" } });
     const unsigned = auth.admit({ raw: body });
     expect(unsigned.action).toBe("refuse");

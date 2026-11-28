@@ -151,8 +151,9 @@ Options:
                          (defaults to --token; must match the token registered
                          for --id in the gateway device registry)
   --caller-auth <mode>   Tool calls that come through the gateway: off (not
-                         checked), warn (default: a call not signed by a trusted
-                         key runs and is logged) or enforce (refused)
+                         checked), warn (a call not signed by a trusted key runs
+                         and is logged) or enforce (refused). Default: enforce
+                         once the callers file lists a key, warn until then
   --callers <file>       Keys trusted to sign calls (default: callers.json beside
                          the config); edit it with 'prime devices allow-caller'
   --caller-state <dir>   Where the device keeps its reply key and the log of calls that
@@ -221,8 +222,9 @@ const gatewayToken: string | undefined = args["gateway-token"] ?? token;
 const activityJournal = typeof args["activity-log"] === "string" && args["activity-log"] ? new ActivityJournal(resolve(args["activity-log"]), { onError: (message) => console.error(message) }) : undefined;
 // Calls still queued when the process leaves cleanly are written then.
 if (activityJournal) process.on("exit", () => activityJournal.flushSync());
-const callerAuthMode = args["caller-auth"] === undefined ? "warn" : parseCallerAuthMode(args["caller-auth"]);
-if (!callerAuthMode) {
+// Without --caller-auth the device decides by its callers file: enforce once it lists a key, warn until then.
+const callerAuthMode = args["caller-auth"] === undefined ? undefined : parseCallerAuthMode(args["caller-auth"]);
+if (args["caller-auth"] !== undefined && !callerAuthMode) {
   console.error(`error: invalid --caller-auth: ${args["caller-auth"]} (use off, warn or enforce)`);
   process.exit(2);
 }
@@ -6208,13 +6210,14 @@ if (gatewayDomain) {
   const deviceId = assignedDeviceId ?? randomUUID();
   // Which tool calls the gateway tunnels in are signed by a key this device trusts (see caller-auth.ts).
   const callerAuth = new CallerAuth({
-    mode: callerAuthMode,
+    ...(callerAuthMode ? { mode: callerAuthMode } : {}),
     deviceId,
     callersFile: typeof args.callers === "string" ? resolve(args.callers) : callersPath(),
     ...(typeof args["caller-state"] === "string" && args["caller-state"] ? { stateDir: resolve(args["caller-state"]) } : {}),
     parse: (text) => parseMcpJson(text),
     log: (text) => console.error(`[${deviceId}] ${text}`),
   });
+  console.error(`[${deviceId}] ${callerAuth.describeMode()}`);
   const BASE_DELAY_MS = 1000;
   const MAX_DELAY_MS = 60_000;
   let retries = 0;

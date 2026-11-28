@@ -44,6 +44,12 @@ export interface FleetCallersFile {
   roster: "signed" | "open" | "refused";
   /** When it is not "signed": why nobody is listed. */
   note?: string;
+  /**
+   * This member has taken the fleet's signed roster into account: an owner is pinned here, or a signed roster was seen (both kept in
+   * the member's trust file, which the gateway cannot write). The space then enforces whatever the list below holds: a roster that
+   * is refused, open, older or unreadable means "nobody may call", not "everybody may". Only the operator clears it (`trust pin --clear`).
+   */
+  enforce?: boolean;
   /** This space holds the fleet's place now (from the agent's own lease state). */
   primary: boolean;
   /** When this space last became the primary (ms since the epoch, the agent's clock, which is the device's). */
@@ -121,6 +127,7 @@ export function readFleetCallers(path: string): { file?: FleetCallersFile; error
       fleet: f.fleet,
       roster,
       ...(typeof f.note === "string" ? { note: f.note.slice(0, 300) } : {}),
+      ...(f.enforce === true ? { enforce: true } : {}),
       primary: f.primary,
       primarySince: f.primarySince,
       writtenAt: f.writtenAt,

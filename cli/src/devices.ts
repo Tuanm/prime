@@ -426,7 +426,7 @@ export async function devicesAllowCaller(ctx: Ctx): Promise<void> {
   const allTools = bool(ctx.parsed, "all-tools");
   if (tools && allTools) throw new UsageError("--tools and --all-tools cannot be used together");
   const path = callersFile(ctx);
-  callersOrFail(path); // a malformed file is reported, not overwritten
+  const before = callersOrFail(path); // a malformed file is reported, not overwritten
   const { entry, added } = addCaller(path, {
     pub,
     ...(str(ctx.parsed, "label") !== undefined ? { label: str(ctx.parsed, "label")! } : {}),
@@ -434,12 +434,18 @@ export async function devicesAllowCaller(ctx: Ctx): Promise<void> {
     ...(allTools ? { allTools: true } : {}),
   });
   if (ctx.json) {
-    printJson({ key_id: entry.keyId, label: entry.label, tools: entry.tools ?? null, added, callers_file: path });
+    printJson({ key_id: entry.keyId, label: entry.label, tools: entry.tools ?? null, added, callers_file: path, first_key: before.length === 0 });
     return;
   }
   ctx.out(`${green("✓")} ${added ? "allowed" : "updated"} ${bold(entry.keyId)}${entry.label ? ` (${entry.label})` : ""}`);
   ctx.out(`  callers file  ${dim(path)}`);
   ctx.out(`  tools         ${entry.tools ? entry.tools.join(", ") : "all"}`);
+  if (before.length === 0) {
+    ctx.note(
+      yellow("  this was the first key: a device that reads this file now refuses a call that is not signed by an allowed key") +
+        dim("\n  (unless it was started with --caller-auth warn or off). Allow this machine's own key too, if it calls the device: prime devices allow-caller --self"),
+    );
+  }
 }
 
 /** What the pinned key of a device is, for `callers --device`. */
@@ -518,9 +524,16 @@ export async function devicesRevokeCaller(ctx: Ctx): Promise<void> {
   const path = callersFile(ctx);
   callersOrFail(path);
   const removed = removeCaller(path, keyId);
+  const left = removed ? callersOrFail(path).length : undefined;
   if (ctx.json) {
-    printJson({ key_id: keyId, removed, callers_file: path });
+    printJson({ key_id: keyId, removed, callers_file: path, ...(left === 0 ? { no_keys_left: true } : {}) });
     return;
   }
   ctx.out(removed ? `${green("✓")} revoked ${bold(keyId)}` : dim(`${keyId} was not in ${path}`));
+  if (left === 0) {
+    ctx.note(
+      yellow("  no key is allowed now: a device that reads this file runs every call again, and logs the ones that are not signed") +
+        dim("\n  (the default for a device with no keys). To keep refusing them, start the device with --caller-auth enforce."),
+    );
+  }
 }
