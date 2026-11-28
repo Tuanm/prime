@@ -860,6 +860,26 @@ says; it now means twenty dollars.
 | a request body on a fleet route | 64 KB (`FLEET_BODY_MAX_BYTES`), 4 KB for the body that asks for a device with a code; the snapshot and change-pack uploads have their own limit above. The gateway answers 413 |
 | a fleet nobody touches | kept: only the operator or the owner deletes it (`reap` also takes one whose members the gateway has all forgotten, after a week) |
 
+## What is left in the bucket
+
+A publish that is refused (it was not the primary any more, or it was behind), or whose publisher dies after
+storing its pack and before moving the head, leaves objects that no snapshot names; so does a fleet that was
+deleted while the bucket was out of reach. Once a day (03:17 UTC, `[triggers]` in `wrangler.toml`) the gateway
+sweeps:
+
+- for each fleet it lists `fleets/<fleet>/packs/` and `manifests/`, takes the objects older than an hour (a publish in
+  flight stores its objects before it names them), asks the fleet's object which of them nothing keeps, and deletes
+  those. The object keeps what a publish is storing, what the snapshots it holds name, **and whatever the head in
+  the bucket names, even if its own record was lost**; if the head cannot be read the fleet is left alone;
+- for a name in the bucket that the registry does not list and whose object says it does not exist, it deletes the
+  objects older than a day.
+
+It never touches a fleet's head, anything that is not a pack or a manifest, or the audit record (`audit/`, outside
+`fleets/`). A run deletes at most 1,000 objects of one fleet and 10,000 in all; the rest waits for the next day.
+Anything it cannot read (the registry, a fleet, the bucket) leaves that fleet alone and is reported. The result is
+in the Worker's log (`fleet sweep {...}`); `POST /admin/api/fleet-sweep` runs it on request, and with `?dry=1` only
+counts. It costs a few bucket listings per fleet a day (Class A, about $0.01 a month for a hundred fleets).
+
 ## Codes made before the longer ones
 
 An anonymous device's code was six characters until the gateway began issuing 25. Nothing issues a short one

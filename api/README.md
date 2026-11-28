@@ -131,6 +131,7 @@ These need Cloudflare Access, unless the row says otherwise. The gateway verifie
 | `GET /admin/api/audit-archive/{fleet}[?file=name]` | Access | The audit files a deleted (or trimmed) fleet's object copied to the bucket. |
 | `DELETE /admin/api/fleets/{fleet}` | Access | Delete a fleet. Its spaces are left alone. |
 | `GET /admin/api/usage` | Access | What the month has cost so far. |
+| `POST /admin/api/fleet-sweep[?dry=1]` | Access | Run the daily bucket sweep now (see docs/fleets.md, "What is left in the bucket"); `dry=1` only counts. |
 | `GET, POST, DELETE /admin/api/blocked` | Access | Block or unblock an address. |
 
 ## Security
