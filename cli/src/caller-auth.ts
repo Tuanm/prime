@@ -39,6 +39,8 @@ export const MAX_SKEW_MS = 5 * 60_000;
 const NONCE_LIMIT = 10_000;
 /** How many nonces of signed refusals are kept (see `retired`); when they are all in use, refusals go unsigned. */
 const RETIRED_LIMIT = 10_000;
+/** How many nonces of refusals for keys nobody allowed are kept (in memory only). */
+const RETIRED_UNKNOWN_LIMIT = 1_000;
 /** The file in the state directory that keeps them over a restart, and how long past the end of their calls' life they are kept. */
 const RETIRED_FILE = "retired-nonces.jsonl";
 const RETIRED_MARGIN_MS = 60_000;
@@ -191,6 +193,7 @@ export class CallerAuth {
   private logFailureSaid = false;
   private replyFailureSaid = false;
   private retiredFailureSaid = false;
+  private readonly retiredUnknown = new Map<string, number>();
   private retiredLines = 0;
   private cache: CallersCache | undefined;
   private fleetCache: FleetCache | undefined;
@@ -307,7 +310,7 @@ export class CallerAuth {
       failure !== "stale" &&
       sig.ts > this.floorTs &&
       !this.ranNonces.has(sig.nonce) &&
-      this.retire(sig.nonce, sig.ts);
+      this.retire(sig.nonce, sig.ts, failure !== "unknown-key");
     return {
       action: "refuse",
       response: {
@@ -324,8 +327,9 @@ export class CallerAuth {
   }
 
   /** Keep a nonce from ever running, because a refusal for it is to be signed. False when no more can be kept: then the refusal is not signed. */
-  private retire(nonce: string, ts: number): boolean {
+  private retire(nonce: string, ts: number, known: boolean): boolean {
     const now = this.now();
+    if (!known) return this.retireStranger(nonce, ts, now);
     for (const [key, at] of this.retired) {
       if (at + MAX_SKEW_MS >= now) break;
       this.retired.delete(key);
@@ -336,6 +340,23 @@ export class CallerAuth {
     // said "did not run" could be followed by the call running. If it cannot be kept, the refusal is not signed.
     if (!this.persistRetired(nonce, ts)) return false;
     this.retired.set(nonce, ts);
+    return true;
+  }
+
+  /**
+   * A key that neither callers file lists is a stranger's. Its refusal is signed too (a caller that is not allowed yet is told so by the device, not by
+   * a gateway that could have made it up), and its nonce is kept so that the call cannot run after a refusal that said it did not (a gateway that
+   * changed the key id of a genuine call gets the refusal for the changed one). But a stranger costs nothing to be, so its nonces have a set of their
+   * own, small, in memory only: frames from keys nobody allowed can neither fill the set that the refusals that matter use nor write to the disk.
+   * When it is full the refusal goes unsigned, and its caller is told the call may or may not have run.
+   */
+  private retireStranger(nonce: string, ts: number, now: number): boolean {
+    for (const [key, at] of this.retiredUnknown) {
+      if (at + MAX_SKEW_MS >= now) break;
+      this.retiredUnknown.delete(key);
+    }
+    if (this.retiredUnknown.has(nonce) || this.retiredUnknown.size >= RETIRED_UNKNOWN_LIMIT) return false;
+    this.retiredUnknown.set(nonce, ts);
     return true;
   }
 
@@ -416,7 +437,7 @@ export class CallerAuth {
     const now = this.now();
     if (Math.abs(now - parsed.ts) > MAX_SKEW_MS) return { ok: false, failure: "stale" };
     // A refusal was signed for this nonce: the call must not run now (see `retired`).
-    if (this.retired.has(parsed.nonce)) return { ok: false, failure: "replay" };
+    if (this.retired.has(parsed.nonce) || this.retiredUnknown.has(parsed.nonce)) return { ok: false, failure: "replay" };
     const callers = this.callers();
     if (!callers.entries) return { ok: false, failure: "callers-unreadable" };
     const entry = callers.entries.find((e) => e.keyId === parsed.keyId);

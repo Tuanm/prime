@@ -443,15 +443,32 @@ describe("CallerAuth: a signed refusal is never followed by that call running", 
     let signed = 0;
     for (let i = 0; i < 10_000; i++) {
       const body = JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/call", params: { name: "bash", arguments: {} } });
-      if (t.auth.admit({ raw: body, callerSig: mangle(t.sign(body), 1, "A".repeat(22)) }).reply) signed++;
+      if (t.auth.admit({ raw: body, callerSig: flipped(t.sign(body)) }).reply) signed++;
     }
     expect(signed).toBe(10_000);
     const header = t.sign(BASH);
-    const over = t.auth.admit({ raw: BASH, callerSig: mangle(header, 1, "A".repeat(22)) });
+    const over = t.auth.admit({ raw: BASH, callerSig: flipped(header) });
     expect(over.action).toBe("refuse");
     expect(over.reply).toBeUndefined();
     // a call that is not refused still runs
     expect(t.auth.admit(t.frame(BASH, t.sign(BASH))).action).toBe("run");
+  });
+
+  test("frames from a key nobody allowed are refused signed, but cannot fill what the refusals that matter use, nor write to the disk", () => {
+    const t = setup("enforce");
+    addCaller(t.callers, { pub: t.key.publicKey });
+    const stranger = (i: number) => JSON.stringify({ jsonrpc: "2.0", id: i, method: "tools/call", params: { name: "bash", arguments: {} } });
+    let signed = 0;
+    for (let i = 0; i < 1_500; i++) {
+      const body = stranger(i);
+      if (t.auth.admit({ raw: body, callerSig: mangle(t.sign(body), 1, "A".repeat(22)) }).reply) signed++;
+    }
+    // a small set of their own: signed until it is full, and unsigned after
+    expect(signed).toBe(1_000);
+    expect(existsSync(join(t.dir, "caller-auth", "retired-nonces.jsonl"))).toBe(false);
+    // a call that was refused signed for a key that is allowed still is, and is kept
+    expect(t.auth.admit({ raw: BASH, callerSig: flipped(t.sign(BASH)) }).reply).toBeDefined();
+    expect(readFileSync(join(t.dir, "caller-auth", "retired-nonces.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
   });
 
   test("retired nonces are forgotten when their signatures no longer verify", () => {
