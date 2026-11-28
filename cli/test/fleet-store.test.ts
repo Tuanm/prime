@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { gitSync } from "./git";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import { applyTestTimeout } from "./setup";
 applyTestTimeout();
 
 const git = (gitDir: string, args: string[], input?: string): string =>
-  execFileSync("git", ["--git-dir=" + gitDir].concat(args), { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+  gitSync(["--git-dir=" + gitDir].concat(args), { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
 
 // Make everything in the store look old, as it would after the grace period.
 function age(gitDir: string): void {

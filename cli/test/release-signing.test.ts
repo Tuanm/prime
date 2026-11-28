@@ -12,6 +12,7 @@ import { RELEASE_KEYS, SIGNED_SINCE, isDevBuild, isPreSigningRelease, parseRelea
 import { assetNameFor, runUpdate } from "../src/update.ts";
 import { defaultImage, imageLabel } from "../src/spaces.ts";
 import { applyTestTimeout } from "./setup";
+import { SYNC_CHILD_MS } from "./sync-limit";
 
 applyTestTimeout();
 
@@ -313,6 +314,7 @@ describe("the space image by digest", () => {
     const run = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--space-image", "ghcr.io/x/y@sha256:abc"], {
       stdout: "pipe",
       stderr: "pipe",
+      timeout: SYNC_CHILD_MS,
     });
     expect(run.exitCode).toBe(1);
     expect(run.stderr.toString()).toContain("--space-image needs");
@@ -322,7 +324,7 @@ describe("the space image by digest", () => {
     const out = mkdtempSync(join(tmpdir(), "prime-build-"));
     const build = Bun.spawnSync(
       ["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--space-image", ref, "--out-dir", out],
-      { stdout: "pipe", stderr: "pipe" },
+      { stdout: "pipe", stderr: "pipe", timeout: SYNC_CHILD_MS },
     );
     expect(build.stderr.toString()).toBe("");
     expect(build.exitCode).toBe(0);
@@ -330,7 +332,7 @@ describe("the space image by digest", () => {
     expect(bundle).toContain(ref);
     // The image is a literal, not a read of the environment.
     expect(bundle).not.toContain("process.env.PRIME_SPACE_IMAGE");
-    const bare = Bun.spawnSync(["bun", join(out, "prime.js"), "--version"], { env: { ...process.env, MCP_CLI_VERSION: "9.9.9", PRIME_SPACE_IMAGE: "evil" }, stdout: "pipe" });
+    const bare = Bun.spawnSync(["bun", join(out, "prime.js"), "--version"], { env: { ...process.env, MCP_CLI_VERSION: "9.9.9", PRIME_SPACE_IMAGE: "evil" }, stdout: "pipe", timeout: SYNC_CHILD_MS });
     expect(bare.stdout.toString().trim()).toBe("prime 26.12.10");
   });
 });
@@ -338,7 +340,7 @@ describe("the space image by digest", () => {
 describe("a release build does not trust keys from the environment", () => {
   test("an update to a release signed by a key only the environment names is refused by the built bundle", async () => {
     const out = mkdtempSync(join(tmpdir(), "prime-build-"));
-    const build = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--out-dir", out], { stdout: "pipe", stderr: "pipe" });
+    const build = Bun.spawnSync(["bun", join(ROOT, "scripts", "build.ts"), "--bundle-only", "--version", "26.12.10", "--out-dir", out], { stdout: "pipe", stderr: "pipe", timeout: SYNC_CHILD_MS });
     expect(build.exitCode).toBe(0);
 
     const attacker = generateKeyPairSync("ed25519");
@@ -395,7 +397,7 @@ describe("a release build does not trust keys from the environment", () => {
 
 describe("the workflows", () => {
   const lint = (workflows: string) => {
-    const proc = Bun.spawnSync(["bun", join(REPO, "scripts", "check-workflows.ts"), workflows], { stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawnSync(["bun", join(REPO, "scripts", "check-workflows.ts"), workflows], { stdout: "pipe", stderr: "pipe", timeout: SYNC_CHILD_MS });
     return { code: proc.exitCode, out: proc.stdout.toString() };
   };
 

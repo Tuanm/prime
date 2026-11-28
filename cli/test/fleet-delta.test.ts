@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { gitSync } from "./git";
 import { randomBytes } from "node:crypto";
 import { readFileSync as readSource } from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
@@ -316,7 +316,7 @@ describe("incremental snapshots", () => {
       const published = await publish(credsFor("B"), "x", B, b1.commit, b1.seq, 2, last.roster);
       expect(published.seq).toBe(3);
       // Its snapshot follows the one it caught up to, not the one it held before.
-      const parent = execFileSync("git", ["--git-dir=" + B.gitDir, "rev-parse", published.commit + "^"], { encoding: "utf8" }).trim();
+      const parent = gitSync(["--git-dir=" + B.gitDir, "rev-parse", published.commit + "^"], { encoding: "utf8" }).trim();
       expect(parent).toBe(last.commit);
       // The fleet has A's work and B's, and a replica that follows gets both.
       const A2 = await pull(credsFor("A"), "x", A, last.seq, last.commit);

@@ -6,6 +6,9 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callerFile, stallMs, STALL_MS } from "./stall-guard";
+import { callsOf, hasTimeLimit, lineOf, scanCode } from "./scan-code";
+import { HELPER_SYNC_MS, SYNC_BACKSTOP_MS, SYNC_CHILD_MS } from "./sync-limit";
+import { SERVICE_CALL_MS, SERVICE_POWERSHELL_MS } from "../src/service";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -33,7 +36,15 @@ async function runFixture(name: string, body: string, env: Record<string, string
 }
 
 describe("the setting", () => {
-  test("is 45 s unless PRIME_TEST_STALL_MS says otherwise, and 0 turns the guard off", () => {
+  test("is the backstop behind every limit a single call has, with half a minute to spare", () => {
+    // A call that is only slow ends by its own limit, as one failed test; the guard that ends the whole run must come later.
+    const limits = [SYNC_CHILD_MS, HELPER_SYNC_MS, SERVICE_CALL_MS, ...(process.platform === "win32" ? [SERVICE_POWERSHELL_MS] : [])];
+    for (const limit of limits) expect(stallMs({})).toBeGreaterThanOrEqual(limit + 30_000);
+    expect(STALL_MS).toBe(SYNC_BACKSTOP_MS);
+    expect(SYNC_BACKSTOP_MS).toBe(process.platform === "win32" ? 150_000 : 90_000);
+  });
+
+  test("is that, unless PRIME_TEST_STALL_MS says otherwise, and 0 turns the guard off", () => {
     expect(stallMs({})).toBe(STALL_MS);
     expect(stallMs({ PRIME_TEST_STALL_MS: "" })).toBe(STALL_MS);
     expect(stallMs({ PRIME_TEST_STALL_MS: "nope" })).toBe(STALL_MS);
@@ -64,7 +75,8 @@ test("not reached", () => {});`,
     expect(r.out).toContain("TEST STALLED");
     expect(r.out).toContain("blocks.test.ts");
     expect(r.out).toContain("(pass) quick one");
-    if (process.platform !== "win32") expect(r.out).toContain("stall-fixture-child");
+    // Where it can be listed (pgrep, or the process table on Windows), the child it waits for is named by its command line.
+    expect(r.out).toContain("stall-fixture-child");
     expect(r.out).not.toContain("not reached");
     expect(r.ms).toBeLessThan(30_000);
   }, 60_000);
@@ -100,49 +112,118 @@ test("sets the date far back and waits", async () => { setSystemTime(new Date("2
   }, 60_000);
 });
 
-describe("a synchronous spawn in a test", () => {
-  // `Bun.spawnSync` blocks the thread the test's time limit is kept by: without a limit of its own, a child that does
-  // not exit holds the run (a full `bun test` hung for ten minutes on one). The guard ends such a run in 45 s; this keeps
-  // the call itself from needing it.
-  const dir = import.meta.dir;
-  const files = [
-    ...readdirSync(dir).filter((f) => f.endsWith(".test.ts")).map((f) => join(dir, f)),
-    ...readdirSync(join(dir, "helpers")).filter((f) => f.endsWith(".ts")).map((f) => join(dir, "helpers", f)),
-  ];
-  /** The text of each call of `name(`, up to its closing parenthesis (strings and templates are skipped over). */
-  function callsOf(text: string, name: RegExp): Array<{ at: number; call: string }> {
-    const out: Array<{ at: number; call: string }> = [];
-    for (const m of text.matchAll(name)) {
-      if (/["'`]/.test(text[m.index! - 1] ?? "")) continue; // the text of a call in a string (a test of a scan)
-      let depth = 0;
-      let i = m.index! + m[0].length - 1;
-      const start = i;
-      for (; i < text.length; i++) {
-        const c = text[i]!;
-        if (c === '"' || c === "'" || c === "`") {
-          for (i++; i < text.length && text[i] !== c; i++) if (text[i] === "\\") i++;
-        } else if (c === "(") depth++;
-        else if (c === ")" && --depth === 0) break;
-      }
-      out.push({ at: m.index!, call: text.slice(start, i + 1) });
-    }
-    return out;
-  }
+describe("a run that is ended from outside", () => {
+  test.skipIf(process.platform === "win32")("says where it was, and exits as a terminated process does", async () => {
+    const r = await runFixture(
+      "terminated.test.ts",
+      `test("quick one", () => {});
+test("is terminated", async () => { process.kill(process.pid, "SIGTERM"); await Bun.sleep(5000); });`,
+      { PRIME_TEST_STALL_MS: "30000" },
+    );
+    expect(r.code).toBe(143);
+    expect(r.out).toContain("TEST RUN SIGTERMed in");
+    expect(r.out).toContain("terminated.test.ts");
+    expect(r.out).toMatch(/after 2 test\(s\) had started/);
+    expect(r.out).not.toContain("TEST STALLED");
+  }, 60_000);
+});
 
-  test("carries a time limit, in every test file and helper", () => {
+describe("what the tests left behind when the run is ended", () => {
+  test.skipIf(process.platform === "win32")("a process whose parent is gone and whose command line names the run's temporary directories is listed and ended", async () => {
+    const marker = join(tmpdir(), "stall-orphan-" + process.pid + "-" + Date.now());
+    cleanups.push(() => void Bun.spawnSync(["pkill", "-f", marker], { timeout: SYNC_CHILD_MS }));
+    const r = await runFixture(
+      "orphans.test.ts",
+      // The shell that starts it leaves at once, so that init takes the process over, as it does a detached agent of a test.
+      `test("leaves one and blocks", () => {
+  Bun.spawnSync(["sh", "-c", "(sh -c 'sleep 600; : ${marker}' >/dev/null 2>&1 &) ; exit 0"], { timeout: 10_000 });
+  Bun.spawnSync([process.execPath, "-e", "setTimeout(() => {}, 600000)"], { timeout: 120_000 });
+});`,
+      { PRIME_TEST_STALL_MS: "1500" },
+    );
+    expect(r.out).toContain("TEST STALLED");
+    expect(r.out).toContain("whose parent has gone");
+    expect(r.out).toContain(marker);
+    await Bun.sleep(300);
+    expect(Bun.spawnSync(["pgrep", "-f", marker], { stdout: "pipe", timeout: SYNC_CHILD_MS }).stdout.toString().trim()).toBe("");
+  }, 60_000);
+});
+
+describe("the reader of source that the scans use", () => {
+  test("blanks comments, strings, regular expressions and the text of templates, and keeps code, offsets and lines", () => {
+    const src = [
+      "const a = f(1); // g(2)",
+      "/* h(3)",
+      "   i(4) */ const b = j(5);",
+      'const s = "k(6)" + \'l(7)\';',
+      "const r = /m\\(8\\)['\"`]/.test(s);",
+      "const t = `n(9) ${ o(10, `p(11) ${q(12)}`) } r(13)`;",
+    ].join("\n");
+    const { code, clean } = scanCode(src);
+    expect(clean).toBe(true);
+    expect(code.length).toBe(src.length);
+    expect(code.split("\n").length).toBe(src.split("\n").length);
+    const names = [...code.matchAll(/\b([a-z])\(/g)].map((m) => m[1]);
+    expect(names).toEqual(["f", "j", "o", "q"]);
+  });
+
+  test("says when it lost its way, instead of reading the rest of the file as nothing", () => {
+    expect(scanCode('const a = "never closed;\nf(1);').clean).toBe(false);
+    expect(scanCode("/* never closed\nf(1);").clean).toBe(false);
+    expect(scanCode("const t = `never closed ${f(1)}").clean).toBe(false);
+    expect(scanCode("const x = a / b; f(2); const y = c / d;").clean).toBe(true);
+  });
+
+  test("a time limit is a limit: not 0, undefined, null or false, not a word in a comment, and a shorthand counts", () => {
+    const limited = (text: string): boolean => callsOf(scanCode(text).code, /\bspawnSync\(/g).every((c) => hasTimeLimit(c.call));
+    expect(limited('spawnSync(["a"], { timeout: 30_000 })')).toBe(true);
+    expect(limited('spawnSync(["a"], { stdout: "pipe", timeout: SYNC_CHILD_MS })')).toBe(true);
+    expect(limited('spawnSync(["a"], { timeout: opts.timeoutMs ?? 60_000 })')).toBe(true);
+    expect(limited('spawnSync(["a"], { timeout })')).toBe(true);
+    expect(limited('spawnSync(["a"], { stdout: "pipe" })')).toBe(false);
+    expect(limited('spawnSync(["a"], { timeout: 0 })')).toBe(false);
+    expect(limited('spawnSync(["a"], { timeout: undefined })')).toBe(false);
+    expect(limited('spawnSync(["a"], { timeout: null })')).toBe(false);
+    expect(limited('spawnSync(["a"], { noTimeout: true })')).toBe(false);
+    expect(limited('spawnSync(["a"], { stdout: "pipe" /* timeout: 5 */ }) // timeout: 5')).toBe(false);
+    expect(limited('spawnSync(["a"], { stdout: `timeout: ${5}` })')).toBe(false);
+    expect(limited('spawnSync(["a", `${f(")")}`], { timeout: 5 })')).toBe(true); // a ")" inside an expression of a template
+  });
+});
+
+describe("a synchronous spawn", () => {
+  // A call that blocks the thread the test's time limit is kept by needs a limit of its own: without one, a child that does
+  // not exit holds the run (a full `bun test` hung for ten minutes on one). The guard ends such a run, but only as the backstop.
+  const root = join(import.meta.dir, "..");
+  const sources = (dir: string): string[] => readdirSync(join(root, dir)).filter((f) => f.endsWith(".ts")).map((f) => join(root, dir, f));
+  const CALL = /\b(?:Bun\.)?(?:spawnSync|execFileSync|execSync)\s*\(/g;
+
+  test("in a test file or a helper carries a time limit", () => {
     const missing: string[] = [];
-    for (const file of files) {
-      if (file.endsWith("stall-guard.test.ts")) continue; // its fixtures block on purpose
+    for (const file of [...sources("test").filter((f) => f.endsWith(".test.ts")), ...sources("test/helpers")]) {
       const text = readFileSync(file, "utf8");
-      for (const { at, call } of callsOf(text, /\b(?:Bun\.spawnSync|spawnSync)\(/g)) {
-        if (!/timeout/.test(call)) missing.push(`${file}:${text.slice(0, at).split("\n").length}`);
-      }
+      const { code, clean } = scanCode(text);
+      expect(clean, file + " could not be read to the end").toBe(true);
+      for (const { at, call } of callsOf(code, CALL)) if (!hasTimeLimit(call)) missing.push(`${file}:${lineOf(text, at)}`);
     }
     expect(missing).toEqual([]);
   });
 
-  test("the scan sees a call without a limit", () => {
-    const calls = callsOf('x(); Bun.spawnSync(["a", ")"], { stdout: "pipe" }); y(); Bun.spawnSync(["b"], { timeout: 5 });', /\bBun\.spawnSync\(/g);
-    expect(calls.map((c) => /timeout/.test(c.call))).toEqual([false, true]);
+  test("in the product has one, or says why not (`no time limit:` in the lines above it)", () => {
+    const missing: string[] = [];
+    let seen = 0;
+    for (const file of sources("src")) {
+      const text = readFileSync(file, "utf8");
+      const { code, clean } = scanCode(text);
+      expect(clean, file + " could not be read to the end").toBe(true);
+      for (const { at, call } of callsOf(code, CALL)) {
+        seen++;
+        const line = lineOf(text, at);
+        const above = text.split("\n").slice(Math.max(0, line - 4), line).join("\n");
+        if (!hasTimeLimit(call) && !/no time limit:/.test(above)) missing.push(`${file}:${line}`);
+      }
+    }
+    expect(seen).toBeGreaterThan(8); // the scan finds them
+    expect(missing).toEqual([]);
   });
 });

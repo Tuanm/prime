@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { gitSync } from "./git";
 import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
@@ -51,7 +51,7 @@ function listFiles(work: string): string[] {
 // What a snapshot of the work tree takes, by git itself.
 async function taken(work: string, gitDir: string): Promise<string[]> {
   const snap = await snapshot({ work, gitDir, base: null, treeOnly: true });
-  return execFileSync("git", ["--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", snap.tree], { encoding: "utf8" })
+  return gitSync(["--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", snap.tree], { encoding: "utf8" })
     .split("\n")
     .filter(Boolean)
     .sort();
@@ -65,7 +65,7 @@ async function ignoredBy(filter: IgnoreFilter, files: string[]): Promise<string[
 
 // A store that holds nothing yet: no file is tracked.
 function emptyStore(gitDir: string): void {
-  execFileSync("git", ["init", "-q", "--bare", gitDir], { stdio: "pipe" });
+  gitSync(["init", "-q", "--bare", gitDir], { stdio: "pipe" });
 }
 
 // The filter says "ignored" for exactly the files the snapshot leaves out (asked before the snapshot
@@ -84,7 +84,7 @@ async function expectSameAsSnapshot(work: string, gitDir: string, filter: Ignore
 function leftOut(work: string, gitDir: string): string[] {
   const env = gitEnv(gitDir, work, join(gitDir, "snapshot.index"));
   const ls = (...args: string[]): string[] =>
-    execFileSync("git", ["--git-dir=" + gitDir, "ls-files", "-z", ...args], { env, cwd: work, encoding: "utf8" }).split("\u0000").filter(Boolean);
+    gitSync(["--git-dir=" + gitDir, "ls-files", "-z", ...args], { env, cwd: work, encoding: "utf8" }).split("\u0000").filter(Boolean);
   const takes = new Set([...ls("--cached"), ...ls("--others", "--exclude-standard")]);
   return listFiles(work).filter((f) => !takes.has(f));
 }

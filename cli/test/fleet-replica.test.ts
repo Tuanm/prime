@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { chooseRoute } from "../src/fleet-agent";
-import { execFileSync } from "node:child_process";
+import { gitSync } from "./git";
 import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2311,7 +2311,7 @@ describe("the primary's round with a tree it has just taken", () => {
       expect(publishedTree(w)).toBe(await treeOf(w, s.paths.work));
       expect(readFileSync(join(s.paths.work, "arrived.txt"), "utf8")).toBe("new");
       // And it is a file of the published tree.
-      const listing = execFileSync("git", ["--git-dir=" + s.paths.gitDir, "ls-tree", "-r", "--name-only", publishedTree(w)], { encoding: "utf8" });
+      const listing = gitSync(["--git-dir=" + s.paths.gitDir, "ls-tree", "-r", "--name-only", publishedTree(w)], { encoding: "utf8" });
       expect(listing).toContain("arrived.txt");
     } finally {
       finish(w);

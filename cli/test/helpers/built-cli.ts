@@ -7,6 +7,7 @@
 import { realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { HELPER_SYNC_MS } from "../sync-limit";
 
 export interface BuiltOptions {
   /**
@@ -72,7 +73,7 @@ export function spawnBuilt<
 }
 
 /** A command of a built CLI that does not end in this long is a hung one; a call blocks its thread, and so any time limit kept by it. */
-const SYNC_LIMIT_MS = 180_000;
+const SYNC_LIMIT_MS = HELPER_SYNC_MS;
 
 export function spawnBuiltSync<
   const In extends Bun.SpawnOptions.Writable = "ignore",

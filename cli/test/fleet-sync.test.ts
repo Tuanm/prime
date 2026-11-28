@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { lstatSync, chmodSync, closeSync, mkdtempSync, mkdirSync, openSync, writeFileSync, writeSync, readFileSync, readdirSync, renameSync, rmSync, existsSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { gitSync } from "./git";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import {
@@ -35,7 +35,7 @@ function scratch(): string {
 }
 
 function gitIn(dir: string, args: string[]): void {
-  execFileSync("git", ["-C", dir].concat(args), { stdio: ["pipe", "pipe", "pipe"] });
+  gitSync(["-C", dir].concat(args), { stdio: ["pipe", "pipe", "pipe"] });
 }
 
 describe("nested repositories", () => {
@@ -139,7 +139,7 @@ describe("snapshots", () => {
       writeFileSync(join(nested, "code.py"), "print(2) agent edit");
 
       const snap = await snapshot({ work, gitDir });
-      const listed = execFileSync("git", ["--git-dir=" + gitDir, "ls-tree", "-r", snap.commit], { encoding: "utf8" });
+      const listed = gitSync(["--git-dir=" + gitDir, "ls-tree", "-r", snap.commit], { encoding: "utf8" });
       expect(listed).toContain("loose.txt");
       // The nested repository is excluded outright: the fleet neither mirrors
       // its contents nor records a reference to it. A reference would be a
@@ -162,7 +162,7 @@ describe("snapshots", () => {
       writeFileSync(join(work, "keep", "a.txt"), "a");
       writeFileSync(join(work, "skip", "b.txt"), "b");
       const snap = await snapshot({ work, gitDir, exclude: ["skip"] });
-      const listed = execFileSync("git", ["--git-dir=" + gitDir, "ls-tree", "-r", snap.commit], { encoding: "utf8" });
+      const listed = gitSync(["--git-dir=" + gitDir, "ls-tree", "-r", snap.commit], { encoding: "utf8" });
       expect(listed).toContain("keep/a.txt");
       expect(listed).not.toContain("skip/b.txt");
     } finally {
@@ -181,7 +181,7 @@ describe("snapshots", () => {
       writeFileSync(join(work, "a.txt"), "two");
       const second = await snapshot({ work, gitDir, base: first.commit });
       expect(second.parent).toBe(first.commit);
-      const parents = execFileSync("git", ["--git-dir=" + gitDir, "rev-list", "--parents", "-n", "1", second.commit], { encoding: "utf8" });
+      const parents = gitSync(["--git-dir=" + gitDir, "rev-list", "--parents", "-n", "1", second.commit], { encoding: "utf8" });
       expect(parents).toContain(first.commit);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -225,7 +225,7 @@ describe("applying a snapshot", () => {
       // The file goes away, and the next snapshot does not have it.
       rmSync(join(work, "stale.txt"));
       const second = await snapshot({ work, gitDir, base: first.commit });
-      const listed = execFileSync("git", ["--git-dir=" + gitDir, "ls-tree", "-r", second.commit], { encoding: "utf8" });
+      const listed = gitSync(["--git-dir=" + gitDir, "ls-tree", "-r", second.commit], { encoding: "utf8" });
       expect(listed).toContain("a.txt");
       expect(listed).not.toContain("stale.txt");
 
@@ -528,7 +528,7 @@ describe("taking a snapshot in and writing it out are two steps", () => {
       expect(readFileSync(join(r.other, "a.txt"), "utf8")).toBe("alpha");
       expect(existsSync(join(r.other, "gone.txt"))).toBe(true);
       expect(readdirSync(r.other).sort()).toEqual(before);
-      const ref = execFileSync("git", ["--git-dir=" + r.otherGit, "rev-parse", "refs/prime/fetched/2"], { encoding: "utf8" }).trim();
+      const ref = gitSync(["--git-dir=" + r.otherGit, "rev-parse", "refs/prime/fetched/2"], { encoding: "utf8" }).trim();
       expect(ref).toBe(second.commit);
       // Repeating it is harmless.
       await ingestPack(r.other, r.otherGit, second.commit, second.delta!, { tree: second.tree });
@@ -575,7 +575,7 @@ describe("taking a snapshot in and writing it out are two steps", () => {
       }
       expect(message).toContain("does not match its manifest");
       // It is not kept as fetched.
-      expect(() => execFileSync("git", ["--git-dir=" + r.otherGit, "rev-parse", "--verify", "-q", "refs/prime/fetched/2"], { stdio: "pipe" })).toThrow();
+      expect(() => gitSync(["--git-dir=" + r.otherGit, "rev-parse", "--verify", "-q", "refs/prime/fetched/2"], { stdio: "pipe" })).toThrow();
     } finally {
       rmSync(r.root, { recursive: true, force: true });
     }
@@ -633,7 +633,7 @@ describe("names that differ only in case", () => {
       if (!foldsCase(r.other)) return;
       // A primary on a case-sensitive file system renamed README.md -> readme.md.
       const git = (args: string[], input?: string) =>
-        execFileSync("git", ["--git-dir=" + r.gitDir, ...args], {
+        gitSync(["--git-dir=" + r.gitDir, ...args], {
           input,
           env: { ...process.env, GIT_AUTHOR_NAME: "a", GIT_AUTHOR_EMAIL: "a@a", GIT_COMMITTER_NAME: "a", GIT_COMMITTER_EMAIL: "a@a" },
         }).toString().trim();
@@ -641,7 +641,7 @@ describe("names that differ only in case", () => {
       const other = git(["hash-object", "-w", "--stdin"], "o");
       const tree = git(["mktree"], "100644 blob " + hello + "\treadme.md\n100644 blob " + other + "\tother.txt\n");
       const commit = git(["commit-tree", tree, "-p", r.first.commit, "-m", "x"]);
-      const pack = execFileSync("git", ["--git-dir=" + r.gitDir, "pack-objects", "--stdout", "--revs"], { input: commit + "\n" });
+      const pack = gitSync(["--git-dir=" + r.gitDir, "pack-objects", "--stdout", "--revs"], { input: commit + "\n" });
       await applyPack(r.other, r.otherGit, commit, pack, [], r.first.commit);
       expect(readFileSync(join(r.other, "readme.md"), "utf8")).toBe("hello");
       expect(readdirSync(r.other).filter((n) => n.toLowerCase() === "readme.md")).toEqual(["readme.md"]);
@@ -720,7 +720,7 @@ describe("a snapshot that goes out as a whole tree", () => {
       const changed = noise();
       writeFileSync(join(r.work, "a.txt"), changed);
       const second = await snapshot({ work: r.work, gitDir: r.gitDir, base: r.first.commit, wantFull: true, withDelta: true });
-      const parents = execFileSync("git", ["--git-dir=" + r.gitDir, "rev-list", "--parents", "-n", "1", second.commit], { encoding: "utf8" }).trim();
+      const parents = gitSync(["--git-dir=" + r.gitDir, "rev-list", "--parents", "-n", "1", second.commit], { encoding: "utf8" }).trim();
       expect(parents).toBe(second.commit); // no parent after it
       // The change carries the changed file and not the two that did not change.
       expect(second.delta!.length).toBeLessThan(second.pack.length * 0.6); // one of three files
@@ -742,7 +742,7 @@ describe("a snapshot that goes out as a whole tree", () => {
     // the snapshot's history, and stops at a parent it never received.
     let oldSource = "";
     try {
-      oldSource = execFileSync("git", ["show", "26e61d1:cli/src/fleet-sync.ts"], { encoding: "utf8", cwd: join(import.meta.dir, "..") });
+      oldSource = gitSync(["show", "26e61d1:cli/src/fleet-sync.ts"], { encoding: "utf8", cwd: join(import.meta.dir, "..") });
     } catch {
       return; // no history to read (a shallow checkout): nothing to compare with
     }
@@ -797,7 +797,7 @@ describe("a case-only rename on the primary", () => {
       renameSync(join(work, "docs"), join(work, "tmp-dir"));
       renameSync(join(work, "tmp-dir"), join(work, "Docs"));
       const second = await snapshot({ work, gitDir, base: first.commit, wantFull: false });
-      const names = execFileSync("git", ["--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", second.commit], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
+      const names = gitSync(["--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", second.commit], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
       expect(names).toEqual(["Docs/a.txt", "NOTES.md", "keep.txt"]);
       expect(second.tree).not.toBe(first.tree);
 
@@ -820,7 +820,7 @@ describe("a case-only rename on the primary", () => {
 
 describe("the object store's settings", () => {
   const configFile = (gitDir: string) => join(gitDir, "config");
-  const setting = (gitDir: string, key: string) => execFileSync("git", ["--git-dir=" + gitDir, "config", "--get", key], { encoding: "utf8" }).trim();
+  const setting = (gitDir: string, key: string) => gitSync(["--git-dir=" + gitDir, "config", "--get", key], { encoding: "utf8" }).trim();
 
   test("are written when the store is made or its work tree moves, not on every snapshot", async () => {
     const root = scratch();
@@ -856,7 +856,7 @@ describe("the object store's settings", () => {
       mkdirSync(work);
       writeFileSync(join(work, "a.txt"), "a");
       const first = await snapshot({ work, gitDir });
-      execFileSync("git", ["--git-dir=" + gitDir, "config", "core.ignorecase", "true"]);
+      gitSync(["--git-dir=" + gitDir, "config", "core.ignorecase", "true"]);
       await snapshot({ work, gitDir, base: first.commit, wantFull: false });
       expect(setting(gitDir, "core.ignorecase")).toBe("false");
     } finally {
@@ -889,7 +889,7 @@ describe("a case-only rename under a directory whose name is decomposed unicode"
       renameSync(join(work, nfd, "tmp-name"), join(work, nfd, "Notes.md"));
       const second = await snapshot({ work, gitDir, base: first.commit, wantFull: false });
       const names = () =>
-        execFileSync("git", ["-c", "core.quotepath=false", "--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", second.commit], { encoding: "utf8" })
+        gitSync(["-c", "core.quotepath=false", "--git-dir=" + gitDir, "ls-tree", "-r", "--name-only", second.commit], { encoding: "utf8" })
           .split("\n")
           .filter(Boolean)
           .map((n) => n.normalize("NFC"))
@@ -1189,7 +1189,7 @@ describe("a repository that arrives while the cache is stale", () => {
     gitIn(dir, ["commit", "-q", "-m", "init"]);
   }
   const listed = (gitDir: string, args: string[]): string =>
-    execFileSync("git", ["--git-dir=" + gitDir].concat(args), { encoding: "utf8" });
+    gitSync(["--git-dir=" + gitDir].concat(args), { encoding: "utf8" });
 
   test("a directory moved in with a repository deeper down puts no gitlink in the snapshot", async () => {
     const root = scratch();
@@ -1503,7 +1503,7 @@ describe("settling the work tree", () => {
         const writer = await chunkedWrite(join(work, "big.bin"), 10, pause);
         const stamp = await settle(work, quiet, { gitDir });
         const snap = await snapshot({ work, gitDir, base: null, treeOnly: true });
-        const blob = execFileSync("git", ["--git-dir=" + gitDir, "show", snap.tree + ":big.bin"], { maxBuffer: 1 << 24 }).toString();
+        const blob = gitSync(["--git-dir=" + gitDir, "show", snap.tree + ":big.bin"], { maxBuffer: 1 << 24 }).toString();
         expect(blob.length).toBe(writer.content.length);
         expect(blob).toBe(writer.content);
         await writer.done;
