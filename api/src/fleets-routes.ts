@@ -14,7 +14,7 @@
 
 import { timingSafeEq, extractToken, type GatewayConfig } from "./config";
 import { actorOf, emailAllowed, verifyOperatorToken, forwardableHeaders } from "./access";
-import { INLINE_PACK_BYTES, MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
+import { INLINE_PACK_BYTES, MAX_FLEETS_PER_DEVICE, MAX_SNAPSHOT_BYTES, checkChunkList, REAP_SILENCE_MS, validFleetId, type FleetAuth } from "./fleets";
 import { countFleetR2 } from "./usage";
 import { readBounded, readBoundedText } from "./body";
 import { fleetBodyMax } from "./fleet-limits";
@@ -154,7 +154,6 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   }
   const manifestBytes = body.subarray(4, 4 + manifestLength);
   const pack = body.subarray(4 + manifestLength);
-  if (pack.length === 0) return Response.json({ error: "empty pack" }, { status: 400 });
 
   let manifest: {
     seq?: number;
@@ -163,7 +162,8 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
     full?: unknown;
     packBytes?: unknown;
     seal?: unknown;
-    delta?: { packKey?: unknown; bytes?: unknown };
+    delta?: { packKey?: unknown; bytes?: unknown; chunks?: unknown };
+    chunks?: unknown;
   };
   try {
     manifest = JSON.parse(manifestBytes.toString("utf8")) as typeof manifest;
@@ -173,25 +173,83 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
   const seq = typeof manifest.seq === "number" ? manifest.seq : 0;
   if (seq < 1) return Response.json({ error: "manifest has no sequence" }, { status: 400 });
 
-  // The two objects are addressed by their contents, so writing the same bytes
-  // twice is free.
-  const packHash = await sha256Hex(pack);
-  const packKey = "fleets/" + fleetId + "/packs/" + packHash;
+  const prefix = "fleets/" + fleetId + "/packs/";
+  // A snapshot is in the frame, or in pieces that were uploaded before it (and then the frame carries the manifest alone).
+  const chunked = manifest.chunks !== undefined;
+  if (chunked && pack.length > 0) return Response.json({ error: "a snapshot in pieces is published as its manifest alone: the pack is not in the frame as well" }, { status: 400 });
+  if (!chunked && pack.length === 0) return Response.json({ error: "empty pack" }, { status: 400 });
+  // Every piece that is named: the objects it must find in the bucket, and what the object keeps with the snapshot.
+  const pieces: Array<{ key: string; bytes: number }> = [];
+  const extraKeys: string[] = [];
+  let packHash: string;
+  let packKey: string;
+  if (chunked) {
+    const listed = checkChunkList(manifest.chunks, manifest.packBytes, "chunks");
+    if (!listed.ok) return Response.json({ error: listed.error }, { status: 400 });
+    // The seal binds the hash of the whole pack, which the gateway cannot work out without reading all of it: it is the member's
+    // to say (and every member checks it when it joins the pieces).
+    if (typeof manifest.packHash !== "string" || !/^[0-9a-f]{64}$/.test(manifest.packHash)) {
+      return Response.json({ error: "a snapshot in pieces names the hash of the whole pack (packHash)" }, { status: 400 });
+    }
+    packHash = manifest.packHash;
+    packKey = prefix + listed.hashes[0];
+    if (manifest.packKey !== undefined && manifest.packKey !== packKey) {
+      return Response.json({ error: "packKey of a snapshot in pieces is the key of its first piece" }, { status: 400 });
+    }
+    listed.hashes.forEach((h, i) => {
+      pieces.push({ key: prefix + h, bytes: listed.bytes[i]! });
+      if (i > 0) extraKeys.push(prefix + h);
+    });
+  } else {
+    // The two objects are addressed by their contents, so writing the same bytes
+    // twice is free.
+    packHash = await sha256Hex(pack);
+    packKey = prefix + packHash;
+  }
 
   // The manifest says where its pack is. The member cannot know that - only
-  // the gateway knows where the bytes ended up - so it is filled in here.
+  // the gateway knows where the bytes ended up - so it is filled in here (for a snapshot in pieces, where the first piece is,
+  // and the hash of the whole pack stays what the member said).
   manifest.packKey = packKey;
   manifest.packHash = packHash;
   // A checkpoint's whole tree may carry the change since the snapshot before as
   // a pack of its own, uploaded just before. The object is told, so it is kept
-  // for as long as the snapshot is and let go with it.
-  const extraKeys = typeof manifest.delta?.packKey === "string" ? [manifest.delta.packKey] : [];
+  // for as long as the snapshot is and let go with it. That pack may be in pieces too.
+  let deltaChunked = false;
+  if (manifest.delta?.chunks !== undefined) {
+    const listed = checkChunkList(manifest.delta.chunks, manifest.delta.bytes, "delta.chunks");
+    if (!listed.ok) return Response.json({ error: listed.error }, { status: 400 });
+    const first = prefix + listed.hashes[0];
+    if (manifest.delta.packKey !== undefined && manifest.delta.packKey !== first) {
+      return Response.json({ error: "delta.packKey of a change pack in pieces is the key of its first piece" }, { status: 400 });
+    }
+    manifest.delta.packKey = first;
+    deltaChunked = true;
+    listed.hashes.forEach((h, i) => {
+      pieces.push({ key: prefix + h, bytes: listed.bytes[i]! });
+      extraKeys.push(prefix + h);
+    });
+  } else if (typeof manifest.delta?.packKey === "string") {
+    extraKeys.push(manifest.delta.packKey);
+  }
+  // The pieces are in the bucket, each the size it is said to be: a snapshot that names one that is not would be one nobody can read.
+  if (pieces.length > 0) {
+    const absent = await missingPieces(bucket, pieces);
+    if (absent.length > 0) {
+      return Response.json(
+        { error: "the gateway does not hold " + absent.length + " of the pieces the snapshot names, at the size it says: upload them again, then publish", missing: absent.map((p) => p.key.slice(prefix.length)) },
+        { status: 409 },
+      );
+    }
+  }
   const finalManifest = Buffer.from(JSON.stringify(manifest), "utf8");
   const manifestHash = await sha256Hex(finalManifest);
   const manifestKey = "fleets/" + fleetId + "/manifests/" + manifestHash;
 
-  countFleetR2("write");
-  await bucket.put(packKey, pack, { httpMetadata: { contentType: "application/octet-stream" } });
+  if (!chunked) {
+    countFleetR2("write");
+    await bucket.put(packKey, pack, { httpMetadata: { contentType: "application/octet-stream" } });
+  }
   countFleetR2("write");
   await bucket.put(manifestKey, finalManifest, { httpMetadata: { contentType: "application/json" } });
 
@@ -215,7 +273,7 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
       extraKeys,
       // A small edit goes to the members that listen in the event that announces it: the object checks it is what the key
       // says, and does not store it.
-      ...(manifest.full !== true && pack.length <= INLINE_PACK_BYTES
+      ...(!chunked && !deltaChunked && manifest.full !== true && pack.length <= INLINE_PACK_BYTES
         ? { inline: { manifest: finalManifest.toString("utf8"), pack: pack.toString("base64") } }
         : {}),
       // What a member needs to choose its route without opening every manifest.
@@ -223,12 +281,14 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
         full: manifest.full === true,
         // Whether the publisher sealed the manifest: the fleet does not move from sealed to unsealed.
         ...(typeof manifest.seal === "string" && manifest.seal !== "" ? { sealed: true } : {}),
+        // In pieces: only members that read them may be in the fleet (the object checks).
+        ...(chunked || deltaChunked ? { chunked: true } : {}),
         ...(typeof manifest.packBytes === "number" ? { packBytes: manifest.packBytes } : {}),
         ...(typeof manifest.delta?.bytes === "number" ? { deltaBytes: manifest.delta.bytes } : {}),
       },
     }),
   });
-  const result = (await moved.json().catch(() => ({}))) as { ok?: boolean; head?: unknown; error?: string };
+  const result = (await moved.json().catch(() => ({}))) as { ok?: boolean; head?: unknown; error?: string; chunks?: boolean; members?: number };
   if (!moved.ok) {
     // The head did not move, so what was stored for it belongs to no snapshot. (A refusal that
     // never reached the object, or a publisher that dies after uploading its change pack and
@@ -236,9 +296,31 @@ async function publishSnapshot(deps: FleetDeps, fleetId: string): Promise<Respon
     // (A member that is told to catch up stores the change pack again before it sends the manifest
     // that names it: what it sent for a refused publish is not kept for one that may not come.)
     await dropUnreferenced(bucket, stub, deviceId, fleetId, [packKey, manifestKey, ...extraKeys]);
-    return Response.json({ ok: false, error: result.error ?? "the head did not move" }, { status: moved.status });
+    return Response.json({ ok: false, error: result.error ?? "the head did not move", ...(result.chunks === false ? { chunks: false, members: result.members } : {}) }, { status: moved.status });
   }
   return Response.json({ ok: true, head: result.head, seq, manifestKey });
+}
+
+/** The pieces that are not in the bucket at the size they were said to be (looked up a few at a time). */
+async function missingPieces(
+  bucket: NonNullable<FleetDeps["env"]["BUCKET"]>,
+  pieces: Array<{ key: string; bytes: number }>,
+): Promise<Array<{ key: string; bytes: number }>> {
+  const absent: Array<{ key: string; bytes: number }> = [];
+  for (let at = 0; at < pieces.length; at += 16) {
+    const group = pieces.slice(at, at + 16);
+    const found = await Promise.all(
+      group.map(async (p) => {
+        countFleetR2("read");
+        const o = await bucket.head(p.key);
+        return o !== null && o.size === p.bytes;
+      }),
+    );
+    group.forEach((p, i) => {
+      if (!found[i]) absent.push(p);
+    });
+  }
+  return absent;
 }
 
 // Delete what a refused publish stored, unless a snapshot the fleet keeps names it. Never fails the answer.
@@ -265,6 +347,19 @@ async function dropUnreferenced(
   } catch {
     // Leaving an object behind is the cost of not knowing; the publish was refused either way.
   }
+}
+
+/** Tell the fleet's object that this pack was uploaded. Best effort: the upload is made either way. */
+async function noteUpload(deps: PayloadDeps, deviceId: string, key: string): Promise<void> {
+  try {
+    const namespace = deps.env.FLEET;
+    if (!namespace) return;
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.set("x-prime-caller", "device");
+    headers.set("x-prime-device", deviceId);
+    headers.set("x-prime-fleet", deps.fleetId);
+    await namespace.get(namespace.idFromName(deps.fleetId)).fetch("https://fleet/uploaded", { method: "POST", headers, body: JSON.stringify({ key }) });
+  } catch {}
 }
 
 async function fleetRole(deps: PayloadDeps, deviceId: string): Promise<FleetRole | null> {
@@ -323,6 +418,9 @@ async function handleFleetPayload(deps: PayloadDeps): Promise<Response | null> {
     // Content addressed: writing the same bytes twice is free and idempotent.
     countFleetR2("write");
     await bucket.put(key, body, { httpMetadata: { contentType: "application/octet-stream" } });
+    // A pack that no snapshot names yet is one of the pieces of a snapshot that is being uploaded, or an orphan: the object notes it, so
+    // that the sweep does not take a piece of a slow upload (it goes on for hours) from under the publisher.
+    if (parts[0] === "packs") await noteUpload(deps, deviceId, key);
     return Response.json({ ok: true, key, hash: digest, size: body.byteLength, epoch: role.epoch });
   }
 

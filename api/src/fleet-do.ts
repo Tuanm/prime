@@ -40,7 +40,13 @@ import {
   leaseBounds,
   inviteShape,
   MAX_MEMBERS,
+  CHUNK_BYTES,
+  CHUNKS_CAP,
+  MAX_CHUNKED_SNAPSHOT_BYTES,
+  MAX_CHUNKS,
   MAX_SNAPSHOT_BYTES,
+  UPLOAD_KEEP_MS,
+  UPLOADS_KEPT,
   RECENT_SNAPSHOTS,
   MAX_PENDING,
   newInviteCode,
@@ -513,6 +519,7 @@ export class FleetDO implements DurableObject {
     await this.storage.delete("fence");
     this.signedMemo = false;
     this.fenceMemo = {};
+    await this.storage.delete("uploads");
     await this.storage.delete("ownerSeenAt");
     // The next fleet of the name has a key pair of its own for key-change proofs.
     await this.storage.delete("proofKey");
@@ -1015,6 +1022,7 @@ export class FleetDO implements DurableObject {
       return this.applied(caller, body, request);
     }
     if (path === "/exists" && request.method === "GET") return caller.kind === "admin" ? Response.json({ exists: await this.exists() }) : this.deny();
+    if (path === "/uploaded" && request.method === "POST") return this.uploaded(caller, body, request);
     if (path === "/unreferenced" && request.method === "POST") return this.unreferenced(caller, body, request);
     if (path === "/delete" && request.method === "POST") return this.delete(caller, request, body);
     if (path === "/audit" && request.method === "GET") return this.readAudit(caller, url);
@@ -1926,7 +1934,7 @@ export class FleetDO implements DurableObject {
     // payloads may be named, so a publisher cannot have another fleet's deleted.
     const own = "fleets/" + fleetId + "/packs/";
     const extraKeys = Array.isArray(body.extraKeys)
-      ? body.extraKeys.filter((k): k is string => typeof k === "string" && k.startsWith(own) && /^[0-9a-f]{16,64}$/.test(k.slice(own.length))).slice(0, 4)
+      ? body.extraKeys.filter((k): k is string => typeof k === "string" && k.startsWith(own) && /^[0-9a-f]{16,64}$/.test(k.slice(own.length))).slice(0, 2 * MAX_CHUNKS)
       : [];
     // What a member needs to choose its route (see `index`). Only numbers and a flag.
     const rawMeta = (body.meta ?? {}) as Record<string, unknown>;
@@ -1936,6 +1944,7 @@ export class FleetDO implements DurableObject {
       ...(rawMeta.sealed === true ? { sealed: true as const } : {}),
       ...(size(rawMeta.packBytes) !== undefined ? { packBytes: size(rawMeta.packBytes)! } : {}),
       ...(size(rawMeta.deltaBytes) !== undefined ? { deltaBytes: size(rawMeta.deltaBytes)! } : {}),
+      ...(rawMeta.chunked === true ? { chunked: true as const } : {}),
     };
     if (!manifestKey || !manifestHash) return Response.json({ error: "manifest required" }, { status: 400 });
 
@@ -1946,6 +1955,16 @@ export class FleetDO implements DurableObject {
     if ((await this.members())[caller.deviceId]?.role === "viewer") return Response.json({ error: "a viewer does not publish" }, { status: 403 });
     // A member that is being removed (fenced) publishes nothing more: the owner signs its removal with the sequence the fence gave.
     if ((await this.fences())[caller.deviceId]) return Response.json({ error: "this member is being removed from the fleet", fenced: true }, { status: 409 });
+
+    // A snapshot in pieces is one that only a member that reads them can open: a fleet with one that does not is refused it, so that the
+    // publisher (which checks the same list) is not the only protection.
+    if (meta.chunked === true) {
+      const members = await this.members();
+      const without = Object.values(members).filter((m) => !(m.caps ?? []).includes(CHUNKS_CAP)).map((m) => m.deviceId);
+      if (without.length > 0) {
+        return Response.json({ error: "a snapshot in pieces needs every member to read them, and " + without.length + " do not say they can", chunks: false, members: without.length }, { status: 409 });
+      }
+    }
 
     const key = this.headKey(fleetId);
     // A publish whose object died after it wrote the head and before it was kept is made good first.
@@ -2096,11 +2115,14 @@ export class FleetDO implements DurableObject {
     const fleetId = request.headers.get("x-prime-fleet") ?? "";
     const own = new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/(packs|manifests)/[0-9a-f]{64}$");
     // A member asks about what it has just stored; the gateway's sweep asks about a whole fleet's worth.
-    const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, gateway ? SWEEP_ASK_MAX : 8) : [];
+    const asked = Array.isArray(body.keys) ? body.keys.filter((k): k is string => typeof k === "string" && own.test(k)).slice(0, gateway ? SWEEP_ASK_MAX : 2 * MAX_CHUNKS + 8) : [];
     if (gateway && !(await this.exists())) return Response.json({ exists: false, keys: [] });
     const recent = (await this.storage.get<string[]>("recent")) ?? [];
     const kept = new Set([...recent.flatMap((entry) => entry.split("\n")), ...(await this.storingKeys())]);
     if (gateway) {
+      // What was uploaded and not yet named by a snapshot is kept for a day (a snapshot in pieces is uploaded over hours). A member
+      // asking about what its own refused publish stored is not held to this: it is the one that uploaded them.
+      for (const key of Object.keys(await this.uploads())) kept.add(key);
       // What the head names is kept whatever this object remembers: the head is in the bucket, and losing the
       // object's own record of it must not make the snapshot everyone is on look like an orphan. When it cannot
       // be read the answer is an error, so that nothing is deleted on a guess.
@@ -2125,10 +2147,38 @@ export class FleetDO implements DurableObject {
     this.meter.r2("read");
     const manifestObject = await this.bucket().get(head.manifestKey);
     if (!manifestObject) return keys;
-    const manifest = (await manifestObject.json()) as { packKey?: unknown; delta?: { packKey?: unknown } };
+    const manifest = (await manifestObject.json()) as { packKey?: unknown; chunks?: unknown; delta?: { packKey?: unknown; chunks?: unknown } };
     if (typeof manifest.packKey === "string") keys.push(manifest.packKey);
     if (typeof manifest.delta?.packKey === "string") keys.push(manifest.delta.packKey);
+    // The pieces of a snapshot in pieces: the manifest lists them by hash.
+    const pieceKeys = (list: unknown): string[] =>
+      Array.isArray(list) ? list.flatMap((c) => (typeof (c as { hash?: unknown })?.hash === "string" && /^[0-9a-f]{64}$/.test((c as { hash: string }).hash) ? ["fleets/" + fleetId + "/packs/" + (c as { hash: string }).hash] : [])) : [];
+    keys.push(...pieceKeys(manifest.chunks), ...pieceKeys(manifest.delta?.chunks));
     return keys;
+  }
+
+  // The packs the publisher has uploaded and no snapshot names yet, by key, with when: the pieces of a snapshot that is being
+  // uploaded. The sweep leaves them for UPLOAD_KEEP_MS. Pruned as it is read.
+  private async uploads(): Promise<Record<string, number>> {
+    const held = (await this.storage.get<Record<string, number>>("uploads")) ?? {};
+    const now = Date.now();
+    return Object.fromEntries(Object.entries(held).filter(([, at]) => typeof at === "number" && now - at < UPLOAD_KEEP_MS));
+  }
+
+  /** The lease holder says it has put a pack in the bucket. */
+  private async uploaded(caller: Caller, body: Record<string, unknown>, request: Request): Promise<Response> {
+    if (caller.kind !== "device") return this.deny();
+    const held = await this.lease();
+    if (!held || held.holder !== caller.deviceId) return this.deny();
+    const fleetId = request.headers.get("x-prime-fleet") ?? "";
+    const key = typeof body.key === "string" ? body.key : "";
+    if (!new RegExp("^fleets/" + fleetId.replace(/[^a-z0-9-]/g, "") + "/packs/[0-9a-f]{64}$").test(key)) return Response.json({ error: "not a pack of this fleet" }, { status: 400 });
+    const now = Date.now();
+    const uploads = await this.uploads();
+    uploads[key] = now;
+    const newest = Object.entries(uploads).sort((a, b) => b[1] - a[1]).slice(0, UPLOADS_KEPT);
+    await this.storage.put("uploads", Object.fromEntries(newest));
+    return Response.json({ ok: true });
   }
 
   // The join requests waiting for the operator. Read tolerantly: an earlier build kept the keys of a
@@ -2832,6 +2882,9 @@ export class FleetDO implements DurableObject {
       ...(fence ? { fenced: true, fenceLapsesAt: fence.at + FENCE_TTL_MS } : {}),
       // The most one upload may be: a member says so before it sends what the gateway would refuse.
       snapshotLimit: MAX_SNAPSHOT_BYTES,
+      // A snapshot too big for that is published in pieces (see `CHUNK_BYTES`): the most one piece may be, and the most the whole may be.
+      chunkLimit: CHUNK_BYTES,
+      chunkedLimit: MAX_CHUNKED_SNAPSHOT_BYTES,
       // The key a member proves that it holds its old key with, when it changes its own (see `changeKey`).
       ...((await this.proofKey()) ? { keyProofKey: (await this.proofKey())!.publicKey } : {}),
     });
