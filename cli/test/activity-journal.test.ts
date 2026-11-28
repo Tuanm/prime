@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { ACTIVITY_LIMIT_BYTES, ActivityJournal, readActivity } from "../src/activity-journal.ts";
 import { addCaller, loadOrCreateCallerKey, signCall } from "../src/caller-key.ts";
 import { parseCodeMcpArgs, toCodeMcpArgv } from "../src/code-mcp-options.ts";
+import { withDirLock } from "../src/dir-lock.ts";
 import { applyTestTimeout } from "./setup";
 
 applyTestTimeout();
@@ -212,6 +213,61 @@ describe("ActivityJournal", () => {
     expect(readActivity(file).entries.map((e) => e.tool)).toEqual(["a", "b"]);
     await fill(new ActivityJournal(file), 1, () => "f");
     expect(readActivity(file).entries.map((e) => [e.seq, e.fid, e.tool])).toEqual([[1, "aabbccdd", "a"], [2, "aabbccdd", "b"], [3, "aabbccdd", "f"]]);
+  });
+
+  /** Hold the journal's lock, as another process would, until `release()`. */
+  async function holdLock(file: string): Promise<() => Promise<void>> {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let taken!: () => void;
+    const got = new Promise<void>((r) => (taken = r));
+    const held = withDirLock(file + ".lock", async () => {
+      taken();
+      await gate;
+    });
+    await got;
+    return async () => {
+      release();
+      await held;
+    };
+  }
+
+  test("a clean exit does not wait on the lock while a drain waits for it: the lines are written at once, and not twice", async () => {
+    const file = join(scratch(), "a.jsonl");
+    const journal = new ActivityJournal(file);
+    const release = await holdLock(file);
+    journal.record("a", "k");
+    journal.record("b", "k");
+    await new Promise((r) => setTimeout(r, 30)); // the drain has taken the batch and waits for the lock
+    const t = performance.now();
+    journal.flushSync();
+    expect(performance.now() - t).toBeLessThan(500); // not the second the lock wait would take
+    expect(readActivity(file).entries.map((e) => e.tool)).toEqual(["a", "b"]);
+    await release();
+    await journal.flush();
+    expect(readActivity(file).entries.map((e) => e.tool)).toEqual(["a", "b"]); // the drain wrote nothing more
+  });
+
+  test("while the file cannot be written the queue is bounded, what is dropped is counted and said, and the rest is written when it can be", async () => {
+    const file = join(scratch(), "a.jsonl");
+    const said: string[] = [];
+    const journal = new ActivityJournal(file, { queueLimit: 5, onError: (m) => said.push(m) });
+    const release = await holdLock(file);
+    for (let i = 0; i < 20; i++) journal.record(`t${i}`, "k");
+    expect(journal.pending).toBeLessThanOrEqual(5);
+    expect(journal.droppedCalls).toBe(15);
+    expect(said.filter((m) => m.includes("queue is full"))).toHaveLength(1);
+    await journal.flush(); // the drain gives up on the lock (1 s) and puts the batch back
+    expect(journal.pending).toBeLessThanOrEqual(5);
+    await release();
+    journal.record("last", "k"); // the next call tries again
+    await journal.flush();
+    const tools = readActivity(file).entries.map((e) => e.tool);
+    expect(tools[tools.length - 1]).toBe("last");
+    expect(tools.length).toBeLessThanOrEqual(5);
+    expect(tools).toEqual([...tools].sort((x, y) => (x === "last" ? 1 : y === "last" ? -1 : Number(x.slice(1)) - Number(y.slice(1)))));
+    expect(said.some((m) => /\d+ calls? (was|were) not noted/.test(m))).toBe(true);
+    expect(journal.droppedCalls).toBe(0);
   });
 
   test("several processes writing one file lose no line and take no number twice", async () => {

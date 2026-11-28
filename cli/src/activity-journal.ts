@@ -21,7 +21,7 @@ import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
-import { withDirLock, withDirLockSync } from "./dir-lock.ts";
+import { LockBusyError, withDirLock, withDirLockSync } from "./dir-lock.ts";
 
 export interface ActivityEntry {
   /** 1, 2, 3, ...: the call's place in this file. */
@@ -35,6 +35,8 @@ export interface ActivityEntry {
 }
 
 export const ACTIVITY_LIMIT_BYTES = 1024 * 1024;
+/** Calls kept in the queue while the file cannot be written (the lock is held by another process for long, the disk is full, ...). */
+export const ACTIVITY_QUEUE_LIMIT = 10_000;
 const TOOL_NAME_MAX = 128;
 const TAIL_BYTES = 4096;
 const FID_RE = /^[0-9a-f]{8,32}$/;
@@ -42,6 +44,8 @@ const FID_RE = /^[0-9a-f]{8,32}$/;
 export interface ActivityOptions {
   limit?: number;
   now?: () => number;
+  /** How many calls wait in the queue while the file cannot be written; the oldest go first, and are counted. */
+  queueLimit?: number;
   /** Told, once, why calls could not be written down. */
   onError?: (message: string) => void;
 }
@@ -60,17 +64,34 @@ export class ActivityJournal {
   private errorSaid = false;
   private queue: Queued[] = [];
   private draining: Promise<void> | undefined;
+  private readonly queueLimit: number;
+  /** The batch a drain has taken and not yet written: a clean exit writes it too. */
+  private inflight: Queued[] | undefined;
+  /** Calls dropped because the queue was full, since the last report. */
+  private dropped = 0;
 
   constructor(path: string, options: ActivityOptions = {}) {
     this.path = path;
     this.limit = options.limit ?? ACTIVITY_LIMIT_BYTES;
     this.now = options.now ?? Date.now;
     this.onError = options.onError;
+    this.queueLimit = options.queueLimit ?? ACTIVITY_QUEUE_LIMIT;
+  }
+
+  /** How many calls are waiting to be written (a measure of a journal that cannot keep up). */
+  get pending(): number {
+    return this.queue.length + (this.inflight?.length ?? 0);
+  }
+
+  /** Calls dropped, and not yet said, because the queue was full. */
+  get droppedCalls(): number {
+    return this.dropped;
   }
 
   /** Note one call. It only queues it: it never touches the disk, never waits and never throws. */
   record(tool: string, caller: string): void {
     this.queue.push({ ts: new Date(this.now()).toISOString(), tool: tool.slice(0, TOOL_NAME_MAX), caller });
+    this.bound();
     if (!this.draining) {
       this.draining = this.drain().finally(() => {
         this.draining = undefined;
@@ -83,13 +104,43 @@ export class ActivityJournal {
     while (this.draining) await this.draining;
   }
 
-  /** Write what is queued, now, blocking: for a process that is about to exit. */
+  /** Keep the queue within its limit: the oldest calls go, and are counted (and said, once the file can be written, or at once if it cannot). */
+  private bound(): void {
+    const over = this.queue.length - this.queueLimit;
+    if (over <= 0) return;
+    this.queue.splice(0, over);
+    this.dropped += over;
+    if (!this.errorSaid) {
+      this.errorSaid = true;
+      this.onError?.(`the activity journal ${this.path} is not being written and its queue is full: the oldest calls are dropped (${this.queueLimit} are kept)`);
+    }
+  }
+
+  /**
+   * Write what is queued, now, blocking: for a process that is about to exit. It never waits on this process's own lock:
+   * when a drain is in progress (it may hold the lock, or be waiting for another process's), the lines are appended
+   * directly, together with the batch that drain has not written yet; otherwise it takes the lock for at most 200 ms.
+   */
   flushSync(): void {
-    const batch = this.queue.splice(0);
+    const inflight = this.inflight;
+    const batch = [...(inflight ?? []), ...this.queue.splice(0)];
     if (batch.length === 0) return;
     try {
       mkdirSync(dirname(this.path), { recursive: true });
-      withDirLockSync(this.path + ".lock", () => this.write(batch), { waitMs: 1000 });
+      if (this.draining) {
+        this.write(batch);
+      } else {
+        try {
+          withDirLockSync(this.path + ".lock", () => this.write(batch), { waitMs: 200 });
+        } catch (err) {
+          if (!(err instanceof LockBusyError)) throw err;
+          this.write(batch); // another process holds it: the lines go in anyway, rather than be lost at exit
+        }
+      }
+      // Written here: a drain that is still waiting for the lock finds nothing left of its batch to write.
+      if (inflight) inflight.length = 0;
+      this.inflight = undefined;
+      this.report();
     } catch (err) {
       this.failed(err);
     }
@@ -100,13 +151,38 @@ export class ActivityJournal {
     await Promise.resolve();
     while (this.queue.length > 0) {
       const batch = this.queue.splice(0);
+      this.inflight = batch;
       try {
         mkdirSync(dirname(this.path), { recursive: true });
-        await withDirLock(this.path + ".lock", () => this.write(batch), { waitMs: 1000 });
+        await withDirLock(
+          this.path + ".lock",
+          () => {
+            this.write(batch);
+            this.inflight = undefined; // written: a clean exit has nothing more of it to write
+          },
+          { waitMs: 1000 },
+        );
+        this.report();
       } catch (err) {
         this.failed(err);
+        // Not written (unless it was, and only the release of the lock failed): back to the front of the queue, within its limit, and tried again at the next call.
+        if (this.inflight) {
+          this.queue.unshift(...this.inflight);
+          this.inflight = undefined;
+          this.bound();
+        }
+        return;
       }
     }
+  }
+
+  /** After a write: say what was dropped while the file could not be written. */
+  private report(): void {
+    if (this.dropped === 0) return;
+    const n = this.dropped;
+    this.dropped = 0;
+    this.onError?.(`the activity journal ${this.path}: ${n} call${n === 1 ? " was" : "s were"} not noted (the queue was full while the file could not be written)`);
+    this.errorSaid = false; // a later failure is said again
   }
 
   private failed(err: unknown): void {
@@ -117,6 +193,7 @@ export class ActivityJournal {
 
   /** With the lock held: number the batch after the last line of the file and append it, the ring kept within its limit. */
   private write(batch: Queued[]): void {
+    if (batch.length === 0) return;
     const last = tailOf(this.path);
     const fid = last.fid ?? randomBytes(4).toString("hex");
     let seq = last.seq;
