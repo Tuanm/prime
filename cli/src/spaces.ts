@@ -1380,6 +1380,34 @@ export async function spacesCreate(ctx: Ctx, version: string): Promise<void> {
   }
 }
 
+/** `prime spaces show <name>`: what is recorded of a space (no secrets). */
+export async function spacesShow(ctx: Ctx): Promise<void> {
+  const name = requirePositional(ctx, "<name>", "prime spaces show <name>");
+  const space = requireSpace(ctx.config, name);
+  const shown = {
+    name,
+    id: space.id,
+    runtime: space.runtime,
+    image: space.image,
+    mode: space.mode,
+    container: space.container,
+    ...(space.fleet ? { fleet: space.fleet } : {}),
+    entrypoint: space.entrypoint ?? null,
+    created_at: space.created_at ?? null,
+    // what a person allowed when they started it, which `prime update` repeats when it moves the space and nothing else does
+    allow_rootful: space.allow_rootful === true,
+    allow_no_limits: space.allow_no_limits === true,
+  };
+  if (ctx.json) {
+    printJson(shown);
+    return;
+  }
+  for (const [key, value] of Object.entries(shown)) ctx.out(dim(key.padEnd(16)) + String(value));
+  if (shown.allow_rootful || shown.allow_no_limits) {
+    ctx.out(dim("allowed on the last start by a person; a start without the flag takes it back, 'prime update' repeats it"));
+  }
+}
+
 export async function spacesStart(ctx: Ctx): Promise<void> {
   const name = requirePositional(ctx, "<name>", "prime spaces start <name>");
   return startSpace(ctx, name);
@@ -1415,7 +1443,7 @@ export async function refreshSpaceImage(
   }
   space.image = image;
   saveConfig(ctx.configPath, ctx.config);
-  await startSpace(ctx, name, { recreate: true });
+  await startSpace(ctx, name, { recreate: true, unattended: true });
   return { changed: true, from };
 }
 
@@ -1477,11 +1505,14 @@ export async function refreshFleetSpaceImages(ctx: Ctx, version: string): Promis
 }
 
 /** Start the named space, whatever the command that asked for it. */
-async function startSpace(ctx: Ctx, name: string, options: { recreate?: boolean } = {}): Promise<void> {
+async function startSpace(ctx: Ctx, name: string, options: { recreate?: boolean; unattended?: boolean } = {}): Promise<void> {
   const space = requireSpace(ctx.config, name);
-  // What the person allowed when they made or started the space is allowed again when `prime update` moves it (nobody is there to say so).
-  if (bool(ctx.parsed, "allow-rootful")) space.allow_rootful = true;
-  if (bool(ctx.parsed, "allow-no-limits")) space.allow_no_limits = true;
+  // What a person allowed is allowed again only by a start that nobody is there to answer (`prime update` moving the space). A start that a
+  // person makes takes what the flags say now, and so renews or takes back what was recorded: consent is not left standing.
+  if (options.unattended !== true) {
+    space.allow_rootful = bool(ctx.parsed, "allow-rootful") ? true : undefined;
+    space.allow_no_limits = bool(ctx.parsed, "allow-no-limits") ? true : undefined;
+  }
   const runtime = await runtimeFor(space.runtime, space.allow_rootful === true);
   const allowNoLimits = space.allow_no_limits === true;
   await ensureImage(runtime, space.image, (text) => ctx.note(text));
@@ -1808,6 +1839,8 @@ export async function spacesList(ctx: Ctx): Promise<void> {
         device: row.space.id,
         ...(row.space.fleet ? { fleet: row.space.fleet } : {}),
         persistent: row.space.mode === "persistent",
+        allow_rootful: row.space.allow_rootful === true,
+        allow_no_limits: row.space.allow_no_limits === true,
       })),
       ...(runtimeError ? { runtime_error: runtimeError } : {}),
     });
@@ -2251,7 +2284,7 @@ export async function spacesTop(ctx: Ctx): Promise<void> {
     }
   }
 }
-export const SPACE_COMMANDS = ["create", "start", "stop", "delete", "list", "logs", "enter", "doctor", "top"] as const;
+export const SPACE_COMMANDS = ["create", "start", "stop", "delete", "list", "show", "logs", "enter", "doctor", "top"] as const;
 
 /** `prime spaces refresh-fleet`: what `prime update` runs in the build it has just installed (not listed in the help). */
 export async function spacesRefreshFleet(ctx: Ctx, version: string): Promise<void> {

@@ -249,3 +249,32 @@ describe("a space in a fleet is not persistent", () => {
     await expect(spacesCreate(ctx, "26.11.0")).rejects.toThrow("not persistent");
   });
 });
+
+describe("what a person allowed when they started a space", () => {
+  const cfgWith = (extra: string) => {
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, "devices: {}\nspaces:\n  work:\n    id: space-1\n    runtime: docker\n    image: img\n    mode: ephemeral\n    container: prime-space-1\n    token: t\n" + extra);
+    return { cfg, home };
+  };
+  const run = (args: string[], cfg: string, home: string) =>
+    Bun.spawnSync(["bun", fileURLToPath(new URL("../src/index.ts", import.meta.url)), ...args, "--config", cfg], { cwd: dir, env: { ...process.env, HOME: home, USERPROFILE: home }, timeout: 30_000, stdout: "pipe", stderr: "pipe" });
+
+  test("'prime spaces show' says what is recorded, and no secret", () => {
+    const { cfg, home } = cfgWith("    allow_rootful: true\n");
+    const r = run(["spaces", "show", "work", "--json"], cfg, home);
+    expect(r.exitCode).toBe(0);
+    const shown = JSON.parse(r.stdout.toString());
+    expect(shown).toMatchObject({ name: "work", allow_rootful: true, allow_no_limits: false });
+    expect(r.stdout.toString()).not.toContain('"token"');
+  });
+
+  test("a start that a person makes takes back what was recorded; only the start `prime update` makes repeats it", () => {
+    const src = readFileSync(fileURLToPath(new URL("../src/spaces.ts", import.meta.url)), "utf8");
+    // the unattended start (the refresh) is the only one that reads what is recorded without the flags
+    expect(src).toContain("{ recreate: true, unattended: true }");
+    expect(src).toContain('space.allow_rootful = bool(ctx.parsed, "allow-rootful") ? true : undefined;');
+    expect(src.match(/unattended: true/g) ?? []).toHaveLength(1);
+  });
+});

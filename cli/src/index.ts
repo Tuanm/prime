@@ -36,7 +36,7 @@ import { EXIT, exitCodeOf, hintOf, UsageError } from "./errors.ts";
 import { TOPIC_HINT, helpFor, rootHelp, usageLine } from "./help.ts";
 import { dim, initColor, red } from "./output.ts";
 import { toolsCall, toolsList, toolsView } from "./tools.ts";
-import { fleetSpaceNames, isSpaceCommand, spacesCreate, spacesRefreshFleet, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
+import { fleetSpaceNames, isSpaceCommand, spacesCreate, spacesRefreshFleet, spacesShow, spacesDelete, spacesDoctor, spacesEnter, spacesList, spacesLogs, spacesStart, spacesStop, spacesTop } from "./spaces.ts";
 import {
   fleetsAgent,
   fleetsApprove,
@@ -465,10 +465,12 @@ async function main(argv: string[]): Promise<void> {
           return spacesDoctor(ctx);
         case "top":
           return spacesTop(ctx);
+        case "show":
+          return spacesShow(ctx);
         case "refresh-fleet":
           return spacesRefreshFleet(ctx, VERSION);
         default:
-          throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, logs, enter, doctor, top. ${usageLine("spaces")}`);
+          throw new UsageError(`unknown spaces command "${sub}"`, `Valid: create, start, stop, delete, list, show, logs, enter, doctor, top. ${usageLine("spaces")}`);
       }
     case "files":
       switch (sub) {
