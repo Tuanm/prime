@@ -297,6 +297,15 @@ describe("the workflows", () => {
     expect(result.code).toBe(0);
   });
 
+  test("the check reads a workflow with Windows line ends (a Windows checkout), heredocs included", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prime-crlf-"));
+    const text = readFileSync(join(REPO, ".github", "workflows", "release-cli.yml"), "utf8").replace(/\r?\n/g, "\r\n");
+    writeFileSync(join(dir, "release-cli.yml"), text);
+    const result = lint(dir);
+    expect(result.out).toContain("0 problem(s)");
+    expect(result.code).toBe(0);
+  });
+
   test("the check refuses an action pinned by tag or branch, and accepts a commit", () => {
     const dir = mkdtempSync(join(tmpdir(), "prime-wf-"));
     const workflow = (uses: string) => `name: t\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ${uses}\n`;
