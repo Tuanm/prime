@@ -1791,6 +1791,82 @@ describe("a renewal that hangs", () => {
   }, 30_000);
 });
 
+describe("a fleet whose newest snapshot this build cannot read", () => {
+  test("gives no place: nothing is fetched, the hint is shown, and it is asked again after the time it names", async () => {
+    const { round } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      await w.publishNext();
+      w.gateway.upgradeRequired = { need: "chunks", hint: "update prime: the newest snapshot of this fleet is in pieces" };
+      s.loop.lastBootstrap = 0;
+      s.loop.headDirty = true;
+      const before = { ...Object.fromEntries(w.gateway.requests) };
+      await round(s.loop as never, { heartbeatMs: 60_000 }, (t) => s.said.push(t));
+      expect(s.loop.upgrade).toEqual({ need: "chunks", hint: "update prime: the newest snapshot of this fleet is in pieces" });
+      expect(s.loop.primary).toBe(false);
+      expect(s.said.join("\n")).toContain("update prime: the newest snapshot");
+      // The head was not looked at, nor a pack or a manifest fetched.
+      for (const [k, n] of w.gateway.requests) {
+        if (/ (head|packs|manifests|index)$/.test(k)) expect(n, k).toBe(before[k] ?? 0);
+      }
+      expect(w.gateway.packReads.length).toBe(0);
+      // Asked again only after the time named.
+      const asked = w.gateway.bootstraps;
+      await round(s.loop as never, { heartbeatMs: 60_000 }, () => undefined);
+      expect(w.gateway.bootstraps).toBe(asked);
+      s.loop.lastBootstrap = Date.now() - 61_000;
+      await round(s.loop as never, { heartbeatMs: 60_000 }, () => undefined);
+      expect(w.gateway.bootstraps).toBe(asked + 1);
+      // The fleet is readable again: the member carries on as before.
+      w.gateway.upgradeRequired = undefined;
+      s.loop.lastBootstrap = Date.now() - 61_000;
+      await round(s.loop as never, { heartbeatMs: 60_000 }, () => undefined).catch(() => undefined);
+      expect(s.loop.upgrade).toBeUndefined();
+    } finally {
+      finish(w);
+    }
+  }, 30_000);
+
+  test("a primary that is told so gives up the lease at once, and the hint is shown without control characters", async () => {
+    const { round } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      w.gateway.primary = "r1";
+      s.loop.primary = true;
+      s.loop.lastBootstrap = 0;
+      w.gateway.upgradeRequired = { need: "chunks", hint: "update prime \u001b[2Jnow" };
+      await round(s.loop as never, { heartbeatMs: 60_000 }, (t) => s.said.push(t));
+      expect(s.loop.primary).toBe(false);
+      expect(w.gateway.requests.get("POST lease")).toBe(1);
+      expect(s.loop.upgrade?.hint).toBe("update prime [2Jnow");
+    } finally {
+      finish(w);
+    }
+  }, 30_000);
+
+  test("sleeps by the time the fleet named, whatever the socket says, and does not renew or claim", async () => {
+    const { loopSleepMs, heartbeat } = await import("../src/fleet-daemon");
+    const w = await world();
+    try {
+      const s = await space(w, "r1", { connected: true });
+      s.loop.upgrade = { need: "chunks", hint: "update" };
+      s.loop.retryAfterMs = 60_000;
+      s.loop.claim = true;
+      const sleep = loopSleepMs(s.loop as never, 1500);
+      expect(sleep).toBeGreaterThanOrEqual(1_000);
+      expect(sleep).toBeLessThanOrEqual(60_000);
+      s.loop.lastBootstrap = 1;
+      const asked = w.gateway.bootstraps;
+      expect(await heartbeat(s.loop as never, () => undefined)).toBe(true);
+      expect(w.gateway.bootstraps).toBe(asked);
+    } finally {
+      finish(w);
+    }
+  });
+});
+
 describe("the lease the fleet reports", () => {
   test("is taken from every word of it, the newest first, and a change sets the heartbeat's timer again", async () => {
     const { acceptedLeaseMs, adoptLease } = await import("../src/fleet-daemon");

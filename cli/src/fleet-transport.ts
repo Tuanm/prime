@@ -30,6 +30,11 @@ export const MEMBER_CAPS: readonly string[] = [META_CAP, INLINE_CAP, CHUNKS_CAP]
 /** What a capability's name looks like: the pattern the gateway keeps (`^[a-z0-9][a-z0-9-]{0,23}$`), so that both sides read the same names. */
 export const CAP_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/;
 
+/** Text a gateway sent, made safe to print in a terminal or a log: no control characters (an escape sequence is not a hint), cut short. */
+export function plainText(text: string, max = 400): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, max);
+}
+
 /** The part of a bootstrap body that says what the member can do: nothing at all while it can do nothing more. */
 export function capsBody(caps: readonly string[] = MEMBER_CAPS): { caps?: string[] } {
   return caps.length > 0 ? { caps: [...caps] } : {};

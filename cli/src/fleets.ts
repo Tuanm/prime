@@ -49,7 +49,7 @@ import {
   type VerifiedRoster,
 } from "./fleet-roster.ts";
 import { preserveLocalChange, snapshot, withApplyLock } from "./fleet-sync.ts";
-import { capsBody, fetchMemberKeys, fetchRole, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
+import { capsBody, fetchMemberKeys, fetchRole, plainText, reportApplied, type FleetCredentials } from "./fleet-transport.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { withDirLockSync, type HeldLock } from "./dir-lock.ts";
 import { fleetAgentServiceStatus } from "./fleet-service.ts";
@@ -957,7 +957,11 @@ export async function bootstrap(creds: FleetCredentials, fleet: string): Promise
     const detail = (await res.json().catch(() => ({}))) as { error?: string };
     throw new CliError("could not take a place in the fleet: " + (detail.error ?? res.status));
   }
-  const body = (await res.json()) as { role?: string; catchUpTo?: number };
+  const body = (await res.json()) as { role?: string; catchUpTo?: number; reason?: unknown; hint?: unknown };
+  // A fleet whose newest snapshot this build cannot read gives no place, and says what to do about it.
+  if (body.reason === "upgrade-required") {
+    throw new CliError(typeof body.hint === "string" && body.hint.trim() ? plainText(body.hint) : "this fleet's newest snapshot cannot be read by this build: update prime");
+  }
   return { primary: body.role === "primary", ...(body.catchUpTo !== undefined ? { catchUpTo: body.catchUpTo } : {}) };
 }
 
